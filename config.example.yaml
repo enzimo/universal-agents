@@ -1,0 +1,1140 @@
+# Agent Configuration
+#
+# Copy this file to config.yaml and edit it for your environment.
+#
+# Do not store secrets in this file. API keys, passwords, and DSNs should live
+# in environment variables or Docker-style *_FILE secret variables.
+
+schema_version: 10                              # Generic config.yaml schema version. This is not the same version as gateway instance_config.yaml.
+
+# Where an onboarded instance's secrets come from. Onboarding copies this into
+# instance_config.yaml (launch.secrets_source); later onboarding runs and
+# restarts keep the instance's value.
+launch:
+  secrets_source: env_file                      # env_file: onboarding writes and generates secrets in team.env. environment: secrets come only from environment variables and Docker secrets (*_FILE); no team.env is written or read.
+
+network:
+  public_origin: "http://127.0.0.1"             # Browser-facing scheme and host shared by local public service URLs; no path/query/fragment.
+
+# Internal web research services. The Crawl4AI token is not a setting or an
+# environment variable: it is the team's linked account (/link http:crawl4ai
+# team), and the secure tool broker adds it to each request.
+web_services:                         # Agent-facing internal web research service connections; keys are linked accounts in the credential store.
+  crawl4ai:
+    base_url: "http://127.0.0.1:11235"          # Internal Crawl4AI HTTP(S) URL; the broker sends the linked token only to this exact address (CRAWL4AI_BASE_URL overrides it).
+    timeout_seconds: 120                        # Per-request timeout for screenshots; the broker stops a request after 120 seconds at most.
+  searxng:
+    base_url: "http://127.0.0.1:8080"           # Internal SearXNG URL
+    verify_tls: true                            # Verify TLS certificates when base_url uses HTTPS.
+    timeout_seconds: 30                         # Per-request timeout for searches, suggestions, and capability discovery.
+    default_num_results: 8                     # Bounded default number of normalized results returned inline; raw responses remain artifacts.
+
+mcp:                                  # Installed MCP connection, transport, authorization, and managed-host settings. Installed connections live in <instance_root>/runtime/mcp-connections and hosted servers in runtime/mcp-hosting; these folders are not settings.
+  enabled: true                                # Run the brokered MCP control/data plane before the first dynamic proposal exists.
+  protocol_adapter: "mcp_v1"                   # Adapter seam for a future MCP v2 implementation.
+  load_retry_window_minutes: 60                # How long agents retry a server that does not answer (after 1, 2, 4, 8, 16, then every 30 minutes) before they stop and tell administrators in the Inbox; 1 to 10080.
+  static_reconciliation:                    # Static reconciliation settings.
+    upgrade_mode: "review_required"            # New or changed static connections are quarantined
+  network_policy:                           # Network policy settings.
+    allow_loopback: false                      # Allow approved endpoints that resolve to loopback.
+    allow_private_networks: false              # Allow approved private/link-local endpoint addresses.
+    allowed_private_hosts: ["crawl4ai"]        # Exact approved Docker/private DNS names; does not permit loopback, link-local, or other private hosts.
+  legacy_sse:                               # Legacy sse settings.
+    enabled: true                                 # Rare compatibility transport; Streamable HTTP is the default.
+    removal_target_date: '2026-11-12'             # Operator reminder for removing legacy SSE support.
+  hosting:                                  # Hosting settings.
+    enabled: false                                # Enable reviewed declarative MCP hosting; arbitrary agent-authored code remains forbidden.
+    bind_host: 127.0.0.1                          # Bind host setting.
+    port_range_start: 18700                       # Port range start setting.
+    port_range_end: 18799                         # Port range end setting.
+
+ui:                                   # User-interface preferences shared by onboarding and runtime web surfaces.
+  onboarding:                               # Onboarding UI preferences retained for the post-reboot interface.
+    appearance:                                   # Shared color theme and background preferences for web interfaces.
+      color_mode: "dark"                          # Default interface theme: "dark" or "light".
+      light_colors: ["#082f73", "#ffd60a", "#20f05a", "#ff3030"]  # Four background light colors for onboard-web.
+      light_diffusion: 58                       # Light diffusion percentage, 0 concentrated through 100 diffuse.
+      polygon_opacity_low: 20                   # Low end of moving polygon opacity percentage.
+      polygon_opacity_high: 70                  # High end of moving polygon opacity percentage.
+      polygon_line_color: "#202426"             # Polygon edge color.
+      polygon_line_opacity: 8                   # Polygon edge opacity percentage.
+      polygon_seed: 4147                        # Stable seed for the diffuse light polygon mesh.
+      dynamic_background: true                  # Animate the onboarding background.
+      interface_animation: true                 # Animate interface elements in Web Chat and onboarding; reduced-motion systems never animate.
+      # Dark metallic background: polished metal plates under one studio light. A
+      # dark section holding settings that no longer exist (light_angle, shimmer_*,
+      # mesh_morph*, metallic_seams, accents.silver, accent strength) is ignored
+      # with a warning.
+      dark:
+        detail: "full"                           # "full" moves the metal with the graphics card; "basic" draws a still version without it.
+        surface_color: "#007007"                 # Dark surroundings that unlit plates reflect.
+        metal_color: "#015b1a"                   # Base metal color of the plates.
+        facet_size: 230                          # Average plate size in pixels, from 140 through 520.
+        facet_depth: 80                          # How far the plates tilt, from 0 (flat) through 100.
+        chrome_faces: 0                          # Share of plates turned toward a light, from 0 through 20 percent.
+        shine: 51                                # Light strength, from 0 through 100.
+        edge_highlights: 31                      # Width of the bright plate edges, from 0 through 100.
+        surface_grain: 24                        # Brushed metal grain, from 0 through 100.
+        light_x: -7                              # Light left (-) or right (+) of the screen center, -300 through 300; 100 is the screen edge.
+        light_y: -5                              # Light above (-) or below (+) the screen center, -300 through 300; 100 is the screen edge.
+        light_softness: 37                       # Light size and edge softness, 0 (small, sharp) through 100 (large, even).
+        light_motion: true                       # Move the light and tilt the plates slowly.
+        light_wander: false                      # Let the light roam around its place over time (needs light_motion).
+        light_wander_distance: 133               # How far it roams, 0 through 150; 100 is the distance from the screen center to its edge.
+        light_speed: 110                         # Reflection speed percentage, from 10 through 400.
+        mesh_motion: true                        # Let the plates drift and reconnect.
+        mesh_speed: 100                          # Mesh speed percentage, from 10 through 400.
+        seed: 9187                               # Stable seed for the plate layout.
+        accents:
+          gold: {color: "#464020", share: 10}    # Gold tint and the share of plates (0 through 50 percent) it covers.
+          bronze: {color: "#00751d", share: 39}  # Bronze tint and the share of plates (0 through 50 percent) it covers.
+
+# NATS/JetStream messaging settings. NATS is the permanent internal transport.
+transport:
+  type: "nats"                                  # NATS/JetStream is the only supported transport.
+  nats_url: "nats://127.0.0.1:4222"             # Single-server URL.
+  nats_servers: ["nats://127.0.0.1:4222"]       # NATS server URLs.
+  nats_name: null                               # Optional NATS connection name.
+  jetstream_enabled: true                       # Use JetStream for durable work/reply/presence messages.
+  subject_prefix: ""                            # Team subject prefix. Empty uses team_id, e.g. team_303. Use per-team values for external NATS ACLs.
+  storage: "file"                               # JetStream storage: "file" or "memory".
+  replicas: 1                                   # JetStream stream replica count.
+  ack_wait_seconds: 3600.0                      # Delivery ack wait for long-running agent work.
+  max_deliver: 5                                # Maximum redelivery attempts before termination.
+  duplicate_window_seconds: 600.0               # JetStream duplicate message-id window.
+  work_max_age_seconds: 604800.0                # Durable work/reply retention age.
+  presence_max_age_seconds: 600.0               # Replayable presence retention age.
+  process_consumer_inactive_threshold_seconds: 300.0  # Delete unbound process-scoped JetStream consumers after this delay.
+  nats_user: null                               # NATS username. For the managed local server, leave NATS_USER/NATS_PASSWORD unset to use generated credentials stored under the NATS service root; prefer NATS_USER or NATS_USER_FILE when setting your own.
+  credentials_file: null                        # Optional NATS user credentials file.
+
+# Gateway-owned user identity and Web Chat onboarding settings. Onboarding
+# copies these values into each generated instance_config.yaml.
+gateway:
+  users:                                    # Gateway user registration, link-code, and web-token settings.
+    enabled: true                               # Resolve durable canonical users and enforce owner-scoped access.
+    allow_newuser_registration: true            # Allow admins to add channel users or create web-only users with /user.
+    link_code_ttl_seconds: 900                  # Lifetime of cross-channel identity-link codes.
+    web_user_tokens_enabled: true               # Enable reusable per-user Web Chat tokens and one-time invitations.
+    web_user_token_ttl_days: 0                  # Reusable token lifetime in days; 0 disables automatic expiration.
+    web_user_invite_ttl_seconds: 900            # One-time invitation lifetime in seconds; allowed range 60-86400.
+    removed_data_retention_days: 7              # Days a removed person's folder, personal memory and conversations are held for /user restore; then a maintenance run deletes them.
+
+# Main chat/reasoning model settings.
+llm:
+  provider: litellm                             # Universal Agents route for OpenAI-compatible endpoints; litellm_api_mode selects Chat Completions or Responses. Use openai for the native OpenAI Responses API.
+  model_id: deepseek/deepseek-v4.1-flash        # DeepSeek V4.1 Flash through the default OpenRouter endpoint. Leave blank with provider xai-oauth to use grok-4.5.
+
+  temperature: 0.0                              # Sampling temperature. Omitted for OpenAI GPT-5/o-series models (including compatible routes) and openai-codex because those backends reject it.
+
+  reasoning_effort: "medium"                    # Optional reasoning-effort hint. Responses routes send reasoning.effort; Chat Completions routes send reasoning_effort.
+  reasoning_summary: null                       # Provider-generated reasoning summary: auto, concise, detailed, or null. Supported by native OpenAI, openai-codex, and litellm Responses mode; raw private chain-of-thought is never exposed.
+
+  context_window_tokens: 800000                 # Explicit context-window size used for prompt budgeting and compaction. If omitted, the runtime default is used.
+
+  max_output_tokens: 55296                      # Optional provider-supported cap. Native OpenAI/xAI use Responses max_output_tokens; Chat-compatible routes use the provider-appropriate completion-token field; not sent to openai-codex.
+
+  stream: null                                  # Optional LiteLLM streaming override. null keeps the adapter default; responses mode rejects false because Strands consumes streamed events.
+  litellm_api_mode: chat_completions            # API used by provider=litellm. Keep chat_completions for OpenRouter/generic compatibility; select responses only when the endpoint implements POST /responses.
+  request_timeout_seconds: 120                  # HTTP timeout for model requests: the longest wait to connect or for the next bytes of a response. Also bounds a model-switch probe.
+  stream_idle_timeout_seconds: 300              # Longest wait for the next model output (text, reasoning, tool call or finish). Keep-alive pings do not count, so a stalled stream ends; the task then fails over or reports a timeout.
+  model_call_timeout_seconds: 1800              # Longest time one model call may take from request to its last output.
+
+  supports_image_input: null                    # Whether this provider/model accepts image input. null means unknown until configured or researched.
+  supports_audio_input: null                    # Whether this provider/model accepts audio input. null means unknown until configured or researched.
+  supports_file_input: null                     # Whether this provider/model accepts native text, Markdown, or other supported file/document input. null means unknown.
+  model_capabilities:                           # Provider/model facts keyed by provider then model id. reasoning_summary: null disables a broader summary request for one rejecting model. max_tools_per_request caps the tools one request carries (128 without an entry); control/LLM_OVERRIDES.yaml model_capabilities wins.
+    litellm:
+      minimax/minimax-m3:
+        supports_image_input: true
+        supports_audio_input: null
+
+  reasoning_trace_retention_messages: 96         # Keep full provider reasoning traces for this many later Strands messages after tool-call turns. null disables pruning.
+
+  openai_codex:
+    base_url: "https://chatgpt.com/backend-api/codex"  # Codex OAuth backend URL. Used only when provider is "openai-codex".
+    auth_store_path: null                       # Universal Agents-owned OAuth token store. null uses instance auth/openai_codex_auth.json or user state dir.
+    shared_codex_home: null                     # Optional Codex CLI home for read-only file-auth discovery. null uses CODEX_HOME or ~/.codex.
+    allow_shared_codex_auth_read: true          # Read file-based Codex CLI auth when no owned token store exists. Runtime never writes shared Codex auth.
+    refresh_skew_seconds: 120                   # Refresh owned OAuth tokens this many seconds before JWT expiry.
+    refresh_timeout_seconds: 20                 # HTTP timeout for Codex OAuth refresh requests.
+    model_discovery:
+      enabled: true                             # Enable live Codex model discovery for status/onboarding suggestions.
+      cache_path: null                          # Model discovery cache. null stores beside the owned Codex auth store.
+      cache_ttl_seconds: 3600                   # Cache freshness window for model discovery results.
+      client_version: "1.0.0"                   # Client version sent to the Codex models endpoint.
+
+  xai_oauth:
+    base_url: "https://api.x.ai/v1"             # xAI Responses API URL. Used only when provider is "xai-oauth"; HTTPS x.ai origins only.
+    auth_store_path: null                       # Instance-owned OAuth token store. null uses auth/xai_oauth_auth.json below the instance root.
+    refresh_skew_seconds: 3600                  # Maximum proactive refresh window; short-lived tokens automatically use a smaller window.
+    refresh_timeout_seconds: 20                 # HTTP timeout for xAI OAuth discovery, device login, and refresh requests.
+
+  # Uncomment both fields to use a separate compaction model.
+  # compaction_model_provider: "openai"         # Optional smaller/faster model provider for conversation compaction.
+
+  # compaction_model_id: "gpt-4o-mini"          # Optional smaller/faster model id for conversation compaction.
+
+  # Runtime-owned model-provider failover policy.
+  # Strands first performs bounded same-provider retry. If the provider remains
+  # overloaded/rate-limited and failover is enabled, this runtime can switch to
+  # an ordered fallback provider/model for a bounded turn/time window.
+  failover:
+    enabled: false                              # Opt-in master switch for cross-provider failover. Configure fallbacks before enabling.
+
+    # Same-provider throttling retry configuration passed to Strands
+    # ModelRetryStrategy when failover is enabled.
+    same_provider_retry:
+      max_attempts: 2                           # Total same-provider model attempts before cross-provider failover.
+      initial_delay_seconds: 2                  # Delay before the first same-provider retry, in seconds.
+      max_delay_seconds: 10                     # Maximum retry delay, in seconds.
+
+    # Minimum lease duration for a selected fallback. The fallback remains
+    # active until both the turn count and time window are exhausted.
+    switch_for:
+      min_turns: 3                              # Minimum successful model turns to keep using the fallback.
+      min_seconds: 900                          # Minimum seconds to keep using the fallback.
+
+    # Historical failure demotion. Repeated failures push a provider behind
+    # healthy alternatives for a bounded period.
+    demotion:
+      failure_threshold: 3                      # Failure count that triggers demotion.
+      failure_window_seconds: 3600              # Rolling failure window in seconds.
+      demotion_seconds: 86400                   # Demotion duration in seconds.
+
+    history_retention_seconds: 604800           # Retain provider success/failure history for this many seconds.
+
+    notify_user: true                           # Emit task history/activity plus a gateway system notification when an actual provider failover switch occurs.
+
+    fallbacks: []                               # Ordered fallback candidates. Items may override reasoning_summary and litellm_api_mode along with provider/model settings.
+
+  # Model keys are never set here: administrators save them per endpoint address with /auth model (tested before
+  # they are stored). An environment variable (LITELLM_API_KEY, EMBEDDING_API_KEY, OPENAI_API_KEY, ...) overrides
+  # the stored key; /auth model and /auth status show when it does.
+
+  litellm_api_base: "https://openrouter.ai/api/v1"  # OpenAI API-compatible endpoint used by "litellm"; its key is the one saved for this address with /auth model.
+
+# Agent runtime defaults shared by all agent types unless overridden under
+# agent_types.<AgentType>.agent.
+agent:
+  # agent_id: "my-custom-agent-id"              # Agent ID for NATS routing (optional - a random ID is generated if not set)
+
+  default_team_id: "team_ua"                    # Default team id used when launch args do not override it.
+  default_request_timezone: America/Chicago     # Fallback IANA timezone used when an incoming request has no user-specific timezone.
+  instance_root: "."                            # Instance root. control/ (team control files), dbs/, state/ (runtime records) and workspaces/ (users/, team/, agents/) are derived from it.
+
+  # Task manager settings
+  schedule_workers:
+    enabled: true                              # Enables local automatic startup under saved default or TeamLead policies.
+    eligible_agent_types: [WebResearchAgent, PersonalAdminAgent] # TeamLead may add registered custom specialists through runtime settings; explicit denies still win.
+    default_startup_policy_enabled: true        # Default startup permission for specialist types shipped with Universal Agents; team-written types need eligible_agent_types. Existing disables and operator denies win. Tool access is separate.
+    denied_agent_types: []                      # Operator prohibition checked for manual, delegated, and automatic dynamic starts.
+    reconcile_interval_seconds: 5              # Maximum normal delay before the independent local startup scan.
+    max_claim_wait_seconds: 86400               # Operator ceiling for a schedule's claim wait.
+    max_startup_timeout_seconds: 3600            # Operator ceiling for worker readiness timeout.
+    max_admission_timeout_seconds: 3600          # Operator ceiling for waiting after readiness.
+    max_launch_attempts_per_occurrence: 2        # Operator ceiling for retries of the same occurrence.
+    max_idle_ttl_seconds: 86400                  # Operator ceiling for an explicit automatic-worker TTL.
+    lease_seconds: 120                          # Launch-custody lease; independent of claim wait.
+    lease_loss_wait_timeout_seconds: 1800       # After losing its lease, a worker hands back unstarted and running tasks, keeps tasks waiting on a person or subtask this long, then fails them and exits.
+    max_consecutive_interruptions: 3            # Lost-lease interruptions in a row (per task, or per schedule) before the task is cancelled and the TeamLead investigates.
+    review_interval_seconds: 3600               # How long a schedule may stay stuck before its owner (and administrators, when only they can fix it) are told in the Inbox and in chat.
+    missed_one_time_after_seconds: 3600         # A schedule's last run this late (a one-time reminder, or the last of a counted series) is turned off and its owner told, so it never arrives late.
+    retention_days: 30                          # Terminal launch evidence retention; active custody is never pruned.
+    defaults:
+      claim_wait_seconds: 30                    # Zero permits startup as soon as the occurrence is due.
+      startup_timeout_seconds: 120              # Thread startup is not readiness.
+      admission_timeout_seconds: 60             # Ready status is not occurrence acceptance.
+      max_launch_attempts_per_occurrence: 2      # Includes the first launch.
+      retry_backoff_seconds: 30                 # Exponential retries cap at 300 seconds.
+      launch_when_busy: false                   # Reuse existing workers unless bounded scale-out is requested.
+      idle_ttl_seconds: null                    # Inherit the existing team/type ephemeral policy.
+      interrupted_run_skip_window_seconds: 900  # Do not rerun a run interrupted by a lost worker lease when the next run is due within this window.
+
+  # Worker pools: delegated tasks wait in their worker type's shared queue and a
+  # free worker takes one at a time. Trusted code starts workers while tasks wait
+  # and no worker is free, up to each type's pool size. A worker does delegated
+  # and scheduled work, so one pool size per type covers both. TeamArchitect
+  # changes pool sizes inside the ceilings with set_worker_pool_limit (stored in
+  # the database); the ceilings below are operator-owned.
+  worker_pools:
+    enabled: true                               # Start workers automatically for waiting delegated tasks.
+    default_max_workers_per_type: 4             # Pool size of each worker type until TeamArchitect sets another.
+    max_workers_per_type_ceiling: 16            # Operator ceiling for one worker type; TeamArchitect cannot set a pool above it.
+    max_total_workers_per_team: 32              # Operator ceiling for all workers of the team, however they were started.
+    max_launches_per_type_per_hour: 60          # Operator limit on worker starts per type per hour.
+    scale_up_wait_seconds: 20                   # A task waiting this long with no free worker starts another worker (a type with none starts one at once).
+    max_starts_per_pass: 4                      # Most workers started in one controller pass.
+    capacity_warning_ratio: 0.95                # Share of a limit at which TeamArchitect gets a capacity review while tasks wait.
+    review_repeat_after_minutes: 30             # A problem still present this long after TeamArchitect's review of it is reviewed again.
+    recurring_incident_count: 3                 # Repeats of one problem in the window that TeamArchitect reports to administrators (who also get an Inbox notice).
+    recurring_incident_window_hours: 24         # Window for counting repeats of a worker pool problem.
+    max_retries_after_worker_loss: 3            # Times a delegated task moves to another worker after its worker was lost, before it fails and its requester decides.
+    provider_limit:
+      cooldown_seconds: 60                      # First wait before a worker retries after its model provider refused calls; doubles each time.
+      max_cooldown_seconds: 600                 # Longest wait between retries.
+      max_retries: 3                            # Retries before the task fails as provider-limited.
+      review_events: 3                          # Provider-limited tasks of one type in the window that give TeamArchitect a review.
+      review_window_minutes: 10                 # Window for counting provider-limited tasks.
+    progress_notices:
+      min_tasks: 3                              # Requests with fewer delegated tasks get no progress notes.
+      interval_minutes: 5                       # At most one progress note per interval, and only when the counts changed.
+
+  max_queued_top_level_tasks: 50                # Maximum admitted top-level tasks tracked at once.
+  max_concurrent_top_level_tasks: 1             # Top-level execution parallelism per agent. Keep this at 1 unless the runtime flow has been audited for higher concurrency.
+  max_tool_calls_per_task: 150                  # Cumulative tool calls across one ordinary local task-processing invocation, not per model turn. Accepted Objective work profiles use their own session total. Set null or <=0 to disable.
+  max_tool_result_tokens_per_call: 20000        # Per-tool-result token safety cap. Oversized results are offloaded to artifacts and replaced with compact previews. Set null or <=0 to disable.
+
+  # Policy for recoverable runtime budget/overload pauses.
+  runtime_budget_policy:
+    mode: "user_guided"                         # "hard_stop" fails visibly; "user_guided" pauses and asks the requester.
+    partial_tool_call_budget_multiplier: 1.5    # Temporary tool-call budget multiplier when requester asks for partial results.
+    max_user_guided_pauses_per_task: 3          # Maximum user-guided pauses before falling back to hard-stop behavior.
+
+    # Which recoverable conditions may pause instead of immediately failing.
+    triggers:
+      tool_call_budget_exceeded: true           # Tool-call budget exceeded.
+      context_budget_exceeded: true             # Prompt/context budget exceeded.
+      delegated_subtask_timeout: true           # Delegated subtask timeout.
+      specialist_runtime_budget_pause: true     # Specialist agent runtime budget pause.
+      provider_overloaded: true                 # Provider overload / 429 when failover cannot handle it.
+
+  # Durable ordered action outbox for StructuredAgentTurnDecision side effects.
+  turn_action_outbox:
+    max_auto_attempts: 4                        # Automatic retries for infrastructure-safe action failures.
+    initial_retry_delay_seconds: 2.0            # Initial automatic retry delay in seconds.
+    max_retry_delay_seconds: 60.0               # Maximum automatic retry delay in seconds.
+    retry_jitter_ratio: 0.15                    # Jitter ratio applied to retry delays.
+    max_inline_recovery_attempts_per_batch: 2   # Inline model-recovery attempts before isolated recovery.
+    max_validation_repair_attempts: 1           # Reserved bounded validation-repair attempts for structured action output.
+    dispatching_stale_after_seconds: 30.0       # Restart normalization threshold for stale dispatching records.
+
+  # Coordinates active action batches and defers conflicting inbound events.
+  runtime_coordinator:
+    enabled: true                               # Master switch for task-tree leases/mailbox deferral.
+    mode: "enforced"                            # "enforced" defers conflicts; "observe" logs diagnostics; "disabled" handles events directly.
+    batch_lease_stale_after_seconds: 60.0       # Stale lease threshold in seconds.
+    max_deferred_events_per_task: 500           # Maximum deferred mailbox events per task tree.
+    max_mailbox_drain_events_per_pass: 100      # Maximum mailbox events replayed in one drain pass.
+    mailbox_event_retention_seconds: 86400.0    # Retain processed/stale/rejected mailbox events for this many seconds.
+    check_interrupts_between_actions: true      # Check stop/cancel controls between ordered actions.
+    defer_scheduled_events_during_active_batch: true  # Defer scheduled events while an action batch owns the task tree.
+    defer_task_responses_during_active_batch: true  # Defer task responses while an action batch owns the task tree.
+    defer_recovery_events_during_active_batch: true  # Defer recovery events while an action batch owns the task tree.
+
+  # Strands mid-turn steering for active tasks.
+  mid_turn_steering:
+    enabled: true                               # Master switch for runtime steering.
+    proactive_guidance_ttl_seconds: 1800.0      # Suggested expiry for proactive guidance.
+    interrupt_response_timeout_seconds: 86400.0 # Suggested expiry for interrupt responses.
+    allow_restart_fallback: true                # Record durable recovery guidance if the live Strands session is gone.
+    apply_proactive_guidance_before_tools: true # Cancel a pending tool call when fresh guidance arrives.
+    apply_proactive_guidance_after_model: true  # Retry a model call when guidance arrives at a safe checkpoint.
+
+  # Active Strands transcript management before model calls.
+  inner_loop_context:
+    enabled: true                               # Enable filtering/offloading of historical tool-result transcript.
+    max_total_tokens: 300000                    # Main active-transcript token budget.
+    warning_ratio: 0.75                         # Emit a model-visible warning at this fraction of max_total_tokens.
+    aggressive_ratio: 0.90                      # Start aggressive artifact-only reduction at this fraction.
+    preserve_recent_messages: 8                 # Preserve recent messages from aggressive reduction where possible.
+    preserve_head_tokens: 1000                  # Head excerpt tokens retained for filtered noisy results.
+    preserve_tail_tokens: 1000                  # Tail excerpt tokens retained for filtered noisy results.
+
+    # Proactive pressure handling when Strands exposes projected input tokens.
+    projected_token_pressure:
+      enabled: true                             # Enable proactive old-tool-result reduction based on projected tokens.
+      threshold_ratio: 0.85                     # Trigger when projected input reaches this context-window ratio.
+      target_ratio: 0.75                        # Target projected context-window ratio after reduction.
+      fallback_context_window_tokens: null      # Optional explicit model context window fallback.
+
+    # Reactive handling after a provider rejects the active transcript as too large.
+    reactive_overflow:
+      max_total_recovery_attempts: 3            # Shared ceiling for inner reductions and outer provider reinvocations.
+      min_reduction_tokens: 1                   # Minimum measured message-token reduction required before retrying.
+
+    # Built-in filters for noisy historical tool output.
+    filters:
+      html_document:                                    # Large HTML documents.
+        enabled: true
+        trigger_tokens: 2000
+      javascript_or_bundle:                             # JavaScript files or bundled/minified scripts.
+        enabled: true
+        trigger_tokens: 1000
+      css_or_style_blob:                                # CSS or style blobs.
+        enabled: true
+        trigger_tokens: 2000
+      base64_or_binary_like:                            # Base64 or binary-like payloads.
+        enabled: true
+        trigger_tokens: 500
+      minified_or_low_entropy_noise:                    # Low-entropy minified noise.
+        enabled: true
+        trigger_tokens: 750
+      json_large:                                       # Large JSON. comms_json_lenient protects comms-shaped JSON longer.
+        enabled: true
+        trigger_tokens: 3000
+        comms_json_lenient: true
+        comms_json_trigger_tokens: 20000
+      xml_or_svg:                                       # XML or SVG payloads.
+        enabled: true
+        trigger_tokens: 2000
+      log_or_trace:                                     # Logs, traces, and stack dumps.
+        enabled: true
+        trigger_tokens: 750
+      csv_or_table:                                     # CSV or table-like output.
+        enabled: true
+        trigger_tokens: 2500
+      html_boilerplate_text:                            # Boilerplate-heavy HTML text.
+        enabled: true
+        trigger_tokens: 1000
+      agent_transcript:                                 # Agent transcript-like text.
+        enabled: true
+        trigger_tokens: 1500
+      code_file:                                        # Large source-code files.
+        enabled: true
+        trigger_tokens: 30000
+  context_engine:
+    type: "default"                             # Context engine implementation. Only "default" is currently supported.
+    max_context_ratio: 0.85                     # Soft prompt-input budget ratio after reserving output tokens.
+    reserved_output_tokens: 55296               # Output headroom subtracted from llm.context_window_tokens.
+    hard_limit_behavior: "recover_then_error"   # Overflow behavior. "recover_then_error" tries bounded recovery first.
+
+    # Bounded recovery when prompt assembly or provider call exceeds context.
+    overflow_recovery:
+      enabled: true                             # Enable context-epoch/degraded-section recovery.
+      max_preflight_attempts: 2                 # Maximum prompt preflight recovery attempts.
+      max_provider_retry_attempts: 1            # Maximum provider-overflow retry attempts after provider rejects context.
+      degrade_sections:                         # Lower-priority sections that may be omitted during recovery only.
+        - task_runtime_timing
+        - domain_topic_recall
+        - knowledge_recall
+        - task_history
+        - workspace_user_context
+        - instance_delivery_context
+
+    # Durable conversation context-boundary summaries.
+    context_epochs:
+      enabled: true                             # Enable context epoch records.
+      auto_create: true                         # Create epochs automatically when needed.
+      summary_max_tokens: 5000                  # Maximum epoch summary token budget.
+      include_source_accounting: true           # Store/render source accounting with epoch summaries.
+
+    # Optional future Strands-native snapshots. These are not canonical durable context.
+    strands_state_snapshots:
+      enabled: "auto"                           # "auto" feature-detects SDK snapshot support.
+      persist: false                            # Persist SDK snapshots when supported. false keeps this diagnostic-only.
+
+    plugins: []                                 # Optional context lifecycle plugins.
+
+    # Conversation-thread rendering controls.
+    thread_window:
+      recent_full_turns: 4                      # Recent conversation turns kept in full when budget permits.
+      per_turn_summary_max_tokens: 400          # Summary budget for older turns.
+      max_turns_to_load: 100                    # Maximum turns loaded from durable conversation storage.
+      omitted_notice_enabled: true              # Include notice when older turns are omitted.
+      include_turn_ids: true                    # Include durable turn ids in rendered context.
+      retrieval_tool_hint: true                 # Include hint for get_conversation_context_slice retrieval.
+
+    # Compact lifecycle timing added to model-visible context.
+    task_runtime_timing:
+      enabled: true                             # Enable timing section.
+      include_message_created_at: true          # Include original message-created timestamp.
+      include_handled_at: true                  # Include local handled-at timestamp.
+      include_processing_started_at: true       # Include local processing-start timestamp.
+      include_processing_finished_at: false     # Include processing-finished timestamp when available.
+
+  # Optional context and runtime debug dumps.
+  debug:
+    terminal_reasoning:
+      enabled: false                            # Print provider-exposed reasoning deltas to local stderr when the provider emits them. Does not reveal hidden chain-of-thought.
+    context_dump:
+      enabled: false                            # Enable model-visible context/runtime trace dumps.
+      mode: "on_error"                          # Dump mode: always, on_error, or on_budget_warning.
+      include_system_prompt: true               # Include the full system prompt file/rendering.
+      include_full_prompt: true                 # Include full assembled prompt.
+      include_context_sections: true            # Include context sections as structured JSON.
+      include_source_lengths: true              # Include per-source size accounting.
+      include_incoming_envelope_json: false     # Include full incoming envelope JSON. Usually keep false for sensitivity/noise.
+      include_strands_messages: true            # Include Strands message snapshots.
+      include_tool_results: true                # Include tool-result diagnostics.
+      include_result: true                      # Include parsed/returned result data.
+      include_reasoning_artifacts: true         # Include observable reasoning artifacts, not hidden chain-of-thought.
+      capture_model_calls: false                # Opt in to per-provider-call accounting through feature-detected private Strands middleware.
+      include_model_call_inputs: false          # Include redacted messages/system/tool-choice snapshots in per-call detail artifacts.
+      include_tool_specs: false                 # Include redacted full tool schemas; compact per-tool schema-size accounting is always captured.
+      redact_secrets: true                      # Redact secret-looking values in dumps.
+      retention_days: 14                        # Best-effort dump retention in days.
+      web_chat_controls_enabled: false          # Show authenticated Web Chat controls for live context dump toggles.
+    reply_routing_trace:
+      enabled: true                             # Trace reply routing boundaries for temporary diagnostics.
+
+  structured_output_failure_threshold: 4        # Optional threshold for stopping repeated structured-output validation failures.
+  task_queue_warning_threshold: 5               # Warn when pending top-level task count reaches this threshold.
+  subtask_timeout_seconds: 1200                 # Local timeout for delegated subtasks and unanswered TaskQuery waits.
+  subtask_watchdog_interval_seconds: 15         # Watchdog scan interval for overdue subtasks and TaskQuery waits.
+  subtask_status_probe_timeout_seconds: 5       # Per-probe timeout for delegated-subtask status checks.
+  restart_executing_task_grace_seconds: 900     # Restart grace for interrupted executing snapshots before failing fast.
+  same_role_runtime_takeover_enabled: true      # Same-role replacement agents may claim stale runtime snapshots.
+  deferred_message_warning_threshold: 10        # Warn when deferred inbound delivery backlog reaches this count.
+  max_deferred_messages: 100                    # Bound durable deferred admission; excess work remains with NATS for redelivery.
+  tool_allowlist: null                          # Optional exact tool-name allowlist. null means no allowlist; [] means no tools. A name that is no tool function is refused.
+  tool_blocklist: []                            # Optional exact tool-name blocklist applied after allowlist filtering. A name that is no tool function is refused.
+  external_mcp_servers:                         # Servers for every agent type (with authorization on, an agent uses one only with access to its mcp:<name> tool); omission configures none.
+    - name: "crawl4ai"
+      transport: "sse"
+      server_url_env: "CRAWL4AI_MCP_SERVER_URL" # Required URL. Stock 0.9.2 is validated with /mcp/sse; UA also supports websocket/ws for compliant MCP servers.
+      credential_injections:                    # The broker fills this header from the connection's linked account; link the token with /link mcp:crawl4ai team.
+        - {target_kind: header, target_name: Authorization, field_name: api_token, template: "Bearer {value}"}
+      tool_name_prefix: "crawl4ai"
+      startup_timeout: 60
+      timeout: 30
+      sse_read_timeout: 300
+      tool_timeout_seconds: 300                 # End-to-end deadline for one MCP tool result; must be positive and finite.
+      max_message_bytes: 67108864              # WebSocket frame cap (64 MiB); ignored by SSE.
+  agent_definition_paths: []                    # Additional YAML agent-definition files, catalog directories, or bundle directories. Relative paths resolve under control/. control/agent_definitions/ and control/agent_bundles/ are always scanned at startup.
+  prompt_skill_description_exclusions: []       # Skill names hidden from AgentSkills menu/XML prompt content.
+  prompt_skill_description_limit: 50            # Maximum deduplicated skill descriptions shown in the prompt menu; omitted skills remain activatable.
+  memory_graph_enabled: false                   # Enable graph-backed memory infrastructure.
+  memory:
+    plugin_manager:
+      enabled: true                             # Coordinate memory hydration before conversation-thread budgeting.
+      registry_mode: "builtin"                  # Built-in repo-owned plugin registry; no arbitrary external loading.
+      fail_open: true                           # Omit failed optional plugins and warn instead of failing the turn.
+      emit_plugin_warnings: true                # Include model-visible warnings for failed pinned memory plugins.
+    plugins:
+      order:                                    # Hydration plugin order before priorities.
+      - coremem
+      - usermem
+      - domain_topic_recall
+      - knowledge_recall
+      coremem:                                          # Team-scoped pinned facts.
+        enabled: true                                         # Enable this memory plugin.
+        priority: 34                                          # Memory plugin rendering priority.
+        pinned: true                                          # Pin this memory plugin output during context budgeting.
+        degradable: false                                     # Allow this memory plugin output to be omitted during context pressure.
+      usermem:                                          # Canonical-user-scoped pinned facts.
+        enabled: true                                         # Enable this memory plugin.
+        priority: 35                                          # Memory plugin rendering priority.
+        pinned: true                                          # Pin this memory plugin output during context budgeting.
+        degradable: false                                     # Allow this memory plugin output to be omitted during context pressure.
+      domain_topic_recall:                              # Compact tagged-thread hints.
+        enabled: true                                         # Enable this memory plugin.
+        priority: 44                                          # Memory plugin rendering priority.
+        pinned: false                                         # Pin this memory plugin output during context budgeting.
+        degradable: true                                      # Allow this memory plugin output to be omitted during context pressure.
+      knowledge_recall:                                 # Names and summaries of knowledge pages that match the request (team pages and the verified person's own).
+        enabled: true                                         # Enable this memory plugin.
+        priority: 45                                          # Memory plugin rendering priority.
+        pinned: false                                         # Pin this memory plugin output during context budgeting.
+        degradable: true                                      # Allow this memory plugin output to be omitted during context pressure.
+        max_pages: 5                                          # Most pages listed per turn.
+    coremem:
+      enabled: true                             # Enable team-scoped pinned memory commands/tools/hydration.
+      max_facts_per_team: 200                   # Hard active coremem capacity per team.
+      max_metadata_chars: 2000                  # Maximum serialized metadata JSON length per coremem fact.
+      max_tags: 20                              # Maximum tag count per coremem fact.
+      max_tag_chars: 64                         # Maximum normalized tag length per coremem tag.
+      hydrate_into_context: true                # Hydrate active coremem into every applicable turn.
+      automatic_creation_enabled: true          # Allow MemReview to automatically create/reconcile coremem facts.
+      agent_write_tools_enabled: true           # Allow agent tools to write coremem; slash commands still work when false.
+    usermem:
+      enabled: true                             # Enable canonical-user-scoped pinned memory commands/tools/hydration.
+      max_facts_per_user: 500                   # Hard active usermem capacity per canonical user.
+      require_canonical_user_id: true           # Skip usermem hydration when the requester is not registered.
+      max_metadata_chars: 2000                  # Maximum serialized metadata JSON length per usermem fact.
+      max_tags: 20                              # Maximum tag count per usermem fact.
+      max_tag_chars: 64                         # Maximum normalized tag length per usermem tag.
+      hydrate_into_context: true                # Hydrate active usermem into every applicable registered-user turn.
+      automatic_creation_enabled: true          # Allow MemReview to automatically create/reconcile usermem facts.
+      agent_write_tools_enabled: true           # Allow agent tools to write usermem; slash commands still work when false.
+    review:
+      enabled: true                             # Enable memory review maintenance boundaries and MemReview job enqueueing.
+      mode: cue_plus_periodic                   # Review scheduling policy for pinned-memory review jobs.
+      periodic_turn_interval: 15                # Maximum unreviewed completed user turns before submitting a conversation review window.
+      sliding_window_overlap_turns: 5           # Already-reviewed turns included before the first unreviewed turn for review continuity.
+      explicit_cue_immediate: true              # Allow explicit "remember" style cues to submit a partial window before the interval fills.
+      max_turn_text_chars: 4000                 # Per-turn text field cap inside MemReview conversation-window payloads.
+      stale_conversation_after_seconds: 86400   # Inactivity age before remaining unreviewed turns are considered stale.
+      max_stale_conversations_per_run: 20       # Maximum stale conversations submitted per scheduled stale-review scan; each person's scan covers only their own conversations.
+      stale_conversation_review_interval_seconds: 3600  # Recurring scan interval for stale conversations with unreviewed turns; one schedule per active person, owned by them; applies when a schedule is first installed (a stored one keeps its cadence).
+      coremem_audit_interval_seconds: 86400     # Recurring interval for scheduled coremem validity/conflict audits; one team schedule; applies when the schedule is first installed.
+      usermem_audit_interval_seconds: 86400     # Recurring interval for scheduled usermem validity/conflict audits; one schedule per active person, owned by them; applies when a schedule is first installed.
+      claim_ttl_seconds: 300                    # Review-job claim TTL used by MemReview workers.
+      memreview_agent_count: 2                  # Default managed MemReview worker count.
+      review_task_ttl_seconds: 14400            # MemReview task NATS TTL in seconds (4 hours).
+    notifications:
+      quiet_hours_aware: true                   # Route memory/topic notices through quiet-hours-aware gateway delivery.
+      active_engagement_grace_seconds: 300      # Grace window for treating a source conversation as actively engaged.
+      delivery_target: "default"                # notify_user target for memory/topic notices: "default" or "current_thread".
+    domain:
+      enabled: true                             # Enable tagged-thread topic recall and topic command surfaces.
+      auto_tag_threads: true                    # Allow maintenance plugins to tag threads from explicit topic signals.
+      visible_notices: true                     # Allow user-visible topic/memory notices where delivery policy permits.
+      max_recall_threads: 5                     # Maximum compact thread hints inserted by domain_topic_recall.
+  knowledge:                                    # The shared knowledge base: team pages, each person's own pages, revisions, notes and reviewed team contributions.
+    enabled: true                               # Open the knowledge base and give agents its tools.
+    limits:                                     # Checked by the store on every agent write; people's edits are not rate limited.
+      window_minutes: 30                        # Window for the per-page edit limit and the edit-war check.
+      page_edits_per_agent: 5                   # Edits one agent may make to the same page within the window.
+      writes_per_agent_per_hour: 30             # All knowledge writes one agent may make per hour.
+      new_pages_per_work: 10                    # New pages one person's request may create (all its agents together).
+      archives_per_agent_per_hour: 5            # Applied or proposed page archives one agent may make per hour.
+      recent_revisions_compared: 5              # An edit repeating the current text or one of this many earlier revisions is refused.
+      edit_war_edits: 8                         # More edits than this within the window from 2+ agents freezes the page for agents.
+      edit_war_freeze_minutes: 60               # How long a frozen page refuses agent edits (agents add notes instead).
+      max_title_chars: 120
+      max_summary_chars: 300
+      max_body_chars: 24000                     # Longer pages should be split into linked pages.
+      max_note_chars: 2000
+      max_tags: 10
+    sensitive_content:
+      blocked_patterns: []                      # Extra never-stored patterns, e.g. [{name: "project codename", pattern: "(?i)\\bbluebird\\b"}]; credentials and identity numbers are always refused.
+    search:
+      max_results: 8                            # Most results one knowledge search returns.
+    curation:                                   # KnowledgeCuratorAgent's schedules; a run with nothing to review is skipped without starting it.
+      enabled: true                             # Install the curator's per-person and team schedules.
+      person_interval_minutes: 1440             # Each person's review of team changes proposed from their work; 0 installs none.
+      team_interval_minutes: 1440               # The team run (notes, broken links, pages agents fight over); 0 installs none.
+  schedule_maintenance:
+    memory_review_cleanup:
+      enabled: true # Set abandoned review claims aside for InternalImprovementAgent; never declares them completed.
+      scan_interval_seconds: 300 # Frequency of the runtime's abandoned-claim check.
+      expired_claim_grace_seconds: 3600 # Additional wait after claim expiry before cleanup review.
+      batch_size: 100 # Maximum records handled in one automatic scan or reviewed cleanup operation.
+      archive_retention_days: 90 # Minimum time to retain archived review content before authorized deletion.
+    stale_schedules:                            # Checked by trusted code before each maintenance run; results go to the Inbox.
+      enabled: true                             # Delete removed people's own schedules; tell owners and administrators about unused ones.
+      turned_off_days: 30                       # Tell the owner once a schedule has been turned off at least this long.
+      paused_beyond_days: 90                    # Tell the owner when a schedule is paused until more than this many days away.
+    stuck_tasks:                                # Checked by the team lead on every scheduler pass; the person a stuck task works for is told in the Inbox and in chat, and again when it moves.
+      enabled: true                             # Tell people about stuck tasks.
+      owner_gone_after_seconds: 600             # The agent holding the task stopped reporting in and nobody took it over.
+      waiting_on_person_after_seconds: 86400    # Waiting this long on an access decision or the person's answer (a reminder; such waits may last two days).
+      no_progress_after_seconds: 7200           # In progress with no new history entry this long.
+      handback_unclaimed_after_seconds: 1800    # Handed back by a worker that lost its lease, sent out again, and not picked up.
+    internal_improvement_review_interval_seconds: 21600  # Manager-owned InternalImprovement review cadence (6 hours); each worker startup ensures one shared team schedule. Set <= 0 to disable installation and the stale-schedule check.
+
+  # Conversation compaction policy for durable conversation history.
+  conversation_compactor:
+    type: "heuristic_sliding_window"            # Compactor implementation: heuristic_sliding_window, llm_summarizing, or noop.
+
+    # Compactor tuning options.
+    options:
+      trigger_ratio: 0.75                       # Trigger compaction when the configured ratio is reached.
+      target_ratio: 0.50                        # Target ratio after compaction.
+      min_recent_turns: 3                       # Minimum recent turns to preserve.
+      max_recent_turns: 8                       # Maximum recent turns to preserve.
+      # trigger_turn_count: 20                  # Optional turn-count trigger.
+      # trigger_message_count: 40               # Optional message-count trigger.
+
+  conversation_summary_generator_type: "heuristic"  # Durable per-turn summary generator. "heuristic" is deterministic. "llm_summarizing" opts into model summaries with heuristic fallback.
+
+# Backend-neutral storage selection starts here.
+# This store owns manager/task-history/schedule data. It maps to
+# instance_config.yaml state.storage during onboarding.
+storage:
+  backend: "sqlite"                             # Shared storage backend: "sqlite" or "postgres".
+
+  # SQLite backend settings.
+  sqlite:
+    path: "dbs/task_history.db"                 # Manager/task-history/schedule SQLite DB. Relative paths resolve under agent.instance_root; runtime connections use WAL, synchronous=NORMAL, busy_timeout=2500ms.
+    vector:
+      enabled: true                             # Enable sqlite-vec indexes in the manager/task-history store for memory graph vector search.
+      provider: "sqlite_vec"                    # SQLite vector provider; only the non-alpha sqlite-vec package is supported.
+      require_extension: true                   # Fail memory graph startup if sqlite-vec cannot load.
+
+  # Postgres backend settings. Keep DSN in POSTGRES_DSN / POSTGRES_DSN_FILE.
+  postgres: {}                                  # Manager/task-history/schedule Postgres settings. DSNs are env-owned and not persisted into instance_config.yaml.
+
+access_workflows:                              # Plans agents publish before asking for access; people follow them on the workflow page.
+  max_steps: 32                                # Maximum steps in one access workflow (1-64).
+  diagnostic_event_limit: 1000                 # Maximum redacted events per diagnostic download (20-10000); truncation is reported.
+
+authorization:                                  # Access checks: agents and the people their tasks work for need grants for the tools they use.
+  enabled: true                                 # Check every agent tool call and broker request against grants; false runs every tool without requests while the sandbox, broker, and protected folders still apply.
+  cedar_binary_path: null                       # Optional access evaluator executable path/name; null finds ua-cedar-authorizer.
+  starter_profile: "trusted"                    # TeamLead's standing access for the first user's work until they choose their own with /access profile: trusted (full standard tools plus sandboxed shell and Python, hands on without asking), careful (read only, hands on), manual (nothing). Other people choose their own with /access profile.
+  presentation:                                 # How much detail access refusals and review messages show.
+    mode: "friendly"                            # "friendly" uses plain-language messages; "technical" also shows exact tool ids, levels, and identifiers. Restart after changing.
+
+# Folders outside the instance (data folders) are registered by an administrator with
+# /access folders add <name> <path> or assistant_cli access folders add, not here.
+tool_policy:                                    # Tool settings that are not access; access is given with grants.
+  scratch_retention_days: 14                    # Days a file stays in a scratch/ folder (each person's scratch/, which also holds the copies of files sent to them, and agents/scratch/) before the maintenance run deletes it; 0 keeps them.
+
+# Credential-owning secure tool broker / OpenShell integration. The broker always runs:
+# every credentialed tool call (web research, GitHub, Google, Hugging Face, X, MCP servers) goes through it.
+security_layer:
+  mode: "broker"                                # "broker", or "openshell" to also run agent commands in an OpenShell sandbox. ("disabled" was removed and is refused.)
+  broker_internal_base_url: "http://127.0.0.1:18600" # Agent/gateway-facing broker API URL.
+  broker_public_port: 18600                     # Browser-facing broker port combined with network.public_origin. null uses network.public_origin as-is.
+  broker_bind_host: "0.0.0.0"                   # Broker listener host.
+  broker_bind_port: 18600                       # Broker listener port.
+  broker_credentials_dir: "broker_credentials"  # Broker-owned credential-state directory. Relative paths resolve under instance_root.
+  tool_setup_recheck_days: 30                   # Days after which the broker re-checks a person's tool that is set up (signed in or linked) but was not used since, and tells the person in the Inbox when it needs setting up again; 0 turns it off.
+  credential_state_backend:                     # Where broker auth payloads are persisted. credential_source is default; files remains available for explicit local-only deployments.
+    mode: "credential_source"                   # "files" or "credential_source".
+    source: sealbox                             # Credential source when mode is credential_source, e.g. "sealbox", "vault", or "bitwarden".
+    namespace: "team-cred-store"                # Credential-source namespace/path prefix.
+    fallback_to_files: false                    # Use broker files for absent records or other-source failures; Sealbox errors always stop the operation.
+  credential_catalog:                           # Broker-owned catalog of credentials, one set per person and one for the team.
+    enabled: true                               # Enable secure credential collection, signup fallback, and OpenShell credential leases.
+    database_path: "credential_catalog.db"      # Owner-scoped SQLite credential catalog under instance_root.
+    template_overrides_path: credential_template_overrides.yaml # Approved agent-augmented credential templates. Relative paths resolve under instance_root.
+    default_write_source: sealbox                 # Default store for new secrets. Unsupported write targets fail closed.
+    openshell_binding_ttl_seconds: 900            # Lifetime of a lease that exposes a linked account to the OpenShell sandbox.
+    collection_session_ttl_seconds: 900           # Secure broker form session lifetime.
+    secret_cache_ttl_seconds: 300                 # In-memory broker cache TTL for resolved catalog secrets; 0 disables.
+  sealbox:                                  # Independent encrypted service used through its public API/CLI contract.
+    enabled: true                                 # Configure Sealbox as a broker credential source.
+    manage_service: true                          # Start sealbox-server during headless launch.
+    auto_initialize: true                         # Create the managed server root token when missing.
+    bind_host: 127.0.0.1                          # Managed sealbox-server listener host.
+    bind_port: 8767                               # Managed sealbox-server listener port.
+    store_path: dbs/sealbox.db                    # Managed Sealbox SQLite store path under broker_credentials_dir.
+    root_token_file: "sealbox/root_token"       # Root administration token used only for tenant lifecycle operations.
+    tenant_material_dir: "sealbox/tenants"      # Broker-only opaque tenant tokens and public/private key pairs.
+    api_version: "v2"                           # Tenant-scoped Sealbox data API.
+    ready_timeout_seconds: 30                   # Seconds to wait for managed sealbox-server readiness.
+
+  # OpenShell settings used when mode is "openshell": each person's code runs in
+  # their own sandbox, created on first use with copies of only their folder and
+  # the shared team/ and agents/ folders.
+  openshell:
+    sandbox_name: null                          # Name prefix of the per-person sandboxes (<prefix>-p-<person>, <prefix>-shared). null uses team-<instance>.
+    sandbox_image: null                         # Optional sandbox image/community name/path.
+    policy_file: null                           # OpenShell policy file; it decides the network and anything else OpenShell code may reach.
+    workspace_mount: "/workspace"               # Where the person's folder and team/ and agents/ are copied inside each sandbox.
+    manage_gateway: true                        # Start/manage openshell-gateway in headless mode.
+    gateway_name: null                          # OpenShell gateway name. null defaults to team-<instance>.
+    gateway_bind_host: "127.0.0.1"              # OpenShell gateway listener host.
+    gateway_bind_port: 18080                    # OpenShell gateway listener port.
+    gateway_endpoint: null                      # Gateway endpoint used by clients. null derives from bind host/port.
+    gateway_driver: "docker"                    # OpenShell backend driver.
+    gateway_state_dir: null                     # Gateway state directory. null uses <instance_root>/runtime/openshell/state/openshell.
+    gateway_db_url: null                        # Gateway DB URL. null derives from gateway_state_dir.
+    gateway_binary: null                        # Gateway binary path/name.
+    gateway_ready_timeout_seconds: 60           # Seconds to wait for gateway process readiness.
+    gateway_extra_args: []                      # Extra openshell-gateway argv entries.
+    create_if_missing: true                     # Create a person's sandbox the first time their code runs.
+    delete_on_shutdown: false                   # Delete this instance's sandboxes when the launcher stops.
+    upload_workspace: true                      # Copy the person's folder and team/ and agents/ into their sandbox when it is created.
+    no_git_ignore: false                        # Ignore .gitignore while copying folders into a sandbox.
+    provision_timeout_seconds: 300              # Sandbox provisioning timeout in seconds.
+    readiness_timeout_seconds: 30               # Sandbox readiness timeout in seconds.
+
+  # Sandbox for agent-run shell and python_env commands outside OpenShell mode.
+  code_execution:
+    sandbox: "required"                         # "required": each command reaches only the folders its agent and person may use, a private temp HOME and read-only OS files, and the network only with full access to the code tool (Linux Landlock; the network limit needs Linux 6.7+); commands are refused if the sandbox cannot apply. "off": run every agent's code with this process's full access.
+    extra_read_paths: []                        # Extra absolute paths sandboxed code may read (for example a mounted reference-data directory). Never list the instance root.
+    extra_write_paths: []                       # Extra absolute paths sandboxed code may read and write.
+
+# Embedding service settings for memory graph ingestion/retrieval.
+embedding:
+  provider: "openai_compatible"                 # Embedding backend: "local" or "openai_compatible".
+  model_id: "harrier-oss-v1-0.6b"               # Embedding model id. Required for openai_compatible.
+  api_base: null                                # OpenAI-compatible embedding base URL.
+
+  # dimensions: 48                              # Optional explicit embedding dimensionality.
+  timeout_seconds: 10                           # Embedding request timeout in seconds.
+  organization: ""                              # Optional OpenAI-compatible organization header.
+  extra_headers: {}                             # Optional non-secret static headers for embedding requests.
+
+# Workspace behavior. Locations are fixed by the instance layout: team skills in
+# control/skills, Python environments in each task's own folder, and model
+# overrides, templates and the startup roster in control/.
+workspace:
+  objective_execution_enabled: true             # Make bounded and conversationally proposed profiles available by default; each Objective still requires explicit authenticated user acceptance.
+  objective_execution_paths:                # Ordered policy layers; later files (relative to control/) can add or replace profiles and bounds.
+  - builtin://objective-execution/default       # Ordered built-in policy URIs or separate bounded Objective execution policy paths.
+  # - objective-execution.yaml                    # Additional overrides on top of the default policy. Resolves to /data/control/objective-execution.yaml.
+  skill_installation:
+    enabled: true                               # Allow TeamArchitect to quarantine, scan, and request installation of GitHub-hosted skills. With authorization enabled, skill.install must also be selected in enforce mode.
+    scanner_executable: "skillspector"          # Operator-owned executable; Docker and native installs put the isolated scanner on PATH.
+    scanner_timeout_seconds: 180                # Maximum static scan runtime in seconds.
+    safe_max_score: 20                          # Accept only LOW/SAFE reports at or below this score; values above 20 are rejected.
+    plan_ttl_seconds: 86400                     # Lifetime of a scanned plan (60-86400 s); long enough for a person to approve it later.
+    max_repository_bytes: 104857600             # Maximum size of a quarantined Git checkout (100 MiB).
+  external_skill_repositories: []               # Public GitHub repositories containing one or more skills/ directories at any depth.
+  refresh_external_skills_on_start: false       # Refresh and replace externally managed skills before agents start.
+
+# Assistant-facing display and gateway availability notice settings.
+assistant:
+  display_name: "Lisa"                          # Assistant display name shown in user-facing surfaces.
+  manager_transition_notices_enabled: false     # Emit proactive manager outage/recovery messages into the configured delivery channel.
+  unavailable_message_template: "{assistant_name} is not currently available. Please try again after it reconnects." # Direct fallback reply when no live manager route is available.
+  available_message_template: "{assistant_name} is now available." # Proactive recovery message when transition notices are enabled.
+
+# Immutable deterministic execution keeps source/build artifacts, exact activations,
+# schedule attempts, and managed-service desired state outside the agent process.
+execution_control:
+  enabled: true                                 # Master switch for immutable execution jobs and managed services.
+  runner:
+    enabled: true                               # Start the fenced execution controller in headless launch.
+    tick_interval_seconds: 2                    # Schedule materialization and finite-run polling interval.
+    max_concurrent_jobs: 2                      # Maximum finite attempts executed concurrently.
+    lease_ttl_seconds: 60                       # Renewed DB lease lifetime; takeover increments the fencing token.
+    service_reconcile_interval_seconds: 10      # Managed process/MCP health reconciliation interval.
+  artifact_store:
+    maximum_artifact_bytes: 268435456           # Per-object limit for source, build, log, and result artifacts.
+  profiles:
+    - profile_id: "python.openshell.restricted" # Stable operator-owned profile selected by an immutable revision.
+      language: "python"
+      backend: "openshell"
+      runtime_executable: "/usr/bin/python3"
+      toolchain_identity: "cpython-3.13"
+      openshell_sandbox_name: "ua-default"      # Replace with the provisioned team sandbox name.
+      openshell_workspace_mount: "/workspace"
+      network_enabled: false
+      read_only_root: true
+      run_as_non_root: true
+    - profile_id: "rust.openshell.restricted"
+      language: "rust"
+      backend: "openshell"
+      runtime_executable: "/workspace/program"
+      builder_executable: "/usr/bin/rustc"
+      toolchain_identity: "rust-1.95.0"
+      openshell_sandbox_name: "ua-default"      # Rust compilation runs only in this isolated builder sandbox.
+      openshell_workspace_mount: "/workspace"
+      network_enabled: false
+      read_only_root: true
+      run_as_non_root: true
+    # Kubernetes profiles require a digest-pinned image containing Python and
+    # the configured artifact helper. Mount artifact_store_dir on the named
+    # artifact PVC in the controller deployment. The optional, separate data
+    # PVC is exposed read-write to code at UA_DATA_DIR=/ua/data.
+    # - profile_id: "python.kubernetes.persistent"
+    #   language: "python"
+    #   backend: "kubernetes"
+    #   runtime_executable: "/usr/bin/python3"
+    #   toolchain_identity: "cpython-3.13"
+    #   runtime_image: "registry.example/ua-worker@sha256:<64-lowercase-hex>"
+    #   artifact_fetcher_executable: "/usr/local/bin/ua-artifact-fetch"
+    #   kubernetes_artifact_pvc_name: "ua-execution-artifacts"
+    #   kubernetes_workload_pvc_name: "ua-execution-data"
+    #   kubernetes_namespace: "ua-execution"
+    #   kubernetes_service_account_name: "ua-execution-worker"
+    #   network_enabled: false
+  kubernetes:
+    kubectl_executable: "kubectl"               # Used only by profiles whose backend is kubernetes.
+    network_policy_enforced: false              # Set true only when namespace policies enforce universal-agents.io/network labels.
+  ssh:
+    enabled: false                              # Enable the brokered OpenSSH PTY surface.
+    ssh_executable: "ssh"                       # OpenSSH client; host keys and identity files remain broker-owned.
+    lease_ttl_seconds: 300                      # Renewed on each PTY read, write, or resize.
+    transcript_limit_bytes: 4194304             # Maximum captured remote-output transcript artifact.
+    targets: []                                 # Pinned hosts and identity paths; keep key files outside the agent workspace. Optional remote_persistent_session_name enables tmux reattachment.
+
+# Preferred user communication target and proactive delivery settings used for
+# agent notify_user messages, autonomous notices, deferred digests, heartbeat
+# output, and optional manager availability notices.
+delivery:
+  quiet_hours:
+    enabled: true                               # Defer non-urgent proactive delivery during quiet hours.
+    start_hour_local: 22                        # Local quiet-hours start, 0-23.
+    end_hour_local: 8                           # Local quiet-hours end, 0-23.
+    allow_urgent_delivery: true                 # Urgent messages can bypass quiet-hours deferral.
+  digest_delivery_hour_local: 8                 # Local hour to release deferred-message digests.
+  summarize_deferred: true                      # Summarize deferred messages before digest delivery.
+  notification_routing:
+    mode: "source_thread_or_default"            # notify_user target="auto": "source_thread_or_default" or "default_target". To route all auto notifications to your default channel set to "default_target"
+  urgent_keywords:                              # Keywords that bypass quiet hours.
+  - urgent
+  - asap
+  - immediately
+  - critical
+  - failure
+  - error
+  default_target:
+    channel_name: "telegram"                    # Preferred user communication channel, e.g. "cli", "telegram", "discord", "whatsapp", "signal", or "photon".
+    chat_id: ""                                 # Preferred destination id as a string. For Telegram, quote values like "-1001234567890".
+    thread_id: ""                               # Optional Discord thread id or Telegram forum topic id as a string.
+
+# Interactive app adapters are keyed by stable plugin id. A non-bundled entry
+# must also name its installed Python distribution; the configured id and
+# distribution together form the operator allowlist.
+interactive_apps:
+  adapter_host:                             # Authenticated private boundary for adapters selected with execution: adapter_host.
+    enabled: false                          # Start the gateway adapter-host API and its separately supervised plugin process.
+    transport: "unix"                       # Private transport: "unix" for one host or "mtls" across containers/hosts.
+    host_id: "python-adapter-host"          # Stable workload identity presented by the managed adapter-host process.
+    allowed_host_ids: ["python-adapter-host"] # Exact workload identities permitted to register configured adapters.
+    token_env_var: "ADAPTER_HOST_AUTH_TOKEN" # Env var containing the rotatable bearer credential; never put its value in YAML.
+    unix_socket_path: "runtime/adapter-host.sock" # Permission-restricted Unix socket path relative to instance_root.
+    unix_socket_mode: "0600"                # Octal permission mode applied after binding the Unix socket.
+    bind_host: "127.0.0.1"                  # Gateway listener address used only by the mTLS transport.
+    bind_port: 18700                        # Gateway listener port used only by the mTLS transport.
+    connect_host: "127.0.0.1"               # Gateway DNS name/address used by the adapter-host mTLS client.
+    tls:                                    # Mutual-TLS certificate and trust paths; required when transport is mtls.
+      server_certificate_path: ""           # Gateway server certificate path relative to instance_root.
+      server_private_key_path: ""           # Gateway server private-key path; keep file permissions restrictive.
+      client_ca_path: ""                    # CA bundle the gateway uses to authenticate adapter-host client certificates.
+      client_certificate_path: ""           # Adapter-host client certificate path relative to instance_root.
+      client_private_key_path: ""           # Adapter-host client private-key path; keep file permissions restrictive.
+      server_ca_path: ""                    # CA bundle the adapter host uses to authenticate the gateway.
+      server_name: ""                       # Expected gateway TLS server identity used for hostname verification.
+    limits:                                 # Gateway ceilings intersected with host-supported limits at registration.
+      max_in_flight_events: 16              # Maximum received but incomplete deliveries for one adapter stream.
+      max_payload_bytes: 2097152            # Maximum JSON payload bytes for one protocol message.
+      max_attachment_bytes: 31457280        # Maximum bytes accepted for one opaque attachment transfer.
+      max_pending_events: 1000              # Bounded durable outbound queue capacity per adapter instance.
+      heartbeat_interval_seconds: 15.0      # Maximum negotiated heartbeat interval in seconds.
+      acknowledgement_timeout_seconds: 60.0 # Deadline before an unacknowledged delivery degrades health.
+      retention_seconds: 604800             # Terminal protocol-record retention and reconnect/resume window.
+    lease_seconds: 45                       # Registration lease lifetime renewed by authenticated heartbeats.
+    upload_ticket_ttl_seconds: 300          # Lifetime of one-use inbound attachment upload tickets.
+    upload_dir: "runtime/adapter-host-uploads" # Gateway-owned opaque attachment staging directory.
+    client_state_path: "dbs/adapter_host_client.db" # Host-side durable idempotency and resume ledger.
+    reconnect_initial_delay_seconds: 0.5    # Initial bounded reconnect delay after gateway unavailability.
+    reconnect_max_delay_seconds: 30.0       # Maximum exponential reconnect delay.
+  plugins:                                  # Registry-keyed adapter settings and the exact allowlist for optional packages.
+    builtin.internal_website:                     # Internal website settings.
+      execution: "in_process"               # The gateway-owned operator website must remain in the gateway process.
+      adapter_instance_id: null             # Stable adapter instance id; null derives one from instance and plugin ids.
+      settings:
+        enabled: true                           # Start shared docs/generated-site host with run-gateway unless --no-apps is used.
+        bind_host: "0.0.0.0"                    # Listener host for the shared docs/generated-site service.
+        bind_port: 18090                        # Shared docs/generated-site listener port.
+        public_port: 18090                      # Browser-facing port; null uses network.public_origin as-is.
+        docs_root: null                         # Docs root directory. null defaults to repository user_docs/site.
+        skills_dir: null                        # Team skill-docs source. null uses control/skills; relative paths resolve under control/.
+        web_chat_enabled: true                  # Serve built-in Web Chat through the internal website host.
+        web_chat_token_env_var: "WEB_CHAT_AUTH_TOKEN" # Env var containing the Web Chat token; keep the value in team.env or a secret file.
+        attachments:                            # Built-in Web Chat attachment settings.
+          enabled: true                         # Allow uploads, pasted images, and attachment rendering in Web Chat.
+          max_file_bytes: 31457280              # Maximum accepted Web Chat attachment size in bytes.
+          allowed_kinds:                            # Attachment kinds accepted by Web Chat.
+          - image
+          - document
+          - audio
+          - video
+          nats_object_bucket: "ua_attachments"  # NATS Object Store bucket for team-lead-coordinated remote copies.
+          nats_object_ttl_seconds: 86400        # Retention seconds for NATS Object Store attachment copies.
+          nats_object_max_bytes: null           # Optional max bytes for the attachment Object Store bucket.
+          remote_copy_enabled: true             # Allow gateway-owned on-demand mirroring to NATS Object Store.
+    builtin.discord:                        # Discord settings.
+      execution: "in_process"                   # Use "adapter_host" to run this channel adapter in the external host.
+      adapter_instance_id: null                 # Stable adapter instance id; null derives one from instance and plugin ids.
+      settings:
+        enabled: false                          # Enable the Discord interactive adapter.
+        allowed_user_ids: []                    # Discord user-id strings. Empty means no user allowlist.
+        allowed_channel_ids: []                 # Discord channel-id strings. Empty means no channel allowlist.
+        group_policy: "mention"                 # Discord group handling policy: "mention" or "open".
+        thread_scoped_sessions: true            # Scope Discord sessions by thread when present.
+        command_guild_ids: []                   # Optional guild-id strings for command sync.
+    builtin.telegram:
+      execution: "in_process"               # Use "adapter_host" to run this channel adapter in the external host.
+      adapter_instance_id: null             # Stable adapter instance id; null derives one from instance and plugin ids.
+      settings:
+        enabled: false                          # Enable the Telegram interactive adapter.
+        allowed_user_ids: []                    # Telegram user-id strings. Empty means no user allowlist.
+        allowed_chat_ids: []                    # Telegram chat-id strings. Empty means no chat allowlist. Quote negative ids.
+        group_policy: "mention"                 # Telegram group handling policy: "mention" or "open".
+        manager_offline_policy: "pause_telegram_polling" # Inbound behavior when the manager is offline.
+        topic_scoped_sessions: true             # Scope Telegram sessions by topic when present.
+        drop_pending_updates: true              # Drop stale Telegram updates on startup.
+        rich_messages: true                     # Use Bot API rich messages for Telegram replies when supported.
+    builtin.whatsapp:
+      execution: "in_process"               # Use "adapter_host" to run this channel adapter in the external host.
+      adapter_instance_id: null             # Stable adapter instance id; null derives one from instance and plugin ids.
+      settings:                             # WhatsApp app settings.
+        enabled: false                                        # Enable the Twilio-backed WhatsApp adapter.
+        allowed_sender_ids: []                                # WhatsApp sender allowlist. Empty means no sender allowlist.
+        webhook_host: 0.0.0.0                                 # Listener host for Twilio webhook callbacks.
+        webhook_port: 8080                                    # Listener port for Twilio webhook callbacks.
+        webhook_path: "/webhooks/whatsapp"      # Twilio webhook path.
+        public_base_url: null                   # Public base URL used for Twilio signature validation.
+        validate_twilio_signature: true         # Validate inbound Twilio signatures.
+    builtin.signal:                         # Signal settings.
+      execution: "in_process"               # Use "adapter_host" to run this channel adapter in the external host.
+      adapter_instance_id: null             # Stable adapter instance id; null derives one from instance and plugin ids.
+      settings:
+        enabled: false                          # Enable the Signal adapter backed by signal-cli-rest-api.
+        base_url: "http://127.0.0.1:8080"       # Base URL for the authenticated signal-cli-rest-api server.
+        account: ""                             # Registered Signal account or number used by the REST server.
+        allowed_sender_ids: []                  # Signal direct sender allowlist. Empty means no sender allowlist.
+        allowed_group_ids: []                   # Signal group-id allowlist. Empty disables group handling.
+        group_policy: "mention"                 # Signal group handling policy: "mention" or "open".
+        mention_markers: []                     # Required group mention markers for mention policy.
+        poll_timeout_seconds: 5.0               # Signal receive long-poll timeout in seconds.
+        poll_interval_seconds: 0.25             # Delay between empty Signal receive polls in seconds.
+        max_messages_per_poll: 10               # Maximum Signal messages requested per receive poll.
+        request_timeout_seconds: 15.0           # Signal REST request timeout in seconds.
+        ignore_attachments: false               # Ask signal-cli-rest-api not to download attachments on receive.
+        ignore_stories: true                    # Ignore Signal stories on receive.
+        ignore_avatars: true                    # Ignore Signal avatars on receive.
+        ignore_stickers: true                   # Ignore Signal stickers on receive.
+        send_read_receipts: false               # Send Signal read receipts when receiving messages.
+        drop_pending_messages_on_startup: false # Drop queued Signal receive messages when the adapter starts.
+        text_mode: "normal"                     # Signal outbound text mode: "normal" or "styled".
+    builtin.photon:
+      execution: "in_process"               # Use "adapter_host" to run this channel adapter in the external host.
+      adapter_instance_id: null             # Stable adapter instance id; null derives one from instance and plugin ids.
+      settings:
+        enabled: false                          # Enable the Photon Spectrum iMessage adapter.
+        project_id: ""                          # Photon Spectrum project id. Empty uses project_id_env_var.
+        project_id_env_var: "PHOTON_PROJECT_ID" # Env var containing the Photon Spectrum project id.
+        project_secret_env_var: "PHOTON_PROJECT_SECRET" # Env var containing the project secret.
+        sidecar_token_env_var: "PHOTON_SIDECAR_TOKEN" # Optional pre-shared sidecar token env var.
+        sidecar_bind_host: "127.0.0.1"          # Loopback bind host for the Photon sidecar control server.
+        sidecar_port: 8789                      # Loopback port for the Photon sidecar control server.
+        sidecar_autostart: true                 # Start the bundled Photon sidecar with the adapter.
+        node_bin: "node"                        # Node.js executable used to launch the Photon sidecar.
+        allowed_sender_ids: []                  # Photon direct sender allowlist. Empty means no sender allowlist.
+        allowed_group_ids: []                   # Photon group-id allowlist. Empty disables group handling.
+        group_policy: "mention"                 # Photon group handling policy: "mention" or "open".
+        mention_markers: []                     # Required group mention markers for mention policy.
+        request_timeout_seconds: 15.0           # Photon sidecar loopback HTTP request timeout in seconds.
+        max_inline_attachment_bytes: 20971520   # Maximum inbound attachment bytes the sidecar may inline.
+        markdown: true                          # Send outbound Photon text through Spectrum markdown.
+        telemetry: false                        # Enable Spectrum telemetry in the Photon sidecar.
+
+    # Example allowlisted external package. Keep disabled until the distribution
+    # is explicitly installed by an operator.
+    # acme.chat:
+    #   distribution: "acme-universal-agents-chat"
+    #   execution: "adapter_host"
+    #   adapter_instance_id: "instance:acme.chat"
+    #   settings:
+    #     enabled: false
+
+# Optional HTTP collector for curated TaskActivityEvent updates.
+# Leave base_url empty to disable emitter-side submission.
+activity_collector:
+  base_url: "http://127.0.0.1:8765"             # Agent-side collector URL. Empty/null disables emitter-side submission.
+  connect_timeout_seconds: 1.0                  # Positive HTTP connect timeout in seconds.
+  request_timeout_seconds: 2.0                  # Positive HTTP request timeout in seconds.
+  batch_max_events: 25                          # Maximum events sent per collector request, 1-1000.
+  flush_interval_seconds: 1.0                   # Positive flush interval in seconds.
+  max_buffered_events: 500                      # Maximum buffered events before dropping/backpressure, 1-100000.
+  drop_when_unavailable: true                   # Drop activity events when collector is unavailable instead of blocking work.
+  bind_host: "127.0.0.1"                        # Collector service listener host for run-activity-collector.
+  bind_port: 8765                               # Collector service listener port.
+  user_url_path: "/user"                        # User dashboard URL path.
+  admin_url_path: "/admin"                      # Admin dashboard URL path.
+  otel_trace_base_url: null                     # Optional OTEL trace UI base URL for linking traces.
+  ingest_token_env_var: "ACTIVITY_COLLECTOR_INGEST_TOKEN" # Env var containing the ingest token; keep the value in team.env or a secret file.
+
+  # Activity Collector storage settings. This is separate from manager/task-history
+  # storage and is used for live activity events, status displays, and dashboard data.
+  # It maps to instance_config.yaml activity_collector.storage during onboarding.
+  storage:
+    backend: "sqlite"                           # Collector storage backend: "sqlite" or "postgres".
+
+    # Collector SQLite settings.
+    sqlite:
+      path: "dbs/activity_collector.db"        # Activity Collector SQLite DB. Relative paths resolve under instance_root.
+
+    # Collector Postgres settings. Keep DSN in env.
+    postgres: {}                                # Activity Collector Postgres settings. DSNs are env-owned and not persisted into instance_config.yaml.
+
+# OpenTelemetry export settings.
+otel:
+  enabled: false                                # Master OTEL switch.
+  enable_traces: false                          # Export traces.
+  enable_metrics: false                         # Export metrics.
+  otlp_endpoint: ""                             # OTLP endpoint.
+  service_name: "team_nats_agents"              # OTEL service name.
+  headers: {}                                   # Optional non-secret OTEL headers.
+
+# Gateway voice settings copied into instance_config.yaml during onboarding.
+voice:
+  enabled: false                                # Master voice switch.
+  input_enabled: true                           # Enable inbound speech-to-text.
+  output_enabled: false                         # Enable outbound text-to-speech.
+  response_mode: "text_only"                    # Reply mode: voice_only, voice_and_text, or text_only.
+  provider: "grok"                              # Voice provider. "grok" is implemented; "litellm_proxy" is reserved.
+  api_base: "https://api.x.ai/v1"               # Voice API base URL.
+  stt_language: "en"                            # Speech-to-text language hint.
+  stt_format_text: true                         # Ask STT to format text.
+  tts_voice: "eve"                              # Text-to-speech voice name.
+  tts_language: "auto"                          # Text-to-speech language hint.
+  tts_output_codec: "mp3"                       # Text-to-speech output codec.
+  tts_sample_rate: 24000                        # Text-to-speech sample rate.
+  tts_bit_rate: 128000                          # Text-to-speech bit rate.
+  connect_timeout_seconds: 10.0                 # Voice HTTP connect timeout in seconds.
+  request_timeout_seconds: 120.0                # Voice HTTP request timeout in seconds.
+
+# Operator-owned MCP server profiles, for every agent type once approved.
+# Agents cannot name them (non-empty mcp_profile_names in agent-authored
+# instantiate_agent calls are refused). To configure a server for one agent
+# type, list it under agent_types.<AgentType>.agent.external_mcp_servers below.
+# With authorization on, an installed server is the tool mcp:<name>: agents use
+# it only with access to that tool, which approving it in Settings gives to the
+# agent types it names.
+mcp_profiles: {}
+# Example:
+# mcp_profiles:
+#   skills_mcp:
+#     transport: "sse"
+#     server_url: "http://127.0.0.1:8000/sse"
+#     tool_name_prefix: "skills_mcp"
+#     include_tools:
+#       - "load_skill"                        # Exact original MCP operation names the agent may see.
+#   local_skills_dev:
+#     transport: "stdio"
+#     command: "python"
+#     args:
+#       - "mcp/skills_mcp.py"
+
+# Optional per-agent-type overrides. Each block is deep-merged over the generic
+# transport/llm/agent maps above. Keep shared policies at top-level unless a specific
+# agent type intentionally differs.
+agent_types:
+  TeamArchitect: {}               # Team lead / manager defaults. Empty means inherit top-level settings.
+
+  CodeWritingAgent:               # Code-writing specialist overrides.
+    agent:                                        # Agent runtime overrides
+      # Hide irrelevant skills from this agent's AgentSkills menu.
+      prompt_skill_description_exclusions:
+        - skill-creator
+        - weather-checker
+
+      # Example static external MCP server configuration:
+      # external_mcp_servers:
+      #   - name: "skills_mcp"
+      #     transport: "sse"
+      #     server_url: "http://127.0.0.1:8000/sse"
+      #     tool_name_prefix: "skills_mcp"
+      #     include_tools:
+      #       - "load_skill"
+      #     startup_timeout: 30
+      # Agent-authored instantiation cannot pass non-empty mcp_profile_names;
+      # list a server here to give it to this agent type.
+
+  # Personal administration specialist defaults.
+  PersonalAdminAgent: {}
+
+  # Research and comparison specialist defaults.
+  ResearchComparisonAgent:
+    agent:                                        # Agent runtime overrides
+      prompt_skill_description_exclusions:      # Hide irrelevant skills from this agent's AgentSkills menu.
+        - skill-creator
+        - weather-checker
+        - mcp-builder
+
+  # Home and errands specialist defaults.
+  HomeErrandsAgent: {}
+
+  # Learning and coaching specialist defaults.
+  LearningCoachingAgent: {}
+
+  # Internal improvement specialist defaults. Shell access allows cargo-based native CLI builds when cargo is installed.
+  InternalImprovementAgent: {}
+
+  # Memory review specialist defaults. Managed gateway instances start one by default.
+  MemReviewAgent: {}
+
+  # Web research specialist overrides.
+  WebResearchAgent:
+    agent:                                        # Agent runtime overrides
+      schedule_worker_rules: {}                    # Optional type-specific launch rules; schedule overrides take precedence within operator ceilings.
+      prompt_skill_description_exclusions:      # Hide irrelevant skills from this agent's AgentSkills menu.
+        - skill-creator
+        - weather-checker
+        - mcp-builder
+
+# Python logging configuration for local runtime output.
+logging:
+  level: "DEBUG"                                # Log level: DEBUG, INFO, WARNING, or ERROR.
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"  # Python logging format string.

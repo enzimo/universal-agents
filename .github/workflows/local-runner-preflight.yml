@@ -1,0 +1,32 @@
+name: Local runner preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    if: github.event.repository.private
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: [self-hosted, Linux, X64, ua-build, ua-linux]
+            shell: rtk proxy bash --noprofile --norc -e -o pipefail {0}
+          - runner: [self-hosted, macOS, ARM64, ua-build, ua-macos]
+            shell: rtk proxy bash --noprofile --norc -e -o pipefail {0}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - name: Require managed local runner
+        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify tools and cleanup lifecycle
+        run: node -e "const r = require('node:child_process').spawnSync(process.env.UA_CI_PYTHON, ['.github/runner/preflight.py'], {stdio:'inherit'}); if (r.error) throw r.error; process.exit(r.status ?? 1)"

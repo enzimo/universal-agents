@@ -1,0 +1,21 @@
+{
+  "msg_content": {
+    "task_type": "request",
+    "problem_statement": "What tasks have you completed recently? Give me a summary of your task history. If no task is currently active, first use list_archived_tasks to discover recent archived task IDs from the shared history database, then use get_task_history_window on the most relevant tasks. If you create any files for this test, place them under `{{TEST_OUTPUT_DIR}}`.",
+    "message_class": "Task"
+  },
+  "msg_meta": {
+    "from_agent_name": "user",
+    "to_named_agent_type": "TeamArchitect",
+    "is_response_requested": true,
+    "msg_correlation_id": "{{CORRELATION_ID}}"
+  },
+  "msg_header": {
+    "message_id": "{{MESSAGE_ID}}",
+    "from_agent_id": "user",
+    "to_routing_path": "{{TARGET_AGENT_ID}}",
+    "response_routing_key": "{{USER_QUEUE}}",
+    "agent_signature": "",
+    "timestamp": "{{TIMESTAMP}}"
+  }
+}

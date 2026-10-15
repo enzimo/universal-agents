@@ -1,0 +1,97 @@
+schema_version: 1
+
+agent_types:
+  PersonalAdminAgent:
+    display_name: "Personal Admin Agent"
+    role: "Personal administration assistant for schedules, paperwork, reminders, and everyday communications"
+    description: "Handles calendar-like planning, reminders, renewals, forms, household paperwork, message drafts, thread summaries, and attention flags."
+    prompt_ref: "prompts/personal_admin.md"
+    backstory: "hub_and_spoke"
+    default_tools:
+      - "fn:heartbeat"
+      - "fn:publishing"
+      - "fn:schedules"
+      - "google_workspace"
+    skills_enabled: true
+    onboarding:
+      visible: true
+      locked: false
+      default_enabled: false
+      default_count: 1
+      summary: "Scheduling, paperwork, and message help"
+      description: "Keeps track of reminders, renewals, forms, household paperwork, and messages that need a clear reply or follow-up."
+
+  ResearchComparisonAgent:
+    display_name: "Research & Comparison Agent"
+    role: "Research and comparison assistant for practical decisions, options, and plans"
+    description: "Compares products, services, plans, policies, schools, contractors, travel options, and local businesses with concrete tradeoffs and source-grounded recommendations."
+    prompt_ref: "prompts/research_comparison.md"
+    backstory: "hub_and_spoke"
+    default_tools:
+      - "fn:publishing"
+      - "fn:schedules"
+      - "code:python"
+    skills_enabled: true
+    onboarding:
+      visible: false
+      locked: false
+      default_enabled: false
+      default_count: 1
+      summary: "Research, comparisons, and travel planning"
+      description: "Compares real-world options, critiques reviews and approaches, builds itineraries, tracks reservation constraints, and returns decision-ready recommendations."
+
+  HomeErrandsAgent:
+    display_name: "Home & Errands Agent"
+    role: "Household operations assistant for errands, maintenance, groceries, meals, contractors, and warranties"
+    description: "Manages grocery lists, meal plans, maintenance schedules, contractor outreach drafts, warranty tracking, and household project checklists."
+    prompt_ref: "prompts/home_errands.md"
+    backstory: "hub_and_spoke"
+    default_tools:
+      - "fn:heartbeat"
+      - "fn:publishing"
+      - "fn:schedules"
+    skills_enabled: true
+    onboarding:
+      visible: false
+      locked: false
+      default_enabled: false
+      default_count: 1
+      summary: "Household errands and projects"
+      description: "Organizes groceries, meals, maintenance, contractors, warranties, and home project next steps into concrete lists and follow-ups."
+
+  LearningCoachingAgent:
+    display_name: "Learning & Coaching Agent"
+    role: "Learning coach for skills, study plans, language practice, and clear explanations"
+    description: "Explains confusing topics, adapts lessons to the user's pace, creates study plans, designs practice drills, and gives constructive coaching feedback."
+    prompt_ref: "prompts/learning_coaching.md"
+    backstory: "hub_and_spoke"
+    default_tools:
+      - "fn:publishing"
+      - "fn:schedules"
+    skills_enabled: true
+    onboarding:
+      visible: true
+      locked: false
+      default_enabled: false
+      default_count: 1
+      summary: "Study plans and skill coaching"
+      description: "Helps learn skills, practice languages, understand hard topics, and turn goals into realistic study sessions and practice plans."
+
+team_templates:
+  personal_operations_team:
+    description: "A practical everyday support team for admin, research, and household follow-through."
+    members:
+      - agent_type: "PersonalAdminAgent"
+        count: 1
+      - agent_type: "ResearchComparisonAgent"
+        count: 1
+      - agent_type: "HomeErrandsAgent"
+        count: 1
+
+  learning_and_research_team:
+    description: "A study and decision-support team for learning plans backed by source-grounded research."
+    members:
+      - agent_type: "LearningCoachingAgent"
+        count: 1
+      - agent_type: "ResearchComparisonAgent"
+        count: 1

@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "valid": [
+    {
+      "model": "WebTranscriptMessageV1",
+      "name": "ordinary_message_with_attachment",
+      "payload": {
+        "attachments": [
+          {
+            "attachment_id": "attachment_fixture_1",
+            "caption": "Rendered report",
+            "content_type": "application/pdf",
+            "filename": "report.pdf",
+            "kind": "document",
+            "schema_version": 1,
+            "size_bytes": 4096,
+            "url": "/api/web-chat/attachments/attachment_fixture_1"
+          }
+        ],
+        "content": "The report is ready.",
+        "conversation_id": "conversation_fixture_1",
+        "correlation_id": "correlation_fixture_1",
+        "created_at_utc": "2026-08-20T18:00:00Z",
+        "delivery_status": "presented",
+        "event_sequence": 42,
+        "message_id": "message_fixture_1",
+        "message_level": "normal",
+        "message_type": "assistant_message",
+        "role": "assistant",
+        "schema_version": 1,
+        "session_key": "website:web-chat:fixture",
+        "session_sequence": 7
+      }
+    },
+    {
+      "model": "WebTranscriptHistoryPageV1",
+      "name": "empty_history_page",
+      "payload": {
+        "before_cursor": null,
+        "has_more": false,
+        "messages": [],
+        "schema_version": 1
+      }
+    },
+    {
+      "model": "WebTranscriptEventPageV1",
+      "name": "empty_event_page",
+      "payload": {
+        "has_more": false,
+        "messages": [],
+        "next_cursor": "eyJraW5kIjoiZXZlbnRzIiwic2VxdWVuY2UiOjQyfQ",
+        "schema_version": 1
+      }
+    },
+    {
+      "model": "WebTranscriptMessageV1",
+      "name": "user_message_with_client_request_id",
+      "payload": {
+        "attachments": [],
+        "client_request_id": "client_request_fixture_1",
+        "content": "Please compile the weekly report.",
+        "conversation_id": "conversation_fixture_1",
+        "correlation_id": "correlation_fixture_1",
+        "created_at_utc": "2026-08-20T18:00:00Z",
+        "delivery_status": "presented",
+        "event_sequence": 42,
+        "message_id": "message_fixture_user_1",
+        "message_level": "normal",
+        "message_type": "user_message",
+        "role": "user",
+        "schema_version": 1,
+        "session_key": "website:web-chat:fixture",
+        "session_sequence": 7
+      }
+    },
+    {
+      "model": "WebTranscriptMessageV1",
+      "name": "access_review_with_access_request_id",
+      "payload": {
+        "access_request_id": "access_request_fixture_1",
+        "attachments": [],
+        "content": "TeamArchitect asks for approval: Switch TeamArchitect to deepseek/deepseek-v4.1-flash via openrouter. Takes effect now.\nThe task waits for your decision. Details are in the Inbox: /webchat?view=inbox#access_request=access_request_fixture_1",
+        "conversation_id": "conversation_fixture_1",
+        "correlation_id": null,
+        "created_at_utc": "2026-08-20T18:01:00Z",
+        "delivery_status": "presented",
+        "event_sequence": 43,
+        "message_id": "message_fixture_access_review_1",
+        "message_level": "normal",
+        "message_type": "access_review",
+        "role": "system",
+        "schema_version": 1,
+        "session_key": "website:web-chat:fixture",
+        "session_sequence": 8
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "model": "WebTranscriptMessageV1",
+      "name": "browser_identity_is_not_a_server_message_id",
+      "payload": {
+        "attachments": [],
+        "content": "Untrusted browser row",
+        "conversation_id": "conversation_fixture_1",
+        "correlation_id": null,
+        "created_at_utc": "2026-08-20T18:00:00Z",
+        "delivery_status": "presented",
+        "event_sequence": 42,
+        "message_id": "",
+        "message_level": "normal",
+        "message_type": "user_message",
+        "role": "user",
+        "schema_version": 1,
+        "session_key": "website:web-chat:fixture",
+        "session_sequence": 7
+      }
+    },
+    {
+      "model": "WebTranscriptMessageV1",
+      "name": "zero_sequence_is_invalid",
+      "payload": {
+        "attachments": [],
+        "content": "Out of order",
+        "conversation_id": null,
+        "correlation_id": null,
+        "created_at_utc": "2026-08-20T18:00:00Z",
+        "delivery_status": "presented",
+        "event_sequence": 0,
+        "message_id": "message_fixture_2",
+        "message_level": "normal",
+        "message_type": "system_status",
+        "role": "system",
+        "schema_version": 1,
+        "session_key": "website:web-chat:fixture",
+        "session_sequence": 0
+      }
+    },
+    {
+      "model": "WebTranscriptMessageV1",
+      "name": "unknown_role_is_invalid",
+      "payload": {
+        "attachments": [],
+        "content": "Unknown role",
+        "conversation_id": null,
+        "correlation_id": null,
+        "created_at_utc": "2026-08-20T18:00:00Z",
+        "delivery_status": "presented",
+        "event_sequence": 1,
+        "message_id": "message_fixture_3",
+        "message_level": "normal",
+        "message_type": "assistant_message",
+        "role": "tool",
+        "schema_version": 1,
+        "session_key": "website:web-chat:fixture",
+        "session_sequence": 1
+      }
+    }
+  ]
+}

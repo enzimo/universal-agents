@@ -1,0 +1,246 @@
+{
+  "$defs": {
+    "ObjectiveWorkBudget": {
+      "additionalProperties": false,
+      "description": "Immutable budget snapshot for one objective work session.",
+      "properties": {
+        "active_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Active Seconds",
+          "type": "integer"
+        },
+        "checkpoint_reserve_seconds": {
+          "minimum": 0,
+          "title": "Checkpoint Reserve Seconds",
+          "type": "integer"
+        },
+        "checkpoint_reserve_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Checkpoint Reserve Tokens",
+          "type": "integer"
+        },
+        "checkpoint_reserve_tool_calls": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Checkpoint Reserve Tool Calls",
+          "type": "integer"
+        },
+        "checkpoint_reserve_turns": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Checkpoint Reserve Turns",
+          "type": "integer"
+        },
+        "message_class": {
+          "const": "ObjectiveWorkBudget",
+          "default": "ObjectiveWorkBudget",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "tool_calls": {
+          "exclusiveMinimum": 0,
+          "title": "Tool Calls",
+          "type": "integer"
+        },
+        "total_tokens": {
+          "exclusiveMinimum": 0,
+          "title": "Total Tokens",
+          "type": "integer"
+        },
+        "turns": {
+          "exclusiveMinimum": 0,
+          "title": "Turns",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "active_seconds",
+        "checkpoint_reserve_seconds",
+        "turns",
+        "total_tokens",
+        "tool_calls"
+      ],
+      "title": "ObjectiveWorkBudget",
+      "type": "object"
+    },
+    "ObjectiveWorkPolicyStatus": {
+      "description": "Lifecycle of an explicitly accepted objective work-session policy.",
+      "enum": [
+        "active",
+        "paused",
+        "disabled"
+      ],
+      "title": "ObjectiveWorkPolicyStatus",
+      "type": "string"
+    },
+    "ObjectiveWorkProfileSource": {
+      "description": "Trusted provenance for the profile snapshotted onto an Objective.",
+      "enum": [
+        "configured",
+        "installed",
+        "one_time"
+      ],
+      "title": "ObjectiveWorkProfileSource",
+      "type": "string"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/ObjectiveWorkPolicy.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Explicitly accepted, durable policy for time-boxing one objective.",
+  "properties": {
+    "acceptance_summary": {
+      "title": "Acceptance Summary",
+      "type": "string"
+    },
+    "accepted_by_task_id": {
+      "title": "Accepted By Task Id",
+      "type": "string"
+    },
+    "budget": {
+      "$ref": "#/$defs/ObjectiveWorkBudget"
+    },
+    "cadence_cron": {
+      "title": "Cadence Cron",
+      "type": "string"
+    },
+    "cadence_timezone": {
+      "default": "owner",
+      "title": "Cadence Timezone",
+      "type": "string"
+    },
+    "created_at": {
+      "title": "Created At",
+      "type": "string"
+    },
+    "disabled_by_objective_control": {
+      "default": false,
+      "title": "Disabled By Objective Control",
+      "type": "boolean"
+    },
+    "installed_profile_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Installed Profile Id"
+    },
+    "message_class": {
+      "const": "ObjectiveWorkPolicy",
+      "default": "ObjectiveWorkPolicy",
+      "title": "Message Class",
+      "type": "string"
+    },
+    "next_run_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Next Run At"
+    },
+    "objective_id": {
+      "title": "Objective Id",
+      "type": "string"
+    },
+    "owner_agent_id": {
+      "title": "Owner Agent Id",
+      "type": "string"
+    },
+    "owner_canonical_user_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Owner Canonical User Id"
+    },
+    "policy_id": {
+      "title": "Policy Id",
+      "type": "string"
+    },
+    "profile_digest": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Profile Digest"
+    },
+    "profile_name": {
+      "title": "Profile Name",
+      "type": "string"
+    },
+    "profile_proposal_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Profile Proposal Id"
+    },
+    "profile_source": {
+      "$ref": "#/$defs/ObjectiveWorkProfileSource",
+      "default": "configured"
+    },
+    "required_skills": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Required Skills",
+      "type": "array"
+    },
+    "schedule_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Schedule Id"
+    },
+    "status": {
+      "$ref": "#/$defs/ObjectiveWorkPolicyStatus",
+      "default": "active"
+    },
+    "updated_at": {
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "objective_id",
+    "owner_agent_id",
+    "profile_name",
+    "cadence_cron",
+    "budget",
+    "accepted_by_task_id",
+    "acceptance_summary"
+  ],
+  "title": "ObjectiveWorkPolicy",
+  "type": "object"
+}

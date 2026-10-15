@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Visual access review · Universal Agents design preview</title>
+    <link rel="stylesheet" href="preview.css" />
+    <script src="preview.js" defer></script>
+  </head>
+  <body>
+    <svg
+      class="mesh"
+      aria-hidden="true"
+      viewBox="0 0 1600 1000"
+      preserveAspectRatio="xMidYMid slice"
+    >
+      <path fill="#15191b" d="M0 0H540L320 310 0 190Z" />
+      <path fill="#242821" d="M540 0 890 0 760 250 320 310Z" />
+      <path fill="#181413" d="M890 0H1600L1260 420 760 250Z" />
+      <path fill="#252021" d="M0 190 320 310 150 660 0 790Z" />
+      <path fill="#11191d" d="M320 310 760 250 630 720 150 660Z" />
+      <path fill="#14252a" d="M760 250 1260 420 1030 840 630 720Z" />
+      <path fill="#251e1b" d="M1600 0V790L1260 420Z" />
+      <path fill="#0c171b" d="M1260 420 1600 790V1000L1030 840Z" />
+      <path fill="#161919" d="M0 790 150 660 630 720 900 1000H0Z" />
+      <path fill="#171419" d="M630 720 1030 840 1600 1000H900Z" />
+    </svg>
+    <div class="preview-bar">
+      <span
+        ><strong>Design preview</strong>
+        <span class="muted"
+          >Synthetic accounts. No access is changed.</span
+        ></span
+      >
+      <div class="preview-controls">
+        <label for="scenario">Example</label>
+        <select id="scenario">
+          <option value="connected">Account already connected</option>
+          <option value="new">Choose an account</option>
+          <option value="interrupted">Setup interrupted after approval</option>
+        </select>
+        <button type="button" id="theme">Light theme</button>
+        <button type="button" id="reset">Reset</button>
+      </div>
+    </div>
+    <main>
+      <div class="conversation-label">
+        <span class="avatar" aria-hidden="true">N</span><strong>Nova</strong
+        ><span class="muted">Access request</span>
+      </div>
+      <article class="review" aria-labelledby="review-heading">
+        <header class="review-header">
+          <div>
+            <div class="eyebrow">X ACCOUNT &amp; POSTING</div>
+            <h1 id="review-heading">Set Up X Access</h1>
+            <p class="recipient">
+              For <strong id="recipient-name">AcmeCommunicationsAgent</strong>
+            </p>
+            <p class="muted requester">Requested by TeamArchitect</p>
+          </div>
+          <span class="badge" id="workflow-status">Needs your review</span>
+        </header>
+        <div class="review-body">
+          <section class="map-section" aria-labelledby="map-heading">
+            <div class="section-heading">
+              <h2 id="map-heading">Your Access Plan</h2>
+              <button
+                class="info"
+                type="button"
+                data-info="plan"
+                aria-label="About this access plan"
+              >
+                i
+              </button>
+            </div>
+            <p class="muted intro">
+              Choose what this agent can do. The connected steps show what each
+              choice needs.
+            </p>
+            <p class="hint">
+              <a href="workflow.html">Open full workflow</a> to follow
+              execution, answer questions, and review later steps.
+            </p>
+            <div class="map" id="map">
+              <svg class="connections" aria-hidden="true">
+                <defs>
+                  <marker
+                    id="arrow"
+                    viewBox="0 0 10 10"
+                    refX="8"
+                    refY="5"
+                    markerWidth="6"
+                    markerHeight="6"
+                    orient="auto-start-reverse"
+                  >
+                    <path
+                      d="M0 1L8 5 0 9"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                    />
+                  </marker>
+                </defs>
+                <g id="edges"></g>
+              </svg>
+              <div class="map-column account-column">
+                <h3><span>1</span> Account</h3>
+                <div id="account-slot"></div>
+              </div>
+              <div class="map-column capability-column">
+                <h3><span>2</span> Capabilities</h3>
+                <div id="capability-slot" class="node-stack"></div>
+              </div>
+              <div class="map-column setup-column">
+                <h3><span>3</span> Setup</h3>
+                <div id="setup-slot" class="node-stack"></div>
+              </div>
+            </div>
+            <div class="flow-note" id="flow-note" role="status"></div>
+            <div class="visible-impact">
+              <strong>No post is queued.</strong> This request sets up access.
+              Any future posting follows the rule you select.
+            </div>
+            <details class="how-details">
+              <summary>How this review works</summary>
+              <p>
+                The agent maps out its request. The system checks the available
+                tools and existing access, then builds this review. After your
+                decision, it carries out the selected steps and keeps their
+                progress here.
+              </p>
+              <p>
+                Unchecked actions are left out. If a step fails, completed work
+                is kept and the remaining step can resume under valid approval.
+              </p>
+            </details>
+          </section>
+          <aside class="summary" aria-labelledby="summary-heading">
+            <h2 id="summary-heading">Your Decision</h2>
+            <div class="field">
+              <label for="scope">Who gets access</label
+              ><select id="scope">
+                <option value="agent">This agent only</option>
+                <option value="team">Whole team</option>
+              </select>
+              <p class="hint" id="scope-help">
+                Other agents do not receive access.
+              </p>
+            </div>
+            <div class="field">
+              <div class="field-label">
+                <label for="duration">Keep access</label
+                ><button
+                  class="info"
+                  type="button"
+                  data-info="duration"
+                  aria-label="About access duration"
+                >
+                  i
+                </button>
+              </div>
+              <select id="duration">
+                <option value="persistent">Until removed</option>
+                <option value="month">For 30 days</option>
+                <option value="task">For this task</option>
+              </select>
+            </div>
+            <div class="field" id="posting-field">
+              <div class="field-label">
+                <label for="posting-rule">Future text posts</label
+                ><button
+                  class="info"
+                  type="button"
+                  data-info="future"
+                  aria-label="About future posting permission"
+                >
+                  i
+                </button>
+              </div>
+              <select id="posting-rule">
+                <option value="ask">Ask before each post</option>
+                <option value="allow">Allow without asking again</option>
+              </select>
+              <p class="hint" id="posting-help">
+                You review new post content. Account setup is reused.
+              </p>
+            </div>
+            <div class="decision-summary">
+              <p class="summary-label" id="summary-label">
+                Approval will allow
+              </p>
+              <ul id="effects"></ul>
+            </div>
+            <p class="wide-access" id="wide-access" hidden></p>
+            <p class="selection-count" id="selection-count"></p>
+            <div class="decision-actions">
+              <button class="primary" type="button" id="approve">
+                Approve selected</button
+              ><button class="reject" type="button" id="reject">
+                Reject request
+              </button>
+            </div>
+            <p class="hint" id="decision-help">
+              One decision covers the selected access and required setup.
+            </p>
+          </aside>
+        </div>
+        <footer class="review-footer">
+          <span id="receipt" role="status"
+            >Your choices have not been submitted.</span
+          ><span class="muted"
+            >The same request appears in Inbox and Permissions.</span
+          >
+        </footer>
+      </article>
+      <details class="implementation-notes">
+        <summary>
+          Design notes: agent proposal → system validation → this review
+        </summary>
+        <p>
+          This prototype renders a fixed example of the system's validated
+          graph. Production must validate the agent's proposal on the server
+          before creating this projection. The browser does not grant authority
+          or run these steps.
+        </p>
+        <div class="contract-examples">
+          <section>
+            <h2>Proposed by the Agent</h2>
+            <pre id="proposal-json"></pre>
+          </section>
+          <section>
+            <h2>Resolved by the System</h2>
+            <pre id="review-json"></pre>
+          </section>
+        </div>
+      </details>
+    </main>
+    <dialog id="info-dialog" aria-labelledby="info-heading">
+      <div class="popup-header">
+        <h2 id="info-heading"></h2>
+        <button type="button" id="close-info" aria-label="Close information">
+          ×
+        </button>
+      </div>
+      <div id="info-content"></div>
+    </dialog>
+  </body>
+</html>

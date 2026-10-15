@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en" data-color-mode="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Dark background lab</title>
+  <link rel="icon" href="data:,">
+  <style>
+    html, body { margin: 0; height: 100%; background: #050607; color: #f2f7f8;
+      font: 13px/1.4 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; overflow: hidden; }
+    #lab-canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 0; display: block; }
+    .panel { position: fixed; top: 16px; right: 16px; z-index: 3; width: 300px; max-height: calc(100% - 32px);
+      overflow: auto; padding: 14px 16px; border-radius: 10px; background: rgba(11, 21, 27, 0.78);
+      border: 1px solid #367287; backdrop-filter: blur(22px) saturate(140%); box-sizing: border-box; }
+    .panel[hidden] { display: none; }
+    .panel h1 { font-size: 15px; margin: 0 0 4px; font-weight: 800; }
+    .panel p { margin: 0 0 12px; color: #adc1c8; }
+    .panel h2 { font-size: 12px; margin: 14px 0 8px; font-weight: 800; color: #adc1c8; }
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; margin: 0 0 9px; }
+    .row input[type=range] { grid-column: 1 / -1; width: 100%; }
+    .row output, .row code { color: #adc1c8; font-variant-numeric: tabular-nums; }
+    .row input[type=color] { width: 44px; height: 22px; border: 1px solid #367287; background: #10232d; padding: 0; }
+    .check { display: flex; gap: 8px; align-items: center; margin: 0 0 9px; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+    button { font: inherit; color: #f2f7f8; background: #10232d; border: 1px solid #367287;
+      border-radius: 7px; padding: 5px 9px; cursor: pointer; }
+    button:hover { background: #173440; }
+    button:focus-visible, input:focus-visible { outline: 2px solid #62d5f3; outline-offset: 2px; }
+    #status { min-height: 18px; color: #adc1c8; margin-top: 8px; }
+    #settings-text { width: 100%; height: 180px; margin-top: 6px; box-sizing: border-box; color: #f2f7f8;
+      background: #10232d; border: 1px solid #367287; border-radius: 7px; font: 12px/1.4 ui-monospace, monospace;
+      white-space: pre; }
+    .mock { position: fixed; left: 50%; top: 50%; z-index: 2; transform: translate(-50%, -50%);
+      width: min(760px, 70vw); height: min(520px, 70vh); border-radius: 14px; background: rgba(11, 21, 27, 0.62);
+      border: 1px solid rgba(54, 114, 135, 0.5); backdrop-filter: blur(22px) saturate(140%);
+      box-shadow: 0 34px 120px rgba(0, 0, 0, 0.45); padding: 28px 32px; box-sizing: border-box; }
+    .mock[hidden] { display: none; }
+    .mock h2 { font-size: 30px; font-weight: 880; margin: 0 0 8px; }
+    .mock p { color: #adc1c8; max-width: 56ch; }
+    #show { position: fixed; top: 16px; right: 16px; z-index: 3; }
+  </style>
+</head>
+<body>
+  <canvas id="lab-canvas" data-ua-metallic-mesh aria-hidden="true"></canvas>
+  <section class="mock" id="mock" hidden>
+    <h2>Welcome to Universal Agents</h2>
+    <p>This sample pane shows how the background reads behind the frosted Web Chat and onboarding windows.</p>
+  </section>
+  <aside class="panel" id="panel" aria-labelledby="lab-title">
+    <h1 id="lab-title">Dark Background Lab</h1>
+    <p>Tune the dark metallic background with the same renderer the product uses.</p>
+    <div id="controls"></div>
+    <div class="buttons">
+      <button type="button" id="regenerate">Regenerate Mesh</button>
+      <button type="button" id="mock-toggle">Sample Pane</button>
+      <button type="button" id="freeze">Freeze</button>
+      <button type="button" id="reset">Reset to Defaults</button>
+      <button type="button" id="hide">Hide</button>
+    </div>
+    <h2>Share settings</h2>
+    <p>The same text as Customize Theme's Share settings: YAML that fits under
+      ui.onboarding.appearance in instance_config.yaml. Paste settings and choose Apply to try them.</p>
+    <textarea id="settings-text" aria-label="Theme settings text" spellcheck="false"></textarea>
+    <div class="buttons">
+      <button type="button" id="copy">Copy</button>
+      <button type="button" id="apply">Apply</button>
+    </div>
+    <div id="status" role="status"></div>
+  </aside>
+  <button type="button" id="show" hidden>Show Controls</button>
+  <script>
+    // Test switches. ?nowebgl pretends the browser has no WebGL2 (checks the
+    // fallback to the basic background). ?light2d holds a 2D context on the
+    // page canvas first, as the light theme does in the product.
+    if (/[?&]nowebgl\b/.test(location.search)) {
+      var originalGetContext = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function (type) {
+        return type === "webgl2" ? null : originalGetContext.apply(this, arguments);
+      };
+    }
+    if (/[?&]light2d\b/.test(location.search)) {
+      document.getElementById("lab-canvas").getContext("2d");
+    }
+  </script>
+  <script src="../../assistant_gateway/onboarding_web/assets/appearance.js"></script>
+  <script src="../../assistant_gateway/onboarding_web/assets/metallic_mesh.js"></script>
+  <script src="lab.js"></script>
+</body>
+</html>

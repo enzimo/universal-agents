@@ -1,0 +1,51 @@
+name: Nightly Pre-release
+
+# Once a day, when main has changed since the newest nightly, tag main as
+# vX.Y.Z-nightly.YYYYMMDDHHMM (X.Y.Z is the next patch after VERSION), create a
+# GitHub pre-release for it, start publish-container.yml for that tag, and keep
+# only the newest seven nightlies. scripts/nightly_release.py holds the logic.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-pre-release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: rtk proxy bash --noprofile --norc -e -o pipefail {0}
+
+jobs:
+  nightly:
+    if: github.event.repository.private && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    timeout-minutes: 15
+    permissions:
+      # Create and delete nightly releases and tags.
+      contents: write
+      # Start publish-container.yml. Tags created with this token start no
+      # workflows themselves; a workflow_dispatch request does.
+      actions: write
+    steps:
+      - name: Require managed local runner
+        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Publish nightly pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_SHA: ${{ github.sha }}
+        run: >-
+          python3 scripts/nightly_release.py
+          --repository "$GITHUB_REPOSITORY"
+          --target-sha "$TARGET_SHA"
+          --dispatch-ref main
+          --keep 7

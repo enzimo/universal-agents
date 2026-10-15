@@ -1,0 +1,125 @@
+name: Publish GitHub Release
+
+# Stable tags (vX.Y.Z) and pre-release tags (vX.Y.Z-beta.N, vX.Y.Z-rc.N) pushed
+# by a person both match. Nightly tags are created by nightly.yml with the
+# workflow token, which starts no workflows, so nightly.yml creates their
+# release itself.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: rtk proxy bash --noprofile --norc -e -o pipefail {0}
+
+jobs:
+  publish-release:
+    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    timeout-minutes: 15
+    steps:
+      - name: Require managed local runner
+        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate release tag
+        id: release
+        shell: rtk proxy bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          set -euo pipefail
+          version="$(python3 scripts/validate_release_tag.py "${GITHUB_REF_NAME}")"
+          kind="$(python3 scripts/validate_release_tag.py --kind "${GITHUB_REF_NAME}")"
+          archive="dist/universal-agents-${version}.zip"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "kind=${kind}" >> "${GITHUB_OUTPUT}"
+          echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build tracked-source release archive
+        env:
+          RELEASE_ARCHIVE: ${{ steps.release.outputs.archive }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_KIND: ${{ steps.release.outputs.kind }}
+        shell: rtk proxy bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "${RELEASE_ARCHIVE}")"
+          git archive \
+            --format=zip \
+            --prefix="universal-agents-${RELEASE_VERSION}/" \
+            --output="${RELEASE_ARCHIVE}" \
+            "${GITHUB_SHA}"
+          (cd dist && sha256sum "universal-agents-${RELEASE_VERSION}.zip" > "universal-agents-${RELEASE_VERSION}.zip.sha256")
+          # The tracked guide installs VERSION, which is still the previous
+          # stable version on beta/RC commits. Offer it only on stable releases.
+          if [ "${RELEASE_KIND}" = "stable" ]; then
+            cp docker-compose-setup.html dist/setup-guide.html
+            (cd dist && sha256sum setup-guide.html > setup-guide.html.sha256)
+          fi
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ARCHIVE: ${{ steps.release.outputs.archive }}
+          RELEASE_KIND: ${{ steps.release.outputs.kind }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        shell: rtk proxy bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          set -euo pipefail
+          # Betas, release candidates and nightlies are GitHub pre-releases and
+          # never become "Latest". Notes always start at the previous stable
+          # release, so pre-releases cannot shorten a stable release's notes.
+          release_options=()
+          if [ "${RELEASE_KIND}" != "stable" ]; then
+            release_options+=(--prerelease --latest=false)
+          fi
+          previous_stable="$(gh release list --repo "${GITHUB_REPOSITORY}" \
+            --exclude-drafts --exclude-pre-releases --limit 1000 \
+            --json tagName --jq '.[].tagName' \
+            | python3 scripts/release_versions.py previous-stable "${RELEASE_VERSION}")"
+          if [ -n "${previous_stable}" ]; then
+            release_options+=(--notes-start-tag "${previous_stable}")
+          fi
+          assets=(
+            "${RELEASE_ARCHIVE}#Universal Agents ${RELEASE_VERSION} source bundle"
+            "${RELEASE_ARCHIVE}.sha256#SHA-256 checksum"
+          )
+          if [ "${RELEASE_KIND}" = "stable" ]; then
+            assets+=(
+              "dist/setup-guide.html#Offline setup guide"
+              "dist/setup-guide.html.sha256#Setup guide checksum"
+            )
+          fi
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            if [ "${RELEASE_KIND}" != "stable" ]; then
+              # A person may have created this release before the tag job ran.
+              gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+                --prerelease --latest=false
+              # Repairs remove guide assets published by older workflow runs.
+              stale_guides="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+                --json assets --jq '.assets[].name | select(. == "setup-guide.html" or . == "setup-guide.html.sha256")')"
+              while IFS= read -r asset; do
+                if [ -n "$asset" ]; then
+                  gh release delete-asset "${RELEASE_TAG}" "$asset" \
+                    --repo "${GITHUB_REPOSITORY}" --yes
+                fi
+              done <<< "$stale_guides"
+            fi
+            gh release upload "${RELEASE_TAG}" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${RELEASE_TAG}" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --fail-on-no-commits \
+              --generate-notes \
+              "${release_options[@]}" \
+              --title "Universal Agents ${RELEASE_VERSION}"
+          fi

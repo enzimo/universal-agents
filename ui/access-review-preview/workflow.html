@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Run an access workflow · Design preview</title>
+    <link rel="stylesheet" href="preview.css" />
+    <link rel="stylesheet" href="workflow.css" />
+    <script src="workflow.js" defer></script>
+  </head>
+  <body>
+    <div class="preview-bar">
+      <span
+        ><strong>Design preview</strong>
+        <span class="muted"
+          >Simulated execution and chat. No accounts or posts are changed.</span
+        ></span
+      >
+      <div class="preview-controls">
+        <a href="index.html">Inline review example</a
+        ><label for="draft-mode">Draft</label
+        ><select id="draft-mode">
+          <option value="ready">Ready upfront: approve together</option>
+          <option value="later">
+            Prepared later: pause for review
+          </option></select
+        ><label for="failure-mode">Test</label
+        ><select id="failure-mode">
+          <option value="none">Successful flow</option>
+          <option value="setup">Tool setup fails once</option>
+          <option value="unknown">Posting result uncertain</option></select
+        ><button id="theme" type="button">Light theme</button
+        ><button id="reset" type="button">Reset</button>
+      </div>
+    </div>
+    <main>
+      <article class="review">
+        <header class="review-header">
+          <div>
+            <div class="eyebrow">GUIDED WORKFLOW</div>
+            <h1>Connect X and Publish an Update</h1>
+            <p class="recipient">
+              For <strong>AcmeCommunicationsAgent</strong>
+            </p>
+            <p class="muted requester">Requested by TeamArchitect</p>
+          </div>
+          <span class="badge" id="flow-status">Ready to start</span>
+        </header>
+        <div class="workflow-intro">
+          <p>
+            Review the full plan, then start when you are ready. Approve known
+            steps together. The flow pauses only when new input or a new
+            decision is needed.
+          </p>
+          <div class="workflow-actions">
+            <button id="start-flow" class="primary" type="button">
+              Start workflow</button
+            ><button id="stop-flow" class="reject" type="button" disabled>
+              Stop workflow</button
+            ><button id="download-logs" type="button">Download logs</button>
+          </div>
+        </div>
+        <div class="flow-workspace">
+          <section class="flow-progress" aria-labelledby="plan-title">
+            <h2 id="plan-title">The Full Plan</h2>
+            <p class="hint">
+              Connected steps run in order. Completed steps are kept.
+            </p>
+            <ol id="step-list"></ol>
+            <p class="hint" id="progress-count">0 of 6 steps complete</p>
+          </section>
+          <section class="flow-current" aria-labelledby="current-title">
+            <div class="section-heading">
+              <h2 id="current-title">Before You Start</h2>
+            </div>
+            <p id="current-description"></p>
+            <div id="current-detail" class="current-detail"></div>
+            <button id="open-step" class="primary" type="button" hidden>
+              Review this step
+            </button>
+            <section
+              id="failure-panel"
+              class="failure-panel"
+              hidden
+              aria-labelledby="failure-heading"
+            >
+              <h2 id="failure-heading">This Step Needs Attention</h2>
+              <p id="failure-explanation"></p>
+              <dl id="failure-facts" class="approval-facts"></dl>
+              <div class="workflow-actions">
+                <button id="recover-step" class="primary" type="button">
+                  Retry failed step</button
+                ><button id="failure-logs" type="button">
+                  Download diagnostic logs
+                </button>
+              </div>
+              <p class="hint">
+                The diagnostic file includes step states, error codes, and event
+                times. It excludes credentials, draft content, and conversation
+                text.
+              </p>
+            </section>
+            <section class="up-next">
+              <h2>What Happens Next</h2>
+              <ol id="next-steps"></ol>
+            </section>
+            <section class="activity" aria-labelledby="activity-title">
+              <h2 id="activity-title">Activity</h2>
+              <ol id="activity-list" aria-live="polite">
+                <li>Workflow prepared. Waiting for you to start.</li>
+              </ol>
+            </section>
+          </section>
+          <aside class="flow-chat" aria-labelledby="chat-title">
+            <h2 id="chat-title">Workflow Conversation</h2>
+            <p class="hint">
+              Ask questions here. Approvals use the review controls.
+            </p>
+            <div
+              id="messages"
+              class="messages"
+              role="log"
+              aria-label="Workflow conversation"
+            >
+              <div class="chat-entry assistant">
+                <strong>Nova <small>Preview</small></strong>
+                <p>
+                  I have mapped out the setup and first post. You can follow the
+                  progress here, and I will pause when a decision is needed.
+                </p>
+              </div>
+            </div>
+            <div class="quick-questions">
+              <button type="button" data-question="Why is this step needed?">
+                Explain this step</button
+              ><button
+                type="button"
+                data-question="What have I approved so far?"
+              >
+                What is approved?
+              </button>
+            </div>
+            <form id="chat-form">
+              <label for="question">Ask about this workflow</label
+              ><textarea
+                id="question"
+                rows="2"
+                maxlength="1000"
+                placeholder="Ask a question…"
+              ></textarea
+              ><button type="submit">Send</button>
+            </form>
+          </aside>
+        </div>
+        <footer class="review-footer">
+          <span id="flow-receipt" role="status"
+            >Starting runs the plan. Each approval applies only to the effect
+            shown.</span
+          ><span class="muted"
+            >Return to this workflow from Chat, Inbox, or Permissions.</span
+          >
+        </footer>
+      </article>
+    </main>
+    <dialog
+      id="step-dialog"
+      aria-labelledby="dialog-heading"
+      aria-describedby="dialog-description"
+    >
+      <div class="popup-header">
+        <h2 id="dialog-heading"></h2>
+        <button id="close-dialog" type="button" aria-label="Close review">
+          ×
+        </button>
+      </div>
+      <p id="dialog-description"></p>
+      <div id="dialog-fields"></div>
+      <div class="dialog-actions">
+        <button id="approve-step" class="primary" type="button">
+          Approve selected</button
+        ><button id="reject-step" class="reject" type="button">
+          Reject this step
+        </button>
+      </div>
+      <p class="hint">
+        Closing this dialog leaves the workflow paused. You can ask a question
+        and return to review.
+      </p>
+    </dialog>
+    <dialog id="step-info" aria-labelledby="step-info-heading">
+      <div class="popup-header">
+        <h2 id="step-info-heading"></h2>
+        <button
+          id="close-step-info"
+          type="button"
+          aria-label="Close information"
+        >
+          ×
+        </button>
+      </div>
+      <p id="step-info-description"></p>
+    </dialog>
+  </body>
+</html>

@@ -1,0 +1,72 @@
+{
+  "$defs": {
+    "EndpointKind": {
+      "description": "What protocol an endpoint speaks, which decides how a key is tested and sent.",
+      "enum": [
+        "openai_compatible",
+        "openai",
+        "anthropic",
+        "gemini",
+        "xai"
+      ],
+      "title": "EndpointKind",
+      "type": "string"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/StoredModelKey.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One address's entry as stored (the key is part of the stored record, never of a reply).",
+  "properties": {
+    "address": {
+      "title": "Address",
+      "type": "string"
+    },
+    "base_url": {
+      "default": "",
+      "title": "Base Url",
+      "type": "string"
+    },
+    "key": {
+      "default": "",
+      "maxLength": 8192,
+      "title": "Key",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/EndpointKind"
+    },
+    "no_key_needed": {
+      "default": false,
+      "title": "No Key Needed",
+      "type": "boolean"
+    },
+    "saved_at": {
+      "format": "date-time",
+      "title": "Saved At",
+      "type": "string"
+    },
+    "saved_by_person_id": {
+      "title": "Saved By Person Id",
+      "type": "string"
+    },
+    "tested_api_mode": {
+      "default": "",
+      "title": "Tested Api Mode",
+      "type": "string"
+    },
+    "tested_model_id": {
+      "default": "",
+      "title": "Tested Model Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "address",
+    "kind",
+    "saved_at",
+    "saved_by_person_id"
+  ],
+  "title": "StoredModelKey",
+  "type": "object"
+}

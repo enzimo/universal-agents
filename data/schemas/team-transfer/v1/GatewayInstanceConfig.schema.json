@@ -1,0 +1,4710 @@
+{
+  "$defs": {
+    "AccessWorkflowSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "diagnostic_event_limit": {
+          "default": 1000,
+          "description": "Maximum events in a redacted workflow diagnostic download.",
+          "maximum": 10000,
+          "minimum": 20,
+          "title": "Diagnostic Event Limit",
+          "type": "integer"
+        },
+        "max_steps": {
+          "default": 32,
+          "description": "Maximum steps in one access workflow.",
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Max Steps",
+          "type": "integer"
+        }
+      },
+      "title": "AccessWorkflowSettings",
+      "type": "object"
+    },
+    "ActivityCollectorSettings": {
+      "properties": {
+        "admin_url_path": {
+          "default": "/admin",
+          "title": "Admin Url Path",
+          "type": "string"
+        },
+        "base_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "http://127.0.0.1:8765",
+          "title": "Base Url"
+        },
+        "batch_max_events": {
+          "default": 25,
+          "title": "Batch Max Events",
+          "type": "integer"
+        },
+        "bind_host": {
+          "default": "127.0.0.1",
+          "title": "Bind Host",
+          "type": "string"
+        },
+        "bind_port": {
+          "default": 8765,
+          "title": "Bind Port",
+          "type": "integer"
+        },
+        "connect_timeout_seconds": {
+          "default": 1.0,
+          "title": "Connect Timeout Seconds",
+          "type": "number"
+        },
+        "drop_when_unavailable": {
+          "default": true,
+          "title": "Drop When Unavailable",
+          "type": "boolean"
+        },
+        "flush_interval_seconds": {
+          "default": 1.0,
+          "title": "Flush Interval Seconds",
+          "type": "number"
+        },
+        "ingest_token_env_var": {
+          "default": "ACTIVITY_COLLECTOR_INGEST_TOKEN",
+          "title": "Ingest Token Env Var",
+          "type": "string"
+        },
+        "max_buffered_events": {
+          "default": 500,
+          "title": "Max Buffered Events",
+          "type": "integer"
+        },
+        "otel_trace_base_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Otel Trace Base Url"
+        },
+        "request_timeout_seconds": {
+          "default": 2.0,
+          "title": "Request Timeout Seconds",
+          "type": "number"
+        },
+        "storage": {
+          "$ref": "#/$defs/CollectorStorageSettings"
+        },
+        "user_url_path": {
+          "default": "/user",
+          "title": "User Url Path",
+          "type": "string"
+        }
+      },
+      "title": "ActivityCollectorSettings",
+      "type": "object"
+    },
+    "AdapterHostProtocolLimitsSettings": {
+      "additionalProperties": false,
+      "description": "Gateway ceilings negotiated independently for each registration epoch.",
+      "properties": {
+        "acknowledgement_timeout_seconds": {
+          "default": 60.0,
+          "maximum": 86400.0,
+          "minimum": 1.0,
+          "title": "Acknowledgement Timeout Seconds",
+          "type": "number"
+        },
+        "heartbeat_interval_seconds": {
+          "default": 15.0,
+          "maximum": 3600.0,
+          "minimum": 1.0,
+          "title": "Heartbeat Interval Seconds",
+          "type": "number"
+        },
+        "max_attachment_bytes": {
+          "default": 31457280,
+          "maximum": 268435456,
+          "minimum": 0,
+          "title": "Max Attachment Bytes",
+          "type": "integer"
+        },
+        "max_in_flight_events": {
+          "default": 16,
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Max In Flight Events",
+          "type": "integer"
+        },
+        "max_payload_bytes": {
+          "default": 2097152,
+          "maximum": 268435456,
+          "minimum": 1024,
+          "title": "Max Payload Bytes",
+          "type": "integer"
+        },
+        "max_pending_events": {
+          "default": 1000,
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Max Pending Events",
+          "type": "integer"
+        },
+        "retention_seconds": {
+          "default": 604800,
+          "maximum": 31536000,
+          "minimum": 60,
+          "title": "Retention Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "AdapterHostProtocolLimitsSettings",
+      "type": "object"
+    },
+    "AdapterHostSettings": {
+      "additionalProperties": false,
+      "description": "Private authenticated transport and durable host-runtime settings.",
+      "properties": {
+        "allowed_host_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Host Ids",
+          "type": "array"
+        },
+        "bind_host": {
+          "default": "127.0.0.1",
+          "title": "Bind Host",
+          "type": "string"
+        },
+        "bind_port": {
+          "default": 18700,
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Bind Port",
+          "type": "integer"
+        },
+        "client_state_path": {
+          "default": "dbs/adapter_host_client.db",
+          "title": "Client State Path",
+          "type": "string"
+        },
+        "connect_host": {
+          "default": "127.0.0.1",
+          "title": "Connect Host",
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "host_id": {
+          "default": "python-adapter-host",
+          "title": "Host Id",
+          "type": "string"
+        },
+        "lease_seconds": {
+          "default": 45,
+          "maximum": 86400,
+          "minimum": 5,
+          "title": "Lease Seconds",
+          "type": "integer"
+        },
+        "limits": {
+          "$ref": "#/$defs/AdapterHostProtocolLimitsSettings"
+        },
+        "reconnect_initial_delay_seconds": {
+          "default": 0.5,
+          "maximum": 60.0,
+          "minimum": 0.05,
+          "title": "Reconnect Initial Delay Seconds",
+          "type": "number"
+        },
+        "reconnect_max_delay_seconds": {
+          "default": 30.0,
+          "maximum": 600.0,
+          "minimum": 0.1,
+          "title": "Reconnect Max Delay Seconds",
+          "type": "number"
+        },
+        "tls": {
+          "$ref": "#/$defs/AdapterHostTLSSettings"
+        },
+        "token_env_var": {
+          "default": "ADAPTER_HOST_AUTH_TOKEN",
+          "title": "Token Env Var",
+          "type": "string"
+        },
+        "transport": {
+          "default": "unix",
+          "title": "Transport",
+          "type": "string"
+        },
+        "unix_socket_mode": {
+          "default": "0600",
+          "title": "Unix Socket Mode",
+          "type": "string"
+        },
+        "unix_socket_path": {
+          "default": "runtime/adapter-host.sock",
+          "title": "Unix Socket Path",
+          "type": "string"
+        },
+        "upload_dir": {
+          "default": "runtime/adapter-host-uploads",
+          "title": "Upload Dir",
+          "type": "string"
+        },
+        "upload_ticket_ttl_seconds": {
+          "default": 300,
+          "maximum": 86400,
+          "minimum": 10,
+          "title": "Upload Ticket Ttl Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "AdapterHostSettings",
+      "type": "object"
+    },
+    "AdapterHostTLSSettings": {
+      "additionalProperties": false,
+      "description": "Mutual-TLS material for container or remote private transports.",
+      "properties": {
+        "client_ca_path": {
+          "default": "",
+          "title": "Client Ca Path",
+          "type": "string"
+        },
+        "client_certificate_path": {
+          "default": "",
+          "title": "Client Certificate Path",
+          "type": "string"
+        },
+        "client_private_key_path": {
+          "default": "",
+          "title": "Client Private Key Path",
+          "type": "string"
+        },
+        "server_ca_path": {
+          "default": "",
+          "title": "Server Ca Path",
+          "type": "string"
+        },
+        "server_certificate_path": {
+          "default": "",
+          "title": "Server Certificate Path",
+          "type": "string"
+        },
+        "server_name": {
+          "default": "",
+          "title": "Server Name",
+          "type": "string"
+        },
+        "server_private_key_path": {
+          "default": "",
+          "title": "Server Private Key Path",
+          "type": "string"
+        }
+      },
+      "title": "AdapterHostTLSSettings",
+      "type": "object"
+    },
+    "AgentRuntimeDefaultsSettings": {
+      "properties": {
+        "agent_definition_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Agent Definition Paths",
+          "type": "array"
+        },
+        "context_engine": {
+          "additionalProperties": true,
+          "title": "Context Engine",
+          "type": "object"
+        },
+        "conversation_compactor": {
+          "additionalProperties": true,
+          "title": "Conversation Compactor",
+          "type": "object"
+        },
+        "conversation_summary_generator_type": {
+          "default": "heuristic",
+          "title": "Conversation Summary Generator Type",
+          "type": "string"
+        },
+        "debug": {
+          "additionalProperties": true,
+          "title": "Debug",
+          "type": "object"
+        },
+        "default_request_timezone": {
+          "default": "America/Chicago",
+          "title": "Default Request Timezone",
+          "type": "string"
+        },
+        "deferred_message_warning_threshold": {
+          "default": 10,
+          "title": "Deferred Message Warning Threshold",
+          "type": "integer"
+        },
+        "external_mcp_servers": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "External Mcp Servers",
+          "type": "array"
+        },
+        "inner_loop_context": {
+          "additionalProperties": true,
+          "title": "Inner Loop Context",
+          "type": "object"
+        },
+        "knowledge": {
+          "$ref": "#/$defs/KnowledgeSettings"
+        },
+        "max_concurrent_top_level_tasks": {
+          "default": 1,
+          "title": "Max Concurrent Top Level Tasks",
+          "type": "integer"
+        },
+        "max_deferred_messages": {
+          "default": 100,
+          "minimum": 1,
+          "title": "Max Deferred Messages",
+          "type": "integer"
+        },
+        "max_queued_top_level_tasks": {
+          "default": 50,
+          "title": "Max Queued Top Level Tasks",
+          "type": "integer"
+        },
+        "max_tool_calls_per_task": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 150,
+          "title": "Max Tool Calls Per Task"
+        },
+        "max_tool_result_tokens_per_call": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 20000,
+          "title": "Max Tool Result Tokens Per Call"
+        },
+        "memory": {
+          "additionalProperties": true,
+          "title": "Memory",
+          "type": "object"
+        },
+        "memory_graph_enabled": {
+          "default": false,
+          "title": "Memory Graph Enabled",
+          "type": "boolean"
+        },
+        "mid_turn_steering": {
+          "additionalProperties": true,
+          "title": "Mid Turn Steering",
+          "type": "object"
+        },
+        "prompt_skill_description_exclusions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Prompt Skill Description Exclusions",
+          "type": "array"
+        },
+        "prompt_skill_description_limit": {
+          "default": 50,
+          "minimum": 1,
+          "title": "Prompt Skill Description Limit",
+          "type": "integer"
+        },
+        "restart_executing_task_grace_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 900.0,
+          "title": "Restart Executing Task Grace Seconds"
+        },
+        "result_transformer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Transformer"
+        },
+        "runtime_budget_policy": {
+          "additionalProperties": true,
+          "title": "Runtime Budget Policy",
+          "type": "object"
+        },
+        "runtime_coordinator": {
+          "additionalProperties": true,
+          "title": "Runtime Coordinator",
+          "type": "object"
+        },
+        "same_role_runtime_takeover_enabled": {
+          "default": true,
+          "title": "Same Role Runtime Takeover Enabled",
+          "type": "boolean"
+        },
+        "schedule_maintenance": {
+          "additionalProperties": true,
+          "title": "Schedule Maintenance",
+          "type": "object"
+        },
+        "schedule_workers": {
+          "$ref": "#/$defs/ScheduleWorkersConfig"
+        },
+        "structured_output_failure_threshold": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 4,
+          "title": "Structured Output Failure Threshold"
+        },
+        "subtask_status_probe_timeout_seconds": {
+          "default": 5.0,
+          "title": "Subtask Status Probe Timeout Seconds",
+          "type": "number"
+        },
+        "subtask_timeout_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 1200.0,
+          "title": "Subtask Timeout Seconds"
+        },
+        "subtask_watchdog_interval_seconds": {
+          "default": 15.0,
+          "title": "Subtask Watchdog Interval Seconds",
+          "type": "number"
+        },
+        "task_queue_warning_threshold": {
+          "default": 5,
+          "title": "Task Queue Warning Threshold",
+          "type": "integer"
+        },
+        "tool_allowlist": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Allowlist"
+        },
+        "tool_blocklist": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tool Blocklist",
+          "type": "array"
+        },
+        "turn_action_outbox": {
+          "additionalProperties": true,
+          "title": "Turn Action Outbox",
+          "type": "object"
+        },
+        "worker_pools": {
+          "$ref": "#/$defs/WorkerPoolsConfig"
+        }
+      },
+      "title": "AgentRuntimeDefaultsSettings",
+      "type": "object"
+    },
+    "AgentRuntimeOverrideSettings": {
+      "properties": {
+        "agent_definition_paths": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Definition Paths"
+        },
+        "context_engine": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context Engine"
+        },
+        "conversation_compactor": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Compactor"
+        },
+        "conversation_summary_generator_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Summary Generator Type"
+        },
+        "debug": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Debug"
+        },
+        "deferred_message_warning_threshold": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Deferred Message Warning Threshold"
+        },
+        "external_mcp_servers": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Mcp Servers"
+        },
+        "inner_loop_context": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inner Loop Context"
+        },
+        "max_concurrent_top_level_tasks": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Concurrent Top Level Tasks"
+        },
+        "max_deferred_messages": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Deferred Messages"
+        },
+        "max_queued_top_level_tasks": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Queued Top Level Tasks"
+        },
+        "max_tool_calls_per_task": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Tool Calls Per Task"
+        },
+        "max_tool_result_tokens_per_call": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Tool Result Tokens Per Call"
+        },
+        "memory": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory"
+        },
+        "memory_graph_enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory Graph Enabled"
+        },
+        "mid_turn_steering": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mid Turn Steering"
+        },
+        "prompt_skill_description_exclusions": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Skill Description Exclusions"
+        },
+        "prompt_skill_description_limit": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Skill Description Limit"
+        },
+        "restart_executing_task_grace_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Restart Executing Task Grace Seconds"
+        },
+        "result_transformer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Transformer"
+        },
+        "runtime_budget_policy": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runtime Budget Policy"
+        },
+        "runtime_coordinator": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runtime Coordinator"
+        },
+        "same_role_runtime_takeover_enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Same Role Runtime Takeover Enabled"
+        },
+        "schedule_worker_rules": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schedule Worker Rules"
+        },
+        "structured_output_failure_threshold": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Structured Output Failure Threshold"
+        },
+        "subtask_status_probe_timeout_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subtask Status Probe Timeout Seconds"
+        },
+        "subtask_timeout_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subtask Timeout Seconds"
+        },
+        "subtask_watchdog_interval_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subtask Watchdog Interval Seconds"
+        },
+        "task_queue_warning_threshold": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task Queue Warning Threshold"
+        },
+        "tool_allowlist": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Allowlist"
+        },
+        "tool_blocklist": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Blocklist"
+        },
+        "turn_action_outbox": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Action Outbox"
+        }
+      },
+      "title": "AgentRuntimeOverrideSettings",
+      "type": "object"
+    },
+    "AgentTypeLLMOverrideSettings": {
+      "properties": {
+        "compaction_model_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Compaction Model Id"
+        },
+        "compaction_model_provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Compaction Model Provider"
+        },
+        "context_window_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context Window Tokens"
+        },
+        "failover": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failover"
+        },
+        "litellm_api_base": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Litellm Api Base"
+        },
+        "litellm_api_mode": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Litellm Api Mode"
+        },
+        "max_output_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Output Tokens"
+        },
+        "model_call_timeout_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Call Timeout Seconds"
+        },
+        "model_capabilities": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Capabilities"
+        },
+        "model_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Id"
+        },
+        "openai_codex": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpenAICodexSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Effort"
+        },
+        "reasoning_summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Summary"
+        },
+        "reasoning_trace_retention_messages": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Trace Retention Messages"
+        },
+        "request_timeout_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Timeout Seconds"
+        },
+        "stream": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stream"
+        },
+        "stream_idle_timeout_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stream Idle Timeout Seconds"
+        },
+        "supports_audio_input": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Supports Audio Input"
+        },
+        "supports_file_input": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Supports File Input"
+        },
+        "supports_image_input": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Supports Image Input"
+        },
+        "temperature": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Temperature"
+        },
+        "xai_oauth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/XAIOAuthSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "AgentTypeLLMOverrideSettings",
+      "type": "object"
+    },
+    "AgentTypeRuntimeSettings": {
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/AgentRuntimeOverrideSettings"
+        },
+        "llm": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentTypeLLMOverrideSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "AgentTypeRuntimeSettings",
+      "type": "object"
+    },
+    "AssistantProfileSettings": {
+      "properties": {
+        "available_message_template": {
+          "default": "{assistant_name} is now available.",
+          "title": "Available Message Template",
+          "type": "string"
+        },
+        "display_name": {
+          "default": "Lisa",
+          "title": "Display Name",
+          "type": "string"
+        },
+        "manager_transition_notices_enabled": {
+          "default": false,
+          "title": "Manager Transition Notices Enabled",
+          "type": "boolean"
+        },
+        "unavailable_message_template": {
+          "default": "{assistant_name} is not currently available. Please try again after it reconnects.",
+          "title": "Unavailable Message Template",
+          "type": "string"
+        }
+      },
+      "title": "AssistantProfileSettings",
+      "type": "object"
+    },
+    "AuthorizationPresentationMode": {
+      "description": "Choose plain-language or exact technical authorization copy.",
+      "enum": [
+        "friendly",
+        "technical"
+      ],
+      "title": "AuthorizationPresentationMode",
+      "type": "string"
+    },
+    "AuthorizationPresentationSettings": {
+      "description": "How much detail access refusals and review messages show.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/AuthorizationPresentationMode",
+          "default": "friendly"
+        }
+      },
+      "title": "AuthorizationPresentationSettings",
+      "type": "object"
+    },
+    "AuthorizationSettings": {
+      "properties": {
+        "cedar_binary_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cedar Binary Path"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "presentation": {
+          "$ref": "#/$defs/AuthorizationPresentationSettings"
+        },
+        "starter_profile": {
+          "default": "trusted",
+          "enum": [
+            "trusted",
+            "careful",
+            "manual"
+          ],
+          "title": "Starter Profile",
+          "type": "string"
+        }
+      },
+      "title": "AuthorizationSettings",
+      "type": "object"
+    },
+    "CodeExecutionSecuritySettings": {
+      "description": "Sandbox for agent-run shell and Python commands outside OpenShell.\n\n``required`` confines each command to the workspace, a private scratch\ndirectory, read-only operating-system files, and the extra paths below; a\ncommand is refused when the sandbox cannot be applied. ``off`` runs agent\ncode with the runtime's full filesystem access and is logged as a warning.",
+      "properties": {
+        "extra_read_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Extra Read Paths",
+          "type": "array"
+        },
+        "extra_write_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Extra Write Paths",
+          "type": "array"
+        },
+        "sandbox": {
+          "default": "required",
+          "title": "Sandbox",
+          "type": "string"
+        }
+      },
+      "title": "CodeExecutionSecuritySettings",
+      "type": "object"
+    },
+    "CollectorPostgresStorageSettings": {
+      "properties": {
+        "dsn": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dsn"
+        }
+      },
+      "title": "CollectorPostgresStorageSettings",
+      "type": "object"
+    },
+    "CollectorSqliteStorageSettings": {
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "dbs/activity_collector.db",
+          "title": "Path"
+        }
+      },
+      "title": "CollectorSqliteStorageSettings",
+      "type": "object"
+    },
+    "CollectorStorageSettings": {
+      "properties": {
+        "backend": {
+          "default": "sqlite",
+          "title": "Backend",
+          "type": "string"
+        },
+        "postgres": {
+          "$ref": "#/$defs/CollectorPostgresStorageSettings"
+        },
+        "sqlite": {
+          "$ref": "#/$defs/CollectorSqliteStorageSettings"
+        }
+      },
+      "title": "CollectorStorageSettings",
+      "type": "object"
+    },
+    "Crawl4AIServiceSettings": {
+      "description": "Where this instance's Crawl4AI server is; its token is a linked account (http:crawl4ai).",
+      "properties": {
+        "base_url": {
+          "default": "http://127.0.0.1:11235",
+          "title": "Base Url",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "default": 120.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "title": "Crawl4AIServiceSettings",
+      "type": "object"
+    },
+    "CredentialCatalogSettings": {
+      "properties": {
+        "collection_session_ttl_seconds": {
+          "default": 900,
+          "title": "Collection Session Ttl Seconds",
+          "type": "integer"
+        },
+        "database_path": {
+          "default": "credential_catalog.db",
+          "title": "Database Path",
+          "type": "string"
+        },
+        "default_write_source": {
+          "default": "sealbox",
+          "title": "Default Write Source",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "openshell_binding_ttl_seconds": {
+          "default": 900,
+          "title": "Openshell Binding Ttl Seconds",
+          "type": "integer"
+        },
+        "secret_cache_ttl_seconds": {
+          "default": 300,
+          "title": "Secret Cache Ttl Seconds",
+          "type": "integer"
+        },
+        "template_overrides_path": {
+          "default": "credential_template_overrides.yaml",
+          "title": "Template Overrides Path",
+          "type": "string"
+        }
+      },
+      "title": "CredentialCatalogSettings",
+      "type": "object"
+    },
+    "CredentialStateBackendSettings": {
+      "properties": {
+        "fallback_to_files": {
+          "default": false,
+          "title": "Fallback To Files",
+          "type": "boolean"
+        },
+        "mode": {
+          "default": "credential_source",
+          "title": "Mode",
+          "type": "string"
+        },
+        "namespace": {
+          "default": "team-cred-store",
+          "title": "Namespace",
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "sealbox",
+          "title": "Source"
+        }
+      },
+      "title": "CredentialStateBackendSettings",
+      "type": "object"
+    },
+    "DarkMetalAppearanceSettings": {
+      "description": "Dark metallic background: polished metal plates in a dark studio.",
+      "properties": {
+        "accents": {
+          "$ref": "#/$defs/MetallicAccentPaletteSettings"
+        },
+        "chrome_faces": {
+          "default": 0,
+          "title": "Chrome Faces",
+          "type": "integer"
+        },
+        "detail": {
+          "default": "full",
+          "enum": [
+            "full",
+            "basic"
+          ],
+          "title": "Detail",
+          "type": "string"
+        },
+        "edge_highlights": {
+          "default": 31,
+          "title": "Edge Highlights",
+          "type": "integer"
+        },
+        "facet_depth": {
+          "default": 80,
+          "title": "Facet Depth",
+          "type": "integer"
+        },
+        "facet_size": {
+          "default": 230,
+          "title": "Facet Size",
+          "type": "integer"
+        },
+        "light_motion": {
+          "default": true,
+          "title": "Light Motion",
+          "type": "boolean"
+        },
+        "light_softness": {
+          "default": 37,
+          "title": "Light Softness",
+          "type": "integer"
+        },
+        "light_speed": {
+          "default": 110,
+          "title": "Light Speed",
+          "type": "integer"
+        },
+        "light_wander": {
+          "default": false,
+          "title": "Light Wander",
+          "type": "boolean"
+        },
+        "light_wander_distance": {
+          "default": 133,
+          "title": "Light Wander Distance",
+          "type": "integer"
+        },
+        "light_x": {
+          "default": -7,
+          "title": "Light X",
+          "type": "integer"
+        },
+        "light_y": {
+          "default": -5,
+          "title": "Light Y",
+          "type": "integer"
+        },
+        "mesh_motion": {
+          "default": true,
+          "title": "Mesh Motion",
+          "type": "boolean"
+        },
+        "mesh_speed": {
+          "default": 100,
+          "title": "Mesh Speed",
+          "type": "integer"
+        },
+        "metal_color": {
+          "default": "#015b1a",
+          "title": "Metal Color",
+          "type": "string"
+        },
+        "seed": {
+          "default": 9187,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "shine": {
+          "default": 51,
+          "title": "Shine",
+          "type": "integer"
+        },
+        "surface_color": {
+          "default": "#007007",
+          "title": "Surface Color",
+          "type": "string"
+        },
+        "surface_grain": {
+          "default": 24,
+          "title": "Surface Grain",
+          "type": "integer"
+        }
+      },
+      "title": "DarkMetalAppearanceSettings",
+      "type": "object"
+    },
+    "DeliverySettings": {
+      "properties": {
+        "default_target": {
+          "$ref": "#/$defs/DeliveryTargetSettings"
+        },
+        "digest_delivery_hour_local": {
+          "default": 8,
+          "title": "Digest Delivery Hour Local",
+          "type": "integer"
+        },
+        "notification_routing": {
+          "$ref": "#/$defs/NotificationRoutingSettings"
+        },
+        "quiet_hours": {
+          "$ref": "#/$defs/QuietHoursSettings"
+        },
+        "summarize_deferred": {
+          "default": true,
+          "title": "Summarize Deferred",
+          "type": "boolean"
+        },
+        "urgent_keywords": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Urgent Keywords",
+          "type": "array"
+        }
+      },
+      "title": "DeliverySettings",
+      "type": "object"
+    },
+    "DeliveryTargetSettings": {
+      "properties": {
+        "channel_name": {
+          "default": "telegram",
+          "title": "Channel Name",
+          "type": "string"
+        },
+        "chat_id": {
+          "default": "",
+          "title": "Chat Id",
+          "type": "string"
+        },
+        "thread_id": {
+          "default": "",
+          "title": "Thread Id",
+          "type": "string"
+        }
+      },
+      "title": "DeliveryTargetSettings",
+      "type": "object"
+    },
+    "ExecutionArtifactStoreSettings": {
+      "properties": {
+        "maximum_artifact_bytes": {
+          "default": 268435456,
+          "title": "Maximum Artifact Bytes",
+          "type": "integer"
+        }
+      },
+      "title": "ExecutionArtifactStoreSettings",
+      "type": "object"
+    },
+    "ExecutionBackendKind": {
+      "enum": [
+        "local",
+        "openshell",
+        "kubernetes"
+      ],
+      "title": "ExecutionBackendKind",
+      "type": "string"
+    },
+    "ExecutionControlRunnerSettings": {
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "lease_ttl_seconds": {
+          "default": 60,
+          "title": "Lease Ttl Seconds",
+          "type": "integer"
+        },
+        "max_concurrent_jobs": {
+          "default": 2,
+          "title": "Max Concurrent Jobs",
+          "type": "integer"
+        },
+        "service_reconcile_interval_seconds": {
+          "default": 10,
+          "title": "Service Reconcile Interval Seconds",
+          "type": "number"
+        },
+        "tick_interval_seconds": {
+          "default": 2,
+          "title": "Tick Interval Seconds",
+          "type": "number"
+        }
+      },
+      "title": "ExecutionControlRunnerSettings",
+      "type": "object"
+    },
+    "ExecutionControlSettings": {
+      "properties": {
+        "artifact_store": {
+          "$ref": "#/$defs/ExecutionArtifactStoreSettings"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "kubernetes": {
+          "$ref": "#/$defs/ExecutionKubernetesSettings"
+        },
+        "profiles": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExecutionProfileV1"
+          },
+          "title": "Profiles",
+          "type": "array"
+        },
+        "runner": {
+          "$ref": "#/$defs/ExecutionControlRunnerSettings"
+        },
+        "ssh": {
+          "$ref": "#/$defs/ExecutionSSHSettings"
+        }
+      },
+      "title": "ExecutionControlSettings",
+      "type": "object"
+    },
+    "ExecutionKubernetesSettings": {
+      "properties": {
+        "kubectl_executable": {
+          "default": "kubectl",
+          "title": "Kubectl Executable",
+          "type": "string"
+        },
+        "network_policy_enforced": {
+          "default": false,
+          "title": "Network Policy Enforced",
+          "type": "boolean"
+        }
+      },
+      "title": "ExecutionKubernetesSettings",
+      "type": "object"
+    },
+    "ExecutionLanguage": {
+      "enum": [
+        "python",
+        "rust"
+      ],
+      "title": "ExecutionLanguage",
+      "type": "string"
+    },
+    "ExecutionProfileV1": {
+      "additionalProperties": false,
+      "description": "Operator-authored build and runtime policy selected by stable id.",
+      "properties": {
+        "allow_controller_host_execution": {
+          "default": false,
+          "title": "Allow Controller Host Execution",
+          "type": "boolean"
+        },
+        "artifact_fetcher_executable": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Fetcher Executable"
+        },
+        "backend": {
+          "$ref": "#/$defs/ExecutionBackendKind"
+        },
+        "builder_executable": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Builder Executable"
+        },
+        "kubernetes_artifact_pvc_name": {
+          "anyOf": [
+            {
+              "maxLength": 253,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kubernetes Artifact Pvc Name"
+        },
+        "kubernetes_namespace": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kubernetes Namespace"
+        },
+        "kubernetes_service_account_name": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kubernetes Service Account Name"
+        },
+        "kubernetes_workload_pvc_name": {
+          "anyOf": [
+            {
+              "maxLength": 253,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kubernetes Workload Pvc Name"
+        },
+        "language": {
+          "$ref": "#/$defs/ExecutionLanguage"
+        },
+        "limits": {
+          "$ref": "#/$defs/ResourceLimitsV1"
+        },
+        "network_enabled": {
+          "default": false,
+          "title": "Network Enabled",
+          "type": "boolean"
+        },
+        "openshell_sandbox_name": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Openshell Sandbox Name"
+        },
+        "openshell_workspace_mount": {
+          "default": "/workspace",
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Openshell Workspace Mount",
+          "type": "string"
+        },
+        "profile_digest": {
+          "default": "",
+          "title": "Profile Digest",
+          "type": "string"
+        },
+        "profile_id": {
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "read_only_root": {
+          "default": true,
+          "title": "Read Only Root",
+          "type": "boolean"
+        },
+        "run_as_non_root": {
+          "default": true,
+          "title": "Run As Non Root",
+          "type": "boolean"
+        },
+        "runtime_executable": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Runtime Executable",
+          "type": "string"
+        },
+        "runtime_image": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runtime Image"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "toolchain_identity": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Toolchain Identity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile_id",
+        "language",
+        "backend",
+        "runtime_executable",
+        "toolchain_identity"
+      ],
+      "title": "ExecutionProfileV1",
+      "type": "object"
+    },
+    "ExecutionSSHSettings": {
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "lease_ttl_seconds": {
+          "default": 300,
+          "title": "Lease Ttl Seconds",
+          "type": "integer"
+        },
+        "ssh_executable": {
+          "default": "ssh",
+          "title": "Ssh Executable",
+          "type": "string"
+        },
+        "targets": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExecutionSSHTargetSettings"
+          },
+          "title": "Targets",
+          "type": "array"
+        },
+        "transcript_limit_bytes": {
+          "default": 4194304,
+          "title": "Transcript Limit Bytes",
+          "type": "integer"
+        }
+      },
+      "title": "ExecutionSSHSettings",
+      "type": "object"
+    },
+    "ExecutionSSHTargetSettings": {
+      "properties": {
+        "credential_binding_id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Credential Binding Id",
+          "type": "string"
+        },
+        "host": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Host",
+          "type": "string"
+        },
+        "host_key_algorithm": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Host Key Algorithm",
+          "type": "string"
+        },
+        "host_key_fingerprint": {
+          "pattern": "^SHA256:[A-Za-z0-9+/]{16,}={0,2}$",
+          "title": "Host Key Fingerprint",
+          "type": "string"
+        },
+        "identity_file": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Identity File",
+          "type": "string"
+        },
+        "known_hosts_file": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Known Hosts File",
+          "type": "string"
+        },
+        "port": {
+          "default": 22,
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        },
+        "remote_persistent_session_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Remote Persistent Session Name"
+        },
+        "target_id": {
+          "pattern": "^[a-z][a-z0-9_.-]{0,119}$",
+          "title": "Target Id",
+          "type": "string"
+        },
+        "username": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Username",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_id",
+        "host",
+        "username",
+        "host_key_algorithm",
+        "host_key_fingerprint",
+        "credential_binding_id",
+        "identity_file",
+        "known_hosts_file"
+      ],
+      "title": "ExecutionSSHTargetSettings",
+      "type": "object"
+    },
+    "GatewayStateSettings": {
+      "properties": {
+        "storage": {
+          "$ref": "#/$defs/ManagerStorageSettings"
+        }
+      },
+      "title": "GatewayStateSettings",
+      "type": "object"
+    },
+    "GatewayUsersSettings": {
+      "properties": {
+        "allow_newuser_registration": {
+          "default": true,
+          "title": "Allow Newuser Registration",
+          "type": "boolean"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "link_code_ttl_seconds": {
+          "default": 900,
+          "title": "Link Code Ttl Seconds",
+          "type": "integer"
+        },
+        "removed_data_retention_days": {
+          "default": 7,
+          "title": "Removed Data Retention Days",
+          "type": "integer"
+        },
+        "web_user_invite_ttl_seconds": {
+          "default": 900,
+          "title": "Web User Invite Ttl Seconds",
+          "type": "integer"
+        },
+        "web_user_token_ttl_days": {
+          "default": 0,
+          "title": "Web User Token Ttl Days",
+          "type": "integer"
+        },
+        "web_user_tokens_enabled": {
+          "default": true,
+          "title": "Web User Tokens Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "GatewayUsersSettings",
+      "type": "object"
+    },
+    "HeartbeatSettings": {
+      "properties": {
+        "active_end_hour_local": {
+          "default": 18,
+          "title": "Active End Hour Local",
+          "type": "integer"
+        },
+        "active_hours_enabled": {
+          "default": false,
+          "title": "Active Hours Enabled",
+          "type": "boolean"
+        },
+        "active_start_hour_local": {
+          "default": 8,
+          "title": "Active Start Hour Local",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "interval_seconds": {
+          "default": 1800,
+          "title": "Interval Seconds",
+          "type": "integer"
+        },
+        "schedule_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schedule Id"
+        },
+        "session_key": {
+          "default": "heartbeat",
+          "title": "Session Key",
+          "type": "string"
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Id"
+        }
+      },
+      "title": "HeartbeatSettings",
+      "type": "object"
+    },
+    "InstanceEmbeddingSettings": {
+      "properties": {
+        "api_base": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Api Base"
+        },
+        "dimensions": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dimensions"
+        },
+        "extra_headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Extra Headers",
+          "type": "object"
+        },
+        "model_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "harrier-oss-v1-0.6b",
+          "title": "Model Id"
+        },
+        "organization": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "title": "Organization"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "openai_compatible",
+          "title": "Provider"
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 10.0,
+          "title": "Timeout Seconds"
+        }
+      },
+      "title": "InstanceEmbeddingSettings",
+      "type": "object"
+    },
+    "InstanceLLMSettings": {
+      "properties": {
+        "compaction_model_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Compaction Model Id"
+        },
+        "compaction_model_provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Compaction Model Provider"
+        },
+        "context_window_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 800000,
+          "title": "Context Window Tokens"
+        },
+        "failover": {
+          "additionalProperties": true,
+          "title": "Failover",
+          "type": "object"
+        },
+        "litellm_api_base": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "https://openrouter.ai/api/v1",
+          "title": "Litellm Api Base"
+        },
+        "litellm_api_mode": {
+          "default": "chat_completions",
+          "title": "Litellm Api Mode",
+          "type": "string"
+        },
+        "max_output_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 55296,
+          "title": "Max Output Tokens"
+        },
+        "model_call_timeout_seconds": {
+          "default": 1800.0,
+          "title": "Model Call Timeout Seconds",
+          "type": "number"
+        },
+        "model_capabilities": {
+          "additionalProperties": true,
+          "title": "Model Capabilities",
+          "type": "object"
+        },
+        "model_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "deepseek/deepseek-v4.1-flash",
+          "title": "Model Id"
+        },
+        "openai_codex": {
+          "$ref": "#/$defs/OpenAICodexSettings"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "litellm",
+          "title": "Provider"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "medium",
+          "title": "Reasoning Effort"
+        },
+        "reasoning_summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Summary"
+        },
+        "reasoning_trace_retention_messages": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 96,
+          "title": "Reasoning Trace Retention Messages"
+        },
+        "request_timeout_seconds": {
+          "default": 120.0,
+          "title": "Request Timeout Seconds",
+          "type": "number"
+        },
+        "stream": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stream"
+        },
+        "stream_idle_timeout_seconds": {
+          "default": 300.0,
+          "title": "Stream Idle Timeout Seconds",
+          "type": "number"
+        },
+        "supports_audio_input": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Supports Audio Input"
+        },
+        "supports_file_input": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Supports File Input"
+        },
+        "supports_image_input": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Supports Image Input"
+        },
+        "temperature": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 0.0,
+          "title": "Temperature"
+        },
+        "xai_oauth": {
+          "$ref": "#/$defs/XAIOAuthSettings"
+        }
+      },
+      "title": "InstanceLLMSettings",
+      "type": "object"
+    },
+    "InteractiveAppPluginConfiguration": {
+      "description": "One durable, normalized plugin selection in instance configuration.",
+      "properties": {
+        "adapter_instance_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Adapter Instance Id"
+        },
+        "distribution": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Distribution"
+        },
+        "execution": {
+          "default": "in_process",
+          "title": "Execution",
+          "type": "string"
+        },
+        "settings": {
+          "title": "Settings"
+        }
+      },
+      "title": "InteractiveAppPluginConfiguration",
+      "type": "object"
+    },
+    "InteractiveAppsSettings": {
+      "additionalProperties": false,
+      "description": "Registry-keyed adapter configuration and optional-package allowlist.",
+      "properties": {
+        "adapter_host": {
+          "$ref": "#/$defs/AdapterHostSettings"
+        },
+        "plugins": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InteractiveAppPluginConfiguration"
+          },
+          "title": "Plugins",
+          "type": "object"
+        }
+      },
+      "title": "InteractiveAppsSettings",
+      "type": "object"
+    },
+    "KnowledgeBlockedPattern": {
+      "additionalProperties": false,
+      "description": "A team-specific pattern that is never stored, such as an internal code name.",
+      "properties": {
+        "name": {
+          "maxLength": 60,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "pattern": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Pattern",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "pattern"
+      ],
+      "title": "KnowledgeBlockedPattern",
+      "type": "object"
+    },
+    "KnowledgeCurationSettings": {
+      "additionalProperties": false,
+      "description": "KnowledgeCuratorAgent's schedules, installed by the gateway.\n\nOne run per active person (their pending team contributions and their own\npages) and one team run (notes, problems, activity). A run with nothing to\nreview is skipped without starting the curator. An interval of 0 installs\nno schedule of that kind; changed intervals apply to new installs only, as\nfor every maintenance schedule.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "person_interval_minutes": {
+          "default": 1440,
+          "maximum": 10080,
+          "minimum": 0,
+          "title": "Person Interval Minutes",
+          "type": "integer"
+        },
+        "team_interval_minutes": {
+          "default": 1440,
+          "maximum": 10080,
+          "minimum": 0,
+          "title": "Team Interval Minutes",
+          "type": "integer"
+        }
+      },
+      "title": "KnowledgeCurationSettings",
+      "type": "object"
+    },
+    "KnowledgeSearchSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "max_results": {
+          "default": 8,
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Max Results",
+          "type": "integer"
+        }
+      },
+      "title": "KnowledgeSearchSettings",
+      "type": "object"
+    },
+    "KnowledgeSensitiveContentSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "blocked_patterns": {
+          "items": {
+            "$ref": "#/$defs/KnowledgeBlockedPattern"
+          },
+          "title": "Blocked Patterns",
+          "type": "array"
+        }
+      },
+      "title": "KnowledgeSensitiveContentSettings",
+      "type": "object"
+    },
+    "KnowledgeSettings": {
+      "additionalProperties": false,
+      "description": "``agent.knowledge`` in ``config.yaml`` and ``instance_config.yaml``.",
+      "properties": {
+        "curation": {
+          "$ref": "#/$defs/KnowledgeCurationSettings"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "limits": {
+          "$ref": "#/$defs/KnowledgeWriteLimits"
+        },
+        "search": {
+          "$ref": "#/$defs/KnowledgeSearchSettings"
+        },
+        "sensitive_content": {
+          "$ref": "#/$defs/KnowledgeSensitiveContentSettings"
+        }
+      },
+      "title": "KnowledgeSettings",
+      "type": "object"
+    },
+    "KnowledgeWriteLimits": {
+      "additionalProperties": false,
+      "description": "Per-agent write limits, checked inside the store's write transaction.\n\nThe store counts recorded writes, so the limits hold across processes and\nrestarts. People editing in the gateway are not rate limited; size limits\napply to everyone.",
+      "properties": {
+        "archives_per_agent_per_hour": {
+          "default": 5,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Archives Per Agent Per Hour",
+          "type": "integer"
+        },
+        "edit_war_edits": {
+          "default": 8,
+          "maximum": 1000,
+          "minimum": 2,
+          "title": "Edit War Edits",
+          "type": "integer"
+        },
+        "edit_war_freeze_minutes": {
+          "default": 60,
+          "maximum": 10080,
+          "minimum": 1,
+          "title": "Edit War Freeze Minutes",
+          "type": "integer"
+        },
+        "max_body_chars": {
+          "default": 24000,
+          "maximum": 500000,
+          "minimum": 1000,
+          "title": "Max Body Chars",
+          "type": "integer"
+        },
+        "max_note_chars": {
+          "default": 2000,
+          "maximum": 50000,
+          "minimum": 100,
+          "title": "Max Note Chars",
+          "type": "integer"
+        },
+        "max_summary_chars": {
+          "default": 300,
+          "maximum": 4000,
+          "minimum": 20,
+          "title": "Max Summary Chars",
+          "type": "integer"
+        },
+        "max_tags": {
+          "default": 10,
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Max Tags",
+          "type": "integer"
+        },
+        "max_title_chars": {
+          "default": 120,
+          "maximum": 1000,
+          "minimum": 10,
+          "title": "Max Title Chars",
+          "type": "integer"
+        },
+        "new_pages_per_work": {
+          "default": 10,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "New Pages Per Work",
+          "type": "integer"
+        },
+        "page_edits_per_agent": {
+          "default": 5,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Page Edits Per Agent",
+          "type": "integer"
+        },
+        "recent_revisions_compared": {
+          "default": 5,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Recent Revisions Compared",
+          "type": "integer"
+        },
+        "window_minutes": {
+          "default": 30,
+          "maximum": 1440,
+          "minimum": 1,
+          "title": "Window Minutes",
+          "type": "integer"
+        },
+        "writes_per_agent_per_hour": {
+          "default": 30,
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Writes Per Agent Per Hour",
+          "type": "integer"
+        }
+      },
+      "title": "KnowledgeWriteLimits",
+      "type": "object"
+    },
+    "LaunchSettings": {
+      "properties": {
+        "env_file_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Env File Path"
+        },
+        "secrets_source": {
+          "default": "env_file",
+          "enum": [
+            "env_file",
+            "environment"
+          ],
+          "title": "Secrets Source",
+          "type": "string"
+        }
+      },
+      "title": "LaunchSettings",
+      "type": "object"
+    },
+    "MCPHostingSettings": {
+      "properties": {
+        "bind_host": {
+          "default": "127.0.0.1",
+          "title": "Bind Host",
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "port_range_end": {
+          "default": 18799,
+          "maximum": 65535,
+          "minimum": 1024,
+          "title": "Port Range End",
+          "type": "integer"
+        },
+        "port_range_start": {
+          "default": 18700,
+          "maximum": 65535,
+          "minimum": 1024,
+          "title": "Port Range Start",
+          "type": "integer"
+        }
+      },
+      "title": "MCPHostingSettings",
+      "type": "object"
+    },
+    "MCPLegacySSESettings": {
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "removal_target_date": {
+          "default": "2026-11-12",
+          "title": "Removal Target Date",
+          "type": "string"
+        }
+      },
+      "title": "MCPLegacySSESettings",
+      "type": "object"
+    },
+    "MCPNetworkPolicySettings": {
+      "properties": {
+        "allow_loopback": {
+          "default": false,
+          "title": "Allow Loopback",
+          "type": "boolean"
+        },
+        "allow_private_networks": {
+          "default": false,
+          "title": "Allow Private Networks",
+          "type": "boolean"
+        },
+        "allowed_private_hosts": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Private Hosts",
+          "type": "array"
+        }
+      },
+      "title": "MCPNetworkPolicySettings",
+      "type": "object"
+    },
+    "MCPSettings": {
+      "description": "Installed MCP connection, transport, and managed-host settings.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "hosting": {
+          "$ref": "#/$defs/MCPHostingSettings"
+        },
+        "legacy_sse": {
+          "$ref": "#/$defs/MCPLegacySSESettings"
+        },
+        "load_retry_window_minutes": {
+          "default": 60,
+          "maximum": 10080,
+          "minimum": 1,
+          "title": "Load Retry Window Minutes",
+          "type": "integer"
+        },
+        "network_policy": {
+          "$ref": "#/$defs/MCPNetworkPolicySettings"
+        },
+        "protocol_adapter": {
+          "default": "mcp_v1",
+          "title": "Protocol Adapter",
+          "type": "string"
+        },
+        "static_reconciliation": {
+          "$ref": "#/$defs/MCPStaticReconciliationSettings"
+        }
+      },
+      "title": "MCPSettings",
+      "type": "object"
+    },
+    "MCPStaticReconciliationSettings": {
+      "description": "Controls how desired static MCP definitions become installed authority.",
+      "properties": {
+        "upgrade_mode": {
+          "default": "review_required",
+          "title": "Upgrade Mode",
+          "type": "string"
+        }
+      },
+      "title": "MCPStaticReconciliationSettings",
+      "type": "object"
+    },
+    "ManagerPostgresStorageSettings": {
+      "properties": {
+        "dsn": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dsn"
+        }
+      },
+      "title": "ManagerPostgresStorageSettings",
+      "type": "object"
+    },
+    "ManagerSqliteStorageSettings": {
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "dbs/task_history.db",
+          "title": "Path"
+        },
+        "vector": {
+          "$ref": "#/$defs/SqliteVectorStorageSettings"
+        }
+      },
+      "title": "ManagerSqliteStorageSettings",
+      "type": "object"
+    },
+    "ManagerStorageSettings": {
+      "properties": {
+        "backend": {
+          "default": "sqlite",
+          "title": "Backend",
+          "type": "string"
+        },
+        "postgres": {
+          "$ref": "#/$defs/ManagerPostgresStorageSettings"
+        },
+        "sqlite": {
+          "$ref": "#/$defs/ManagerSqliteStorageSettings"
+        }
+      },
+      "title": "ManagerStorageSettings",
+      "type": "object"
+    },
+    "ManagerTargetSettings": {
+      "properties": {
+        "manager_agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manager Agent Id"
+        },
+        "named_agent_type": {
+          "default": "TeamArchitect",
+          "title": "Named Agent Type",
+          "type": "string"
+        },
+        "request_timeout_seconds": {
+          "default": 3600.0,
+          "title": "Request Timeout Seconds",
+          "type": "number"
+        },
+        "response_queue_name": {
+          "default": "",
+          "title": "Response Queue Name",
+          "type": "string"
+        },
+        "startup_agents": {
+          "items": {
+            "$ref": "#/$defs/StartupAgentSettings"
+          },
+          "title": "Startup Agents",
+          "type": "array"
+        },
+        "storage": {
+          "$ref": "#/$defs/StateStorageSettings"
+        },
+        "team_id": {
+          "default": "team_ua",
+          "title": "Team Id",
+          "type": "string"
+        },
+        "users": {
+          "$ref": "#/$defs/GatewayUsersSettings"
+        }
+      },
+      "title": "ManagerTargetSettings",
+      "type": "object"
+    },
+    "MetallicAccentPaletteSettings": {
+      "properties": {
+        "bronze": {
+          "$ref": "#/$defs/MetallicAccentSettings"
+        },
+        "gold": {
+          "$ref": "#/$defs/MetallicAccentSettings"
+        }
+      },
+      "title": "MetallicAccentPaletteSettings",
+      "type": "object"
+    },
+    "MetallicAccentSettings": {
+      "description": "A metal tint and the share of faces, in percent, that use it.",
+      "properties": {
+        "color": {
+          "title": "Color",
+          "type": "string"
+        },
+        "share": {
+          "title": "Share",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "color",
+        "share"
+      ],
+      "title": "MetallicAccentSettings",
+      "type": "object"
+    },
+    "NetworkSettings": {
+      "properties": {
+        "public_origin": {
+          "default": "http://127.0.0.1",
+          "title": "Public Origin",
+          "type": "string"
+        }
+      },
+      "title": "NetworkSettings",
+      "type": "object"
+    },
+    "NotificationRoutingSettings": {
+      "properties": {
+        "mode": {
+          "default": "source_thread_or_default",
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "title": "NotificationRoutingSettings",
+      "type": "object"
+    },
+    "OTelSettings": {
+      "properties": {
+        "enable_metrics": {
+          "default": false,
+          "title": "Enable Metrics",
+          "type": "boolean"
+        },
+        "enable_traces": {
+          "default": false,
+          "title": "Enable Traces",
+          "type": "boolean"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Headers",
+          "type": "object"
+        },
+        "otlp_endpoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "",
+          "title": "Otlp Endpoint"
+        },
+        "service_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "team_nats_agents",
+          "title": "Service Name"
+        }
+      },
+      "title": "OTelSettings",
+      "type": "object"
+    },
+    "OnboardingAppearanceSettings": {
+      "properties": {
+        "color_mode": {
+          "default": "dark",
+          "enum": [
+            "light",
+            "dark"
+          ],
+          "title": "Color Mode",
+          "type": "string"
+        },
+        "dark": {
+          "$ref": "#/$defs/DarkMetalAppearanceSettings"
+        },
+        "dynamic_background": {
+          "default": true,
+          "title": "Dynamic Background",
+          "type": "boolean"
+        },
+        "interface_animation": {
+          "default": true,
+          "title": "Interface Animation",
+          "type": "boolean"
+        },
+        "light_colors": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Light Colors",
+          "type": "array"
+        },
+        "light_diffusion": {
+          "default": 58,
+          "title": "Light Diffusion",
+          "type": "integer"
+        },
+        "polygon_line_color": {
+          "default": "#202426",
+          "title": "Polygon Line Color",
+          "type": "string"
+        },
+        "polygon_line_opacity": {
+          "default": 8,
+          "title": "Polygon Line Opacity",
+          "type": "integer"
+        },
+        "polygon_opacity_high": {
+          "default": 70,
+          "title": "Polygon Opacity High",
+          "type": "integer"
+        },
+        "polygon_opacity_low": {
+          "default": 20,
+          "title": "Polygon Opacity Low",
+          "type": "integer"
+        },
+        "polygon_seed": {
+          "default": 4147,
+          "title": "Polygon Seed",
+          "type": "integer"
+        }
+      },
+      "title": "OnboardingAppearanceSettings",
+      "type": "object"
+    },
+    "OnboardingUISettings": {
+      "properties": {
+        "appearance": {
+          "$ref": "#/$defs/OnboardingAppearanceSettings"
+        }
+      },
+      "title": "OnboardingUISettings",
+      "type": "object"
+    },
+    "OpenAICodexModelDiscoverySettings": {
+      "properties": {
+        "cache_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache Path"
+        },
+        "cache_ttl_seconds": {
+          "default": 3600,
+          "title": "Cache Ttl Seconds",
+          "type": "integer"
+        },
+        "client_version": {
+          "default": "1.0.0",
+          "title": "Client Version",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "OpenAICodexModelDiscoverySettings",
+      "type": "object"
+    },
+    "OpenAICodexSettings": {
+      "properties": {
+        "allow_shared_codex_auth_read": {
+          "default": true,
+          "title": "Allow Shared Codex Auth Read",
+          "type": "boolean"
+        },
+        "auth_store_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auth Store Path"
+        },
+        "base_url": {
+          "default": "https://chatgpt.com/backend-api/codex",
+          "title": "Base Url",
+          "type": "string"
+        },
+        "model_discovery": {
+          "$ref": "#/$defs/OpenAICodexModelDiscoverySettings"
+        },
+        "refresh_skew_seconds": {
+          "default": 120,
+          "title": "Refresh Skew Seconds",
+          "type": "integer"
+        },
+        "refresh_timeout_seconds": {
+          "default": 20.0,
+          "title": "Refresh Timeout Seconds",
+          "type": "number"
+        },
+        "shared_codex_home": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Shared Codex Home"
+        }
+      },
+      "title": "OpenAICodexSettings",
+      "type": "object"
+    },
+    "OpenShellSecuritySettings": {
+      "properties": {
+        "create_if_missing": {
+          "default": true,
+          "title": "Create If Missing",
+          "type": "boolean"
+        },
+        "delete_on_shutdown": {
+          "default": false,
+          "title": "Delete On Shutdown",
+          "type": "boolean"
+        },
+        "gateway_binary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gateway Binary"
+        },
+        "gateway_bind_host": {
+          "default": "127.0.0.1",
+          "title": "Gateway Bind Host",
+          "type": "string"
+        },
+        "gateway_bind_port": {
+          "default": 18080,
+          "title": "Gateway Bind Port",
+          "type": "integer"
+        },
+        "gateway_db_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gateway Db Url"
+        },
+        "gateway_driver": {
+          "default": "docker",
+          "title": "Gateway Driver",
+          "type": "string"
+        },
+        "gateway_endpoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gateway Endpoint"
+        },
+        "gateway_extra_args": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Gateway Extra Args",
+          "type": "array"
+        },
+        "gateway_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gateway Name"
+        },
+        "gateway_ready_timeout_seconds": {
+          "default": 60,
+          "title": "Gateway Ready Timeout Seconds",
+          "type": "integer"
+        },
+        "gateway_state_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gateway State Dir"
+        },
+        "manage_gateway": {
+          "default": true,
+          "title": "Manage Gateway",
+          "type": "boolean"
+        },
+        "no_git_ignore": {
+          "default": false,
+          "title": "No Git Ignore",
+          "type": "boolean"
+        },
+        "policy_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Policy File"
+        },
+        "provision_timeout_seconds": {
+          "default": 300,
+          "title": "Provision Timeout Seconds",
+          "type": "integer"
+        },
+        "readiness_timeout_seconds": {
+          "default": 30,
+          "title": "Readiness Timeout Seconds",
+          "type": "integer"
+        },
+        "sandbox_image": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sandbox Image"
+        },
+        "sandbox_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sandbox Name"
+        },
+        "upload_workspace": {
+          "default": true,
+          "title": "Upload Workspace",
+          "type": "boolean"
+        },
+        "workspace_mount": {
+          "default": "/workspace",
+          "title": "Workspace Mount",
+          "type": "string"
+        }
+      },
+      "title": "OpenShellSecuritySettings",
+      "type": "object"
+    },
+    "ProgressNoticeSettings": {
+      "additionalProperties": false,
+      "description": "Counts trusted code sends the person while delegated tasks run.",
+      "properties": {
+        "interval_minutes": {
+          "default": 5.0,
+          "exclusiveMinimum": 0,
+          "maximum": 1440,
+          "title": "Interval Minutes",
+          "type": "number"
+        },
+        "min_tasks": {
+          "default": 3,
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Min Tasks",
+          "type": "integer"
+        }
+      },
+      "title": "ProgressNoticeSettings",
+      "type": "object"
+    },
+    "ProviderLimitSettings": {
+      "additionalProperties": false,
+      "description": "What a worker does when a model provider refuses calls (rate limit, quota, overload).",
+      "properties": {
+        "cooldown_seconds": {
+          "default": 60.0,
+          "exclusiveMinimum": 0,
+          "maximum": 3600,
+          "title": "Cooldown Seconds",
+          "type": "number"
+        },
+        "max_cooldown_seconds": {
+          "default": 600.0,
+          "exclusiveMinimum": 0,
+          "maximum": 86400,
+          "title": "Max Cooldown Seconds",
+          "type": "number"
+        },
+        "max_retries": {
+          "default": 3,
+          "maximum": 20,
+          "minimum": 0,
+          "title": "Max Retries",
+          "type": "integer"
+        },
+        "review_events": {
+          "default": 3,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Review Events",
+          "type": "integer"
+        },
+        "review_window_minutes": {
+          "default": 10.0,
+          "exclusiveMinimum": 0,
+          "maximum": 1440,
+          "title": "Review Window Minutes",
+          "type": "number"
+        }
+      },
+      "title": "ProviderLimitSettings",
+      "type": "object"
+    },
+    "QuietHoursSettings": {
+      "properties": {
+        "allow_urgent_delivery": {
+          "default": true,
+          "title": "Allow Urgent Delivery",
+          "type": "boolean"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "end_hour_local": {
+          "default": 8,
+          "title": "End Hour Local",
+          "type": "integer"
+        },
+        "start_hour_local": {
+          "default": 22,
+          "title": "Start Hour Local",
+          "type": "integer"
+        }
+      },
+      "title": "QuietHoursSettings",
+      "type": "object"
+    },
+    "ResourceLimitsV1": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_bytes": {
+          "default": 268435456,
+          "minimum": 1024,
+          "title": "Artifact Bytes",
+          "type": "integer"
+        },
+        "cpu_time_seconds": {
+          "default": 300,
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Cpu Time Seconds",
+          "type": "integer"
+        },
+        "memory_bytes": {
+          "default": 536870912,
+          "minimum": 16777216,
+          "title": "Memory Bytes",
+          "type": "integer"
+        },
+        "process_count": {
+          "default": 64,
+          "maximum": 4096,
+          "minimum": 1,
+          "title": "Process Count",
+          "type": "integer"
+        },
+        "stderr_bytes": {
+          "default": 65536,
+          "minimum": 1024,
+          "title": "Stderr Bytes",
+          "type": "integer"
+        },
+        "stdout_bytes": {
+          "default": 65536,
+          "minimum": 1024,
+          "title": "Stdout Bytes",
+          "type": "integer"
+        },
+        "wall_time_seconds": {
+          "default": 300,
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Wall Time Seconds",
+          "type": "integer"
+        },
+        "writable_bytes": {
+          "default": 268435456,
+          "minimum": 1048576,
+          "title": "Writable Bytes",
+          "type": "integer"
+        }
+      },
+      "title": "ResourceLimitsV1",
+      "type": "object"
+    },
+    "ScheduleWorkerRulesV1": {
+      "additionalProperties": false,
+      "properties": {
+        "admission_timeout_seconds": {
+          "default": 60.0,
+          "exclusiveMinimum": 0,
+          "maximum": 3600,
+          "title": "Admission Timeout Seconds",
+          "type": "number"
+        },
+        "claim_wait_seconds": {
+          "default": 30.0,
+          "maximum": 86400,
+          "minimum": 0,
+          "title": "Claim Wait Seconds",
+          "type": "number"
+        },
+        "idle_ttl_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 86400,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Idle Ttl Seconds"
+        },
+        "interrupted_run_skip_window_seconds": {
+          "default": 900.0,
+          "maximum": 86400,
+          "minimum": 0,
+          "title": "Interrupted Run Skip Window Seconds",
+          "type": "number"
+        },
+        "launch_when_busy": {
+          "default": false,
+          "title": "Launch When Busy",
+          "type": "boolean"
+        },
+        "max_launch_attempts_per_occurrence": {
+          "default": 2,
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Max Launch Attempts Per Occurrence",
+          "type": "integer"
+        },
+        "retry_backoff_seconds": {
+          "default": 30.0,
+          "exclusiveMinimum": 0,
+          "maximum": 300,
+          "title": "Retry Backoff Seconds",
+          "type": "number"
+        },
+        "startup_timeout_seconds": {
+          "default": 120.0,
+          "exclusiveMinimum": 0,
+          "maximum": 3600,
+          "title": "Startup Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "title": "ScheduleWorkerRulesV1",
+      "type": "object"
+    },
+    "ScheduleWorkersConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "default_startup_policy_enabled": {
+          "default": true,
+          "title": "Default Startup Policy Enabled",
+          "type": "boolean"
+        },
+        "defaults": {
+          "$ref": "#/$defs/ScheduleWorkerRulesV1"
+        },
+        "denied_agent_types": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Denied Agent Types",
+          "type": "array"
+        },
+        "eligible_agent_types": {
+          "description": "TeamLead-managed automatic-start candidates. Registered specialists still require a schedule binding and current launch authority; operator denies take precedence.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Eligible Agent Types",
+          "type": "array"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "lease_loss_wait_timeout_seconds": {
+          "default": 1800.0,
+          "description": "After a worker loses its launch lease, how long it keeps tasks that wait on a person or subtask before failing them and exiting.",
+          "maximum": 86400,
+          "minimum": 60,
+          "title": "Lease Loss Wait Timeout Seconds",
+          "type": "number"
+        },
+        "lease_seconds": {
+          "default": 120.0,
+          "maximum": 3600,
+          "minimum": 10,
+          "title": "Lease Seconds",
+          "type": "number"
+        },
+        "max_admission_timeout_seconds": {
+          "default": 3600.0,
+          "exclusiveMinimum": 0,
+          "maximum": 3600,
+          "title": "Max Admission Timeout Seconds",
+          "type": "number"
+        },
+        "max_claim_wait_seconds": {
+          "default": 86400.0,
+          "maximum": 86400,
+          "minimum": 0,
+          "title": "Max Claim Wait Seconds",
+          "type": "number"
+        },
+        "max_consecutive_interruptions": {
+          "default": 3,
+          "description": "Lost-lease interruptions in a row (per task, or per schedule for scheduled work) before the runtime stops retrying and asks the TeamLead to investigate.",
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Max Consecutive Interruptions",
+          "type": "integer"
+        },
+        "max_idle_ttl_seconds": {
+          "default": 86400.0,
+          "exclusiveMinimum": 0,
+          "maximum": 86400,
+          "title": "Max Idle Ttl Seconds",
+          "type": "number"
+        },
+        "max_launch_attempts_per_occurrence": {
+          "default": 2,
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Max Launch Attempts Per Occurrence",
+          "type": "integer"
+        },
+        "max_startup_timeout_seconds": {
+          "default": 3600.0,
+          "exclusiveMinimum": 0,
+          "maximum": 3600,
+          "title": "Max Startup Timeout Seconds",
+          "type": "number"
+        },
+        "missed_one_time_after_seconds": {
+          "default": 3600.0,
+          "description": "A schedule's last run (a one-time reminder, or the last of a counted series) this late is turned off and its owner told it was missed, so it never arrives late.",
+          "maximum": 604800,
+          "minimum": 60,
+          "title": "Missed One Time After Seconds",
+          "type": "number"
+        },
+        "reconcile_interval_seconds": {
+          "default": 5.0,
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Reconcile Interval Seconds",
+          "type": "number"
+        },
+        "retention_days": {
+          "default": 30,
+          "maximum": 365,
+          "minimum": 1,
+          "title": "Retention Days",
+          "type": "integer"
+        },
+        "review_interval_seconds": {
+          "default": 3600.0,
+          "description": "How long a schedule may stay stuck (overdue and not running) before its owner, and administrators when only they can fix it, are told in the Inbox and in chat.",
+          "maximum": 86400,
+          "minimum": 60,
+          "title": "Review Interval Seconds",
+          "type": "number"
+        }
+      },
+      "title": "ScheduleWorkersConfig",
+      "type": "object"
+    },
+    "SealboxSecuritySettings": {
+      "properties": {
+        "api_version": {
+          "default": "v2",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "auto_initialize": {
+          "default": true,
+          "title": "Auto Initialize",
+          "type": "boolean"
+        },
+        "bind_host": {
+          "default": "127.0.0.1",
+          "title": "Bind Host",
+          "type": "string"
+        },
+        "bind_port": {
+          "default": 8767,
+          "title": "Bind Port",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "manage_service": {
+          "default": true,
+          "title": "Manage Service",
+          "type": "boolean"
+        },
+        "ready_timeout_seconds": {
+          "default": 30,
+          "title": "Ready Timeout Seconds",
+          "type": "integer"
+        },
+        "root_token_file": {
+          "default": "sealbox/root_token",
+          "title": "Root Token File",
+          "type": "string"
+        },
+        "service_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Service Url"
+        },
+        "store_path": {
+          "default": "dbs/sealbox.db",
+          "title": "Store Path",
+          "type": "string"
+        },
+        "tenant_material_dir": {
+          "default": "sealbox/tenants",
+          "title": "Tenant Material Dir",
+          "type": "string"
+        }
+      },
+      "title": "SealboxSecuritySettings",
+      "type": "object"
+    },
+    "SearXNGServiceSettings": {
+      "properties": {
+        "base_url": {
+          "default": "http://127.0.0.1:8080",
+          "title": "Base Url",
+          "type": "string"
+        },
+        "default_num_results": {
+          "default": 8,
+          "title": "Default Num Results",
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "default": 30.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "verify_tls": {
+          "default": true,
+          "title": "Verify Tls",
+          "type": "boolean"
+        }
+      },
+      "title": "SearXNGServiceSettings",
+      "type": "object"
+    },
+    "SecurityLayerSettings": {
+      "properties": {
+        "bitwarden_server_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bitwarden Server Url"
+        },
+        "broker_bind_host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "0.0.0.0",
+          "title": "Broker Bind Host"
+        },
+        "broker_bind_port": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 18600,
+          "title": "Broker Bind Port"
+        },
+        "broker_credentials_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "broker_credentials",
+          "title": "Broker Credentials Dir"
+        },
+        "broker_internal_base_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "http://127.0.0.1:18600",
+          "title": "Broker Internal Base Url"
+        },
+        "broker_public_port": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 18600,
+          "title": "Broker Public Port"
+        },
+        "code_execution": {
+          "$ref": "#/$defs/CodeExecutionSecuritySettings"
+        },
+        "credential_catalog": {
+          "$ref": "#/$defs/CredentialCatalogSettings"
+        },
+        "credential_state_backend": {
+          "$ref": "#/$defs/CredentialStateBackendSettings"
+        },
+        "mode": {
+          "default": "broker",
+          "title": "Mode",
+          "type": "string"
+        },
+        "openshell": {
+          "$ref": "#/$defs/OpenShellSecuritySettings"
+        },
+        "sealbox": {
+          "$ref": "#/$defs/SealboxSecuritySettings"
+        },
+        "tool_setup_recheck_days": {
+          "default": 30,
+          "minimum": 0,
+          "title": "Tool Setup Recheck Days",
+          "type": "integer"
+        }
+      },
+      "title": "SecurityLayerSettings",
+      "type": "object"
+    },
+    "SqliteVectorStorageSettings": {
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "provider": {
+          "default": "sqlite_vec",
+          "title": "Provider",
+          "type": "string"
+        },
+        "require_extension": {
+          "default": true,
+          "title": "Require Extension",
+          "type": "boolean"
+        }
+      },
+      "title": "SqliteVectorStorageSettings",
+      "type": "object"
+    },
+    "StartupAgentSettings": {
+      "properties": {
+        "count": {
+          "default": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "named_agent_type": {
+          "title": "Named Agent Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "named_agent_type"
+      ],
+      "title": "StartupAgentSettings",
+      "type": "object"
+    },
+    "StatePostgresStorageSettings": {
+      "properties": {
+        "dsn": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dsn"
+        }
+      },
+      "title": "StatePostgresStorageSettings",
+      "type": "object"
+    },
+    "StateSqliteStorageSettings": {
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        }
+      },
+      "title": "StateSqliteStorageSettings",
+      "type": "object"
+    },
+    "StateStorageSettings": {
+      "properties": {
+        "backend": {
+          "default": "sqlite",
+          "title": "Backend",
+          "type": "string"
+        },
+        "postgres": {
+          "$ref": "#/$defs/StatePostgresStorageSettings"
+        },
+        "sqlite": {
+          "$ref": "#/$defs/StateSqliteStorageSettings"
+        }
+      },
+      "title": "StateStorageSettings",
+      "type": "object"
+    },
+    "ToolPolicySettings": {
+      "description": "Tool settings that are not access (access is given with grants).",
+      "properties": {
+        "scratch_retention_days": {
+          "default": 14,
+          "minimum": 0,
+          "title": "Scratch Retention Days",
+          "type": "integer"
+        }
+      },
+      "title": "ToolPolicySettings",
+      "type": "object"
+    },
+    "TransportSettings": {
+      "properties": {
+        "ack_wait_seconds": {
+          "default": 3600.0,
+          "title": "Ack Wait Seconds",
+          "type": "number"
+        },
+        "credentials_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Credentials File"
+        },
+        "duplicate_window_seconds": {
+          "default": 600.0,
+          "title": "Duplicate Window Seconds",
+          "type": "number"
+        },
+        "jetstream_enabled": {
+          "default": true,
+          "title": "Jetstream Enabled",
+          "type": "boolean"
+        },
+        "max_deliver": {
+          "default": 5,
+          "title": "Max Deliver",
+          "type": "integer"
+        },
+        "nats_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nats Name"
+        },
+        "nats_password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nats Password"
+        },
+        "nats_servers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Nats Servers",
+          "type": "array"
+        },
+        "nats_url": {
+          "default": "nats://127.0.0.1:4222",
+          "title": "Nats Url",
+          "type": "string"
+        },
+        "nats_user": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nats User"
+        },
+        "presence_max_age_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 600.0,
+          "title": "Presence Max Age Seconds"
+        },
+        "process_consumer_inactive_threshold_seconds": {
+          "default": 300.0,
+          "exclusiveMinimum": 0,
+          "title": "Process Consumer Inactive Threshold Seconds",
+          "type": "number"
+        },
+        "replicas": {
+          "default": 1,
+          "title": "Replicas",
+          "type": "integer"
+        },
+        "storage": {
+          "default": "file",
+          "title": "Storage",
+          "type": "string"
+        },
+        "subject_prefix": {
+          "default": "",
+          "title": "Subject Prefix",
+          "type": "string"
+        },
+        "type": {
+          "default": "nats",
+          "title": "Type",
+          "type": "string"
+        },
+        "work_max_age_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 604800.0,
+          "title": "Work Max Age Seconds"
+        }
+      },
+      "title": "TransportSettings",
+      "type": "object"
+    },
+    "UISettings": {
+      "properties": {
+        "onboarding": {
+          "$ref": "#/$defs/OnboardingUISettings"
+        }
+      },
+      "title": "UISettings",
+      "type": "object"
+    },
+    "UserProfileSettings": {
+      "properties": {
+        "canonical_user_id": {
+          "default": "User",
+          "title": "Canonical User Id",
+          "type": "string"
+        },
+        "default_session_key": {
+          "default": "default",
+          "title": "Default Session Key",
+          "type": "string"
+        },
+        "display_name": {
+          "default": "User",
+          "title": "Display Name",
+          "type": "string"
+        },
+        "initial_context": {
+          "default": "",
+          "title": "Initial Context",
+          "type": "string"
+        },
+        "role": {
+          "default": "",
+          "title": "Role",
+          "type": "string"
+        },
+        "timezone": {
+          "default": "America/Chicago",
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "title": "UserProfileSettings",
+      "type": "object"
+    },
+    "VoiceSettings": {
+      "properties": {
+        "api_base": {
+          "default": "https://api.x.ai/v1",
+          "title": "Api Base",
+          "type": "string"
+        },
+        "connect_timeout_seconds": {
+          "default": 10.0,
+          "title": "Connect Timeout Seconds",
+          "type": "number"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "input_enabled": {
+          "default": true,
+          "title": "Input Enabled",
+          "type": "boolean"
+        },
+        "output_enabled": {
+          "default": false,
+          "title": "Output Enabled",
+          "type": "boolean"
+        },
+        "provider": {
+          "default": "grok",
+          "title": "Provider",
+          "type": "string"
+        },
+        "request_timeout_seconds": {
+          "default": 120.0,
+          "title": "Request Timeout Seconds",
+          "type": "number"
+        },
+        "response_mode": {
+          "default": "text_only",
+          "title": "Response Mode",
+          "type": "string"
+        },
+        "stt_format_text": {
+          "default": true,
+          "title": "Stt Format Text",
+          "type": "boolean"
+        },
+        "stt_language": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "en",
+          "title": "Stt Language"
+        },
+        "tts_bit_rate": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 128000,
+          "title": "Tts Bit Rate"
+        },
+        "tts_language": {
+          "default": "auto",
+          "title": "Tts Language",
+          "type": "string"
+        },
+        "tts_output_codec": {
+          "default": "mp3",
+          "title": "Tts Output Codec",
+          "type": "string"
+        },
+        "tts_sample_rate": {
+          "default": 24000,
+          "title": "Tts Sample Rate",
+          "type": "integer"
+        },
+        "tts_voice": {
+          "default": "eve",
+          "title": "Tts Voice",
+          "type": "string"
+        }
+      },
+      "title": "VoiceSettings",
+      "type": "object"
+    },
+    "WebServicesSettings": {
+      "properties": {
+        "crawl4ai": {
+          "$ref": "#/$defs/Crawl4AIServiceSettings"
+        },
+        "searxng": {
+          "$ref": "#/$defs/SearXNGServiceSettings"
+        }
+      },
+      "title": "WebServicesSettings",
+      "type": "object"
+    },
+    "WorkerPoolsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "capacity_warning_ratio": {
+          "default": 0.95,
+          "maximum": 1.0,
+          "minimum": 0.5,
+          "title": "Capacity Warning Ratio",
+          "type": "number"
+        },
+        "default_max_workers_per_type": {
+          "default": 4,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Default Max Workers Per Type",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "max_launches_per_type_per_hour": {
+          "default": 60,
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Max Launches Per Type Per Hour",
+          "type": "integer"
+        },
+        "max_retries_after_worker_loss": {
+          "default": 3,
+          "maximum": 20,
+          "minimum": 0,
+          "title": "Max Retries After Worker Loss",
+          "type": "integer"
+        },
+        "max_starts_per_pass": {
+          "default": 4,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Max Starts Per Pass",
+          "type": "integer"
+        },
+        "max_total_workers_per_team": {
+          "default": 32,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Total Workers Per Team",
+          "type": "integer"
+        },
+        "max_workers_per_type_ceiling": {
+          "default": 16,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Workers Per Type Ceiling",
+          "type": "integer"
+        },
+        "progress_notices": {
+          "$ref": "#/$defs/ProgressNoticeSettings"
+        },
+        "provider_limit": {
+          "$ref": "#/$defs/ProviderLimitSettings"
+        },
+        "recurring_incident_count": {
+          "default": 3,
+          "maximum": 100,
+          "minimum": 2,
+          "title": "Recurring Incident Count",
+          "type": "integer"
+        },
+        "recurring_incident_window_hours": {
+          "default": 24.0,
+          "exclusiveMinimum": 0,
+          "maximum": 720,
+          "title": "Recurring Incident Window Hours",
+          "type": "number"
+        },
+        "review_repeat_after_minutes": {
+          "default": 30.0,
+          "exclusiveMinimum": 0,
+          "maximum": 10080,
+          "title": "Review Repeat After Minutes",
+          "type": "number"
+        },
+        "scale_up_wait_seconds": {
+          "default": 20.0,
+          "maximum": 3600,
+          "minimum": 0,
+          "title": "Scale Up Wait Seconds",
+          "type": "number"
+        }
+      },
+      "title": "WorkerPoolsConfig",
+      "type": "object"
+    },
+    "WorkspaceSettings": {
+      "description": "Workspace behavior. Locations are derived from the instance root\n(``runtime_settings.instance_layout``) and are not configurable.",
+      "properties": {
+        "external_skill_repositories": {
+          "items": {
+            "type": "string"
+          },
+          "title": "External Skill Repositories",
+          "type": "array"
+        },
+        "objective_execution_enabled": {
+          "default": true,
+          "title": "Objective Execution Enabled",
+          "type": "boolean"
+        },
+        "objective_execution_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Objective Execution Paths",
+          "type": "array"
+        },
+        "refresh_external_skills_on_start": {
+          "default": false,
+          "title": "Refresh External Skills On Start",
+          "type": "boolean"
+        },
+        "skill_installation": {
+          "$ref": "#/$defs/WorkspaceSkillInstallationSettings"
+        }
+      },
+      "title": "WorkspaceSettings",
+      "type": "object"
+    },
+    "WorkspaceSkillInstallationSettings": {
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "max_repository_bytes": {
+          "default": 104857600,
+          "title": "Max Repository Bytes",
+          "type": "integer"
+        },
+        "plan_ttl_seconds": {
+          "default": 86400,
+          "title": "Plan Ttl Seconds",
+          "type": "integer"
+        },
+        "safe_max_score": {
+          "default": 20,
+          "title": "Safe Max Score",
+          "type": "integer"
+        },
+        "scanner_executable": {
+          "default": "skillspector",
+          "title": "Scanner Executable",
+          "type": "string"
+        },
+        "scanner_timeout_seconds": {
+          "default": 180,
+          "title": "Scanner Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "WorkspaceSkillInstallationSettings",
+      "type": "object"
+    },
+    "XAIOAuthSettings": {
+      "properties": {
+        "auth_store_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auth Store Path"
+        },
+        "base_url": {
+          "default": "https://api.x.ai/v1",
+          "title": "Base Url",
+          "type": "string"
+        },
+        "refresh_skew_seconds": {
+          "default": 3600,
+          "title": "Refresh Skew Seconds",
+          "type": "integer"
+        },
+        "refresh_timeout_seconds": {
+          "default": 20,
+          "title": "Refresh Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "title": "XAIOAuthSettings",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/GatewayInstanceConfig.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "access_workflows": {
+      "$ref": "#/$defs/AccessWorkflowSettings"
+    },
+    "activity_collector": {
+      "$ref": "#/$defs/ActivityCollectorSettings"
+    },
+    "agent": {
+      "$ref": "#/$defs/AgentRuntimeDefaultsSettings"
+    },
+    "agent_types": {
+      "additionalProperties": {
+        "$ref": "#/$defs/AgentTypeRuntimeSettings"
+      },
+      "title": "Agent Types",
+      "type": "object"
+    },
+    "assistant": {
+      "$ref": "#/$defs/AssistantProfileSettings"
+    },
+    "authorization": {
+      "$ref": "#/$defs/AuthorizationSettings"
+    },
+    "delivery": {
+      "$ref": "#/$defs/DeliverySettings"
+    },
+    "embedding": {
+      "$ref": "#/$defs/InstanceEmbeddingSettings"
+    },
+    "execution_control": {
+      "$ref": "#/$defs/ExecutionControlSettings"
+    },
+    "gateway": {
+      "$ref": "#/$defs/ManagerTargetSettings"
+    },
+    "heartbeat": {
+      "$ref": "#/$defs/HeartbeatSettings"
+    },
+    "instance_name": {
+      "title": "Instance Name",
+      "type": "string"
+    },
+    "instance_root": {
+      "title": "Instance Root",
+      "type": "string"
+    },
+    "interactive_apps": {
+      "$ref": "#/$defs/InteractiveAppsSettings"
+    },
+    "launch": {
+      "$ref": "#/$defs/LaunchSettings"
+    },
+    "llm": {
+      "$ref": "#/$defs/InstanceLLMSettings"
+    },
+    "mcp": {
+      "$ref": "#/$defs/MCPSettings"
+    },
+    "mcp_profiles": {
+      "additionalProperties": true,
+      "title": "Mcp Profiles",
+      "type": "object"
+    },
+    "network": {
+      "$ref": "#/$defs/NetworkSettings"
+    },
+    "otel": {
+      "$ref": "#/$defs/OTelSettings"
+    },
+    "schema_version": {
+      "default": 12,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "security_layer": {
+      "$ref": "#/$defs/SecurityLayerSettings"
+    },
+    "state": {
+      "$ref": "#/$defs/GatewayStateSettings"
+    },
+    "tool_policy": {
+      "$ref": "#/$defs/ToolPolicySettings"
+    },
+    "transport": {
+      "$ref": "#/$defs/TransportSettings"
+    },
+    "ui": {
+      "$ref": "#/$defs/UISettings"
+    },
+    "user": {
+      "$ref": "#/$defs/UserProfileSettings"
+    },
+    "voice": {
+      "$ref": "#/$defs/VoiceSettings"
+    },
+    "web_services": {
+      "$ref": "#/$defs/WebServicesSettings"
+    },
+    "workspace": {
+      "$ref": "#/$defs/WorkspaceSettings"
+    }
+  },
+  "required": [
+    "instance_name",
+    "instance_root"
+  ],
+  "title": "GatewayInstanceConfig",
+  "type": "object"
+}

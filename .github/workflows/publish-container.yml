@@ -1,0 +1,368 @@
+name: Publish Bundle Container
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      build_only:
+        description: Build both architectures without publishing images or registry caches
+        required: false
+        type: boolean
+        default: false
+      release_tag:
+        description: Existing release tag to rebuild from unchanged source
+        required: false
+        type: string
+      image_tag:
+        description: Optional additional GHCR tag for this test build
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+  RELEASE_TAG: ${{ inputs.release_tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
+
+defaults:
+  run:
+    shell: rtk proxy bash --noprofile --norc -e -o pipefail {0}
+
+jobs:
+  build-and-push:
+    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    # Each matrix job emits only its own key; completion order cannot overwrite it.
+    outputs:
+      amd64: ${{ steps.digest.outputs.amd64 }}
+      arm64: ${{ steps.digest.outputs.arm64 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            docker_arch: x86_64
+            runner: [self-hosted, Linux, X64, ua-build, ua-linux]
+          - arch: arm64
+            docker_arch: aarch64
+            runner: [self-hosted, macOS, ARM64, ua-build, ua-macos]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    timeout-minutes: 45
+    steps:
+      - name: Require managed local runner
+        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Validate release tag
+        if: env.RELEASE_TAG != ''
+        run: python3 scripts/validate_release_tag.py "$RELEASE_TAG"
+
+      - name: Record Docker cleanup ownership
+        run: touch "$UA_CI_CACHE/docker-used"
+
+      # Docker hands a login to an installed system helper, such as the macOS
+      # keychain, whenever its settings name none. A runner service cannot use
+      # the keychain, and a helper would keep the job token outside the job's
+      # disposable state. The hooks give each job a private Docker settings
+      # folder and delete it when the job ends. An empty helper for the
+      # registry keeps the login in that folder's config.json, which only the
+      # runner account can read. Write it before any Docker command runs.
+      - name: Keep registry logins in this job's Docker settings
+        run: |
+          if [ -z "$UA_CI_CACHE" ] || [ "$DOCKER_CONFIG" != "$UA_CI_CACHE/docker" ] ||
+            [ ! -d "$DOCKER_CONFIG" ] || [ -L "$DOCKER_CONFIG" ]; then
+            echo "::error::Docker settings must be this job's private folder from the runner hooks"
+            exit 1
+          fi
+          chmod 700 "$DOCKER_CONFIG"
+          umask 077
+          set -o noclobber
+          printf '{"credHelpers": {"%s": ""}}\n' "$REGISTRY" > "$DOCKER_CONFIG/config.json"
+
+      - name: Require a native Docker daemon
+        env:
+          EXPECTED_DOCKER_ARCH: ${{ matrix.docker_arch }}
+        run: test "$(docker info --format '{{.Architecture}}')" = "$EXPECTED_DOCKER_ARCH"
+
+      - name: Check Docker filesystem reserve
+        run: |
+          python3 - <<'PYTHON'
+          import os, subprocess
+          output = subprocess.check_output([
+              'rtk', 'proxy', 'docker', 'run', '--rm',
+              '--label', 'com.universalagents.ci.job=' + os.environ['UA_CI_ID'],
+              'alpine:3.21', 'df', '-Pk', '/'], text=True)
+          available_kib = int(output.splitlines()[-1].split()[3])
+          print(f'Docker filesystem has {available_kib / 1024**2:.1f} GiB available')
+          if available_kib < 30 * 1024**2:
+              raise SystemExit('Docker filesystem has less than 30 GiB free')
+          PYTHON
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        with:
+          name: ${{ env.UA_CI_BUILDER }}
+
+      - name: Log in to GHCR
+        if: ${{ !inputs.build_only }}
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Confirm the registry login stayed in this job's Docker settings
+        if: ${{ !inputs.build_only }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os
+          path = os.path.join(os.environ["DOCKER_CONFIG"], "config.json")
+          with open(path) as stream:
+              settings = json.load(stream)
+          registry = os.environ["REGISTRY"]
+          if settings.get("credHelpers", {}).get(registry) != "" or not settings.get("auths", {}).get(registry, {}).get("auth"):
+              raise SystemExit(f"The {registry} login is not in this job's Docker settings file")
+          if os.stat(path).st_mode & 0o077:
+              raise SystemExit("This job's Docker settings file is readable by other accounts")
+          print(f"The {registry} login is kept in this job's private Docker settings")
+          PYTHON
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          context: git
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern={{version}},value=${{ env.RELEASE_TAG }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.RELEASE_TAG }}
+            type=semver,pattern={{major}},value=${{ env.RELEASE_TAG }}
+            type=raw,value={{branch}},enable=${{ github.event_name == 'workflow_dispatch' && inputs.release_tag == '' }}
+            type=sha,prefix=sha-
+            type=raw,value=${{ inputs.image_tag }},enable=${{ inputs.image_tag != '' }}
+          labels: |
+            org.opencontainers.image.title=Universal Agents
+            org.opencontainers.image.description=Bundled Universal Agents personal assistant runtime
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Build native platform bundle
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: Dockerfile.bundle
+          platforms: linux/${{ matrix.arch }}
+          push: ${{ !inputs.build_only }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          outputs: type=image,push-by-digest=true,name-canonical=true
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            INSTALL_NATS=true
+            INSTALL_POSTGRES=false
+            INSTALL_SQLITE=true
+            INSTALL_NODEJS=true
+            INSTALL_CREDENTIAL_CLIS=sealbox
+            STRIP_SOURCE_CODE=true
+          cache-from: ${{ !inputs.build_only && format('type=registry,ref={0}/{1}:buildcache-{2}', env.REGISTRY, env.IMAGE_NAME, matrix.arch) || '' }}
+          cache-to: ${{ !inputs.build_only && format('type=registry,ref={0}/{1}:buildcache-{2},mode=max,ignore-error=true', env.REGISTRY, env.IMAGE_NAME, matrix.arch) || '' }}
+          provenance: true
+
+      - name: Record immutable platform digest
+        id: digest
+        if: ${{ !inputs.build_only }}
+        env:
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE_ARCH: ${{ matrix.arch }}
+        run: printf '%s=%s\n' "$IMAGE_ARCH" "$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+
+  publish-manifest:
+    needs: build-and-push
+    if: ${{ !inputs.build_only && github.event.repository.private }}
+    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Require managed local runner
+        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.release_tag || github.ref }}
+      # Release tools come from this workflow's commit, not the release tag:
+      # repairing an older release must not depend on scripts it predates.
+      - name: Check out release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: .release-tooling
+          sparse-checkout: scripts
+      - name: Classify release tag
+        id: release
+        if: env.RELEASE_TAG != ''
+        run: |
+          kind="$(python3 .release-tooling/scripts/validate_release_tag.py --kind --version-file VERSION "$RELEASE_TAG")"
+          echo "kind=${kind}" >> "$GITHUB_OUTPUT"
+      - name: Restore platform digests from job outputs
+        env:
+          AMD64_DIGEST: ${{ needs.build-and-push.outputs.amd64 }}
+          ARM64_DIGEST: ${{ needs.build-and-push.outputs.arm64 }}
+        run: |
+          mkdir -p "$UA_CI_CACHE/digests"
+          printf '%s\n' "$AMD64_DIGEST" > "$UA_CI_CACHE/digests/amd64.digest"
+          printf '%s\n' "$ARM64_DIGEST" > "$UA_CI_CACHE/digests/arm64.digest"
+      # Same login storage as the platform builds; see that job's comment.
+      - name: Keep registry logins in this job's Docker settings
+        run: |
+          if [ -z "$UA_CI_CACHE" ] || [ "$DOCKER_CONFIG" != "$UA_CI_CACHE/docker" ] ||
+            [ ! -d "$DOCKER_CONFIG" ] || [ -L "$DOCKER_CONFIG" ]; then
+            echo "::error::Docker settings must be this job's private folder from the runner hooks"
+            exit 1
+          fi
+          chmod 700 "$DOCKER_CONFIG"
+          umask 077
+          set -o noclobber
+          printf '{"credHelpers": {"%s": ""}}\n' "$REGISTRY" > "$DOCKER_CONFIG/config.json"
+      - name: Log in to GHCR
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Confirm the registry login stayed in this job's Docker settings
+        run: |
+          python3 - <<'PYTHON'
+          import json, os
+          path = os.path.join(os.environ["DOCKER_CONFIG"], "config.json")
+          with open(path) as stream:
+              settings = json.load(stream)
+          registry = os.environ["REGISTRY"]
+          if settings.get("credHelpers", {}).get(registry) != "" or not settings.get("auths", {}).get(registry, {}).get("auth"):
+              raise SystemExit(f"The {registry} login is not in this job's Docker settings file")
+          if os.stat(path).st_mode & 0o077:
+              raise SystemExit("This job's Docker settings file is readable by other accounts")
+          print(f"The {registry} login is kept in this job's private Docker settings")
+          PYTHON
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          context: git
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern={{version}},value=${{ env.RELEASE_TAG }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.RELEASE_TAG }}
+            type=semver,pattern={{major}},value=${{ env.RELEASE_TAG }}
+            type=raw,value={{branch}},enable=${{ github.event_name == 'workflow_dispatch' && inputs.release_tag == '' }}
+            type=sha,prefix=sha-
+            type=raw,value=${{ inputs.image_tag }},enable=${{ inputs.image_tag != '' }}
+          labels: |
+            org.opencontainers.image.title=Universal Agents
+            org.opencontainers.image.description=Bundled Universal Agents personal assistant runtime
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Publish combined platform manifest
+        id: merge
+        env:
+          IMAGE_TAGS: ${{ steps.metadata.outputs.tags }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: python3 .github/runner/merge_manifest.py "$UA_CI_CACHE/digests"
+
+      # A private repository without GitHub Enterprise Cloud cannot attest.
+      # Each release needs the owner's exact-tag waiver; nightly pre-releases
+      # (testing only, built unattended) are waived only while the owner sets
+      # PRIVATE_NIGHTLY_ATTESTATION_WAIVER to "true".
+      - name: Warn when private-release attestation is waived
+        if: >-
+          !inputs.build_only && env.RELEASE_TAG != '' && github.event.repository.private &&
+          (vars.PRIVATE_RELEASE_ATTESTATION_WAIVER == env.RELEASE_TAG ||
+          (steps.release.outputs.kind == 'nightly' && vars.PRIVATE_NIGHTLY_ATTESTATION_WAIVER == 'true'))
+        env:
+          RELEASE_REF: ${{ env.RELEASE_TAG }}
+          REPOSITORY: ${{ github.repository }}
+          EXACT_TAG_WAIVER: ${{ vars.PRIVATE_RELEASE_ATTESTATION_WAIVER }}
+        run: |
+          if [ "${EXACT_TAG_WAIVER}" = "${RELEASE_REF}" ]; then
+            waiver="an explicit exact-tag waiver"
+          else
+            waiver="the standing nightly waiver PRIVATE_NIGHTLY_ATTESTATION_WAIVER"
+          fi
+          echo "::warning title=Image attestation waived::Release ${RELEASE_REF} for private repository ${REPOSITORY} is publishing without an image attestation under ${waiver}."
+
+      - name: Attest published image
+        if: >-
+          !inputs.build_only && (env.RELEASE_TAG == '' || github.event.repository.private == false ||
+          (vars.PRIVATE_RELEASE_ATTESTATION_WAIVER != env.RELEASE_TAG &&
+          (steps.release.outputs.kind != 'nightly' || vars.PRIVATE_NIGHTLY_ATTESTATION_WAIVER != 'true')))
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.merge.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attach verified container reference to release
+        if: env.RELEASE_TAG != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          IMAGE_DIGEST: ${{ steps.merge.outputs.digest }}
+        run: |
+          # The source-release workflow runs independently. Wait for its release.
+          for attempt in {1..20}; do
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 30
+          done
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          reference="$UA_CI_CACHE/container-image.txt"
+          {
+            printf 'Release: %s\n' "$RELEASE_TAG"
+            printf 'Source commit: %s\n' "$(git rev-parse HEAD)"
+            printf 'Image: %s:%s\n' "$IMAGE" "${RELEASE_TAG#v}"
+            printf 'Immutable image: %s@%s\n' "$IMAGE" "$IMAGE_DIGEST"
+            printf 'Platforms: linux/amd64, linux/arm64\n'
+            printf 'Pull: docker pull %s@%s\n' "$IMAGE" "$IMAGE_DIGEST"
+          } > "$reference"
+          (cd "$UA_CI_CACHE" && sha256sum container-image.txt > container-image.txt.sha256)
+          gh release upload "$RELEASE_TAG" "$reference" "$reference.sha256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          cat "$reference" >> "$GITHUB_STEP_SUMMARY"
+
+      # Stable releases only: betas, release candidates and nightlies are never
+      # proposed. The launcher repository's check decides whether to merge.
+      - name: Propose launcher compatibility entry
+        if: env.RELEASE_TAG != '' && steps.release.outputs.kind == 'stable'
+        env:
+          GH_TOKEN: ${{ secrets.DESKTOP_COMPATIBILITY_TOKEN }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          IMAGE_DIGEST: ${{ steps.merge.outputs.digest }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning title=Launcher compatibility PR not opened::The DESKTOP_COMPATIBILITY_TOKEN secret is not set, so no pull request was opened to add ${RELEASE_TAG} to the desktop launcher's compatibility list. The release itself is complete. To open the pull request by hand, download container-image.txt from the release and run: python3 scripts/propose_desktop_compatibility.py ${RELEASE_TAG} --digest ${IMAGE_DIGEST} --container-image-file container-image.txt (with GH_TOKEN set to a token that can write to enzimo/universal-agents-desktop)."
+            exit 0
+          fi
+          python3 .release-tooling/scripts/propose_desktop_compatibility.py "$RELEASE_TAG" \
+            --digest "$IMAGE_DIGEST" \
+            --image-repository "$IMAGE" \
+            --container-image-file "$UA_CI_CACHE/container-image.txt"

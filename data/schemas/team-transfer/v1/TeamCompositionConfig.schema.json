@@ -1,0 +1,137 @@
+{
+  "$defs": {
+    "TeamCompositionEphemeralPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "idle_ttl_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Idle Ttl Seconds"
+        }
+      },
+      "title": "TeamCompositionEphemeralPolicy",
+      "type": "object"
+    },
+    "TeamCompositionEphemeralSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_types": {
+          "additionalProperties": {
+            "$ref": "#/$defs/TeamCompositionEphemeralPolicy"
+          },
+          "title": "Agent Types",
+          "type": "object"
+        },
+        "default_idle_ttl_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 600.0,
+          "title": "Default Idle Ttl Seconds"
+        }
+      },
+      "title": "TeamCompositionEphemeralSettings",
+      "type": "object"
+    },
+    "TeamCompositionStartupAgent": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "default": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "named_agent_type": {
+          "title": "Named Agent Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "named_agent_type"
+      ],
+      "title": "TeamCompositionStartupAgent",
+      "type": "object"
+    },
+    "TeamCompositionStartupSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/$defs/TeamCompositionStartupAgent"
+          },
+          "title": "Agents",
+          "type": "array"
+        },
+        "mode": {
+          "default": "merge",
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "title": "TeamCompositionStartupSettings",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/TeamCompositionConfig.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "ephemeral_agents": {
+      "$ref": "#/$defs/TeamCompositionEphemeralSettings"
+    },
+    "generated_agent_bundles_dir": {
+      "default": "agent_bundles/team_lead_generated",
+      "title": "Generated Agent Bundles Dir",
+      "type": "string"
+    },
+    "notes": {
+      "default": "",
+      "title": "Notes",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": 4,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "startup_agents": {
+      "$ref": "#/$defs/TeamCompositionStartupSettings"
+    },
+    "updated_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Updated At"
+    }
+  },
+  "title": "TeamCompositionConfig",
+  "type": "object"
+}

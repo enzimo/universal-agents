@@ -1,0 +1,299 @@
+{
+  "protocol_version": 1,
+  "valid": [
+    {
+      "name": "channel_inbound_text",
+      "payload": {
+        "protocol_version": 1,
+        "message_type": "channel.inbound.v1",
+        "request_id": "request-001",
+        "idempotency_key": "telegram:update:1001",
+        "plugin_id": "builtin.telegram",
+        "adapter_instance_id": "telegram-host-1",
+        "session_epoch": "epoch-telegram-1",
+        "stream_position": 1,
+        "channel_name": "telegram",
+        "external_user_id": "external-user-42",
+        "chat_id": "chat-9",
+        "thread_id": "thread-3",
+        "external_message_id": "message-1001",
+        "text": "Please summarize the report.",
+        "attachments": [],
+        "received_at_utc": "2026-07-28T18:00:00Z"
+      }
+    },
+    {
+      "name": "channel_inbound_attachment",
+      "payload": {
+        "protocol_version": 1,
+        "message_type": "channel.inbound.v1",
+        "request_id": "request-002",
+        "idempotency_key": "discord:message:1002",
+        "plugin_id": "builtin.discord",
+        "adapter_instance_id": "discord-host-1",
+        "session_epoch": "epoch-discord-1",
+        "stream_position": 1,
+        "channel_name": "discord",
+        "external_user_id": "external-user-43",
+        "chat_id": "chat-10",
+        "external_message_id": "message-1002",
+        "text": "",
+        "attachments": [
+          {
+            "attachment_id": "attachment-1002",
+            "filename": "diagram.png",
+            "content_type": "image/png",
+            "kind": "image",
+            "size_bytes": 2048,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "storage_reference": "adapter-upload:upload-1002"
+          }
+        ],
+        "received_at_utc": "2026-07-28T18:00:01Z"
+      }
+    },
+    {
+      "name": "channel_command",
+      "payload": {
+        "protocol_version": 1,
+        "message_type": "channel.command.v1",
+        "request_id": "request-003",
+        "idempotency_key": "website:command:1003",
+        "plugin_id": "builtin.internal_website",
+        "adapter_instance_id": "website-host-1",
+        "session_epoch": "epoch-website-1",
+        "stream_position": 1,
+        "channel_name": "website",
+        "external_user_id": "browser-client-7",
+        "chat_id": "web-chat",
+        "external_message_id": "message-1003",
+        "command_name": "session.new",
+        "arguments": {},
+        "received_at_utc": "2026-07-28T18:00:02Z"
+      }
+    },
+    {
+      "name": "request_accepted",
+      "payload": {
+        "protocol_version": 1,
+        "message_type": "channel.request_accepted.v1",
+        "request_id": "request-001",
+        "idempotency_key": "telegram:update:1001",
+        "status": "accepted",
+        "correlation_id": "corr-001",
+        "accepted_at_utc": "2026-07-28T18:00:03Z"
+      }
+    },
+    {
+      "name": "gateway_delivery",
+      "payload": {
+        "protocol_version": 1,
+        "message_type": "gateway.delivery.v1",
+        "event_id": "delivery-001",
+        "idempotency_key": "delivery:001",
+        "plugin_id": "builtin.telegram",
+        "adapter_instance_id": "telegram-host-1",
+        "session_epoch": "epoch-telegram-1",
+        "stream_position": 1,
+        "channel_name": "telegram",
+        "external_user_id": "external-user-42",
+        "chat_id": "chat-9",
+        "thread_id": "thread-3",
+        "in_reply_to_external_message_id": "message-1001",
+        "session_key": "session-001",
+        "conversation_id": "conversation-001",
+        "correlation_id": "corr-001",
+        "text": "The report is summarized.",
+        "message_level": "normal",
+        "attachments": [
+          {
+            "attachment_id": "attachment-2001",
+            "filename": "summary.pdf",
+            "content_type": "application/pdf",
+            "kind": "document",
+            "size_bytes": 4096,
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "storage_reference": "gateway-object:attachment-2001"
+          }
+        ],
+        "emitted_at_utc": "2026-07-28T18:00:04Z"
+      }
+    },
+    {
+      "name": "gateway_request_state",
+      "payload": {
+        "protocol_version": 1,
+        "message_type": "gateway.request_state.v1",
+        "event_id": "state-001",
+        "idempotency_key": "state:corr-001:completed",
+        "plugin_id": "builtin.telegram",
+        "adapter_instance_id": "telegram-host-1",
+        "session_epoch": "epoch-telegram-1",
+        "stream_position": 2,
+        "channel_name": "telegram",
+        "correlation_id": "corr-001",
+        "session_key": "session-001",
+        "conversation_id": "conversation-001",
+        "status": "completed",
+        "reason_code": "terminal_response",
+        "updated_at_utc": "2026-07-28T18:00:05Z"
+      }
+    },
+    {
+      "name": "adapter_registration",
+      "payload": {
+        "protocol_version": 1,
+        "message_type": "adapter.registration.v1",
+        "registration_id": "registration-001",
+        "idempotency_key": "registration:telegram-host-1:1",
+        "plugin_id": "builtin.telegram",
+        "adapter_instance_id": "telegram-host-1",
+        "plugin_api_version": "1",
+        "implementation_version": "1.0.0",
+        "configuration_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "channel_names": ["telegram"],
+        "capabilities": [
+          "inbound_text",
+          "outbound_text",
+          "proactive_delivery",
+          "attachments",
+          "polling_lifecycle"
+        ],
+        "supported_limits": {
+          "max_in_flight_events": 16,
+          "max_payload_bytes": 2097152,
+          "max_attachment_bytes": 31457280,
+          "max_pending_events": 1000,
+          "heartbeat_interval_seconds": 15.0,
+          "acknowledgement_timeout_seconds": 60.0,
+          "retention_seconds": 604800
+        },
+        "resume": {
+          "inbound_committed_position": 0,
+          "outbound_received_position": 0,
+          "outbound_completed_position": 0
+        },
+        "registered_at_utc": "2026-07-28T18:00:06Z"
+      }
+    },
+    {
+      "name": "adapter_registration_accepted",
+      "payload": {
+        "protocol_version": 1,
+        "message_type": "adapter.registration_accepted.v1",
+        "registration_id": "registration-001",
+        "idempotency_key": "registration:telegram-host-1:1",
+        "plugin_id": "builtin.telegram",
+        "adapter_instance_id": "telegram-host-1",
+        "gateway_instance_id": "gateway-main-1",
+        "accepted": true,
+        "session_epoch": "epoch-telegram-1",
+        "lease_expires_at_utc": "2026-07-28T18:01:07Z",
+        "negotiated_capabilities": [
+          "inbound_text",
+          "outbound_text"
+        ],
+        "negotiated_limits": {
+          "max_in_flight_events": 16,
+          "max_payload_bytes": 2097152,
+          "max_attachment_bytes": 31457280,
+          "max_pending_events": 1000,
+          "heartbeat_interval_seconds": 15.0,
+          "acknowledgement_timeout_seconds": 60.0,
+          "retention_seconds": 604800
+        },
+        "resume": {
+          "inbound_committed_position": 0,
+          "outbound_received_position": 0,
+          "outbound_completed_position": 0
+        },
+        "accepted_at_utc": "2026-07-28T18:00:07Z"
+      }
+    },
+    {
+      "name": "adapter_health",
+      "payload": {
+        "protocol_version": 1,
+        "message_type": "adapter.health.v1",
+        "health_id": "health-001",
+        "idempotency_key": "health:telegram-host-1:100",
+        "plugin_id": "builtin.telegram",
+        "adapter_instance_id": "telegram-host-1",
+        "session_epoch": "epoch-telegram-1",
+        "state": "ready",
+        "observed_at_utc": "2026-07-28T18:00:08Z",
+        "detail": "polling loop active"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "canonical_identity_is_forbidden",
+      "error_code": "trusted_identity_forbidden",
+      "payload": {
+        "protocol_version": 1,
+        "message_type": "channel.inbound.v1",
+        "request_id": "request-invalid-1",
+        "idempotency_key": "telegram:update:invalid-1",
+        "plugin_id": "builtin.telegram",
+        "adapter_instance_id": "telegram-host-1",
+        "channel_name": "telegram",
+        "external_user_id": "external-user-42",
+        "canonical_user_id": "usr-forged",
+        "chat_id": "chat-9",
+        "text": "forged owner",
+        "received_at_utc": "2026-07-28T18:01:00Z"
+      }
+    },
+    {
+      "name": "unknown_message_type",
+      "error_code": "unsupported_message_type",
+      "payload": {
+        "protocol_version": 1,
+        "message_type": "channel.unknown.v1",
+        "request_id": "request-invalid-2"
+      }
+    },
+    {
+      "name": "host_file_path_is_forbidden",
+      "error_code": "invalid_attachment_reference",
+      "payload": {
+        "protocol_version": 1,
+        "message_type": "channel.inbound.v1",
+        "request_id": "request-invalid-3",
+        "idempotency_key": "discord:message:invalid-3",
+        "plugin_id": "builtin.discord",
+        "adapter_instance_id": "discord-host-1",
+        "channel_name": "discord",
+        "external_user_id": "external-user-43",
+        "chat_id": "chat-10",
+        "text": "",
+        "attachments": [
+          {
+            "attachment_id": "attachment-invalid-3",
+            "filename": "secret.txt",
+            "content_type": "text/plain",
+            "kind": "document",
+            "size_bytes": 20,
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "storage_reference": "file:/private/secret.txt"
+          }
+        ],
+        "received_at_utc": "2026-07-28T18:01:01Z"
+      }
+    },
+    {
+      "name": "idempotency_key_is_required",
+      "error_code": "invalid_payload",
+      "payload": {
+        "protocol_version": 1,
+        "message_type": "adapter.health.v1",
+        "health_id": "health-invalid-4",
+        "plugin_id": "builtin.telegram",
+        "adapter_instance_id": "telegram-host-1",
+        "state": "ready",
+        "observed_at_utc": "2026-07-28T18:01:02Z"
+      }
+    }
+  ]
+}

@@ -1,0 +1,170 @@
+{
+  "$defs": {
+    "RuntimeSecretReferenceV1": {
+      "additionalProperties": false,
+      "description": "Environment/file reference; secret material never enters a manifest.",
+      "properties": {
+        "env_var": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Env Var",
+          "type": "string"
+        },
+        "file_env_var": {
+          "maxLength": 245,
+          "minLength": 1,
+          "title": "File Env Var",
+          "type": "string"
+        }
+      },
+      "required": [
+        "env_var",
+        "file_env_var"
+      ],
+      "title": "RuntimeSecretReferenceV1",
+      "type": "object"
+    },
+    "RuntimeStorageManifestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "enum": [
+            "sqlite",
+            "postgres"
+          ],
+          "title": "Backend",
+          "type": "string"
+        },
+        "postgres_dsn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimeSecretReferenceV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sqlite_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sqlite Path"
+        }
+      },
+      "required": [
+        "backend"
+      ],
+      "title": "RuntimeStorageManifestV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/runtime-manifests/v1/ActivityCollectorRuntimeManifestV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "admin_token": {
+      "$ref": "#/$defs/RuntimeSecretReferenceV1"
+    },
+    "admin_url_path": {
+      "title": "Admin Url Path",
+      "type": "string"
+    },
+    "batch_max_events": {
+      "maximum": 1000,
+      "minimum": 1,
+      "title": "Batch Max Events",
+      "type": "integer"
+    },
+    "bind_host": {
+      "title": "Bind Host",
+      "type": "string"
+    },
+    "bind_port": {
+      "maximum": 65535,
+      "minimum": 1,
+      "title": "Bind Port",
+      "type": "integer"
+    },
+    "content_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "ingest_token": {
+      "$ref": "#/$defs/RuntimeSecretReferenceV1"
+    },
+    "otel_trace_base_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Otel Trace Base Url"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "service": {
+      "const": "activity_collector",
+      "default": "activity_collector",
+      "title": "Service",
+      "type": "string"
+    },
+    "source_config_schema_version": {
+      "minimum": 1,
+      "title": "Source Config Schema Version",
+      "type": "integer"
+    },
+    "source_config_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Config Sha256",
+      "type": "string"
+    },
+    "storage": {
+      "$ref": "#/$defs/RuntimeStorageManifestV1"
+    },
+    "team_id": {
+      "title": "Team Id",
+      "type": "string"
+    },
+    "user_token": {
+      "$ref": "#/$defs/RuntimeSecretReferenceV1"
+    },
+    "user_url_path": {
+      "title": "User Url Path",
+      "type": "string"
+    }
+  },
+  "required": [
+    "content_sha256",
+    "source_config_schema_version",
+    "source_config_sha256",
+    "team_id",
+    "bind_host",
+    "bind_port",
+    "user_url_path",
+    "admin_url_path",
+    "batch_max_events",
+    "storage",
+    "user_token",
+    "admin_token",
+    "ingest_token"
+  ],
+  "title": "ActivityCollectorRuntimeManifestV1",
+  "type": "object"
+}

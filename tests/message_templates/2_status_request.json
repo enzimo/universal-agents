@@ -1,0 +1,29 @@
+{
+  "message_class": "MessageEnvelope",
+  "msg_content": {
+    "status_type": "request",
+    "info_type": "status_request_full",
+    "self_id": "user_client",
+    "named_agent_type": "user_client",
+    "is_paused": false,
+    "is_busy": false,
+    "name": "user_client",
+    "agent_role": "user_client",
+    "message_class": "AgentStatus"
+  },
+  "msg_meta": {
+    "from_agent_name": "user",
+    "to_named_agent_type": "TeamArchitect",
+    "is_response_requested": true,
+    "msg_correlation_id": "{{CORRELATION_ID}}"
+  },
+  "msg_header": {
+    "message_class": "MessageHeader",
+    "message_id": "{{MESSAGE_ID}}",
+    "from_agent_id": "user",
+    "to_routing_path": "{{TARGET_AGENT_ID}}",
+    "response_routing_key": "{{USER_QUEUE}}",
+    "agent_signature": "",
+    "timestamp": "{{TIMESTAMP}}"
+  }
+}

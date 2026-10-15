@@ -1,0 +1,95 @@
+site_name: Universal Agents
+site_description: User-facing setup and operating documentation for Universal Agents.
+site_url: !ENV [UA_DOCS_SITE_URL, "http://localhost:18100/docs/"]
+docs_dir: user_docs_source
+site_dir: user_docs/site
+use_directory_urls: true
+strict: true
+
+extra:
+  homepage: !ENV [UA_DOCS_HOMEPAGE, "/webchat"]
+
+theme:
+  name: material
+  custom_dir: user_docs/theme
+  language: en
+  logo: assets/agent-mark.png
+  favicon: assets/favicon.ico
+  features:
+    - navigation.instant
+    - navigation.instant.prefetch
+    - navigation.instant.progress
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.top
+    - content.code.copy
+    - content.code.select
+    - toc.follow
+  palette:
+    - scheme: default
+      primary: green
+      accent: green
+
+extra_css:
+  - assets/extra.css
+  - assets/ua-runtime-theme.css
+
+extra_javascript:
+  - assets/static-mesh.js
+  - assets/metallic_mesh.js
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+nav:
+  - Overview: index.md
+  - Quickstart: quickstart.md
+  - Agent Features: features.md
+  - Scheduled Workers: scheduled-workers.md
+  - X and Hugging Face: hub-cli.md
+  - Model Providers: model-providers.md
+  - Generated Sites: generated-sites.md
+  - Onboarding: onboarding.md
+  - Docker Runtime: docker.md
+  - Reverse Proxy and Docker Swarm: reverse-proxy.md
+  - Configuration: configuration.md
+  - Moving a Team to a New Version: team-transfer.md
+  - Access and Approval: permissions.md
+  - Interactive App Plugins: interactive-app-plugins.md
+  - Channels:
+      - Overview: channels/index.md
+      - Configuration Nuances: channels/configuration-nuances.md
+      - Telegram: channels/telegram.md
+      - WhatsApp: channels/whatsapp.md
+      - Discord: channels/discord.md
+      - Signal: channels/signal.md
+      - Photon iMessage: channels/photon.md
+  - Multi-User Onboarding:
+      - Overview: newuser/index.md
+      - Telegram: newuser/telegram.md
+      - Discord: newuser/discord.md
+      - WhatsApp: newuser/whatsapp.md
+      - Signal: newuser/signal.md
+      - Photon iMessage: newuser/photon.md
+  - Tools and Authentication:
+      - Overview: tools/index.md
+      - Authentication: auth/index.md
+      - OpenAI Codex OAuth: auth/openai-codex.md
+      - xAI Grok OAuth: auth/xai-oauth.md
+      - GitHub CLI: auth/gh.md
+      - Google gog: auth/gog.md
+      - Bitwarden CLI: auth/bw.md
+      - 1Password CLI: auth/onepassword.md
+      - KeePassXC CLI: auth/keepass.md
+      - HashiCorp Vault: auth/vault.md
+  - Skills: skills.md

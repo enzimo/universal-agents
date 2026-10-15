@@ -1,0 +1,4 @@
+interface:
+  display_name: "Long-Horizon Plan Execution"
+  short_description: "Execute and adapt long-horizon plans"
+  default_prompt: "Use $long-horizon-plan-execution to plan, monitor, adapt, and verify this long-horizon goal with minimal human guidance."

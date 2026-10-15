@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en" data-color-mode="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Motion lab</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../../assistant_gateway/onboarding_web/assets/styles.css">
+  <script src="lab-clock.js"></script>
+  <script src="../../assistant_gateway/onboarding_web/assets/appearance.js"></script>
+  <style>
+    html, body { margin: 0; min-height: 100%; }
+    body { display: block; overflow: hidden; font: 13px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
+    :root[data-color-mode="light"] body {
+      background:
+        radial-gradient(circle at 18% 22%, color-mix(in srgb, var(--ua-doc-light-blue, #082f73) 45%, transparent), transparent 42%),
+        radial-gradient(circle at 82% 18%, color-mix(in srgb, var(--ua-doc-light-yellow, #ffd60a) 40%, transparent), transparent 40%),
+        radial-gradient(circle at 70% 82%, color-mix(in srgb, var(--ua-doc-light-green, #20f05a) 35%, transparent), transparent 42%),
+        radial-gradient(circle at 24% 80%, color-mix(in srgb, var(--ua-doc-light-red, #ff3030) 30%, transparent), transparent 40%),
+        #eef4f4;
+    }
+    #lab-mesh { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 0; display: block; }
+    .lab-shell { position: fixed; inset: 0; z-index: 1; pointer-events: none; }
+    .lab-panel {
+      pointer-events: auto; position: fixed; top: 16px; left: 16px; width: 300px; max-height: calc(100% - 32px);
+      overflow: auto; box-sizing: border-box; padding: 14px 16px; border-radius: 12px;
+      color: #f2f7f8; background: rgba(11, 21, 27, 0.82); border: 1px solid #367287;
+      backdrop-filter: blur(22px) saturate(140%);
+    }
+    :root[data-color-mode="light"] .lab-panel { color: #10201c; background: rgba(247, 255, 252, 0.86); border-color: #b8cdd2; }
+    .lab-panel h1 { font-size: 15px; margin: 0 0 4px; font-weight: 800; }
+    .lab-panel h2 { font-size: 12px; margin: 14px 0 6px; font-weight: 800; opacity: 0.8; }
+    .lab-panel p { margin: 0 0 8px; opacity: 0.8; }
+    .lab-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+    .lab-panel button, .lab-dialog button {
+      font: inherit; color: inherit; background: rgba(16, 35, 45, 0.9); border: 1px solid #367287;
+      border-radius: 7px; padding: 5px 9px; cursor: pointer;
+    }
+    :root[data-color-mode="light"] .lab-panel button,
+    :root[data-color-mode="light"] .lab-dialog button { background: #ffffff; border-color: #9fb9c0; }
+    .lab-panel button[aria-pressed="true"] { outline: 2px solid var(--ua-motion-accent); outline-offset: 1px; }
+    .lab-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 7px; }
+    .lab-row input[type=color] { width: 44px; height: 22px; padding: 0; border: 1px solid #367287; background: none; }
+    .lab-swatches { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; align-items: center; }
+    .lab-swatch { width: 28px; height: 16px; border-radius: 4px; border: 1px solid rgba(127, 127, 127, 0.6); }
+    .lab-swatches code { font-size: 11px; opacity: 0.85; }
+    .lab-intro-shell { position: fixed; inset: 0; pointer-events: none; }
+    .lab-dialog h2 { margin: 0 0 12px; font-size: 22px; }
+    .lab-dialog p, .lab-dialog li { color: var(--muted); }
+    :root[data-color-mode="dark"] .lab-dialog p, :root[data-color-mode="dark"] .lab-dialog li { color: #adc1c8; }
+    .lab-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+    .lab-large { width: min(1100px, calc(100vw - 80px)); height: min(720px, calc(100vh - 80px)); box-sizing: border-box; }
+    .lab-large-grid { display: grid; grid-template-columns: 200px 1fr; gap: 20px; height: calc(100% - 60px); }
+    .lab-large-grid nav { display: grid; align-content: start; gap: 6px; }
+    .lab-large-grid nav span { padding: 8px 10px; border-radius: 8px; background: rgba(127, 127, 127, 0.12); }
+    dialog.lab-native { width: min(560px, calc(100vw - 40px)); border-radius: 14px; padding: 24px; color: inherit;
+      background: #10232d; border: 1px solid #367287; }
+    :root[data-color-mode="light"] dialog.lab-native { background: #f2faf8; color: #10201c; }
+    dialog.lab-native::backdrop { background: rgba(0, 0, 0, 0.6); }
+  </style>
+</head>
+<body>
+  <canvas id="lab-mesh" data-ua-metallic-mesh aria-hidden="true"></canvas>
+  <div class="lab-shell">
+    <aside class="lab-panel" aria-label="Motion lab controls">
+      <h1>Motion lab</h1>
+      <p>Popups opening and closing in glass, and the intro word, drawn by the product's own files in your choice of theme.</p>
+
+      <h2>Play</h2>
+      <div class="lab-buttons">
+        <button type="button" id="open-setup">Setup popup</button>
+        <button type="button" id="open-large">Large popup</button>
+        <button type="button" id="open-native">Native dialog</button>
+        <button type="button" id="play-intro">Intro word</button>
+      </div>
+
+      <h2>Speed</h2>
+      <div class="lab-buttons" id="speeds">
+        <button type="button" data-speed="1" aria-pressed="true">1x</button>
+        <button type="button" data-speed="0.5">0.5x</button>
+        <button type="button" data-speed="0.25">0.25x</button>
+        <button type="button" data-speed="0.1">0.1x</button>
+        <button type="button" data-speed="0">Freeze</button>
+      </div>
+
+      <h2>Theme</h2>
+      <div class="lab-buttons" id="modes">
+        <button type="button" data-mode="dark" aria-pressed="true">Dark</button>
+        <button type="button" data-mode="light">Light</button>
+      </div>
+      <p></p>
+      <div class="lab-buttons" id="presets">
+        <button type="button" data-preset="default">Default green</button>
+        <button type="button" data-preset="teal">Teal</button>
+        <button type="button" data-preset="amber">Amber</button>
+        <button type="button" data-preset="violet">Violet</button>
+      </div>
+      <p></p>
+      <label class="lab-row">Dark metal <input type="color" id="metal" value="#015b1a"></label>
+      <label class="lab-row">Dark gold tint (accent) <input type="color" id="gold" value="#464020"></label>
+      <label class="lab-row">Light: blue light <input type="color" id="blue-light" value="#082f73"></label>
+      <label class="lab-row">Interface animation <input type="checkbox" id="animation" checked></label>
+
+      <h2>Theme colors in use</h2>
+      <div class="lab-swatches" id="swatches"></div>
+    </aside>
+  </div>
+  <div class="lab-intro-shell"></div>
+
+  <!-- A Settings-sized popup the page shows and hides with `hidden`, as Web Chat's Settings does. -->
+  <section class="setup-overlay is-open" id="large-overlay" hidden>
+    <div class="setup-dialog lab-dialog lab-large" role="dialog" aria-modal="true" aria-labelledby="large-title">
+      <h2 id="large-title">Settings</h2>
+      <div class="lab-large-grid">
+        <nav><span>Inbox</span><span>Team</span><span>Tasks</span><span>Appearance</span><span>Access</span></nav>
+        <div>
+          <p>A large popup, close to Web Chat's Settings window. Its glass uses bigger triangles, so the effect stays smooth.</p>
+          <p>Use Close, a click on the backdrop, or Escape.</p>
+          <div class="lab-dialog-actions"><button type="button" id="close-large">Close</button></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <dialog class="lab-native" id="native-dialog" aria-labelledby="native-title">
+    <h2 id="native-title">Step details</h2>
+    <p>A native dialog, as the workflow page's step details and review use. It opens with showModal and closes with close.</p>
+    <form method="dialog" class="lab-dialog-actions"><button>Close</button></form>
+  </dialog>
+
+  <script src="../../assistant_gateway/onboarding_web/assets/metallic_mesh.js"></script>
+  <script src="../../assistant_gateway/onboarding_web/assets/mesh_motion.js"></script>
+  <script src="../../assistant_gateway/onboarding_web/assets/glass_mesh.js"></script>
+  <script src="../../assistant_gateway/onboarding_web/assets/ui_motion.js"></script>
+  <script src="../../assistant_gateway/onboarding_web/assets/intro_word.js"></script>
+  <script src="../../assistant_gateway/onboarding_web/assets/panel_motion.js"></script>
+  <script src="lab.js"></script>
+</body>
+</html>

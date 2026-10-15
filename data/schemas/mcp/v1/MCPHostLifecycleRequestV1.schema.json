@@ -1,0 +1,30 @@
+{
+  "$id": "https://universal-agents.dev/schemas/mcp/v1/MCPHostLifecycleRequestV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Start or stop an installed hosted server (manager and gateway only).\n\nWhoever asked was authorized before this request: the per-call access\nhook for an agent, the access service for a person in the gateway.",
+  "properties": {
+    "definition_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Definition Digest",
+      "type": "string"
+    },
+    "record_type": {
+      "const": "mcp_host_lifecycle_request",
+      "default": "mcp_host_lifecycle_request",
+      "title": "Record Type",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "definition_digest"
+  ],
+  "title": "MCPHostLifecycleRequestV1",
+  "type": "object"
+}

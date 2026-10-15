@@ -1,0 +1,3329 @@
+{
+  "$defs": {
+    "AttachmentStorageRef": {
+      "description": "Structured reference to attachment bytes stored outside NATS messages.",
+      "properties": {
+        "bucket": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "NATS Object Store bucket when storage_type is nats_object.",
+          "title": "Bucket"
+        },
+        "object_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "NATS Object Store object name when storage_type is nats_object.",
+          "title": "Object Name"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Local filesystem path when storage_type is local.",
+          "title": "Path"
+        },
+        "storage_type": {
+          "description": "Storage backend for this attachment reference.",
+          "enum": [
+            "local",
+            "nats_object"
+          ],
+          "title": "Storage Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "storage_type"
+      ],
+      "title": "AttachmentStorageRef",
+      "type": "object"
+    },
+    "DispatchedActionNoteV1": {
+      "additionalProperties": false,
+      "description": "One action an interrupted run had already sent before it was stopped.",
+      "properties": {
+        "action_id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Action Id",
+          "type": "string"
+        },
+        "action_type": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Action Type",
+          "type": "string"
+        },
+        "status": {
+          "maxLength": 60,
+          "minLength": 1,
+          "title": "Status",
+          "type": "string"
+        },
+        "summary": {
+          "default": "",
+          "maxLength": 500,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action_id",
+        "action_type",
+        "status"
+      ],
+      "title": "DispatchedActionNoteV1",
+      "type": "object"
+    },
+    "ExecutionDigest": {
+      "description": "Materialized current-state digest that should survive history compaction.",
+      "properties": {
+        "current_focus": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Current execution phase or focus area.",
+          "title": "Current Focus"
+        },
+        "goal_summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Durable summary of the actual goal this task is pursuing.",
+          "title": "Goal Summary"
+        },
+        "last_updated_at": {
+          "description": "Timestamp when the digest was last updated.",
+          "title": "Last Updated At",
+          "type": "string"
+        },
+        "message_class": {
+          "const": "ExecutionDigest",
+          "default": "ExecutionDigest",
+          "description": "Execution Digest",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "plan_items": {
+          "description": "Ordered durable plan items with rationale and status.",
+          "items": {
+            "$ref": "#/$defs/ExecutionPlanItem"
+          },
+          "title": "Plan Items",
+          "type": "array"
+        },
+        "plan_summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "High-level summary of the current plan.",
+          "title": "Plan Summary"
+        },
+        "unknowns": {
+          "description": "Tracked durable unknowns that still matter to execution.",
+          "items": {
+            "$ref": "#/$defs/ExecutionUnknown"
+          },
+          "title": "Unknowns",
+          "type": "array"
+        }
+      },
+      "title": "ExecutionDigest",
+      "type": "object"
+    },
+    "ExecutionPlanItem": {
+      "description": "One durable plan item tracked as part of the living execution digest.",
+      "properties": {
+        "created_at": {
+          "description": "Timestamp when the plan item was first recorded.",
+          "title": "Created At",
+          "type": "string"
+        },
+        "message_class": {
+          "const": "ExecutionPlanItem",
+          "default": "ExecutionPlanItem",
+          "description": "Execution Plan Item",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "rationale": {
+          "description": "Why this step exists and why it matters to the overall plan.",
+          "title": "Rationale",
+          "type": "string"
+        },
+        "resolution_summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional concise summary of how the step was resolved or why it concluded.",
+          "title": "Resolution Summary"
+        },
+        "status": {
+          "$ref": "#/$defs/ExecutionPlanItemStatus",
+          "default": "planned",
+          "description": "Current lifecycle status for the plan item."
+        },
+        "status_detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional concise note explaining the current status, especially when blocked or dropped.",
+          "title": "Status Detail"
+        },
+        "step_id": {
+          "description": "Stable identifier for this plan item.",
+          "title": "Step Id",
+          "type": "string"
+        },
+        "title": {
+          "description": "Short durable description of the planned step.",
+          "title": "Title",
+          "type": "string"
+        },
+        "updated_at": {
+          "description": "Timestamp when the plan item was last updated.",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "rationale"
+      ],
+      "title": "ExecutionPlanItem",
+      "type": "object"
+    },
+    "ExecutionPlanItemStatus": {
+      "enum": [
+        "planned",
+        "in_progress",
+        "blocked",
+        "completed",
+        "dropped"
+      ],
+      "title": "ExecutionPlanItemStatus",
+      "type": "string"
+    },
+    "ExecutionUnknown": {
+      "description": "One durable unknown or ambiguity that the execution plan still needs to resolve.",
+      "properties": {
+        "created_at": {
+          "description": "Timestamp when the unknown was first recorded.",
+          "title": "Created At",
+          "type": "string"
+        },
+        "message_class": {
+          "const": "ExecutionUnknown",
+          "default": "ExecutionUnknown",
+          "description": "Execution Unknown",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "resolution_plan": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How the team currently intends to resolve this unknown.",
+          "title": "Resolution Plan"
+        },
+        "resolution_summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional concise summary of the eventual resolution.",
+          "title": "Resolution Summary"
+        },
+        "status": {
+          "$ref": "#/$defs/ExecutionUnknownStatus",
+          "default": "open",
+          "description": "Whether the unknown is still open or has been resolved."
+        },
+        "summary": {
+          "description": "Short description of the unresolved ambiguity or unknown.",
+          "title": "Summary",
+          "type": "string"
+        },
+        "unknown_id": {
+          "description": "Stable identifier for this tracked unknown.",
+          "title": "Unknown Id",
+          "type": "string"
+        },
+        "updated_at": {
+          "description": "Timestamp when the unknown was last updated.",
+          "title": "Updated At",
+          "type": "string"
+        },
+        "why_it_matters": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why this ambiguity matters to successful execution.",
+          "title": "Why It Matters"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "title": "ExecutionUnknown",
+      "type": "object"
+    },
+    "ExecutionUnknownStatus": {
+      "enum": [
+        "open",
+        "resolved"
+      ],
+      "title": "ExecutionUnknownStatus",
+      "type": "string"
+    },
+    "GatewayContext": {
+      "description": "Optional gateway-specific metadata that should survive task scheduling and replies.\n\nThis keeps channel/session/delivery information grouped under one stable\nsub-object instead of spreading many transport-specific fields across\nMessageMeta.",
+      "properties": {
+        "canonical_user_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable gateway-owned user identifier used for usermem ownership.",
+          "title": "Canonical User Id"
+        },
+        "channel_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Logical channel name such as telegram or local.",
+          "title": "Channel Name"
+        },
+        "chat_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Channel conversation identifier.",
+          "title": "Chat Id"
+        },
+        "delivery_mode": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Gateway delivery mode such as interactive, cron, heartbeat, or deferred.",
+          "title": "Delivery Mode"
+        },
+        "gateway_instance_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Logical gateway instance name.",
+          "title": "Gateway Instance Name"
+        },
+        "heartbeat_source_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Canonical heartbeat source identifier for this gateway instance.",
+          "title": "Heartbeat Source Id"
+        },
+        "message_class": {
+          "const": "GatewayContext",
+          "default": "GatewayContext",
+          "description": "Gateway Context",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "original_message_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional channel message identifier that originated the request.",
+          "title": "Original Message Id"
+        },
+        "schedule_owner_agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Agent id that owns the scheduled message persistence/execution.",
+          "title": "Schedule Owner Agent Id"
+        },
+        "schedule_run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScheduleRunIdentityV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Who a scheduled run works for when the agent that started it holds no scheduler key: the schedule's manager-signed permit and this run's own fields (access_control.task_identity). Set instead of task_context, never with it; copied unchanged onto delegated tasks and never saved on a schedule."
+        },
+        "scheduled_job_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable scheduled job identifier when the task originated from scheduled work.",
+          "title": "Scheduled Job Id"
+        },
+        "session_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Gateway session key used to group user interactions.",
+          "title": "Session Key"
+        },
+        "task_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignedTaskContextV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Signed statement of the person (and roles) this work is for, from the gateway or scheduler (access_control.identity). Copied unchanged onto delegated tasks; enforcement points trust only this, not canonical_user_id."
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional channel thread or topic identifier scoped within chat_id.",
+          "title": "Thread Id"
+        },
+        "user_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Gateway/user identifier from the channel layer.",
+          "title": "User Id"
+        }
+      },
+      "title": "GatewayContext",
+      "type": "object"
+    },
+    "ManagerEscalationContext": {
+      "description": "Worker-origin metadata for manager-mediated escalation tasks.",
+      "properties": {
+        "choice_mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "single",
+                "multiple"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Suggested user-choice mode when escalation_type is needs_user_input.",
+          "title": "Choice Mode"
+        },
+        "choices": {
+          "description": "Stable user-choice options TeamArchitect may present in a TaskQuery.",
+          "items": {
+            "$ref": "#/$defs/TaskQueryChoiceOption"
+          },
+          "title": "Choices",
+          "type": "array"
+        },
+        "escalation_id": {
+          "description": "Stable identifier for this manager escalation.",
+          "title": "Escalation Id",
+          "type": "string"
+        },
+        "escalation_type": {
+          "description": "Why the worker is escalating to TeamArchitect.",
+          "enum": [
+            "needs_user_input",
+            "needs_specialist_support",
+            "worker_result",
+            "manager_review"
+          ],
+          "title": "Escalation Type",
+          "type": "string"
+        },
+        "original_requester": {
+          "default": "worker_task",
+          "description": "Origin class for work that did not necessarily start as a manager delegation.",
+          "enum": [
+            "worker_schedule",
+            "worker_task",
+            "worker_autonomous"
+          ],
+          "title": "Original Requester",
+          "type": "string"
+        },
+        "proposed_config_changes": {
+          "description": "Optional non-secret config/runtime changes requiring manager or user approval.",
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Proposed Config Changes",
+          "type": "array"
+        },
+        "source_agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Worker agent id.",
+          "title": "Source Agent Id"
+        },
+        "source_agent_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Worker display/name.",
+          "title": "Source Agent Name"
+        },
+        "source_named_agent_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Worker named agent type.",
+          "title": "Source Named Agent Type"
+        },
+        "source_schedule_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Schedule id when the escalation came from scheduled work.",
+          "title": "Source Schedule Id"
+        },
+        "source_task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Worker-local task id that created the escalation.",
+          "title": "Source Task Id"
+        },
+        "target_specialist_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Requested specialist type when escalation_type is needs_specialist_support.",
+          "title": "Target Specialist Type"
+        }
+      },
+      "required": [
+        "escalation_type"
+      ],
+      "title": "ManagerEscalationContext",
+      "type": "object"
+    },
+    "MessageHeader": {
+      "additionalProperties": true,
+      "description": "Contains standard routing and identification metadata for a message.\n\nAttributes:\n    from_agent_id (Optional[str]):\n        Optional identifier of the agent originating the message. Useful for tracking message origin\n        and facilitating direct responses. Defaults to None if the message isn't directly associated with an agent.\n\n    to_routing_path (Optional[Union[str, RoutingType]]):\n        Optional identifier of the agent intended to receive the message, or a special routing type.\n        Used for routing messages to specific agents or groups within the system.\n        Special routing types include: '++<all>++', '++<self>++', '++<null>++'.\n        Defaults to None if the message is not targeted at a specific agent.\n\n    response_routing_key (Optional[Union[str, RoutingType]]):\n        Optional routing key (e.g., queue name) or a special routing type where a response to this message should be sent.\n        Defaults to None if no specific response routing is required.\n\n    timestamp (str):\n        Timestamp indicating when the message was created, automatically generated using the\n        ISO 8601 format. Provides a standardized time reference for all messages.\n\n    message_id (str):\n        Unique identifier for the message, automatically generated with a semantic prefix\n        and a 12-character lowercase hexadecimal suffix. Ensures message\n        uniqueness and facilitates tracking.\n\n    agent_signature (Optional[str]):\n        Optional signature of the agent's private key applied to the message_id of this message (for security).",
+      "properties": {
+        "agent_signature": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) signature of agent's private key applied to the message_id of this message (for security)",
+          "title": "Agent Signature"
+        },
+        "from_agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) id of agent from which the message originates",
+          "title": "From Agent Id"
+        },
+        "idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional logical idempotency key for at-least-once delivery handling.",
+          "title": "Idempotency Key"
+        },
+        "message_class": {
+          "const": "MessageHeader",
+          "default": "MessageHeader",
+          "description": "Message Header",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "message_id": {
+          "description": "Unique identifier for the message envelope.",
+          "title": "Message Id",
+          "type": "string"
+        },
+        "outbox_action_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional runtime action outbox record id for idempotent dispatch diagnostics.",
+          "title": "Outbox Action Id"
+        },
+        "response_routing_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) Direct request to send responses to this message to a specific routing path. Defaults to None if no specific response routing is required.",
+          "title": "Response Routing Key"
+        },
+        "timestamp": {
+          "description": "Timestamp of when the message envelope was created.",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "to_routing_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/RoutingType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) id of agent to which the message is sent. Special routing can be achieved with RoutingType: '++<all>++', '++<self>++', '++<null>++'",
+          "title": "To Routing Path"
+        }
+      },
+      "title": "MessageHeader",
+      "type": "object"
+    },
+    "MessageMeta": {
+      "additionalProperties": true,
+      "description": "Optional metadata accompanying the message content.\n\nAttributes:\n    from_agent_name (Optional[str]): (optional) human-readable name of agent from which the message originates\n    to_agent_name (Optional[str]): (optional) human-readable name of agent to which the message is sent. Only used when direct agent-to-agent messaging is required. Only names of existing agents are acceptable. Ignored if to_named_agent_type is defined.\n    to_named_agent_type (Optional[str]): (optional) Primary way to route messages (e.g. Tasks / Subtasks) to agents for execution. The named_agent_type corresponds to a queue on which the request will be placed.\n    requester_type (Optional[RequesterType]): Type of requester for task requests (user, agent, self, timer)\n    is_response_requested (Optional[bool]): Indicates if a response is expected for a task request\n    msg_correlation_id (Optional[str]): (optional) request-local correlation id used to correlate requests and responses.\n    conversation_id (Optional[str]): (optional) durable identifier for a multi-turn user-visible conversation thread.\n    followup_to_task_id (Optional[str]): (optional) top-level task id this new request follows up on within the conversation thread.\n    request_timezone (Optional[str]): (optional) IANA timezone name used to interpret relative dates like \"today\" and \"tomorrow\" for this request lineage.",
+      "properties": {
+        "conversation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) durable identifier for the conversation thread this message belongs to",
+          "title": "Conversation Id"
+        },
+        "followup_to_task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) top-level task id this request follows up on within the same conversation",
+          "title": "Followup To Task Id"
+        },
+        "from_agent_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) human-readable name of agent from which the message originates",
+          "title": "From Agent Name"
+        },
+        "gateway_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GatewayContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) grouped gateway/session/channel metadata that should survive scheduling and replies"
+        },
+        "is_response_requested": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": false,
+          "description": "Indicates if a response is expected for a task request",
+          "title": "Is Response Requested"
+        },
+        "manager_escalation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManagerEscalationContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) worker-origin metadata for manager-mediated escalation"
+        },
+        "message_class": {
+          "const": "MessageMeta",
+          "default": "MessageMeta",
+          "description": "Message Meta Information",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "msg_correlation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) request-local correlation identifier",
+          "title": "Msg Correlation Id"
+        },
+        "objective_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) manager-local Objective id for this request lineage",
+          "title": "Objective Id"
+        },
+        "objective_work_session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) bounded Objective work-session id for this request lineage",
+          "title": "Objective Work Session Id"
+        },
+        "redispatch_notice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskRedispatchNoticeV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) set by the TeamLead when it sends a task out again after a worker handed it back; the receiving worker tells the model what an interrupted run already did"
+        },
+        "request_timezone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) IANA timezone name used to interpret relative dates for this request lineage",
+          "title": "Request Timezone"
+        },
+        "requester_type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequesterType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Type of requester for task requests (user, agent, self, timer)"
+        },
+        "to_agent_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) human-readable name of agent to which the message is sent. Only used when direct agent-to-agent messaging is required. Only names of existing agents are acceptable. Ignored if to_named_agent_type is defined.",
+          "title": "To Agent Name"
+        },
+        "to_named_agent_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(optional) Primary way to route messages (e.g. Tasks / Subtasks) to agents for execution. The named_agent_type corresponds to a queue on which the request will be placed.",
+          "title": "To Named Agent Type"
+        }
+      },
+      "title": "MessageMeta",
+      "type": "object"
+    },
+    "MessageMetaType": {
+      "enum": [
+        "request",
+        "response",
+        "NO OP"
+      ],
+      "title": "MessageMetaType",
+      "type": "string"
+    },
+    "PlanStepTaskLink": {
+      "additionalProperties": false,
+      "description": "Runtime-owned correlation between an internal manager task and a PlanStep.",
+      "properties": {
+        "completed_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Completed At"
+        },
+        "created_at": {
+          "default": "",
+          "title": "Created At",
+          "type": "string"
+        },
+        "plan_id": {
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "root_task_id": {
+          "title": "Root Task Id",
+          "type": "string"
+        },
+        "status": {
+          "default": "active",
+          "title": "Status",
+          "type": "string"
+        },
+        "step_id": {
+          "title": "Step Id",
+          "type": "string"
+        },
+        "step_task_id": {
+          "title": "Step Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root_task_id",
+        "plan_id",
+        "step_id",
+        "step_task_id"
+      ],
+      "title": "PlanStepTaskLink",
+      "type": "object"
+    },
+    "ProgressState": {
+      "description": "Controlled vocabulary for long-running task progress.",
+      "enum": [
+        "abandoned",
+        "accepted",
+        "cancelled",
+        "completed",
+        "finalizing_plan",
+        "failed",
+        "in_progress",
+        "not_started",
+        "partial",
+        "paused",
+        "preparing",
+        "retrying",
+        "undefined",
+        "waiting"
+      ],
+      "title": "ProgressState",
+      "type": "string"
+    },
+    "RecoverablePauseRecord": {
+      "additionalProperties": false,
+      "description": "Runtime-owned state for a user-guided recoverable budget pause.",
+      "properties": {
+        "affected_agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Affected Agent Id"
+        },
+        "affected_named_agent_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Affected Named Agent Type"
+        },
+        "affected_subtask_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Affected Subtask Id"
+        },
+        "base_tool_call_limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Base Tool Call Limit"
+        },
+        "created_at": {
+          "default": "",
+          "title": "Created At",
+          "type": "string"
+        },
+        "friendly_reason": {
+          "default": "",
+          "title": "Friendly Reason",
+          "type": "string"
+        },
+        "partial_tool_call_limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Partial Tool Call Limit"
+        },
+        "pause_count_for_task": {
+          "default": 1,
+          "title": "Pause Count For Task",
+          "type": "integer"
+        },
+        "pause_id": {
+          "title": "Pause Id",
+          "type": "string"
+        },
+        "status": {
+          "default": "pending",
+          "title": "Status",
+          "type": "string"
+        },
+        "task_id": {
+          "title": "Task Id",
+          "type": "string"
+        },
+        "task_query_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task Query Id"
+        },
+        "trigger": {
+          "title": "Trigger",
+          "type": "string"
+        },
+        "user_decision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Decision"
+        },
+        "user_decision_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Decision Text"
+        }
+      },
+      "required": [
+        "task_id",
+        "pause_id",
+        "trigger"
+      ],
+      "title": "RecoverablePauseRecord",
+      "type": "object"
+    },
+    "RecoverablePauseTrigger": {
+      "enum": [
+        "tool_call_budget_exceeded",
+        "context_budget_exceeded",
+        "delegated_subtask_timeout",
+        "specialist_runtime_budget_pause",
+        "provider_overloaded"
+      ],
+      "title": "RecoverablePauseTrigger",
+      "type": "string"
+    },
+    "RecoveryTaskLink": {
+      "additionalProperties": false,
+      "description": "Runtime-owned correlation for an isolated recovery task.",
+      "properties": {
+        "affected_step_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Affected Step Id"
+        },
+        "affected_subtask_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Affected Subtask Id"
+        },
+        "branch_id": {
+          "title": "Branch Id",
+          "type": "string"
+        },
+        "checkpoint_schedule_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint Schedule Id"
+        },
+        "created_at": {
+          "default": "",
+          "title": "Created At",
+          "type": "string"
+        },
+        "failure_summary": {
+          "title": "Failure Summary",
+          "type": "string"
+        },
+        "failure_type": {
+          "title": "Failure Type",
+          "type": "string"
+        },
+        "merge_status": {
+          "default": "pending",
+          "title": "Merge Status",
+          "type": "string"
+        },
+        "merged_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Merged At"
+        },
+        "original_plan_id": {
+          "title": "Original Plan Id",
+          "type": "string"
+        },
+        "original_task_id": {
+          "title": "Original Task Id",
+          "type": "string"
+        },
+        "recovery_task_id": {
+          "title": "Recovery Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "original_task_id",
+        "original_plan_id",
+        "recovery_task_id",
+        "branch_id",
+        "failure_type",
+        "failure_summary"
+      ],
+      "title": "RecoveryTaskLink",
+      "type": "object"
+    },
+    "RepliedMessage": {
+      "description": "An earlier chat message that a person's request or steering replies to.",
+      "properties": {
+        "author": {
+          "description": "Who wrote the replied message: 'assistant' (this team's assistant), 'requester' (the person replying) or 'other' (another chat member).",
+          "enum": [
+            "assistant",
+            "requester",
+            "other"
+          ],
+          "title": "Author",
+          "type": "string"
+        },
+        "author_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The chat's display name for another member; set only when author is 'other'. Chosen by that member, so it is a label, not an identity.",
+          "title": "Author Name"
+        },
+        "quoted_text": {
+          "anyOf": [
+            {
+              "maxLength": 16000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The part of the replied message the person highlighted, when the channel supports quoting part of a message.",
+          "title": "Quoted Text"
+        },
+        "sent_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When the replied message was sent (ISO 8601, UTC), when the channel reports it.",
+          "title": "Sent At"
+        },
+        "shortened": {
+          "default": false,
+          "description": "True when the text was cut to REPLIED_MESSAGE_MAX_CHARS.",
+          "title": "Shortened",
+          "type": "boolean"
+        },
+        "text": {
+          "description": "Text (or caption) of the replied message as the chat showed it.",
+          "maxLength": 16000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "author",
+        "text"
+      ],
+      "title": "RepliedMessage",
+      "type": "object"
+    },
+    "RequesterType": {
+      "enum": [
+        "agent_req",
+        "self_req",
+        "timer_req",
+        "user_req"
+      ],
+      "title": "RequesterType",
+      "type": "string"
+    },
+    "RoutingType": {
+      "enum": [
+        "++<all>++",
+        "++<self>++",
+        "++<null>++"
+      ],
+      "title": "RoutingType",
+      "type": "string"
+    },
+    "RuntimeMailboxEventRecord": {
+      "additionalProperties": false,
+      "description": "Durable inbound event recorded before it mutates a leased task tree.",
+      "properties": {
+        "blocked_by_lease_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Blocked By Lease Id"
+        },
+        "correlation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Correlation Id"
+        },
+        "event_class": {
+          "enum": [
+            "advisory",
+            "preemptive",
+            "recovery",
+            "deferrable"
+          ],
+          "title": "Event Class",
+          "type": "string"
+        },
+        "event_id": {
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "title": "Event Type",
+          "type": "string"
+        },
+        "header_json": {
+          "additionalProperties": true,
+          "title": "Header Json",
+          "type": "object"
+        },
+        "idempotency_key": {
+          "default": "",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "last_error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Error"
+        },
+        "local_task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Task Id"
+        },
+        "message_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Id"
+        },
+        "meta_json": {
+          "additionalProperties": true,
+          "title": "Meta Json",
+          "type": "object"
+        },
+        "payload_json": {
+          "additionalProperties": true,
+          "title": "Payload Json",
+          "type": "object"
+        },
+        "priority": {
+          "default": 50,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "processed_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Processed At"
+        },
+        "received_at": {
+          "default": "",
+          "title": "Received At",
+          "type": "string"
+        },
+        "related_task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Related Task Id"
+        },
+        "root_task_id": {
+          "title": "Root Task Id",
+          "type": "string"
+        },
+        "schedule_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schedule Id"
+        },
+        "status": {
+          "default": "received",
+          "enum": [
+            "received",
+            "deferred",
+            "processing",
+            "processed",
+            "rejected",
+            "failed",
+            "cancelled",
+            "stale"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "updated_at": {
+          "default": "",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "root_task_id",
+        "event_type",
+        "event_class"
+      ],
+      "title": "RuntimeMailboxEventRecord",
+      "type": "object"
+    },
+    "SchedulePermitV1": {
+      "additionalProperties": false,
+      "description": "The manager's signed statement that one schedule's runs work for one person.\n\nThe scheduler signs it once per schedule and renews it before it expires\n(``custom_agents.schedule_permits``), so a worker that holds no key can\nstart the schedule's runs without asking the manager each time. It names\nno roles: whoever checks a run reads the person's current roles and\nstanding, and the schedule row's current owner (``access_control.task_identity``).\n``person_id`` None is system work for no person, only for the runtime's\nmaintenance schedule of a built-in system agent. ``record_kind`` and the\nsignature's own domain keep a permit from ever passing as a task context.",
+      "properties": {
+        "expires_at_utc": {
+          "format": "date-time",
+          "title": "Expires At Utc",
+          "type": "string"
+        },
+        "issued_at_utc": {
+          "format": "date-time",
+          "title": "Issued At Utc",
+          "type": "string"
+        },
+        "issuer": {
+          "const": "scheduler",
+          "title": "Issuer",
+          "type": "string"
+        },
+        "permit_id": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Permit Id",
+          "type": "string"
+        },
+        "person_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Person Id"
+        },
+        "record_kind": {
+          "const": "schedule_permit",
+          "default": "schedule_permit",
+          "title": "Record Kind",
+          "type": "string"
+        },
+        "schedule_id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Schedule Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "team_id": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Team Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "permit_id",
+        "issuer",
+        "team_id",
+        "schedule_id",
+        "issued_at_utc",
+        "expires_at_utc"
+      ],
+      "title": "SchedulePermitV1",
+      "type": "object"
+    },
+    "ScheduleRunIdentityV1": {
+      "additionalProperties": false,
+      "description": "Who one scheduled run works for: its schedule's signed permit and this run's own fields.\n\nTravels in ``GatewayContext.schedule_run`` instead of a signed task\ncontext when the agent that started the run holds no scheduler key.\n``context_id``, ``conversation_id`` and ``started_at_utc`` are not signed:\nthey tie the run's tasks together and date the run, and grant nothing.",
+      "properties": {
+        "context_id": {
+          "maxLength": 120,
+          "minLength": 1,
+          "pattern": "^schedule_run_",
+          "title": "Context Id",
+          "type": "string"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Id"
+        },
+        "permit": {
+          "$ref": "#/$defs/SignedSchedulePermitV1"
+        },
+        "started_at_utc": {
+          "format": "date-time",
+          "title": "Started At Utc",
+          "type": "string"
+        }
+      },
+      "required": [
+        "permit",
+        "context_id",
+        "started_at_utc"
+      ],
+      "title": "ScheduleRunIdentityV1",
+      "type": "object"
+    },
+    "SignedSchedulePermitV1": {
+      "additionalProperties": false,
+      "properties": {
+        "key_id": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Key Id",
+          "type": "string"
+        },
+        "permit": {
+          "$ref": "#/$defs/SchedulePermitV1"
+        },
+        "signature": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Signature",
+          "type": "string"
+        }
+      },
+      "required": [
+        "permit",
+        "key_id",
+        "signature"
+      ],
+      "title": "SignedSchedulePermitV1",
+      "type": "object"
+    },
+    "SignedTaskContextV1": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/TaskContextV1"
+        },
+        "key_id": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Key Id",
+          "type": "string"
+        },
+        "signature": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Signature",
+          "type": "string"
+        }
+      },
+      "required": [
+        "context",
+        "key_id",
+        "signature"
+      ],
+      "title": "SignedTaskContextV1",
+      "type": "object"
+    },
+    "Task": {
+      "description": "Represents a task request or a response containing subtask results/answers.\n\nAttributes:\n    task_id (str): Unique identifier for the task. Defaults to `task_id_` plus a 12-character lowercase hexadecimal suffix. For a task object carrying a response, the task_id must match the original task_id of the received task it is a response to.\n    parent_task_id (Optional[str]): Id of the parent task (if this is a subtask request). Every subtask request and response must have a parent_task_id. Defaults to None.\n    task_state (List[Tuple[ProgressState, str]]): Task status list, where each tuple contains the state and a timestamp string. Defaults to an empty list.\n    task_queries (Optional[List[\"TaskQuery\"]]): List of task queries (conversations about this task), generated by agents to clarify intent or ask questions. Defaults to an empty list.\n    task_type (MessageMetaType): Indicates whether this object represents a request for a task to be performed or a response to a previous task (i.e., a subtask response or final answer).\n    problem_statement (Optional[str]): Clearly defined problem statement and execution instructions for the agent (required for requests, optional for responses).\n    errors (Optional[List[str]]): List of errors generated during task execution. Defaults to None.\n    answers (Union[List[Task, str, None]]): Either a (potentially partial) list of subtask responses to the parent task or a single string holding an answer to a subtask or the final answer to the original task request. Defaults to None.",
+      "properties": {
+        "answer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskAnswer"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The answer to the task. Can be a simple string or a structured TaskAnswer object containing tools used. TaskAnswer objects are preferred.",
+          "title": "Answer"
+        },
+        "attachments": {
+          "description": "User-provided attachment references. Binary bytes are stored outside the task payload.",
+          "items": {
+            "$ref": "#/$defs/UserTaskAttachment"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
+        "errors": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "List of errors generated during task execution",
+          "title": "Errors"
+        },
+        "execution_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionDigest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Pinned durable execution digest that should survive history compaction."
+        },
+        "execution_history": {
+          "description": "Chronological execution timeline composed of automatic system entries and explicit agent notes.",
+          "items": {
+            "$ref": "#/$defs/TaskHistoryEntry"
+          },
+          "title": "Execution History",
+          "type": "array"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskFailureV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Set by the runtime on a failed response: the typed reason (for example provider_limited), so the requester's trusted code acts on it without reading error text."
+        },
+        "message_class": {
+          "const": "Task",
+          "default": "Task",
+          "description": "Task",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "parent_task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional ID of the parent task if this is a subtask request or response.",
+          "title": "Parent Task Id"
+        },
+        "problem_statement": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Clearly defined problem statement and execution instructions for the agent (required for requests)",
+          "title": "Problem Statement"
+        },
+        "replied_message": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepliedMessage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The earlier chat message the person replied to with this request (custom_messages.contracts.replied_message_v1). Background for the request; text from the assistant or another member is never the person's instructions."
+        },
+        "task_id": {
+          "description": "Unique identifier for the task.",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "task_plan": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional high-level execution plan associated with the task.",
+          "title": "Task Plan"
+        },
+        "task_state": {
+          "description": "Task status list, where each tuple contains the state and a timestamp string. DO NOT GENERATE TASK STATES - the state is managed and updated programmatically based on the task_type attribute.",
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "$ref": "#/$defs/ProgressState"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "title": "Task State",
+          "type": "array"
+        },
+        "task_type": {
+          "$ref": "#/$defs/MessageMetaType",
+          "description": "Indicates whether this is a request for a task to be performed or a response to a task. If this is a RESPONSE to the main task, it will be automatically marked as COMPLETED.  If this is a response to a subtask, it will be automatically marked COMPLETED and its parent task will be updated."
+        },
+        "thoughts_info": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional list of thoughts generated by agents during task execution. Agents should **NOT** add freeform text outside of generated JSON and instead use this field to output their thoughts or any additional information they deem relevant to the task.",
+          "title": "Thoughts Info"
+        }
+      },
+      "required": [
+        "task_type"
+      ],
+      "title": "Task",
+      "type": "object"
+    },
+    "TaskAnswer": {
+      "description": "Represents the answer to a task, including the answer text and tools used.",
+      "properties": {
+        "answer": {
+          "description": "The final answer string.",
+          "title": "Answer",
+          "type": "string"
+        },
+        "message_class": {
+          "const": "TaskAnswer",
+          "default": "TaskAnswer",
+          "description": "Task Answer",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "tools_used": {
+          "description": "List of tools used to produce the answer.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Tools Used",
+          "type": "array"
+        }
+      },
+      "required": [
+        "answer"
+      ],
+      "title": "TaskAnswer",
+      "type": "object"
+    },
+    "TaskContextV1": {
+      "additionalProperties": false,
+      "description": "Who an agent task works for, signed by a trusted issuer.\n\nThe gateway signs a context when it admits a person's task; the scheduler\nsigns one for a schedule's owner; delegated child tasks carry their root\ncontext unchanged, so later hops cannot widen it.",
+      "properties": {
+        "context_id": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Context Id",
+          "type": "string"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Id"
+        },
+        "expires_at_utc": {
+          "format": "date-time",
+          "title": "Expires At Utc",
+          "type": "string"
+        },
+        "issued_at_utc": {
+          "format": "date-time",
+          "title": "Issued At Utc",
+          "type": "string"
+        },
+        "issuer": {
+          "enum": [
+            "gateway",
+            "scheduler"
+          ],
+          "title": "Issuer",
+          "type": "string"
+        },
+        "person_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Person Id"
+        },
+        "person_roles": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Person Roles",
+          "type": "array"
+        },
+        "root_task_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Root Task Id"
+        },
+        "schedule_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schedule Id"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "team_id": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Team Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "context_id",
+        "issuer",
+        "team_id",
+        "issued_at_utc",
+        "expires_at_utc"
+      ],
+      "title": "TaskContextV1",
+      "type": "object"
+    },
+    "TaskFailureCategory": {
+      "description": "Why a delegated task failed, for trusted code on the requester's side.",
+      "enum": [
+        "provider_limited",
+        "worker_lost"
+      ],
+      "title": "TaskFailureCategory",
+      "type": "string"
+    },
+    "TaskFailureV1": {
+      "additionalProperties": false,
+      "description": "The typed reason a task failed; the error text stays for people.",
+      "properties": {
+        "attempts": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempts"
+        },
+        "category": {
+          "$ref": "#/$defs/TaskFailureCategory"
+        },
+        "model_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Id"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "maxLength": 120,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "status_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status Code"
+        }
+      },
+      "required": [
+        "category"
+      ],
+      "title": "TaskFailureV1",
+      "type": "object"
+    },
+    "TaskHistoryEntry": {
+      "description": "A structured timeline entry capturing an important execution moment for a task.",
+      "properties": {
+        "agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Identifier of the agent associated with the event, if available.",
+          "title": "Agent Id"
+        },
+        "agent_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Name of the agent associated with the event, if available.",
+          "title": "Agent Name"
+        },
+        "details": {
+          "additionalProperties": true,
+          "description": "Additional structured details about the event.",
+          "title": "Details",
+          "type": "object"
+        },
+        "entry_id": {
+          "description": "Unique identifier for the task history entry.",
+          "title": "Entry Id",
+          "type": "string"
+        },
+        "entry_type": {
+          "$ref": "#/$defs/TaskHistoryType",
+          "default": "task_event",
+          "description": "Structured category for the entry."
+        },
+        "importance": {
+          "$ref": "#/$defs/TaskHistoryImportance",
+          "default": "normal",
+          "description": "Relative importance used when building compact history summaries."
+        },
+        "message_class": {
+          "const": "TaskHistoryEntry",
+          "default": "TaskHistoryEntry",
+          "description": "Task History Entry",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "objective_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional manager-local durable objective identifier active when the entry was recorded.",
+          "title": "Objective Id"
+        },
+        "plan_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional manager-local durable plan identifier active when the entry was recorded.",
+          "title": "Plan Id"
+        },
+        "plan_step_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional plan step identifier associated with the event.",
+          "title": "Plan Step Id"
+        },
+        "related_task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional related task identifier, such as a subtask ID.",
+          "title": "Related Task Id"
+        },
+        "source": {
+          "$ref": "#/$defs/TaskHistorySource",
+          "default": "system",
+          "description": "Whether the entry was recorded automatically by the system or explicitly by an agent."
+        },
+        "summary": {
+          "description": "Short summary of the execution event.",
+          "title": "Summary",
+          "type": "string"
+        },
+        "timestamp": {
+          "description": "Timestamp when the history entry was recorded.",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "tracks_to_plan": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether the event explicitly maps to the current plan.",
+          "title": "Tracks To Plan"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "title": "TaskHistoryEntry",
+      "type": "object"
+    },
+    "TaskHistoryImportance": {
+      "enum": [
+        "low",
+        "normal",
+        "high",
+        "critical"
+      ],
+      "title": "TaskHistoryImportance",
+      "type": "string"
+    },
+    "TaskHistorySource": {
+      "enum": [
+        "system",
+        "agent"
+      ],
+      "title": "TaskHistorySource",
+      "type": "string"
+    },
+    "TaskHistoryType": {
+      "enum": [
+        "state_change",
+        "task_event",
+        "subtask_event",
+        "query_event",
+        "agent_note",
+        "plan_event",
+        "error_event"
+      ],
+      "title": "TaskHistoryType",
+      "type": "string"
+    },
+    "TaskQuery": {
+      "description": "Used for direct messaging between agents (or agent and user) to clarify task intent before proceeding.\nThe task_query_id is reused while the conversation is ongoing. Each agent / user must keep its own track of the chain of queries and replies produced in this conversation.\n\nAttributes:\n    task_query_id (str): Unique identifier for the task query. Defaults to `task_query_id_` plus a 12-character lowercase hexadecimal suffix. The task_query_id is reused while the conversation is ongoing. Each agent / user must keep its own track of the chain of queries and replies produced in this conversation.\n    parent_task_id (Optional[str]): Id of the task that this query pertains to. Defaults to None.\n    task_conversations (List[Tuple[str, str]]): Task conversations list, where each tuple contains the name of the agent that produced the response and the response itself. Defaults to an empty list.",
+      "properties": {
+        "allow_free_text": {
+          "default": true,
+          "description": "Whether free-form text responses are allowed in addition to choices.",
+          "title": "Allow Free Text",
+          "type": "boolean"
+        },
+        "allowed_decisions": {
+          "description": "Allowed structured decisions for this query, when applicable.",
+          "items": {
+            "$ref": "#/$defs/TaskQueryDecision"
+          },
+          "title": "Allowed Decisions",
+          "type": "array"
+        },
+        "choice_mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "single",
+                "multiple"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional first-class choice UI mode.",
+          "title": "Choice Mode"
+        },
+        "choices": {
+          "description": "Optional first-class user-visible choices.",
+          "items": {
+            "$ref": "#/$defs/TaskQueryChoiceOption"
+          },
+          "title": "Choices",
+          "type": "array"
+        },
+        "message": {
+          "default": "",
+          "description": "The message: either to clarify something about a task or as a response to a previous query.",
+          "title": "Message",
+          "type": "string"
+        },
+        "message_class": {
+          "const": "TaskQuery",
+          "default": "TaskQuery",
+          "description": "Task Query",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "parent_task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Id of the task that this query pertains to",
+          "title": "Parent Task Id"
+        },
+        "query_reason": {
+          "$ref": "#/$defs/TaskQueryReason",
+          "default": "clarification",
+          "description": "Machine-readable reason for this query."
+        },
+        "query_type": {
+          "$ref": "#/$defs/MessageMetaType",
+          "description": "Indicates whether this is a query request or a query response"
+        },
+        "recoverable_pause_trigger": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoverablePauseTrigger"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Recoverable runtime pause trigger, when this query asks the requester how to proceed after a runtime budget limit."
+        },
+        "replied_message": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepliedMessage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The earlier chat message the person replied to with this clarification answer. Background for the answer; text from the assistant or another member is never the person's instructions."
+        },
+        "selected_choice_ids": {
+          "description": "Selected option ids for TaskQuery responses.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Selected Choice Ids",
+          "type": "array"
+        },
+        "task_query_id": {
+          "description": "Unique identifier for the task query. The task_query_id is reused while the conversation is ongoing. The underlying communications system will preserve Each agent / user must keep its own track of the chain of queries and replies produced in this conversation.",
+          "title": "Task Query Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query_type"
+      ],
+      "title": "TaskQuery",
+      "type": "object"
+    },
+    "TaskQueryChoiceOption": {
+      "description": "First-class choice option for user-facing TaskQuery prompts.",
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional user-facing explanation.",
+          "title": "Description"
+        },
+        "label": {
+          "description": "Short user-facing option label.",
+          "title": "Label",
+          "type": "string"
+        },
+        "option_id": {
+          "description": "Stable machine-readable option id.",
+          "title": "Option Id",
+          "type": "string"
+        },
+        "recommended": {
+          "default": false,
+          "description": "Whether this option is recommended by the agent.",
+          "title": "Recommended",
+          "type": "boolean"
+        },
+        "selected_by_default": {
+          "default": false,
+          "description": "Whether this option should start selected.",
+          "title": "Selected By Default",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "option_id",
+        "label"
+      ],
+      "title": "TaskQueryChoiceOption",
+      "type": "object"
+    },
+    "TaskQueryDecision": {
+      "enum": [
+        "resume",
+        "partial",
+        "cancel",
+        "retry",
+        "retry_in_5_minutes",
+        "retry_in_10_minutes"
+      ],
+      "title": "TaskQueryDecision",
+      "type": "string"
+    },
+    "TaskQueryReason": {
+      "enum": [
+        "clarification",
+        "recoverable_runtime_pause",
+        "recovery_checkpoint"
+      ],
+      "title": "TaskQueryReason",
+      "type": "string"
+    },
+    "TaskRedispatchNoticeV1": {
+      "additionalProperties": false,
+      "description": "Why a task arrives again and what its interrupted run already did.",
+      "properties": {
+        "dispatched_actions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DispatchedActionNoteV1"
+          },
+          "maxItems": 50,
+          "title": "Dispatched Actions",
+          "type": "array"
+        },
+        "handback_id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Handback Id",
+          "type": "string"
+        },
+        "interrupted_at_utc": {
+          "format": "date-time",
+          "title": "Interrupted At Utc",
+          "type": "string"
+        },
+        "interruption_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Interruption Count",
+          "type": "integer"
+        },
+        "prior_disposition": {
+          "enum": [
+            "not_started",
+            "interrupted"
+          ],
+          "title": "Prior Disposition",
+          "type": "string"
+        },
+        "prior_worker_agent_id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Prior Worker Agent Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "handback_id",
+        "prior_disposition",
+        "prior_worker_agent_id",
+        "interrupted_at_utc"
+      ],
+      "title": "TaskRedispatchNoticeV1",
+      "type": "object"
+    },
+    "TaskRuntimeLeaseRecord": {
+      "additionalProperties": false,
+      "description": "Runtime-owned concurrency lease for one active task-tree batch.",
+      "properties": {
+        "batch_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Batch Id"
+        },
+        "current_action_index": {
+          "default": 0,
+          "title": "Current Action Index",
+          "type": "integer"
+        },
+        "epoch": {
+          "default": 1,
+          "title": "Epoch",
+          "type": "integer"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires At"
+        },
+        "interrupt_event_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Interrupt Event Id"
+        },
+        "interrupt_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Interrupt Reason"
+        },
+        "interrupt_requested": {
+          "default": false,
+          "title": "Interrupt Requested",
+          "type": "boolean"
+        },
+        "lease_id": {
+          "title": "Lease Id",
+          "type": "string"
+        },
+        "owner_agent_id": {
+          "title": "Owner Agent Id",
+          "type": "string"
+        },
+        "root_task_id": {
+          "title": "Root Task Id",
+          "type": "string"
+        },
+        "source_task_id": {
+          "title": "Source Task Id",
+          "type": "string"
+        },
+        "started_at": {
+          "default": "",
+          "title": "Started At",
+          "type": "string"
+        },
+        "status": {
+          "default": "active",
+          "enum": [
+            "active",
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
+            "stale",
+            "waiting_external_result"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "updated_at": {
+          "default": "",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "lease_id",
+        "root_task_id",
+        "source_task_id",
+        "owner_agent_id"
+      ],
+      "title": "TaskRuntimeLeaseRecord",
+      "type": "object"
+    },
+    "TaskSnapshotRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "header": {
+          "$ref": "#/$defs/MessageHeader"
+        },
+        "meta": {
+          "$ref": "#/$defs/MessageMeta"
+        },
+        "owner_person_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Owner Person Id"
+        },
+        "state": {
+          "$ref": "#/$defs/ProgressState"
+        },
+        "task": {
+          "$ref": "#/$defs/Task"
+        },
+        "task_id": {
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "state",
+        "task",
+        "header",
+        "meta",
+        "owner_person_id"
+      ],
+      "title": "TaskSnapshotRecord",
+      "type": "object"
+    },
+    "TaskStateProjectionRecord": {
+      "additionalProperties": false,
+      "description": "Audit record for coordinator-owned semantic task-state projection.",
+      "properties": {
+        "batch_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Batch Id"
+        },
+        "created_at": {
+          "default": "",
+          "title": "Created At",
+          "type": "string"
+        },
+        "event_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Id"
+        },
+        "from_state": {
+          "title": "From State",
+          "type": "string"
+        },
+        "projection_id": {
+          "title": "Projection Id",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "source": {
+          "default": "coordinator",
+          "title": "Source",
+          "type": "string"
+        },
+        "task_id": {
+          "title": "Task Id",
+          "type": "string"
+        },
+        "to_state": {
+          "title": "To State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projection_id",
+        "task_id",
+        "from_state",
+        "to_state",
+        "reason"
+      ],
+      "title": "TaskStateProjectionRecord",
+      "type": "object"
+    },
+    "TurnActionBatchRecord": {
+      "additionalProperties": false,
+      "description": "Runtime-owned durable state for one ordered set of LLM-requested actions.",
+      "properties": {
+        "batch_id": {
+          "title": "Batch Id",
+          "type": "string"
+        },
+        "created_at": {
+          "default": "",
+          "title": "Created At",
+          "type": "string"
+        },
+        "current_action_index": {
+          "default": 0,
+          "title": "Current Action Index",
+          "type": "integer"
+        },
+        "inline_recovery_attempt_count": {
+          "default": 0,
+          "title": "Inline Recovery Attempt Count",
+          "type": "integer"
+        },
+        "plan_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Plan Id"
+        },
+        "plan_step_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Plan Step Id"
+        },
+        "source_task_id": {
+          "title": "Source Task Id",
+          "type": "string"
+        },
+        "status": {
+          "default": "prepared",
+          "enum": [
+            "prepared",
+            "executing",
+            "completed",
+            "retrying",
+            "needs_model_recovery",
+            "isolated_recovery_started",
+            "failed",
+            "waiting_external_result"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "updated_at": {
+          "default": "",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "batch_id",
+        "source_task_id"
+      ],
+      "title": "TurnActionBatchRecord",
+      "type": "object"
+    },
+    "TurnActionOutboxRecord": {
+      "additionalProperties": false,
+      "description": "Runtime-owned durable state for one action inside a turn-action batch.",
+      "properties": {
+        "action_id": {
+          "title": "Action Id",
+          "type": "string"
+        },
+        "action_index": {
+          "title": "Action Index",
+          "type": "integer"
+        },
+        "action_type": {
+          "title": "Action Type",
+          "type": "string"
+        },
+        "attempt_count": {
+          "default": 0,
+          "title": "Attempt Count",
+          "type": "integer"
+        },
+        "batch_id": {
+          "title": "Batch Id",
+          "type": "string"
+        },
+        "created_at": {
+          "default": "",
+          "title": "Created At",
+          "type": "string"
+        },
+        "failure_report": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failure Report"
+        },
+        "idempotency_key": {
+          "default": "",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "last_error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Error"
+        },
+        "message_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Id"
+        },
+        "next_retry_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Retry At"
+        },
+        "payload_json": {
+          "additionalProperties": true,
+          "title": "Payload Json",
+          "type": "object"
+        },
+        "phase": {
+          "default": "validate",
+          "enum": [
+            "validate",
+            "local_commit",
+            "publish",
+            "advisory_capacity",
+            "post_publish_finalize",
+            "complete"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "recoverability": {
+          "default": "automatic_retry",
+          "enum": [
+            "automatic_retry",
+            "model_recovery",
+            "isolated_recovery",
+            "terminal"
+          ],
+          "title": "Recoverability",
+          "type": "string"
+        },
+        "side_effects": {
+          "additionalProperties": true,
+          "title": "Side Effects",
+          "type": "object"
+        },
+        "source_task_id": {
+          "title": "Source Task Id",
+          "type": "string"
+        },
+        "status": {
+          "default": "pending",
+          "enum": [
+            "pending",
+            "prepared",
+            "dispatching",
+            "dispatched",
+            "completed",
+            "blocked",
+            "retry_scheduled",
+            "failed_recoverable",
+            "failed_terminal"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "target_route": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Route"
+        },
+        "updated_at": {
+          "default": "",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action_id",
+        "batch_id",
+        "source_task_id",
+        "action_index",
+        "action_type",
+        "payload_json"
+      ],
+      "title": "TurnActionOutboxRecord",
+      "type": "object"
+    },
+    "UserTaskAttachment": {
+      "description": "User-provided attachment metadata for Task and TaskSteering payloads.",
+      "properties": {
+        "attachment_id": {
+          "description": "Stable gateway-generated attachment identifier.",
+          "title": "Attachment Id",
+          "type": "string"
+        },
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional user-supplied attachment caption.",
+          "title": "Caption"
+        },
+        "content_type": {
+          "default": "application/octet-stream",
+          "description": "Resolved MIME content type.",
+          "title": "Content Type",
+          "type": "string"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "string"
+        },
+        "filename": {
+          "description": "Sanitized user-visible filename.",
+          "title": "Filename",
+          "type": "string"
+        },
+        "kind": {
+          "default": "other",
+          "description": "High-level attachment kind.",
+          "enum": [
+            "image",
+            "document",
+            "audio",
+            "video",
+            "other"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "origin": {
+          "default": "web_chat",
+          "description": "Surface that originated this attachment.",
+          "enum": [
+            "web_chat",
+            "telegram",
+            "discord",
+            "whatsapp",
+            "signal",
+            "photon",
+            "cli",
+            "other"
+          ],
+          "title": "Origin",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "SHA-256 digest of the attachment bytes.",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "description": "Attachment byte size.",
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "storage_refs": {
+          "items": {
+            "$ref": "#/$defs/AttachmentStorageRef"
+          },
+          "title": "Storage Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "attachment_id",
+        "filename",
+        "size_bytes",
+        "sha256"
+      ],
+      "title": "UserTaskAttachment",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/runtime-snapshots/v3/RuntimeSnapshotV3.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Complete durable owner state; older versions and unknown fields are rejected.\n\nEmpty collections are valid. Cancellation and orphan filtering are recovery\npolicy decisions applied only after this whole document validates.",
+  "properties": {
+    "current_in_progress_task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Current In Progress Task Id"
+    },
+    "final_review_attempt_counts": {
+      "additionalProperties": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "title": "Final Review Attempt Counts",
+      "type": "object"
+    },
+    "final_review_pending_task_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Final Review Pending Task Ids",
+      "type": "array"
+    },
+    "human_interaction_blockers": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Human Interaction Blockers",
+      "type": "object"
+    },
+    "partial_tool_call_limit_overrides": {
+      "additionalProperties": {
+        "minimum": 1,
+        "type": "integer"
+      },
+      "title": "Partial Tool Call Limit Overrides",
+      "type": "object"
+    },
+    "plan_step_task_links": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PlanStepTaskLink"
+      },
+      "title": "Plan Step Task Links",
+      "type": "object"
+    },
+    "plan_to_objective_id": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Plan To Objective Id",
+      "type": "object"
+    },
+    "recoverable_pause_records": {
+      "additionalProperties": {
+        "$ref": "#/$defs/RecoverablePauseRecord"
+      },
+      "title": "Recoverable Pause Records",
+      "type": "object"
+    },
+    "recovery_links": {
+      "additionalProperties": {
+        "$ref": "#/$defs/RecoveryTaskLink"
+      },
+      "title": "Recovery Links",
+      "type": "object"
+    },
+    "runtime_leases": {
+      "additionalProperties": {
+        "$ref": "#/$defs/TaskRuntimeLeaseRecord"
+      },
+      "title": "Runtime Leases",
+      "type": "object"
+    },
+    "runtime_mailbox_events": {
+      "additionalProperties": {
+        "$ref": "#/$defs/RuntimeMailboxEventRecord"
+      },
+      "title": "Runtime Mailbox Events",
+      "type": "object"
+    },
+    "runtime_resume_directives": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Runtime Resume Directives",
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 3,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "subtask_to_parent_map": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Subtask To Parent Map",
+      "type": "object"
+    },
+    "task_queries": {
+      "additionalProperties": {
+        "items": {
+          "$ref": "#/$defs/TaskQuery"
+        },
+        "type": "array"
+      },
+      "title": "Task Queries",
+      "type": "object"
+    },
+    "task_queue": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Task Queue",
+      "type": "array"
+    },
+    "task_state_projection_records": {
+      "additionalProperties": {
+        "$ref": "#/$defs/TaskStateProjectionRecord"
+      },
+      "title": "Task State Projection Records",
+      "type": "object"
+    },
+    "task_to_objective_id": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Task To Objective Id",
+      "type": "object"
+    },
+    "task_to_plan_id": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Task To Plan Id",
+      "type": "object"
+    },
+    "tasks": {
+      "items": {
+        "$ref": "#/$defs/TaskSnapshotRecord"
+      },
+      "title": "Tasks",
+      "type": "array"
+    },
+    "turn_action_batches": {
+      "additionalProperties": {
+        "$ref": "#/$defs/TurnActionBatchRecord"
+      },
+      "title": "Turn Action Batches",
+      "type": "object"
+    },
+    "turn_action_outbox": {
+      "additionalProperties": {
+        "$ref": "#/$defs/TurnActionOutboxRecord"
+      },
+      "title": "Turn Action Outbox",
+      "type": "object"
+    },
+    "waiting_top_level_task_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Waiting Top Level Task Ids",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version"
+  ],
+  "title": "RuntimeSnapshotV3",
+  "type": "object"
+}

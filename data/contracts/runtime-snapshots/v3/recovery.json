@@ -1,0 +1,471 @@
+{
+  "cases": [
+    {
+      "cancelled": [],
+      "expected": {
+        "mailbox": {},
+        "outbox": {},
+        "queue": [
+          "work"
+        ],
+        "tasks": [
+          "work"
+        ]
+      },
+      "id": "queued_task",
+      "snapshots": [
+        {
+          "current_in_progress_task_id": null,
+          "final_review_attempt_counts": {},
+          "final_review_pending_task_ids": [],
+          "human_interaction_blockers": {},
+          "partial_tool_call_limit_overrides": {},
+          "plan_step_task_links": {},
+          "plan_to_objective_id": {},
+          "recoverable_pause_records": {},
+          "recovery_links": {},
+          "runtime_leases": {},
+          "runtime_mailbox_events": {},
+          "runtime_resume_directives": {},
+          "schema_version": 3,
+          "subtask_to_parent_map": {},
+          "task_queries": {},
+          "task_queue": [
+            "work"
+          ],
+          "task_state_projection_records": {},
+          "task_to_objective_id": {},
+          "task_to_plan_id": {},
+          "tasks": [
+            {
+              "header": {
+                "agent_signature": null,
+                "from_agent_id": null,
+                "idempotency_key": null,
+                "message_class": "MessageHeader",
+                "message_id": "message_work",
+                "outbox_action_id": null,
+                "response_routing_key": null,
+                "timestamp": "2026-09-07T00:00:00+00:00",
+                "to_routing_path": null
+              },
+              "meta": {
+                "conversation_id": null,
+                "followup_to_task_id": null,
+                "from_agent_name": null,
+                "gateway_context": null,
+                "is_response_requested": false,
+                "manager_escalation": null,
+                "message_class": "MessageMeta",
+                "msg_correlation_id": null,
+                "objective_id": null,
+                "objective_work_session_id": null,
+                "request_timezone": null,
+                "requester_type": null,
+                "to_agent_name": null,
+                "to_named_agent_type": null
+              },
+              "owner_person_id": null,
+              "state": "accepted",
+              "task": {
+                "answer": null,
+                "attachments": [],
+                "errors": null,
+                "execution_digest": null,
+                "execution_history": [],
+                "message_class": "Task",
+                "parent_task_id": null,
+                "problem_statement": "Retain custody",
+                "task_id": "work",
+                "task_plan": null,
+                "task_state": [],
+                "task_type": "request",
+                "thoughts_info": null
+              },
+              "task_id": "work"
+            }
+          ],
+          "turn_action_batches": {},
+          "turn_action_outbox": {},
+          "waiting_top_level_task_ids": []
+        }
+      ]
+    },
+    {
+      "cancelled": [
+        "work"
+      ],
+      "expected": {
+        "mailbox": {},
+        "outbox": {},
+        "queue": [],
+        "tasks": []
+      },
+      "id": "cancellation_wins",
+      "snapshots": [
+        {
+          "current_in_progress_task_id": null,
+          "final_review_attempt_counts": {},
+          "final_review_pending_task_ids": [],
+          "human_interaction_blockers": {},
+          "partial_tool_call_limit_overrides": {},
+          "plan_step_task_links": {},
+          "plan_to_objective_id": {},
+          "recoverable_pause_records": {},
+          "recovery_links": {},
+          "runtime_leases": {},
+          "runtime_mailbox_events": {},
+          "runtime_resume_directives": {},
+          "schema_version": 3,
+          "subtask_to_parent_map": {},
+          "task_queries": {},
+          "task_queue": [
+            "work"
+          ],
+          "task_state_projection_records": {},
+          "task_to_objective_id": {},
+          "task_to_plan_id": {},
+          "tasks": [
+            {
+              "header": {
+                "agent_signature": null,
+                "from_agent_id": null,
+                "idempotency_key": null,
+                "message_class": "MessageHeader",
+                "message_id": "message_work",
+                "outbox_action_id": null,
+                "response_routing_key": null,
+                "timestamp": "2026-09-07T00:00:00+00:00",
+                "to_routing_path": null
+              },
+              "meta": {
+                "conversation_id": null,
+                "followup_to_task_id": null,
+                "from_agent_name": null,
+                "gateway_context": null,
+                "is_response_requested": false,
+                "manager_escalation": null,
+                "message_class": "MessageMeta",
+                "msg_correlation_id": null,
+                "objective_id": null,
+                "objective_work_session_id": null,
+                "request_timezone": null,
+                "requester_type": null,
+                "to_agent_name": null,
+                "to_named_agent_type": null
+              },
+              "owner_person_id": null,
+              "state": "accepted",
+              "task": {
+                "answer": null,
+                "attachments": [],
+                "errors": null,
+                "execution_digest": null,
+                "execution_history": [],
+                "message_class": "Task",
+                "parent_task_id": null,
+                "problem_statement": "Retain custody",
+                "task_id": "work",
+                "task_plan": null,
+                "task_state": [],
+                "task_type": "request",
+                "thoughts_info": null
+              },
+              "task_id": "work"
+            }
+          ],
+          "turn_action_batches": {},
+          "turn_action_outbox": {},
+          "waiting_top_level_task_ids": []
+        }
+      ]
+    },
+    {
+      "cancelled": [],
+      "expected": {
+        "mailbox": {
+          "event": "deferred"
+        },
+        "outbox": {
+          "action": "retry_scheduled"
+        },
+        "queue": [
+          "work"
+        ],
+        "tasks": [
+          "work"
+        ]
+      },
+      "id": "interrupted_operations",
+      "snapshots": [
+        {
+          "current_in_progress_task_id": null,
+          "final_review_attempt_counts": {},
+          "final_review_pending_task_ids": [],
+          "human_interaction_blockers": {},
+          "partial_tool_call_limit_overrides": {},
+          "plan_step_task_links": {},
+          "plan_to_objective_id": {},
+          "recoverable_pause_records": {},
+          "recovery_links": {},
+          "runtime_leases": {},
+          "runtime_mailbox_events": {
+            "event": {
+              "event_class": "deferrable",
+              "event_id": "event",
+              "event_type": "task_response",
+              "root_task_id": "work",
+              "status": "processing"
+            }
+          },
+          "runtime_resume_directives": {},
+          "schema_version": 3,
+          "subtask_to_parent_map": {},
+          "task_queries": {},
+          "task_queue": [
+            "work"
+          ],
+          "task_state_projection_records": {},
+          "task_to_objective_id": {},
+          "task_to_plan_id": {},
+          "tasks": [
+            {
+              "header": {
+                "agent_signature": null,
+                "from_agent_id": null,
+                "idempotency_key": null,
+                "message_class": "MessageHeader",
+                "message_id": "message_work",
+                "outbox_action_id": null,
+                "response_routing_key": null,
+                "timestamp": "2026-09-07T00:00:00+00:00",
+                "to_routing_path": null
+              },
+              "meta": {
+                "conversation_id": null,
+                "followup_to_task_id": null,
+                "from_agent_name": null,
+                "gateway_context": null,
+                "is_response_requested": false,
+                "manager_escalation": null,
+                "message_class": "MessageMeta",
+                "msg_correlation_id": null,
+                "objective_id": null,
+                "objective_work_session_id": null,
+                "request_timezone": null,
+                "requester_type": null,
+                "to_agent_name": null,
+                "to_named_agent_type": null
+              },
+              "owner_person_id": null,
+              "state": "accepted",
+              "task": {
+                "answer": null,
+                "attachments": [],
+                "errors": null,
+                "execution_digest": null,
+                "execution_history": [],
+                "message_class": "Task",
+                "parent_task_id": null,
+                "problem_statement": "Retain custody",
+                "task_id": "work",
+                "task_plan": null,
+                "task_state": [],
+                "task_type": "request",
+                "thoughts_info": null
+              },
+              "task_id": "work"
+            }
+          ],
+          "turn_action_batches": {
+            "batch": {
+              "batch_id": "batch",
+              "source_task_id": "work"
+            }
+          },
+          "turn_action_outbox": {
+            "action": {
+              "action_id": "action",
+              "action_index": 0,
+              "action_type": "task_response",
+              "batch_id": "batch",
+              "payload_json": {},
+              "source_task_id": "work",
+              "status": "dispatching"
+            }
+          },
+          "waiting_top_level_task_ids": []
+        }
+      ]
+    },
+    {
+      "cancelled": [],
+      "id": "malformed_outbox_rejects_snapshot",
+      "reject": true,
+      "snapshots": [
+        {
+          "current_in_progress_task_id": null,
+          "final_review_attempt_counts": {},
+          "final_review_pending_task_ids": [],
+          "human_interaction_blockers": {},
+          "partial_tool_call_limit_overrides": {},
+          "plan_step_task_links": {},
+          "plan_to_objective_id": {},
+          "recoverable_pause_records": {},
+          "recovery_links": {},
+          "runtime_leases": {},
+          "runtime_mailbox_events": {},
+          "runtime_resume_directives": {},
+          "schema_version": 3,
+          "subtask_to_parent_map": {},
+          "task_queries": {},
+          "task_queue": [
+            "work"
+          ],
+          "task_state_projection_records": {},
+          "task_to_objective_id": {},
+          "task_to_plan_id": {},
+          "tasks": [
+            {
+              "header": {
+                "agent_signature": null,
+                "from_agent_id": null,
+                "idempotency_key": null,
+                "message_class": "MessageHeader",
+                "message_id": "message_work",
+                "outbox_action_id": null,
+                "response_routing_key": null,
+                "timestamp": "2026-09-07T00:00:00+00:00",
+                "to_routing_path": null
+              },
+              "meta": {
+                "conversation_id": null,
+                "followup_to_task_id": null,
+                "from_agent_name": null,
+                "gateway_context": null,
+                "is_response_requested": false,
+                "manager_escalation": null,
+                "message_class": "MessageMeta",
+                "msg_correlation_id": null,
+                "objective_id": null,
+                "objective_work_session_id": null,
+                "request_timezone": null,
+                "requester_type": null,
+                "to_agent_name": null,
+                "to_named_agent_type": null
+              },
+              "owner_person_id": null,
+              "state": "accepted",
+              "task": {
+                "answer": null,
+                "attachments": [],
+                "errors": null,
+                "execution_digest": null,
+                "execution_history": [],
+                "message_class": "Task",
+                "parent_task_id": null,
+                "problem_statement": "Retain custody",
+                "task_id": "work",
+                "task_plan": null,
+                "task_state": [],
+                "task_type": "request",
+                "thoughts_info": null
+              },
+              "task_id": "work"
+            }
+          ],
+          "turn_action_batches": {},
+          "turn_action_outbox": {
+            "lost": {
+              "action_id": "lost"
+            }
+          },
+          "waiting_top_level_task_ids": []
+        }
+      ]
+    },
+    {
+      "cancelled": [],
+      "id": "old_version_rejected",
+      "reject": true,
+      "snapshots": [
+        {
+          "current_in_progress_task_id": null,
+          "final_review_attempt_counts": {},
+          "final_review_pending_task_ids": [],
+          "human_interaction_blockers": {},
+          "partial_tool_call_limit_overrides": {},
+          "plan_step_task_links": {},
+          "plan_to_objective_id": {},
+          "recoverable_pause_records": {},
+          "recovery_links": {},
+          "runtime_leases": {},
+          "runtime_mailbox_events": {},
+          "runtime_resume_directives": {},
+          "schema_version": 2,
+          "subtask_to_parent_map": {},
+          "task_queries": {},
+          "task_queue": [
+            "work"
+          ],
+          "task_state_projection_records": {},
+          "task_to_objective_id": {},
+          "task_to_plan_id": {},
+          "tasks": [
+            {
+              "header": {
+                "agent_signature": null,
+                "from_agent_id": null,
+                "idempotency_key": null,
+                "message_class": "MessageHeader",
+                "message_id": "message_work",
+                "outbox_action_id": null,
+                "response_routing_key": null,
+                "timestamp": "2026-09-07T00:00:00+00:00",
+                "to_routing_path": null
+              },
+              "meta": {
+                "conversation_id": null,
+                "followup_to_task_id": null,
+                "from_agent_name": null,
+                "gateway_context": null,
+                "is_response_requested": false,
+                "manager_escalation": null,
+                "message_class": "MessageMeta",
+                "msg_correlation_id": null,
+                "objective_id": null,
+                "objective_work_session_id": null,
+                "request_timezone": null,
+                "requester_type": null,
+                "to_agent_name": null,
+                "to_named_agent_type": null
+              },
+              "owner_person_id": null,
+              "state": "accepted",
+              "task": {
+                "answer": null,
+                "attachments": [],
+                "errors": null,
+                "execution_digest": null,
+                "execution_history": [],
+                "message_class": "Task",
+                "parent_task_id": null,
+                "problem_statement": "Retain custody",
+                "task_id": "work",
+                "task_plan": null,
+                "task_state": [],
+                "task_type": "request",
+                "thoughts_info": null
+              },
+              "task_id": "work"
+            }
+          ],
+          "turn_action_batches": {},
+          "turn_action_outbox": {},
+          "waiting_top_level_task_ids": []
+        }
+      ]
+    }
+  ],
+  "schema_version": 1
+}

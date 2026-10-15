@@ -1,0 +1,74 @@
+# Built-in policy for bounded, resumable Objective work. Loading this policy
+# makes profiles available; no Objective is time-boxed until an authenticated
+# user explicitly accepts a profile for that Objective.
+schema_version: 2
+
+suggestions:
+  enabled: true
+  eligible_horizons: [long_horizon, recurring, standing]
+  minimum_estimated_sessions: 3
+
+# The runtime rejects a bounded-run policy that omits this planning discipline.
+required_skills:
+  - long-horizon-plan-execution
+
+default_profile: nightly
+
+# Agent-authored profiles are inert proposals until the authenticated owner
+# accepts the exact proposal id and digest. Reusable profiles are private to
+# that owner and TeamArchitect; one-time profiles are snapshotted on one Objective.
+custom_profiles:
+  enabled: true
+  allow_reusable_installation: true
+  proposal_ttl_seconds: 86400              # 86,400s (24h) to accept an exact proposal.
+  minimum_cadence_interval_seconds: 3600   # 3,600s (60min) minimum gap between scheduled runs.
+  max_installed_profiles_per_owner: 50     # 50 private reusable profiles per user and TeamArchitect.
+  budget_bounds:
+    minimum:
+      active_seconds: 300                  # 300s (5min) minimum cumulative wall-clock window per session.
+      checkpoint_reserve_seconds: 60       # At least 60s (1min) of the session window reserved for graceful checkpointing.
+      checkpoint_reserve_turns: 1          # At least 1 session model cycle reserved for checkpoint-only continuation work.
+      checkpoint_reserve_tokens: 10000     # At least 10,000 session input + output tokens reserved for a checkpoint-only invocation.
+      checkpoint_reserve_tool_calls: 1     # At least 1 session tool call reserved for recording the checkpoint.
+      turns: 2                             # At least 2 cumulative model cycles per session, including the checkpoint reserve.
+      total_tokens: 25000                  # At least 25,000 cumulative input + output tokens per session, including the reserve.
+      tool_calls: 2                        # At least 2 cumulative tool calls per session, not per turn, including the reserve.
+    maximum:
+      active_seconds: 28800                # 28,800s (8h) maximum cumulative wall-clock window per session.
+      checkpoint_reserve_seconds: 3600     # At most 3,600s (60min) of the session window may be reserved for checkpointing.
+      checkpoint_reserve_turns: 20         # At most 20 session model cycles may be reserved for checkpointing.
+      checkpoint_reserve_tokens: 500000    # At most 500,000 session tokens may be reserved for checkpointing.
+      checkpoint_reserve_tool_calls: 5     # At most 5 session tool calls may be reserved for checkpoint attempts.
+      turns: 200                           # At most 200 cumulative model cycles per session.
+      total_tokens: 3000000                # At most 3,000,000 cumulative input + output tokens per session.
+      tool_calls: 500                      # At most 500 cumulative tool calls per session, not per turn.
+
+profiles:
+  nightly:
+    cadence_cron: "0 3 * * *"
+    cadence_timezone: owner
+    budget:
+      active_seconds: 1800                 # 1,800s (30min) hard work-session duration.
+      checkpoint_reserve_seconds: 300      # 300s (5min) reserved for a graceful checkpoint; 1,500s (25min) remains for new work.
+      checkpoint_reserve_turns: 2          # 2 of 30 model cycles are reserved for the checkpoint-only invocation.
+      checkpoint_reserve_tokens: 150000    # 150,000 of 1,500,000 tokens are held back from material work.
+      checkpoint_reserve_tool_calls: 5     # 5 of 150 tool calls are held for checkpoint attempts; 145 remain for material work.
+      turns: 30                            # Cumulative model cycles across the session.
+      total_tokens: 1500000                # Cumulative input + output tokens; 1,350,000 remain for material work.
+      tool_calls: 150                      # Cumulative tool calls across the session.
+  deep:
+    cadence_cron: "0 4 * * *"
+    cadence_timezone: owner
+    budget:
+      active_seconds: 5400                 # 5,400s (90min) hard work-session duration.
+      checkpoint_reserve_seconds: 300      # 300s (5min) reserved for a graceful checkpoint; 5,100s (85min) remains for new work.
+      checkpoint_reserve_turns: 3          # 3 of 50 model cycles are reserved for checkpoint-only continuation work.
+      checkpoint_reserve_tokens: 250000    # 250,000 of 3,000,000 tokens are held back from material work.
+      checkpoint_reserve_tool_calls: 5     # 5 of 300 tool calls are held for checkpoint attempts; 295 remain for material work.
+      turns: 50                            # Cumulative model cycles across the session.
+      total_tokens: 3000000                # Cumulative input + output tokens; 2,750,000 remain for material work.
+      tool_calls: 300                      # Cumulative tool calls across the session.
+
+visibility:
+  emit_activity_snapshots: true
+  checkpoint_history_limit: 50

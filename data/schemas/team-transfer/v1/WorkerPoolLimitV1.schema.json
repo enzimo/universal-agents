@@ -1,0 +1,119 @@
+{
+  "$defs": {
+    "WorkerPoolLimitChangeV1": {
+      "additionalProperties": false,
+      "properties": {
+        "at_utc": {
+          "format": "date-time",
+          "title": "At Utc",
+          "type": "string"
+        },
+        "max_workers": {
+          "title": "Max Workers",
+          "type": "integer"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "set_by": {
+          "title": "Set By",
+          "type": "string"
+        },
+        "until_utc": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Until Utc"
+        }
+      },
+      "required": [
+        "at_utc",
+        "max_workers",
+        "set_by",
+        "reason"
+      ],
+      "title": "WorkerPoolLimitChangeV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/WorkerPoolLimitV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "TeamArchitect's sizes for one worker type, or the team (``scope='*'``).",
+  "properties": {
+    "history": {
+      "items": {
+        "$ref": "#/$defs/WorkerPoolLimitChangeV1"
+      },
+      "title": "History",
+      "type": "array"
+    },
+    "lasting_max_workers": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Lasting Max Workers"
+    },
+    "scope": {
+      "title": "Scope",
+      "type": "string"
+    },
+    "team_id": {
+      "title": "Team Id",
+      "type": "string"
+    },
+    "temporary_max_workers": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Temporary Max Workers"
+    },
+    "temporary_until_utc": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Temporary Until Utc"
+    },
+    "updated_at_utc": {
+      "format": "date-time",
+      "title": "Updated At Utc",
+      "type": "string"
+    }
+  },
+  "required": [
+    "team_id",
+    "scope",
+    "updated_at_utc"
+  ],
+  "title": "WorkerPoolLimitV1",
+  "type": "object"
+}

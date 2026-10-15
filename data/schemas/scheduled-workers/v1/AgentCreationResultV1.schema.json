@@ -1,0 +1,88 @@
+{
+  "$defs": {
+    "AgentLaunchResultV1": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Id"
+        },
+        "created": {
+          "default": false,
+          "title": "Created",
+          "type": "boolean"
+        },
+        "launch_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Launch Id"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "status": {
+          "enum": [
+            "starting",
+            "ready",
+            "denied",
+            "failed",
+            "waiting"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "AgentLaunchResultV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/scheduled-workers/v1/AgentCreationResultV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "request_id": {
+      "title": "Request Id",
+      "type": "string"
+    },
+    "results": {
+      "items": {
+        "$ref": "#/$defs/AgentLaunchResultV1"
+      },
+      "title": "Results",
+      "type": "array"
+    }
+  },
+  "required": [
+    "request_id",
+    "results"
+  ],
+  "title": "AgentCreationResultV1",
+  "type": "object"
+}

@@ -1,0 +1,196 @@
+{
+  "$defs": {
+    "AccountLinkStatus": {
+      "enum": [
+        "active",
+        "revoked"
+      ],
+      "title": "AccountLinkStatus",
+      "type": "string"
+    },
+    "CredentialInjectionV1": {
+      "additionalProperties": false,
+      "description": "One credential field and where the broker injects it (never the value).",
+      "properties": {
+        "field": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Field",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "placement": {
+          "$ref": "#/$defs/InjectionPlacement"
+        },
+        "template": {
+          "default": "{value}",
+          "maxLength": 1000,
+          "minLength": 7,
+          "title": "Template",
+          "type": "string"
+        }
+      },
+      "required": [
+        "placement",
+        "name",
+        "field"
+      ],
+      "title": "CredentialInjectionV1",
+      "type": "object"
+    },
+    "InjectionPlacement": {
+      "description": "Where the broker puts a credential value.",
+      "enum": [
+        "header",
+        "query",
+        "env",
+        "file"
+      ],
+      "title": "InjectionPlacement",
+      "type": "string"
+    },
+    "LinkOwnerKind": {
+      "enum": [
+        "team",
+        "person"
+      ],
+      "title": "LinkOwnerKind",
+      "type": "string"
+    },
+    "SubjectKind": {
+      "description": "Who a grant is for. A grant to a type, role, or team covers its members.\n\nA schedule holds the access of one scheduled job (owner's decision\n2026-09-30, \"access follows the work\"): every agent in one of its runs is\nin it, whatever agent type runs it. Its id is ``<team>/<schedule id>``.",
+      "enum": [
+        "agent",
+        "agent_type",
+        "role",
+        "team",
+        "user",
+        "schedule"
+      ],
+      "title": "SubjectKind",
+      "type": "string"
+    },
+    "SubjectRefV1": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SubjectKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "SubjectRefV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/AccountLinkV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The stored credential a tool uses for a team or a person, and where it goes.\n\nLinks grant nothing: access to the tool comes from grants. The broker uses\nthe person's own link first and the team's link otherwise, and sends the\ncredential only to the hosts of the tool's definition.",
+  "properties": {
+    "created_at_utc": {
+      "format": "date-time",
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "created_by": {
+      "$ref": "#/$defs/SubjectRefV1"
+    },
+    "credential_key": {
+      "title": "Credential Key",
+      "type": "string"
+    },
+    "injections": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/CredentialInjectionV1"
+      },
+      "title": "Injections",
+      "type": "array"
+    },
+    "link_id": {
+      "maxLength": 120,
+      "minLength": 1,
+      "title": "Link Id",
+      "type": "string"
+    },
+    "owner_id": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Owner Id",
+      "type": "string"
+    },
+    "owner_kind": {
+      "$ref": "#/$defs/LinkOwnerKind"
+    },
+    "revoked_at_utc": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Revoked At Utc"
+    },
+    "revoked_by": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SubjectRefV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/AccountLinkStatus",
+      "default": "active"
+    },
+    "team_id": {
+      "maxLength": 120,
+      "minLength": 1,
+      "title": "Team Id",
+      "type": "string"
+    },
+    "tool_id": {
+      "title": "Tool Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "link_id",
+    "team_id",
+    "tool_id",
+    "owner_kind",
+    "owner_id",
+    "credential_key",
+    "created_by",
+    "created_at_utc"
+  ],
+  "title": "AccountLinkV1",
+  "type": "object"
+}

@@ -1,0 +1,15 @@
+use_default_settings: true
+
+search:
+  # Agent clients need machine-readable output; SearXNG otherwise enables only HTML.
+  formats:
+    - html
+    - json
+    - csv
+    - rss
+
+server:
+  # The container overrides this placeholder from SEARXNG_SECRET at runtime.
+  secret_key: "ultrasecretkey"
+  limiter: false
+  image_proxy: true

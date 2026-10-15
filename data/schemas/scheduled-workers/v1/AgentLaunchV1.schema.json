@@ -1,0 +1,178 @@
+{
+  "$defs": {
+    "AgentLaunchState": {
+      "enum": [
+        "reserved",
+        "starting",
+        "ready",
+        "failed",
+        "unknown",
+        "retired"
+      ],
+      "title": "AgentLaunchState",
+      "type": "string"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/scheduled-workers/v1/AgentLaunchV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "agent_id": {
+      "title": "Agent Id",
+      "type": "string"
+    },
+    "created_at_utc": {
+      "format": "date-time",
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "definition_digest": {
+      "description": "Full launch fingerprint, including tools and prompt text expanded by the running code. It stops one start if the definition changes between reservation and construction.",
+      "title": "Definition Digest",
+      "type": "string"
+    },
+    "fence": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Fence",
+      "type": "integer"
+    },
+    "host_id": {
+      "title": "Host Id",
+      "type": "string"
+    },
+    "idle_ttl_seconds": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Idle Ttl Seconds"
+    },
+    "launch_id": {
+      "title": "Launch Id",
+      "type": "string"
+    },
+    "lease_expires_at_utc": {
+      "format": "date-time",
+      "title": "Lease Expires At Utc",
+      "type": "string"
+    },
+    "named_agent_type": {
+      "title": "Named Agent Type",
+      "type": "string"
+    },
+    "occurrence_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Occurrence Id"
+    },
+    "owner_canonical_user_id": {
+      "title": "Owner Canonical User Id",
+      "type": "string"
+    },
+    "policy_revision": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Policy Revision"
+    },
+    "profile_id": {
+      "const": "local",
+      "default": "local",
+      "title": "Profile Id",
+      "type": "string"
+    },
+    "ready_at_utc": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ready At Utc"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reason"
+    },
+    "schedule_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Schedule Id"
+    },
+    "source": {
+      "enum": [
+        "manual",
+        "delegation",
+        "schedule",
+        "pool"
+      ],
+      "title": "Source",
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/$defs/AgentLaunchState",
+      "default": "reserved"
+    },
+    "team_id": {
+      "title": "Team Id",
+      "type": "string"
+    },
+    "updated_at_utc": {
+      "format": "date-time",
+      "title": "Updated At Utc",
+      "type": "string"
+    }
+  },
+  "required": [
+    "launch_id",
+    "agent_id",
+    "team_id",
+    "owner_canonical_user_id",
+    "named_agent_type",
+    "definition_digest",
+    "host_id",
+    "source",
+    "lease_expires_at_utc"
+  ],
+  "title": "AgentLaunchV1",
+  "type": "object"
+}

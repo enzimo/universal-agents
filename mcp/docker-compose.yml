@@ -1,0 +1,18 @@
+services:
+  skills-mcp:
+    build:
+      context: ..
+      dockerfile: mcp/Dockerfile
+    image: skills-mcp-server:latest
+    container_name: skills-mcp
+    restart: unless-stopped
+    environment:
+      SKILLS_MCP_BIND_HOST: "0.0.0.0"
+      SKILLS_MCP_BIND_PORT: "8000"
+      SKILLS_MCP_SKILLS_DIR: "/app/.skills"
+    # FastMCP using sse/http transport:
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount the skills directory so updates to skills don't require a rebuild
+      - ../.skills:/app/.skills:ro

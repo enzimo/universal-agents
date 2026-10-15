@@ -1,0 +1,12 @@
+{
+  "contract": "universal-agents-transport",
+  "json_schema_draft": "2020-12",
+  "schema_version": 1,
+  "schemas": [
+    {
+      "filename": "MessageEnvelope.schema.json",
+      "model": "MessageEnvelope",
+      "sha256": "a85132ae2d6b9b12cdbf37f04b4563477f3302ab68ab2b240cbb7bb371b36468"
+    }
+  ]
+}

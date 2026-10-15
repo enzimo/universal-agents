@@ -1,0 +1,83 @@
+{
+  "$defs": {
+    "ReviewRecordV1": {
+      "additionalProperties": false,
+      "properties": {
+        "confirmed_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confirmed Digest"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "section": {
+          "title": "Section",
+          "type": "string"
+        },
+        "selected": {
+          "default": true,
+          "title": "Selected",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "section",
+        "key"
+      ],
+      "title": "ReviewRecordV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/ImportReviewV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "records": {
+      "items": {
+        "$ref": "#/$defs/ReviewRecordV1"
+      },
+      "title": "Records",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_mac": {
+      "title": "Source Mac",
+      "type": "string"
+    },
+    "target_root": {
+      "title": "Target Root",
+      "type": "string"
+    }
+  },
+  "required": [
+    "source_mac",
+    "target_root"
+  ],
+  "title": "ImportReviewV1",
+  "type": "object"
+}

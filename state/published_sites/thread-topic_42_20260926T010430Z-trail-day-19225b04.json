@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "site_id": "thread-topic_42_20260926T010430Z-trail-day-19225b04",
+  "folder": "agents/sites/thread-topic_42_20260926T010430Z-trail-day-19225b04",
+  "owner_person_id": null,
+  "title": "Trail Day",
+  "site_kind": "how_to",
+  "created_at": "2026-09-26T01:04:30.910172+00:00",
+  "updated_at": "2026-09-26T01:04:30.910172+00:00",
+  "update_count": 0,
+  "files": {
+    "index.html": "50ab4b350c7b60feb5b8bac5650cbb14d52bc23df1d20ff01b03d6324d748890"
+  },
+  "conversation_id": "conversation_site_test",
+  "session_key": "cli:site-test",
+  "channel_name": "telegram",
+  "chat_id": "chat_site_test",
+  "thread_id": "topic_42",
+  "task_id": "task_site_test",
+  "team_id": "team_site_test",
+  "agent_id": "agent_site_test",
+  "named_agent_type": "TeamArchitect"
+}

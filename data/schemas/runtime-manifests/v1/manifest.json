@@ -1,0 +1,32 @@
+{
+  "contract": "universal-agents-service-runtime-manifests",
+  "json_schema_draft": "2020-12",
+  "schema_version": 1,
+  "schemas": [
+    {
+      "filename": "GatewayRuntimeManifestV1.schema.json",
+      "model": "GatewayRuntimeManifestV1",
+      "sha256": "b22e44c3ea14a167a5dcb476816cb3b2a4a0a049e662185c5ce3c9089f176133"
+    },
+    {
+      "filename": "ActivityCollectorRuntimeManifestV1.schema.json",
+      "model": "ActivityCollectorRuntimeManifestV1",
+      "sha256": "8fdaa621aa98a4d10b10233ebe40096e41f18edd85d8f0ff8ef1f1058d58ac58"
+    },
+    {
+      "filename": "SecureBrokerRuntimeManifestV1.schema.json",
+      "model": "SecureBrokerRuntimeManifestV1",
+      "sha256": "32e087c5b3a19e9a4184e5d5766f7f2f89c82b4fe8ab610934d2ff2daeee9d0f"
+    },
+    {
+      "filename": "ExecutionControllerRuntimeManifestV1.schema.json",
+      "model": "ExecutionControllerRuntimeManifestV1",
+      "sha256": "c80247a8ea83b23c5b1edc620e5fab81e14309f89e9d3f0abdd59f930288f2e8"
+    },
+    {
+      "filename": "AdapterHostRuntimeManifestV1.schema.json",
+      "model": "AdapterHostRuntimeManifestV1",
+      "sha256": "a9a986c535640ae187a39e0c5f6dff0de05ef44cb481acbf1872e9218e8921cb"
+    }
+  ]
+}

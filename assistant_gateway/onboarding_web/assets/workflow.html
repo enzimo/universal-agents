@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en" data-color-mode="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Your Workflow</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/workflow.css">
+  <script src="/appearance.js"></script>
+</head>
+<body class="workflow-body">
+  <canvas data-ua-metallic-mesh aria-hidden="true"></canvas>
+  <main class="workflow-shell">
+    <header class="workflow-header">
+      <div><a href="/webchat?view=inbox">Inbox</a><h1 id="workflow-title">Your Workflows</h1><p id="workflow-goal"></p></div>
+      <div class="workflow-actions"><a class="button ghost" id="workflow-chat" href="/webchat">Open Chat</a><button class="button ghost" id="workflow-refresh" type="button">Refresh</button></div>
+    </header>
+    <p id="workflow-connection" role="status" aria-live="polite">Connecting…</p>
+    <section id="workflow-list" aria-label="Workflows"></section>
+    <section id="workflow-detail" hidden>
+      <div class="workflow-plan-heading"><h2>Your Access Plan</h2><button type="button" class="workflow-info" id="workflow-about" aria-label="About this access plan">i</button></div>
+      <p>Follow the connected steps to see what is happening, what comes next, and why. Each step lists the requests the agent made for it and their current status.</p>
+      <p id="workflow-beneficiary"></p>
+      <p id="workflow-task-status" role="status" class="workflow-error" hidden></p>
+      <div class="workflow-map" id="workflow-map" aria-label="Workflow dependency graph"></div>
+      <div class="workflow-actions" id="workflow-review-actions">
+        <button class="button primary" id="workflow-review" type="button">Review Ready Requests</button>
+        <button class="button ghost" id="workflow-logs" type="button">Download Diagnostic Logs</button>
+      </div>
+      <p id="workflow-review-status" role="status"></p>
+      <section class="workflow-panel" id="workflow-unassigned" hidden><h2>Other Requests From This Task</h2><p>These requests and setup pages matched no single step of the plan. Requests are decided in the Inbox as usual.</p><div id="workflow-unassigned-list"></div></section>
+      <div id="workflow-credentials"></div>
+      <div class="workflow-lower">
+        <section class="workflow-panel"><h2>Activity</h2><p>Progress marked “Agent reported” describes the agent's result. Request status comes from the access service.</p><ol id="workflow-events"></ol><div id="workflow-events-pages"></div></section>
+      </div>
+    </section>
+  </main>
+  <dialog id="workflow-info-dialog" aria-labelledby="workflow-info-title"><h2 id="workflow-info-title"></h2><p id="workflow-info-text"></p><form method="dialog"><button class="button primary">Close</button></form></dialog>
+  <dialog id="workflow-review-dialog" aria-labelledby="workflow-review-title"><h2 id="workflow-review-title">Review Ready Requests</h2><p>These are the requests of this plan that wait for a decision now. Decide each one, or approve or deny all of them together. Requests that need a later result appear here when they are ready.</p><div id="workflow-review-content"></div><p id="workflow-decision-status" role="status"></p><div class="workflow-actions"><button class="button primary" id="workflow-approve-all" type="button">Approve All</button><button class="button ghost" id="workflow-deny-all" type="button">Deny All</button><button class="button ghost" id="workflow-close-review" type="button">Back</button></div></dialog>
+  <script src="/metallic_mesh.js"></script>
+  <script src="/glass_mesh.js"></script>
+  <script src="/ui_motion.js"></script>
+  <script src="/panel_motion.js"></script>
+  <script src="/pagination.js"></script>
+  <script type="module" src="/workflow.mjs"></script>
+</body>
+</html>

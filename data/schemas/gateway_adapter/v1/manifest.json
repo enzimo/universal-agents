@@ -1,0 +1,13 @@
+{
+  "contract": "universal-agents-gateway-adapter-host",
+  "fixtures": {
+    "filename": "fixtures/conformance_cases.json",
+    "sha256": "ca2178efeb7548b8fdd5db039200e46b968732e366ad279f8a726080b7069c4e"
+  },
+  "json_schema_draft": "2020-12",
+  "protocol_version": 1,
+  "schema": {
+    "filename": "adapter_host.schema.json",
+    "sha256": "c314ba9f5c350146330c19e4dbef77fd16cf269c3332fd0bdbda3e36c5d97f15"
+  }
+}

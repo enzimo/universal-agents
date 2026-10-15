@@ -1,0 +1,226 @@
+{
+  "$defs": {
+    "BrokerAgentMCPOverrideSettings": {
+      "description": "Per-agent MCP override where ``None`` retains global inheritance.",
+      "properties": {
+        "external_mcp_servers": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Mcp Servers"
+        }
+      },
+      "title": "BrokerAgentMCPOverrideSettings",
+      "type": "object"
+    },
+    "BrokerAgentMCPSettings": {
+      "properties": {
+        "external_mcp_servers": {
+          "default": [],
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "External Mcp Servers",
+          "type": "array"
+        }
+      },
+      "title": "BrokerAgentMCPSettings",
+      "type": "object"
+    },
+    "BrokerAgentTypeMCPSettings": {
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/BrokerAgentMCPOverrideSettings"
+        }
+      },
+      "title": "BrokerAgentTypeMCPSettings",
+      "type": "object"
+    },
+    "BrokerMCPConfig": {
+      "description": "Only settings required to operate installed broker-owned MCP sessions.",
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/BrokerAgentMCPSettings"
+        },
+        "agent_types": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BrokerAgentTypeMCPSettings"
+          },
+          "title": "Agent Types",
+          "type": "object"
+        },
+        "instance_root_path": {
+          "title": "Instance Root Path",
+          "type": "string"
+        },
+        "mcp": {
+          "$ref": "#/$defs/BrokerMCPSettings"
+        },
+        "mcp_profiles": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Mcp Profiles",
+          "type": "object"
+        }
+      },
+      "required": [
+        "instance_root_path"
+      ],
+      "title": "BrokerMCPConfig",
+      "type": "object"
+    },
+    "BrokerMCPLegacySSEPolicy": {
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "BrokerMCPLegacySSEPolicy",
+      "type": "object"
+    },
+    "BrokerMCPNetworkPolicy": {
+      "properties": {
+        "allow_loopback": {
+          "default": false,
+          "title": "Allow Loopback",
+          "type": "boolean"
+        },
+        "allow_private_networks": {
+          "default": false,
+          "title": "Allow Private Networks",
+          "type": "boolean"
+        },
+        "allowed_private_hosts": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Private Hosts",
+          "type": "array"
+        }
+      },
+      "title": "BrokerMCPNetworkPolicy",
+      "type": "object"
+    },
+    "BrokerMCPSettings": {
+      "properties": {
+        "legacy_sse": {
+          "$ref": "#/$defs/BrokerMCPLegacySSEPolicy"
+        },
+        "network_policy": {
+          "$ref": "#/$defs/BrokerMCPNetworkPolicy"
+        },
+        "protocol_adapter": {
+          "default": "mcp_v1",
+          "title": "Protocol Adapter",
+          "type": "string"
+        }
+      },
+      "title": "BrokerMCPSettings",
+      "type": "object"
+    },
+    "RuntimeSecretReferenceV1": {
+      "additionalProperties": false,
+      "description": "Environment/file reference; secret material never enters a manifest.",
+      "properties": {
+        "env_var": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Env Var",
+          "type": "string"
+        },
+        "file_env_var": {
+          "maxLength": 245,
+          "minLength": 1,
+          "title": "File Env Var",
+          "type": "string"
+        }
+      },
+      "required": [
+        "env_var",
+        "file_env_var"
+      ],
+      "title": "RuntimeSecretReferenceV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/runtime-manifests/v1/SecureBrokerRuntimeManifestV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "authorization_enabled": {
+      "title": "Authorization Enabled",
+      "type": "boolean"
+    },
+    "bind_host": {
+      "title": "Bind Host",
+      "type": "string"
+    },
+    "bind_port": {
+      "maximum": 65535,
+      "minimum": 1,
+      "title": "Bind Port",
+      "type": "integer"
+    },
+    "content_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "mcp": {
+      "$ref": "#/$defs/BrokerMCPConfig"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "service": {
+      "const": "secure_broker",
+      "default": "secure_broker",
+      "title": "Service",
+      "type": "string"
+    },
+    "source_config_schema_version": {
+      "minimum": 1,
+      "title": "Source Config Schema Version",
+      "type": "integer"
+    },
+    "source_config_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Config Sha256",
+      "type": "string"
+    },
+    "token": {
+      "$ref": "#/$defs/RuntimeSecretReferenceV1"
+    }
+  },
+  "required": [
+    "content_sha256",
+    "source_config_schema_version",
+    "source_config_sha256",
+    "bind_host",
+    "bind_port",
+    "authorization_enabled",
+    "token",
+    "mcp"
+  ],
+  "title": "SecureBrokerRuntimeManifestV1",
+  "type": "object"
+}

@@ -1,0 +1,12 @@
+{
+  "contract": "universal-agents-runtime-snapshots",
+  "json_schema_draft": "2020-12",
+  "schema_version": 3,
+  "schemas": [
+    {
+      "filename": "RuntimeSnapshotV3.schema.json",
+      "model": "RuntimeSnapshotV3",
+      "sha256": "945f32e7e5d65ace70a1b3dc81a9c81933ba150fa324fe911e52788089320a6d"
+    }
+  ]
+}

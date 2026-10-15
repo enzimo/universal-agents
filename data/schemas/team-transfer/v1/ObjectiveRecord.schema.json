@@ -1,0 +1,678 @@
+{
+  "$defs": {
+    "ObjectiveCompletionPolicy": {
+      "enum": [
+        "manager_decides",
+        "user_confirms",
+        "success_criteria_met",
+        "recurring_indefinite"
+      ],
+      "title": "ObjectiveCompletionPolicy",
+      "type": "string"
+    },
+    "ObjectiveCriterionStatus": {
+      "enum": [
+        "open",
+        "met",
+        "failed",
+        "dropped"
+      ],
+      "title": "ObjectiveCriterionStatus",
+      "type": "string"
+    },
+    "ObjectiveEventRecord": {
+      "description": "Append-style event describing Objective lifecycle and linkage changes.",
+      "properties": {
+        "created_at": {
+          "description": "Timestamp when the event was recorded.",
+          "title": "Created At",
+          "type": "string"
+        },
+        "details": {
+          "additionalProperties": true,
+          "description": "Additional structured event details.",
+          "title": "Details",
+          "type": "object"
+        },
+        "event_id": {
+          "description": "Stable identifier for this objective event.",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "$ref": "#/$defs/ObjectiveEventType",
+          "description": "Structured objective event type."
+        },
+        "heartbeat_item_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Related heartbeat item id, when applicable.",
+          "title": "Heartbeat Item Id"
+        },
+        "message_class": {
+          "const": "ObjectiveEventRecord",
+          "default": "ObjectiveEventRecord",
+          "description": "Objective Event Record",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "plan_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Related manager-local plan id, when applicable.",
+          "title": "Plan Id"
+        },
+        "schedule_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Related schedule id, when applicable.",
+          "title": "Schedule Id"
+        },
+        "summary": {
+          "description": "Concise description of the event.",
+          "title": "Summary",
+          "type": "string"
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Related manager-local task id, when applicable.",
+          "title": "Task Id"
+        },
+        "user_visible": {
+          "default": false,
+          "description": "Whether this event is suitable for user-facing status.",
+          "title": "User Visible",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "event_type",
+        "summary"
+      ],
+      "title": "ObjectiveEventRecord",
+      "type": "object"
+    },
+    "ObjectiveEventType": {
+      "enum": [
+        "created",
+        "promoted_from_task",
+        "plan_linked",
+        "task_linked",
+        "schedule_linked",
+        "heartbeat_linked",
+        "progress_updated",
+        "status_changed",
+        "user_confirmation_recorded",
+        "review_requested",
+        "review_completed",
+        "work_session_policy_enabled",
+        "work_session_policy_disabled",
+        "work_session_started",
+        "work_session_checkpointed",
+        "work_session_completed"
+      ],
+      "title": "ObjectiveEventType",
+      "type": "string"
+    },
+    "ObjectiveHeartbeatLink": {
+      "description": "Link from an Objective to a canonical heartbeat item.",
+      "properties": {
+        "disabled_by_objective_pause": {
+          "default": false,
+          "description": "Whether the heartbeat item was disabled by an Objective pause/terminal transition.",
+          "title": "Disabled By Objective Pause",
+          "type": "boolean"
+        },
+        "heartbeat_item_id": {
+          "description": "Linked heartbeat item id.",
+          "title": "Heartbeat Item Id",
+          "type": "string"
+        },
+        "linked_at": {
+          "description": "Timestamp when the heartbeat item was linked.",
+          "title": "Linked At",
+          "type": "string"
+        },
+        "managed_by_objective": {
+          "default": true,
+          "description": "Whether Objective lifecycle changes should affect this heartbeat item.",
+          "title": "Managed By Objective",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "heartbeat_item_id"
+      ],
+      "title": "ObjectiveHeartbeatLink",
+      "type": "object"
+    },
+    "ObjectiveHorizon": {
+      "enum": [
+        "finite",
+        "long_horizon",
+        "recurring",
+        "standing"
+      ],
+      "title": "ObjectiveHorizon",
+      "type": "string"
+    },
+    "ObjectivePriority": {
+      "enum": [
+        "low",
+        "normal",
+        "high",
+        "critical"
+      ],
+      "title": "ObjectivePriority",
+      "type": "string"
+    },
+    "ObjectiveScheduleLink": {
+      "description": "Link from an Objective to a manager-owned scheduled job.",
+      "properties": {
+        "disabled_by_objective_pause": {
+          "default": false,
+          "description": "Whether the schedule was disabled by an Objective pause/terminal transition.",
+          "title": "Disabled By Objective Pause",
+          "type": "boolean"
+        },
+        "linked_at": {
+          "description": "Timestamp when the schedule was linked.",
+          "title": "Linked At",
+          "type": "string"
+        },
+        "managed_by_objective": {
+          "default": true,
+          "description": "Whether Objective lifecycle changes should affect this schedule.",
+          "title": "Managed By Objective",
+          "type": "boolean"
+        },
+        "schedule_id": {
+          "description": "Linked ScheduledMessage id.",
+          "title": "Schedule Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schedule_id"
+      ],
+      "title": "ObjectiveScheduleLink",
+      "type": "object"
+    },
+    "ObjectiveStatus": {
+      "enum": [
+        "proposed",
+        "active",
+        "paused",
+        "blocked",
+        "satisfied",
+        "failed",
+        "cancelled",
+        "abandoned",
+        "deleting",
+        "deleted"
+      ],
+      "title": "ObjectiveStatus",
+      "type": "string"
+    },
+    "ObjectiveSuccessCriterion": {
+      "description": "One measurable criterion used to decide whether an Objective is satisfied.",
+      "properties": {
+        "criterion_id": {
+          "description": "Stable identifier for this objective success criterion.",
+          "title": "Criterion Id",
+          "type": "string"
+        },
+        "description": {
+          "description": "Concrete condition that should become true.",
+          "title": "Description",
+          "type": "string"
+        },
+        "evidence_summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Short evidence summary explaining why the current status is valid.",
+          "title": "Evidence Summary"
+        },
+        "message_class": {
+          "const": "ObjectiveSuccessCriterion",
+          "default": "ObjectiveSuccessCriterion",
+          "description": "Objective Success Criterion",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ObjectiveCriterionStatus",
+          "default": "open",
+          "description": "Current criterion lifecycle status."
+        },
+        "updated_at": {
+          "description": "Timestamp when the criterion was last updated.",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "description"
+      ],
+      "title": "ObjectiveSuccessCriterion",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/ObjectiveRecord.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Manager-owned durable desired outcome or standing responsibility.",
+  "properties": {
+    "completion_policy": {
+      "$ref": "#/$defs/ObjectiveCompletionPolicy",
+      "default": "manager_decides",
+      "description": "Policy used to decide whether the objective is satisfied."
+    },
+    "constraints": {
+      "description": "Durable constraints that shape execution.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Constraints",
+      "type": "array"
+    },
+    "created_at": {
+      "description": "Timestamp when the objective was first created.",
+      "title": "Created At",
+      "type": "string"
+    },
+    "created_by_task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Task id that created this objective.",
+      "title": "Created By Task Id"
+    },
+    "current_focus": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Current execution or monitoring focus.",
+      "title": "Current Focus"
+    },
+    "current_plan_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Current plan attempt for this objective.",
+      "title": "Current Plan Id"
+    },
+    "deleted_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Timestamp when the recoverable Objective tombstone completed.",
+      "title": "Deleted At"
+    },
+    "deletion_operation_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Idempotency key for a recoverable Objective deletion.",
+      "title": "Deletion Operation Id"
+    },
+    "deletion_requested_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Timestamp when the owner requested recoverable deletion.",
+      "title": "Deletion Requested At"
+    },
+    "deletion_summary": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Last durable result of the Objective deletion state machine.",
+      "title": "Deletion Summary"
+    },
+    "desired_outcome": {
+      "description": "Durable description of the outcome being pursued or maintained.",
+      "title": "Desired Outcome",
+      "type": "string"
+    },
+    "event_log": {
+      "description": "Recent append-style objective lifecycle and linkage events.",
+      "items": {
+        "$ref": "#/$defs/ObjectiveEventRecord"
+      },
+      "title": "Event Log",
+      "type": "array"
+    },
+    "heartbeat_links": {
+      "description": "Heartbeat items associated with this objective.",
+      "items": {
+        "$ref": "#/$defs/ObjectiveHeartbeatLink"
+      },
+      "title": "Heartbeat Links",
+      "type": "array"
+    },
+    "horizon": {
+      "$ref": "#/$defs/ObjectiveHorizon",
+      "description": "Objective time horizon."
+    },
+    "message_class": {
+      "const": "Objective",
+      "default": "Objective",
+      "description": "Objective",
+      "title": "Message Class",
+      "type": "string"
+    },
+    "non_goals": {
+      "description": "Explicitly excluded outcomes.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Non Goals",
+      "type": "array"
+    },
+    "objective_id": {
+      "description": "Stable manager-local identifier for this durable objective.",
+      "title": "Objective Id",
+      "type": "string"
+    },
+    "owner_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Agent id that owns this objective.",
+      "title": "Owner Agent Id"
+    },
+    "owner_agent_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Human-readable owner agent name.",
+      "title": "Owner Agent Name"
+    },
+    "owner_canonical_user_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Authenticated user that owns this objective.",
+      "title": "Owner Canonical User Id"
+    },
+    "owner_named_agent_type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Named agent type that owns this objective.",
+      "title": "Owner Named Agent Type"
+    },
+    "plan_ids": {
+      "description": "Plan ids associated with this objective.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Plan Ids",
+      "type": "array"
+    },
+    "priority": {
+      "$ref": "#/$defs/ObjectivePriority",
+      "default": "normal",
+      "description": "Objective priority."
+    },
+    "progress_summary": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Current compact progress summary.",
+      "title": "Progress Summary"
+    },
+    "promoted_from_task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Task id from which this objective was promoted.",
+      "title": "Promoted From Task Id"
+    },
+    "recovery_task_ids": {
+      "description": "Recovery task ids associated with this objective.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Recovery Task Ids",
+      "type": "array"
+    },
+    "related_task_ids": {
+      "description": "Task ids associated with this objective.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Related Task Ids",
+      "type": "array"
+    },
+    "requires_user_confirmation": {
+      "default": false,
+      "description": "Whether user confirmation is required before marking satisfied.",
+      "title": "Requires User Confirmation",
+      "type": "boolean"
+    },
+    "root_conversation_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Primary durable conversation id, when any.",
+      "title": "Root Conversation Id"
+    },
+    "satisfied_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Timestamp when the objective was satisfied.",
+      "title": "Satisfied At"
+    },
+    "satisfied_by_task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Task id whose result satisfied the objective.",
+      "title": "Satisfied By Task Id"
+    },
+    "schedule_links": {
+      "description": "Schedules associated with this objective.",
+      "items": {
+        "$ref": "#/$defs/ObjectiveScheduleLink"
+      },
+      "title": "Schedule Links",
+      "type": "array"
+    },
+    "status": {
+      "$ref": "#/$defs/ObjectiveStatus",
+      "default": "active",
+      "description": "Current objective lifecycle status."
+    },
+    "success_criteria": {
+      "description": "Criteria used to decide whether the objective is satisfied.",
+      "items": {
+        "$ref": "#/$defs/ObjectiveSuccessCriterion"
+      },
+      "title": "Success Criteria",
+      "type": "array"
+    },
+    "team_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Team associated with the objective.",
+      "title": "Team Id"
+    },
+    "title": {
+      "description": "Short user-visible objective title.",
+      "title": "Title",
+      "type": "string"
+    },
+    "updated_at": {
+      "description": "Timestamp when the objective was last updated.",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "user_confirmation_summary": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Summary of user confirmation.",
+      "title": "User Confirmation Summary"
+    },
+    "why": {
+      "description": "Rationale for pursuing or maintaining this objective.",
+      "title": "Why",
+      "type": "string"
+    }
+  },
+  "required": [
+    "title",
+    "desired_outcome",
+    "why",
+    "horizon"
+  ],
+  "title": "ObjectiveRecord",
+  "type": "object"
+}

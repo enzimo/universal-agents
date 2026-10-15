@@ -1,0 +1,40 @@
+{
+  "$defs": {
+    "JsonValue": {},
+    "KnowledgeTable": {
+      "enum": [
+        "page",
+        "revision",
+        "note",
+        "link",
+        "redirect",
+        "contribution"
+      ],
+      "title": "KnowledgeTable",
+      "type": "string"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/KnowledgeTransferRecordV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One stored knowledge row; ``row`` has exactly the table's columns.",
+  "properties": {
+    "row": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "minProperties": 1,
+      "title": "Row",
+      "type": "object"
+    },
+    "table": {
+      "$ref": "#/$defs/KnowledgeTable"
+    }
+  },
+  "required": [
+    "table",
+    "row"
+  ],
+  "title": "KnowledgeTransferRecordV1",
+  "type": "object"
+}

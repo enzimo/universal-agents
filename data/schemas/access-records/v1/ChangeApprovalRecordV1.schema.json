@@ -1,0 +1,54 @@
+{
+  "$defs": {
+    "ChangeApprovalMode": {
+      "enum": [
+        "person_approval",
+        "held_access",
+        "agreement",
+        "operator_configuration"
+      ],
+      "title": "ChangeApprovalMode",
+      "type": "string"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/access-records/v1/ChangeApprovalRecordV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "How a staged change was approved, kept with what it created.\n\nSaved in approved configuration (team roster attachments, MCP connection\napprovals, generated specialists) and in receipts. ``access_request_id``\nnames the Inbox request a person approved; it is empty when a person\nre-approved existing configuration from the command line.",
+  "properties": {
+    "access_request_id": {
+      "anyOf": [
+        {
+          "maxLength": 120,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Access Request Id"
+    },
+    "approved_at_utc": {
+      "format": "date-time",
+      "title": "Approved At Utc",
+      "type": "string"
+    },
+    "approved_by": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Approved By",
+      "type": "string"
+    },
+    "mode": {
+      "$ref": "#/$defs/ChangeApprovalMode"
+    }
+  },
+  "required": [
+    "mode",
+    "approved_by",
+    "approved_at_utc"
+  ],
+  "title": "ChangeApprovalRecordV1",
+  "type": "object"
+}

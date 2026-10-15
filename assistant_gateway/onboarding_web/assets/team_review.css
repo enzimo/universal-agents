@@ -1,0 +1,24 @@
+.review-toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 20px 0; }
+.review-toolbar .input { width: auto; min-width: 150px; }
+.review-records { display: grid; gap: 10px; }
+.review-section-title { margin: 18px 0 4px; font-size: 1.1rem; }
+.review-record-key { margin: 8px 0 0; font-family: ui-monospace, monospace; font-size: 0.85rem; opacity: 0.75; overflow-wrap: anywhere; }
+.review-destination { margin: 20px 0; }
+.review-destination label { display: flex; gap: 8px; align-items: center; }
+.review-record { border: 1px solid var(--ua-dark-border, #367287); border-radius: 10px; padding: 16px; background: #101c24; }
+.review-record:nth-child(even) { background: #18343b; }
+.review-record summary { cursor: pointer; overflow-wrap: anywhere; }
+.review-record summary input { margin-right: 12px; }
+.review-record textarea { display: block; width: 100%; min-height: 240px; padding: 12px; margin: 12px 0; font-family: ui-monospace, monospace; color: #f2f7f8; background: #070b0e; border: 1px solid #367287; border-radius: 7px; resize: vertical; }
+.review-record pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-record label { display: block; margin-top: 12px; }
+.review-record:focus-within { outline: 2px solid #62d5f3; outline-offset: 2px; }
+.review-actions { position: sticky; bottom: 0; padding: 14px; background: #0b151b; border-radius: 10px; }
+.review-result { padding: 10px; border-left: 4px solid #16a34a; overflow-wrap: anywhere; }
+.review-result.refused { border-color: #b94850; }
+.review-result.attention { border-color: #b7791f; }
+[data-color-mode="light"] .review-record { background: #f4f8f9; border-color: #b9ccc5; }
+[data-color-mode="light"] .review-record:nth-child(even) { background: #e0efed; }
+[data-color-mode="light"] .review-record textarea { color: #10201c; background: white; border-color: #334942; }
+[data-color-mode="light"] .review-actions { background: #f4f8f9; }
+@media (max-width: 600px) { .review-toolbar .input { width: 100%; } .review-actions { position: static; } }

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "site_id": "thread-topic_42_20260926T005904Z-safe-ff51fbd8",
+  "folder": "agents/sites/thread-topic_42_20260926T005904Z-safe-ff51fbd8",
+  "owner_person_id": null,
+  "title": "Safe",
+  "site_kind": "article",
+  "created_at": "2026-09-26T00:59:04.844905+00:00",
+  "updated_at": "2026-09-26T00:59:04.844905+00:00",
+  "update_count": 0,
+  "files": {
+    "index.html": "0533cf4241f56371e3ae02dc5b8956f435796a562fa83b98480958fff1f64a41"
+  },
+  "conversation_id": "conversation_site_test",
+  "session_key": "</script><script>alert(document.cookie)</script>",
+  "channel_name": "telegram",
+  "chat_id": "chat_site_test",
+  "thread_id": "topic_42",
+  "task_id": "task_site_test",
+  "team_id": "team_site_test",
+  "agent_id": "agent_site_test",
+  "named_agent_type": "TeamArchitect"
+}

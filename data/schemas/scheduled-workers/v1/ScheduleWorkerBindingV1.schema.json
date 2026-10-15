@@ -1,0 +1,241 @@
+{
+  "$defs": {
+    "ScheduleCapabilityRequirementV1": {
+      "additionalProperties": false,
+      "description": "One tool a schedule needs: a tool catalog id and one of its operations.\n\n``capability_id`` holds the catalog tool id (for example ``fn:web_research``,\n``cli:google`` or ``mcp:github``) and ``operation`` one of that tool's\ncatalog operations (a function tool's operation is the function name).\nThe key keeps its name because every saved schedule stores it. Tool groups\nand capability ids such as ``builtin:web_research`` were removed (access\nplan Phase 7): a saved schedule that still names one is blocked with\n``requirement_not_a_catalog_tool`` until TeamLead re-saves it\n(``custom_agents.schedule_repair_guidance``).",
+      "properties": {
+        "capability_id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Capability Id",
+          "type": "string"
+        },
+        "necessity": {
+          "default": "required",
+          "enum": [
+            "required",
+            "conditional"
+          ],
+          "title": "Necessity",
+          "type": "string"
+        },
+        "operation": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Operation",
+          "type": "string"
+        },
+        "resource_constraints": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Resource Constraints",
+          "type": "object"
+        },
+        "source": {
+          "default": "declared",
+          "enum": [
+            "declared",
+            "observed",
+            "approved"
+          ],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability_id",
+        "operation"
+      ],
+      "title": "ScheduleCapabilityRequirementV1",
+      "type": "object"
+    },
+    "ScheduleCapabilityRequirementsV1": {
+      "additionalProperties": false,
+      "properties": {
+        "requirements": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ScheduleCapabilityRequirementV1"
+          },
+          "maxItems": 64,
+          "title": "Requirements",
+          "type": "array"
+        },
+        "runtime_discovery": {
+          "default": true,
+          "title": "Runtime Discovery",
+          "type": "boolean"
+        }
+      },
+      "title": "ScheduleCapabilityRequirementsV1",
+      "type": "object"
+    },
+    "ScheduleWorkerPolicySpecV1": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "expires_at_utc": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires At Utc"
+        },
+        "profile_id": {
+          "const": "local",
+          "default": "local",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "rules": {
+          "additionalProperties": true,
+          "title": "Rules",
+          "type": "object"
+        }
+      },
+      "title": "ScheduleWorkerPolicySpecV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/scheduled-workers/v1/ScheduleWorkerBindingV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "actor_principal_id": {
+      "title": "Actor Principal Id",
+      "type": "string"
+    },
+    "authority_mode": {
+      "enum": [
+        "held_access",
+        "agreement",
+        "runtime_default"
+      ],
+      "title": "Authority Mode",
+      "type": "string"
+    },
+    "blocked_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Blocked Reason"
+    },
+    "blocked_since_utc": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Blocked Since Utc"
+    },
+    "capabilities": {
+      "$ref": "#/$defs/ScheduleCapabilityRequirementsV1"
+    },
+    "created_at_utc": {
+      "format": "date-time",
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "definition_digest": {
+      "description": "Authored-definition fingerprint saved with this policy. Only a team-written definition is compared with it; a shipped definition changes only with a deploy and is never compared. The value is part of execution_digest and therefore of schedule-scoped approvals.",
+      "title": "Definition Digest",
+      "type": "string"
+    },
+    "execution_digest": {
+      "title": "Execution Digest",
+      "type": "string"
+    },
+    "next_review_at_utc": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Next Review At Utc"
+    },
+    "observed_capabilities": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ScheduleCapabilityRequirementV1"
+      },
+      "title": "Observed Capabilities",
+      "type": "array"
+    },
+    "owner_canonical_user_id": {
+      "title": "Owner Canonical User Id",
+      "type": "string"
+    },
+    "policy": {
+      "$ref": "#/$defs/ScheduleWorkerPolicySpecV1"
+    },
+    "review_generation": {
+      "default": 0,
+      "title": "Review Generation",
+      "type": "integer"
+    },
+    "revision": {
+      "minimum": 1,
+      "title": "Revision",
+      "type": "integer"
+    },
+    "schedule_id": {
+      "title": "Schedule Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 2,
+      "default": 2,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "target_agent_type": {
+      "title": "Target Agent Type",
+      "type": "string"
+    },
+    "team_id": {
+      "title": "Team Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schedule_id",
+    "team_id",
+    "owner_canonical_user_id",
+    "target_agent_type",
+    "definition_digest",
+    "execution_digest",
+    "revision",
+    "policy",
+    "actor_principal_id",
+    "authority_mode"
+  ],
+  "title": "ScheduleWorkerBindingV1",
+  "type": "object"
+}

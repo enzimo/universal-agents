@@ -1,0 +1,136 @@
+{
+  "$defs": {
+    "RuntimeSecretReferenceV1": {
+      "additionalProperties": false,
+      "description": "Environment/file reference; secret material never enters a manifest.",
+      "properties": {
+        "env_var": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Env Var",
+          "type": "string"
+        },
+        "file_env_var": {
+          "maxLength": 245,
+          "minLength": 1,
+          "title": "File Env Var",
+          "type": "string"
+        }
+      },
+      "required": [
+        "env_var",
+        "file_env_var"
+      ],
+      "title": "RuntimeSecretReferenceV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/runtime-manifests/v1/AdapterHostRuntimeManifestV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Service-scoped identity and transport projection for the plugin host.",
+  "properties": {
+    "bind_host": {
+      "title": "Bind Host",
+      "type": "string"
+    },
+    "bind_port": {
+      "maximum": 65535,
+      "minimum": 1,
+      "title": "Bind Port",
+      "type": "integer"
+    },
+    "client_state_path": {
+      "title": "Client State Path",
+      "type": "string"
+    },
+    "connect_host": {
+      "title": "Connect Host",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "enabled": {
+      "title": "Enabled",
+      "type": "boolean"
+    },
+    "host_id": {
+      "title": "Host Id",
+      "type": "string"
+    },
+    "instance_name": {
+      "title": "Instance Name",
+      "type": "string"
+    },
+    "instance_root_path": {
+      "title": "Instance Root Path",
+      "type": "string"
+    },
+    "plugin_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Plugin Ids",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "service": {
+      "const": "adapter_host",
+      "default": "adapter_host",
+      "title": "Service",
+      "type": "string"
+    },
+    "source_config_schema_version": {
+      "minimum": 1,
+      "title": "Source Config Schema Version",
+      "type": "integer"
+    },
+    "source_config_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Config Sha256",
+      "type": "string"
+    },
+    "token": {
+      "$ref": "#/$defs/RuntimeSecretReferenceV1"
+    },
+    "transport": {
+      "enum": [
+        "unix",
+        "mtls"
+      ],
+      "title": "Transport",
+      "type": "string"
+    },
+    "unix_socket_path": {
+      "title": "Unix Socket Path",
+      "type": "string"
+    }
+  },
+  "required": [
+    "content_sha256",
+    "source_config_schema_version",
+    "source_config_sha256",
+    "instance_name",
+    "instance_root_path",
+    "enabled",
+    "host_id",
+    "transport",
+    "unix_socket_path",
+    "bind_host",
+    "bind_port",
+    "connect_host",
+    "client_state_path",
+    "token",
+    "plugin_ids"
+  ],
+  "title": "AdapterHostRuntimeManifestV1",
+  "type": "object"
+}

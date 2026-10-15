@@ -1,0 +1,615 @@
+{
+  "access": {
+    "records": [
+      {
+        "document": {
+          "approval_id": null,
+          "created_at_utc": "2026-09-01T00:00:00Z",
+          "delegate_to": [],
+          "delegation_depth": 0,
+          "delegation_mode": "automatic",
+          "expires_at_utc": null,
+          "for_person_id": null,
+          "grant_id": "grant_block_find_tools",
+          "granted_by": {
+            "id": "usr_ana",
+            "kind": "user"
+          },
+          "kind": "block",
+          "level": "full",
+          "lifetime": "until_revoked",
+          "parent_grant_id": null,
+          "reason": "Not for Ben",
+          "revoked_at_utc": null,
+          "revoked_by": null,
+          "schema_version": 1,
+          "status": "active",
+          "subject": {
+            "id": "usr_ben",
+            "kind": "user"
+          },
+          "target": {
+            "id": "fn:tool_loading#find_tools",
+            "kind": "operation"
+          },
+          "task_id": null,
+          "team_id": "team_a",
+          "uses_remaining": null
+        },
+        "kind": "grant",
+        "record_id": "grant_block_find_tools"
+      },
+      {
+        "document": {
+          "created_at_utc": "2026-09-01T00:00:00Z",
+          "created_by": {
+            "id": "usr_ana",
+            "kind": "user"
+          },
+          "credential_key": "http-exa-team",
+          "injections": [],
+          "link_id": "link_exa_team",
+          "owner_id": "team_a",
+          "owner_kind": "team",
+          "revoked_at_utc": null,
+          "revoked_by": null,
+          "schema_version": 1,
+          "status": "active",
+          "team_id": "team_a",
+          "tool_id": "http:exa"
+        },
+        "kind": "account_link",
+        "record_id": "link_exa_team"
+      },
+      {
+        "document": {
+          "changed_at_utc": "2026-09-01T00:00:00Z",
+          "changed_by_person_id": null,
+          "own_model": null,
+          "person_id": "usr_ben",
+          "schema_version": 1,
+          "shared_folders": [],
+          "team_id": "team_a",
+          "uses_team_keys": false
+        },
+        "kind": "person_settings",
+        "record_id": "usr_ben"
+      },
+      {
+        "document": {
+          "changed_at_utc": "2026-09-01T00:00:00Z",
+          "changed_by_person_id": "usr_ana",
+          "schema_version": 1,
+          "sharing": "shared",
+          "subject": "http:exa",
+          "team_id": "team_a"
+        },
+        "kind": "account_sharing",
+        "record_id": "http:exa"
+      },
+      {
+        "document": {
+          "changed_at_utc": "2026-09-01T00:00:00Z",
+          "changed_by_person_id": "usr_ana",
+          "schema_version": 1,
+          "sharing": "private",
+          "subject": "model_keys",
+          "team_id": "team_a"
+        },
+        "kind": "account_sharing",
+        "record_id": "model_keys"
+      }
+    ],
+    "schema_version": 3,
+    "section": "access"
+  },
+  "broker_credentials": {
+    "records": [
+      {
+        "entry": {
+          "address": "https://api.openai.com/v1",
+          "base_url": "",
+          "key": "fixture-model-key",
+          "kind": "openai",
+          "no_key_needed": false,
+          "saved_at": "2026-09-01T00:00:00Z",
+          "saved_by_person_id": "usr_ana",
+          "tested_api_mode": "",
+          "tested_model_id": ""
+        },
+        "kind": "model_key",
+        "owner": {
+          "kind": "team",
+          "owner_id": "team_a"
+        }
+      },
+      {
+        "kind": "stored_value",
+        "name": "github.sign_in",
+        "owner": {
+          "kind": "person",
+          "owner_id": "usr_ana"
+        },
+        "value": "fixture-github-token"
+      }
+    ],
+    "schema_version": 2,
+    "section": "broker_credentials"
+  },
+  "control": {
+    "records": [
+      {
+        "files": [
+          {
+            "path": "LLM_OVERRIDES.yaml",
+            "sha256": "2ec79eb51440b1c9cec05709b6ae3f130152b8b4a158c9fdbef84193acc71263",
+            "size": 17
+          }
+        ],
+        "kind": "llm_overrides",
+        "unit": "LLM_OVERRIDES.yaml"
+      },
+      {
+        "files": [
+          {
+            "path": "SOUL.md",
+            "sha256": "c749274c035a563aca6211666c4e1389d0f20a5b8b81eb58a89efb70aee65a6d",
+            "size": 32
+          }
+        ],
+        "kind": "soul",
+        "unit": "SOUL.md"
+      },
+      {
+        "files": [
+          {
+            "path": "TEAM_AGENTS.yaml",
+            "sha256": "aa2e6e1813858ac858b619764833f639269d4faa929b4a4652eaf0f5bcd3b3b1",
+            "size": 442
+          }
+        ],
+        "kind": "team_composition",
+        "unit": "TEAM_AGENTS.yaml"
+      },
+      {
+        "files": [
+          {
+            "path": "TEAM_TEMPLATES.yaml",
+            "sha256": "1495a1f2b7b8151f261cb3522d12b180c1089e9e519c951ac88e534a75199916",
+            "size": 1083
+          }
+        ],
+        "kind": "team_templates",
+        "unit": "TEAM_TEMPLATES.yaml"
+      }
+    ],
+    "schema_version": 2,
+    "section": "control"
+  },
+  "knowledge": {
+    "records": [
+      {
+        "row": {
+          "body": "Deploy after CI.",
+          "created_at_utc": "2026-09-01T00:00:00.000000Z",
+          "fingerprint": "ab1091e98ce2e619590ce597245bfc8e4eca9789cd9262007b1016a8309a9289",
+          "frozen_until_utc": null,
+          "owner_person_id": "",
+          "page_id": "kb_page_008ce2332a54",
+          "page_type": "reference",
+          "revision": 2,
+          "slug": "deploying",
+          "space": "team",
+          "status": "archived",
+          "summary": "",
+          "tags_json": "[]",
+          "team_id": "team_a",
+          "title": "Deploying",
+          "updated_at_utc": "2026-09-01T00:00:00.000000Z",
+          "updated_by_agent_type": "KnowledgeCuratorAgent",
+          "updated_by_id": "agent_curator",
+          "updated_by_kind": "agent"
+        },
+        "table": "page"
+      },
+      {
+        "row": {
+          "body": "Deploy after CI, on Fridays.",
+          "created_at_utc": "2026-09-01T00:00:00.000000Z",
+          "fingerprint": "9267a4931102df9e492ec1c73f366dfa69c61eb2e71c086cd8bed9b53de3598a",
+          "frozen_until_utc": null,
+          "owner_person_id": "",
+          "page_id": "kb_page_104ace4b24d6",
+          "page_type": "reference",
+          "revision": 2,
+          "slug": "deploy",
+          "space": "team",
+          "status": "active",
+          "summary": "",
+          "tags_json": "[]",
+          "team_id": "team_a",
+          "title": "Deploy",
+          "updated_at_utc": "2026-09-01T00:00:00.000000Z",
+          "updated_by_agent_type": "KnowledgeCuratorAgent",
+          "updated_by_id": "agent_curator",
+          "updated_by_kind": "agent"
+        },
+        "table": "page"
+      },
+      {
+        "row": {
+          "body": "Tag, then see [[ci-checks]].",
+          "created_at_utc": "2026-09-01T00:00:00.000000Z",
+          "fingerprint": "9a890469a1fd940b95fc84205dfe11d9cc7caa218b2cca0aa9360a275aa8a278",
+          "frozen_until_utc": null,
+          "owner_person_id": "",
+          "page_id": "kb_page_25ac859f67c2",
+          "page_type": "reference",
+          "revision": 1,
+          "slug": "release-process",
+          "space": "team",
+          "status": "active",
+          "summary": "How a release is cut.",
+          "tags_json": "[\"release\"]",
+          "team_id": "team_a",
+          "title": "Release process",
+          "updated_at_utc": "2026-09-01T00:00:00.000000Z",
+          "updated_by_agent_type": "KnowledgeCuratorAgent",
+          "updated_by_id": "agent_curator",
+          "updated_by_kind": "agent"
+        },
+        "table": "page"
+      },
+      {
+        "row": {
+          "body": "Window seats.",
+          "created_at_utc": "2026-09-01T00:00:00.000000Z",
+          "fingerprint": "56e26a5d598f7defefe8825ab6b3bd674f8cc36e0cbec64af21ffda7b68eac4d",
+          "frozen_until_utc": null,
+          "owner_person_id": "usr_ben",
+          "page_id": "kb_page_456146de9328",
+          "page_type": "reference",
+          "revision": 1,
+          "slug": "travel",
+          "space": "personal",
+          "status": "active",
+          "summary": "",
+          "tags_json": "[]",
+          "team_id": "team_a",
+          "title": "Travel",
+          "updated_at_utc": "2026-09-01T00:00:00.000000Z",
+          "updated_by_agent_type": "TeamArchitect",
+          "updated_by_id": "agent_lead",
+          "updated_by_kind": "agent"
+        },
+        "table": "page"
+      },
+      {
+        "row": {
+          "actor_agent_type": "KnowledgeCuratorAgent",
+          "actor_display_name": "",
+          "actor_id": "agent_curator",
+          "actor_kind": "agent",
+          "body": "Deploy after CI.",
+          "change_kind": "merge",
+          "change_summary": "Merged into Deploy (team/deploy)",
+          "contribution_id": "",
+          "created_at_utc": "2026-09-01T00:00:00.000000Z",
+          "fingerprint": "ab1091e98ce2e619590ce597245bfc8e4eca9789cd9262007b1016a8309a9289",
+          "owner_person_id": "",
+          "page_id": "kb_page_008ce2332a54",
+          "page_type": "reference",
+          "revision": 2,
+          "revision_id": "kb_rev_0c505db561ed",
+          "space": "team",
+          "status": "archived",
+          "summary": "",
+          "tags_json": "[]",
+          "task_id": "task_1",
+          "team_id": "team_a",
+          "title": "Deploying",
+          "work_id": "task_1",
+          "work_person_id": ""
+        },
+        "table": "revision"
+      },
+      {
+        "row": {
+          "actor_agent_type": "KnowledgeCuratorAgent",
+          "actor_display_name": "",
+          "actor_id": "agent_curator",
+          "actor_kind": "agent",
+          "body": "Tag, then see [[ci-checks]].",
+          "change_kind": "create",
+          "change_summary": "",
+          "contribution_id": "",
+          "created_at_utc": "2026-09-01T00:00:00.000000Z",
+          "fingerprint": "9a890469a1fd940b95fc84205dfe11d9cc7caa218b2cca0aa9360a275aa8a278",
+          "owner_person_id": "",
+          "page_id": "kb_page_25ac859f67c2",
+          "page_type": "reference",
+          "revision": 1,
+          "revision_id": "kb_rev_5b622f7153cc",
+          "space": "team",
+          "status": "active",
+          "summary": "How a release is cut.",
+          "tags_json": "[\"release\"]",
+          "task_id": "task_1",
+          "team_id": "team_a",
+          "title": "Release process",
+          "work_id": "task_1",
+          "work_person_id": ""
+        },
+        "table": "revision"
+      },
+      {
+        "row": {
+          "actor_agent_type": "KnowledgeCuratorAgent",
+          "actor_display_name": "",
+          "actor_id": "agent_curator",
+          "actor_kind": "agent",
+          "body": "Deploy on Fridays.",
+          "change_kind": "create",
+          "change_summary": "",
+          "contribution_id": "",
+          "created_at_utc": "2026-09-01T00:00:00.000000Z",
+          "fingerprint": "9a1a920dd9ec20c8ac29a0e34c4830cf5bf8a4cc0014db8ad9dbe92593f5da7c",
+          "owner_person_id": "",
+          "page_id": "kb_page_104ace4b24d6",
+          "page_type": "reference",
+          "revision": 1,
+          "revision_id": "kb_rev_67d5e1815f98",
+          "space": "team",
+          "status": "active",
+          "summary": "",
+          "tags_json": "[]",
+          "task_id": "task_1",
+          "team_id": "team_a",
+          "title": "Deploy",
+          "work_id": "task_1",
+          "work_person_id": ""
+        },
+        "table": "revision"
+      },
+      {
+        "row": {
+          "actor_agent_type": "KnowledgeCuratorAgent",
+          "actor_display_name": "",
+          "actor_id": "agent_curator",
+          "actor_kind": "agent",
+          "body": "Deploy after CI.",
+          "change_kind": "create",
+          "change_summary": "",
+          "contribution_id": "",
+          "created_at_utc": "2026-09-01T00:00:00.000000Z",
+          "fingerprint": "f846128c09afa9370d7ca892220f342f9b3a142826e6532a62a11a262b841aff",
+          "owner_person_id": "",
+          "page_id": "kb_page_008ce2332a54",
+          "page_type": "reference",
+          "revision": 1,
+          "revision_id": "kb_rev_97cdba1dee56",
+          "space": "team",
+          "status": "active",
+          "summary": "",
+          "tags_json": "[]",
+          "task_id": "task_1",
+          "team_id": "team_a",
+          "title": "Deploying",
+          "work_id": "task_1",
+          "work_person_id": ""
+        },
+        "table": "revision"
+      },
+      {
+        "row": {
+          "actor_agent_type": "KnowledgeCuratorAgent",
+          "actor_display_name": "",
+          "actor_id": "agent_curator",
+          "actor_kind": "agent",
+          "body": "Deploy after CI, on Fridays.",
+          "change_kind": "merge",
+          "change_summary": "Merged Deploying (team/deploying) into this page",
+          "contribution_id": "",
+          "created_at_utc": "2026-09-01T00:00:00.000000Z",
+          "fingerprint": "9267a4931102df9e492ec1c73f366dfa69c61eb2e71c086cd8bed9b53de3598a",
+          "owner_person_id": "",
+          "page_id": "kb_page_104ace4b24d6",
+          "page_type": "reference",
+          "revision": 2,
+          "revision_id": "kb_rev_af402eaf101a",
+          "space": "team",
+          "status": "active",
+          "summary": "",
+          "tags_json": "[]",
+          "task_id": "task_1",
+          "team_id": "team_a",
+          "title": "Deploy",
+          "work_id": "task_1",
+          "work_person_id": ""
+        },
+        "table": "revision"
+      },
+      {
+        "row": {
+          "actor_agent_type": "TeamArchitect",
+          "actor_display_name": "",
+          "actor_id": "agent_lead",
+          "actor_kind": "agent",
+          "body": "Window seats.",
+          "change_kind": "create",
+          "change_summary": "",
+          "contribution_id": "",
+          "created_at_utc": "2026-09-01T00:00:00.000000Z",
+          "fingerprint": "56e26a5d598f7defefe8825ab6b3bd674f8cc36e0cbec64af21ffda7b68eac4d",
+          "owner_person_id": "usr_ben",
+          "page_id": "kb_page_456146de9328",
+          "page_type": "reference",
+          "revision": 1,
+          "revision_id": "kb_rev_ca13445d60a1",
+          "space": "personal",
+          "status": "active",
+          "summary": "",
+          "tags_json": "[]",
+          "task_id": "task_2",
+          "team_id": "team_a",
+          "title": "Travel",
+          "work_id": "ctx_ben",
+          "work_person_id": "usr_ben"
+        },
+        "table": "revision"
+      },
+      {
+        "row": {
+          "actor_agent_type": "KnowledgeCuratorAgent",
+          "actor_display_name": "",
+          "actor_id": "agent_curator",
+          "actor_kind": "agent",
+          "body": "Tag only from main.",
+          "contribution_id": "",
+          "created_at_utc": "2026-09-01T00:00:00.000000Z",
+          "note_id": "kb_note_cf79213da2ab",
+          "owner_person_id": "",
+          "page_id": "kb_page_25ac859f67c2",
+          "resolved_at_utc": null,
+          "resolved_by_id": "",
+          "resolved_by_kind": "",
+          "space": "team",
+          "status": "open",
+          "task_id": "task_1",
+          "team_id": "team_a",
+          "work_id": "task_1",
+          "work_person_id": ""
+        },
+        "table": "note"
+      },
+      {
+        "row": {
+          "owner_person_id": "",
+          "page_id": "kb_page_25ac859f67c2",
+          "target_slug": "ci-checks",
+          "target_space": "team",
+          "team_id": "team_a"
+        },
+        "table": "link"
+      },
+      {
+        "row": {
+          "created_at_utc": "2026-09-01T00:00:00.000000Z",
+          "from_page_id": "kb_page_008ce2332a54",
+          "from_slug": "deploying",
+          "owner_person_id": "",
+          "space": "team",
+          "team_id": "team_a",
+          "to_page_id": "kb_page_104ace4b24d6"
+        },
+        "table": "redirect"
+      },
+      {
+        "row": {
+          "actor_agent_type": "TeamArchitect",
+          "actor_display_name": "",
+          "actor_id": "agent_lead",
+          "actor_kind": "agent",
+          "base_revision": 1,
+          "body": "Tag, test, then see [[ci-checks]].",
+          "change_summary": "",
+          "contribution_id": "kb_contrib_7be505049885",
+          "created_at_utc": "2026-09-01T00:00:00.000000Z",
+          "decided_at_utc": null,
+          "decided_by_id": "",
+          "decided_by_kind": "",
+          "decision_reason": "",
+          "kind": "edit",
+          "owner_person_id": "usr_ben",
+          "page_id": "kb_page_25ac859f67c2",
+          "page_type": "reference",
+          "published_revision": 0,
+          "review_kinds_json": "[]",
+          "slug": "release-process",
+          "status": "pending",
+          "summary": "How a release is cut.",
+          "tags_json": "[\"release\"]",
+          "task_id": "task_2",
+          "team_id": "team_a",
+          "title": "Release process",
+          "work_id": "ctx_ben"
+        },
+        "table": "contribution"
+      }
+    ],
+    "schema_version": 2,
+    "section": "knowledge"
+  },
+  "operator_secrets": {
+    "records": [
+      {
+        "kind": "environment",
+        "name": "SECURE_TOOL_BROKER_CREDENTIALS_DIR",
+        "value": "${INSTANCE_ROOT}/credentials"
+      },
+      {
+        "kind": "environment",
+        "name": "TELEGRAM_BOT_TOKEN",
+        "value": "fixture-token"
+      }
+    ],
+    "schema_version": 2,
+    "section": "operator_secrets"
+  },
+  "schedules": {
+    "records": [
+      {
+        "document": null,
+        "execution": null,
+        "heartbeat_item": null,
+        "heartbeat_source": null,
+        "kind": "session",
+        "record_id": "sess_ana",
+        "schedule": null,
+        "session": {
+          "channel_current": true,
+          "channel_name": "telegram",
+          "chat_id": "42",
+          "manager_agent_id": "mgr_old",
+          "owner_person_id": "usr_ana",
+          "session_alias": null,
+          "session_key": "sess_ana",
+          "status": "active",
+          "thread_id": null,
+          "user_id": "tg-42"
+        },
+        "target": null
+      },
+      {
+        "document": null,
+        "execution": null,
+        "heartbeat_item": null,
+        "heartbeat_source": null,
+        "kind": "schedule",
+        "record_id": "sched_previous",
+        "schedule": {
+          "markdown": "# Schedule review\n\nEdit the YAML block below. It controls the imported schedule. IDs, owner,\ndelivery route, and system-management provenance must stay unchanged.\nRecurring schedules compute their next run at import and skip missed runs.\n\nThe remaining run count is preserved unless you change repeat_count;\na changed repeat_count becomes the new number of remaining runs.\n\n```yaml\nschedule_id: sched_previous\nmessage_class: ScheduledMessage\nschedule_name: sched_previous\nmanagement_class: user\nsystem_schedule_kind: null\nobjective_id: null\nclaim_team_id: team_a\nclaim_named_agent_type: TeamArchitect\nclaim_agent_id: null\ninstall_mode: replace\npayload:\n  message_class: Task\n  task_id: task_id_193448e5aa7f\n  parent_task_id: null\n  task_state: []\n  task_type: request\n  problem_statement: Run sched_previous\n  errors: null\n  task_plan: null\n  execution_digest: null\n  execution_history: []\n  attachments: []\n  thoughts_info: null\n  answer: null\n  failure: null\npayload_header: null\npayload_meta:\n  message_class: MessageMeta\n  from_agent_name: null\n  to_agent_name: null\n  to_named_agent_type: null\n  requester_type: null\n  is_response_requested: false\n  msg_correlation_id: null\n  conversation_id: null\n  followup_to_task_id: null\n  objective_id: null\n  objective_work_session_id: null\n  request_timezone: null\n  gateway_context:\n    message_class: GatewayContext\n    gateway_instance_name: alpha\n    session_key: sess_ana\n    channel_name: telegram\n    user_id: tg-42\n    canonical_user_id: usr_ana\n    chat_id: '42'\n    thread_id: null\n    delivery_mode: proactive\n    scheduled_job_id: null\n    schedule_owner_agent_id: null\n    heartbeat_source_id: null\n    original_message_id: null\n    task_context: null\n    schedule_run: null\n  manager_escalation: null\n  redispatch_notice: null\ninterval_ms: 3600000\ncron_expression: null\ncron_timezone: null\nrepeat_count: null\nnext_fire_at: '2020-01-01T00:00:00+00:00'\npaused_until: null\nexpires_at_utc: null\nschedule_memory: null\ncreated_at: '2026-10-12T15:55:19.599672+00:00'\nenabled: true\n```\n",
+          "owner_vouched": false,
+          "remaining_count": null
+        },
+        "session": null,
+        "target": null
+      }
+    ],
+    "schema_version": 3,
+    "section": "schedules"
+  },
+  "settings": {
+    "records": [
+      {
+        "path": [
+          "heartbeat",
+          "enabled"
+        ],
+        "value": false
+      }
+    ],
+    "schema_version": 4,
+    "section": "settings"
+  }
+}

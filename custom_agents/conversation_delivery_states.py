@@ -1,0 +1,12 @@
+"""Shared delivery-state strings for conversation turns."""
+
+DELIVERY_STATE_DELIVERED = "delivered"
+DELIVERY_STATE_NOTIFICATION_QUEUED = "notification_queued"
+DELIVERY_STATE_PENDING_GATEWAY = "pending_gateway"
+DELIVERY_STATE_SUPPRESSED = "suppressed"
+DELIVERY_STATE_NOT_APPLICABLE = "not_applicable"
+
+MODEL_VISIBLE_TIMER_DELIVERY_STATES = {
+    DELIVERY_STATE_DELIVERED,
+    DELIVERY_STATE_NOTIFICATION_QUEUED,
+}

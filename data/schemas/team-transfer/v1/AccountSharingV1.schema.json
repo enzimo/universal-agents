@@ -1,0 +1,66 @@
+{
+  "$defs": {
+    "AccountSharing": {
+      "description": "Whether the team's account for a service serves everyone's work (``access_control.account_sharing``).",
+      "enum": [
+        "shared",
+        "private"
+      ],
+      "title": "AccountSharing",
+      "type": "string"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/AccountSharingV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "An administrator's choice: whether the team's account for one service serves everyone's work.\n\n``subject`` is a tool id whose tool takes a person's and the team's\naccount (``ToolDefinitionV1.sharing_choice``), or\n``MODEL_KEYS_SHARING_SUBJECT``: whether people added from now on may use\nthe team's model keys. Without a record the tool's ``default_sharing``\n(shared when it names none) and, for model keys, shared apply\n(``access_control.account_sharing``). A choice picks accounts; it never\ngrants access.",
+  "properties": {
+    "changed_at_utc": {
+      "format": "date-time",
+      "title": "Changed At Utc",
+      "type": "string"
+    },
+    "changed_by_person_id": {
+      "anyOf": [
+        {
+          "maxLength": 240,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Changed By Person Id"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "sharing": {
+      "$ref": "#/$defs/AccountSharing"
+    },
+    "subject": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Subject",
+      "type": "string"
+    },
+    "team_id": {
+      "maxLength": 120,
+      "minLength": 1,
+      "title": "Team Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "team_id",
+    "subject",
+    "sharing",
+    "changed_at_utc"
+  ],
+  "title": "AccountSharingV1",
+  "type": "object"
+}

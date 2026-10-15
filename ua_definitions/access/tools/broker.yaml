@@ -1,0 +1,229 @@
+# Broker tools (cli:*, procedure:credentials, http:*) and their levels.
+#
+# Every canonical action in secure_tools (basic_providers.py, hub_providers.py)
+# must appear here (tests/test_access_catalog.py). Passthrough actions take the
+# level of the command they run from a command table (ua_definitions/access/cli);
+# secure_requests.* and credential.api_request take the level of the web API
+# tool that owns the request's host (http:*), or need full when no tool does.
+# linked_tool actions need full access to the tool named by params.tool_id,
+# which must use a linked credential (account: linked_credential).
+#
+# Whose account a tool uses (access_control.account_sharing): a tool that
+# takes a person's and the team's linked account lets each team choose
+# whether the team's account serves everyone (shared) or nobody (private);
+# default_sharing is where it starts, shared when it names none. Services that
+# act as a person start private, services that supply a resource shared.
+# GitHub and Google use only each person's own sign-in, so they are always
+# private.
+tools:
+  - tool_id: cli:github
+    broker_provider: github
+    display_name: GitHub (gh)
+    description: Repositories, issues, pull requests, and workflows through the gh CLI.
+    account: personal_login
+    tool_sets: [github]
+    command_table: gh
+    actions:
+      gh.exec: command_table
+      auth.status: read
+      auth.logout: full
+      auth.login.credential: full
+      repo.view: read
+      issue.list: read
+      issue.view: read
+      issue.create: write
+      issue.comment: write
+      pr.list: read
+      pr.view: read
+      pr.create: write
+      pr.comment: write
+      workflow.run.list: read
+      project.item.list: read
+      api.get: read
+      # A POST may be a GraphQL mutation of any kind.
+      api.post: full
+
+  - tool_id: cli:google
+    broker_provider: google
+    display_name: Google Workspace (gog)
+    description: Gmail, Calendar, Drive, Docs, Sheets and more through the gog CLI.
+    account: personal_login
+    tool_sets: [google_workspace]
+    command_table: gog
+    actions:
+      gog.exec: command_table
+      gmail_search: read
+      gmail_read: read
+      gmail_send: write
+      calendar_list: read
+      calendar_create: write
+      drive_list: read
+      drive_export: read
+      docs_export: read
+      sheets_read: read
+
+  - tool_id: cli:x
+    broker_provider: xurl
+    display_name: X (xurl)
+    description: Read and post on X through the xurl CLI.
+    account: linked_credential
+    # Posts as the account: the team's X account serves people without their
+    # own sign-in only after an administrator shares it (/accounts share cli:x).
+    default_sharing: private
+    actions:
+      auth.status: read
+      post.create: write
+
+  - tool_id: cli:huggingface
+    broker_provider: huggingface
+    display_name: Hugging Face (hf)
+    description: Download and upload models and datasets on Hugging Face through the hf CLI.
+    account: linked_credential
+    actions:
+      auth.status: read
+      file.download: read
+      file.upload: write
+      # Model metadata for the team lead's model capability lookup.
+      model.info: read
+
+  - tool_id: cli:bitwarden
+    broker_provider: bitwarden
+    display_name: Bitwarden
+    actions: &credential_source_actions
+      credential.search: read
+      credential.get_metadata: read
+      credential.use_for_action: write
+
+  - tool_id: cli:onepassword
+    broker_provider: onepassword
+    display_name: 1Password
+    actions: *credential_source_actions
+
+  - tool_id: cli:keepass
+    broker_provider: keepass
+    display_name: KeePass
+    actions: *credential_source_actions
+
+  - tool_id: cli:vault
+    broker_provider: vault
+    display_name: HashiCorp Vault
+    actions: *credential_source_actions
+
+  - tool_id: cli:sealbox
+    broker_provider: sealbox
+    display_name: Sealbox
+    actions: *credential_source_actions
+
+  - tool_id: procedure:credentials
+    broker_provider: credential_catalog
+    display_name: Saved credentials
+    description: Collect credentials through the secure form, and use the accounts linked to tools in web requests and OpenShell code.
+    actions:
+      credential.collect: write
+      credential.get_metadata: read
+      credential.register_existing_source: write
+      # Hands code the linked credential of the tool named by params.tool_id,
+      # so it needs full access to that tool, not to saved credentials.
+      credential.bind_for_openshell: linked_tool
+      credential.release_openshell_binding: write
+      credential.api_request: http
+      template.list: read
+      template.get: read
+      template.render_request: read
+      template.save_approved_variant: write
+      signup.prepare: write
+      signup.execute_approved: full
+      signup.manual_fallback_session: write
+
+  # The broker's side of set_up_tools (fn:tool_setup): whether the person a
+  # task works for signed in to, or linked an account for, the named tools, and
+  # whether the team's sign-in app is set up (secure_tool_broker.tool_setup_status).
+  # Reached only through that function, never secure_cli; it returns states and
+  # account names, never credentials.
+  - tool_id: procedure:tool_setup
+    broker_provider: tool_setup
+    display_name: Tool setup status
+    description: Whether the person a task works for signed in to, or linked an account for, the tools a request needs.
+    tool_sets: [team_lead_runtime]
+    reached_through: fn:tool_setup
+    actions:
+      status: read
+
+  - tool_id: http:github
+    display_name: GitHub API
+    description: GitHub's REST and GraphQL APIs, called with a person's own token.
+    account: linked_credential
+    # Like the gh CLI, GitHub acts only as each person's own account.
+    link_owners: [person]
+    tool_sets: [github]
+    hosts: [api.github.com, github.com]
+    # Where the linked account's token goes; the account link form shows it.
+    credential_injections:
+      - {placement: header, name: Authorization, field: token, template: "Bearer {value}"}
+
+  # Web search and crawling services the web research tools call through the
+  # broker (custom_tools.broker_web_requests). They are in the internet set,
+  # which every agent and person holds at read unless someone blocks it, so
+  # agents use them without asking; their searches are POST requests, so
+  # those routes are read. Keys come only from account links (the person's
+  # own first, then the team's while the service is shared, the default);
+  # onboarding links the Exa and Brave keys it was given for the team, or as
+  # the administrator's own for a service they made private. Agents reach them through the fn:web_research
+  # functions (reached_through), so holding them offers no secure_cli.
+  - tool_id: http:exa
+    display_name: Exa web search
+    description: Search the web and read pages through Exa.
+    account: linked_credential
+    tool_sets: [internet]
+    reached_through: fn:web_research
+    hosts: [api.exa.ai]
+    routes:
+      - {name: search, method: POST, path: /search, level: read}
+      - {name: contents, method: POST, path: /contents, level: read}
+    credential_injections:
+      - {placement: header, name: x-api-key, field: api_key}
+
+  - tool_id: http:brave-search
+    display_name: Brave Search
+    description: Search Brave's web index and get extracted page context.
+    account: linked_credential
+    tool_sets: [internet]
+    reached_through: fn:web_research
+    hosts: [api.search.brave.com]
+    credential_injections:
+      - {placement: header, name: X-Subscription-Token, field: api_key}
+
+  # This instance's own Crawl4AI server. Its address is a setting, not a
+  # fixed host: the catalog takes the host and port from the setting named
+  # here (access_catalog.catalog), and only requests to exactly that address
+  # belong to this tool, so another service on the same host never receives
+  # the token. The Crawl4AI MCP connection (mcp:crawl4ai) is a separate tool
+  # with its own account link to the same token. The server is the team's
+  # own, so only the team's token opens it: it is always shared
+  # (access_control.account_sharing), and a person has no account of their own.
+  - tool_id: http:crawl4ai
+    display_name: Crawl4AI web crawler
+    description: Render pages and take screenshots with this team's Crawl4AI server.
+    account: linked_credential
+    link_owners: [team]
+    tool_sets: [internet]
+    reached_through: fn:web_research
+    service_url_setting: web_services.crawl4ai.base_url
+    routes:
+      - {name: crawl, method: POST, path: /crawl, level: read}
+    credential_injections:
+      - {placement: header, name: Authorization, field: api_token, template: "Bearer {value}"}
+
+# secure_requests only routes: each request belongs to the web API tool (http:*)
+# that owns its host, or needs full when no tool does.
+dispatch_providers:
+  secure_requests: http
+
+tool_sets:
+  - tool_set_id: standard
+    display_name: Standard team tools
+    description: Everyday tools for ordinary work; never code execution or platform controls.
+  - tool_set_id: google_workspace
+    display_name: Google Workspace kit
+  - tool_set_id: github
+    display_name: GitHub kit

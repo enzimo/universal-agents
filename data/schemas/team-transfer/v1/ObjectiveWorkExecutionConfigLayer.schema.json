@@ -1,0 +1,483 @@
+{
+  "$defs": {
+    "ObjectiveWorkBudget": {
+      "additionalProperties": false,
+      "description": "Immutable budget snapshot for one objective work session.",
+      "properties": {
+        "active_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Active Seconds",
+          "type": "integer"
+        },
+        "checkpoint_reserve_seconds": {
+          "minimum": 0,
+          "title": "Checkpoint Reserve Seconds",
+          "type": "integer"
+        },
+        "checkpoint_reserve_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Checkpoint Reserve Tokens",
+          "type": "integer"
+        },
+        "checkpoint_reserve_tool_calls": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Checkpoint Reserve Tool Calls",
+          "type": "integer"
+        },
+        "checkpoint_reserve_turns": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Checkpoint Reserve Turns",
+          "type": "integer"
+        },
+        "message_class": {
+          "const": "ObjectiveWorkBudget",
+          "default": "ObjectiveWorkBudget",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "tool_calls": {
+          "exclusiveMinimum": 0,
+          "title": "Tool Calls",
+          "type": "integer"
+        },
+        "total_tokens": {
+          "exclusiveMinimum": 0,
+          "title": "Total Tokens",
+          "type": "integer"
+        },
+        "turns": {
+          "exclusiveMinimum": 0,
+          "title": "Turns",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "active_seconds",
+        "checkpoint_reserve_seconds",
+        "turns",
+        "total_tokens",
+        "tool_calls"
+      ],
+      "title": "ObjectiveWorkBudget",
+      "type": "object"
+    },
+    "ObjectiveWorkBudgetBoundsLayer": {
+      "additionalProperties": false,
+      "properties": {
+        "maximum": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectiveWorkBudgetLayer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectiveWorkBudgetLayer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "ObjectiveWorkBudgetBoundsLayer",
+      "type": "object"
+    },
+    "ObjectiveWorkBudgetLayer": {
+      "additionalProperties": false,
+      "properties": {
+        "active_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Seconds"
+        },
+        "checkpoint_reserve_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint Reserve Seconds"
+        },
+        "checkpoint_reserve_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint Reserve Tokens"
+        },
+        "checkpoint_reserve_tool_calls": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint Reserve Tool Calls"
+        },
+        "checkpoint_reserve_turns": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint Reserve Turns"
+        },
+        "tool_calls": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Calls"
+        },
+        "total_tokens": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Tokens"
+        },
+        "turns": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turns"
+        }
+      },
+      "title": "ObjectiveWorkBudgetLayer",
+      "type": "object"
+    },
+    "ObjectiveWorkCustomProfilesLayer": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_reusable_installation": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allow Reusable Installation"
+        },
+        "budget_bounds": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectiveWorkBudgetBoundsLayer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enabled"
+        },
+        "max_installed_profiles_per_owner": {
+          "anyOf": [
+            {
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Installed Profiles Per Owner"
+        },
+        "minimum_cadence_interval_seconds": {
+          "anyOf": [
+            {
+              "maximum": 604800,
+              "minimum": 60,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Cadence Interval Seconds"
+        },
+        "proposal_ttl_seconds": {
+          "anyOf": [
+            {
+              "maximum": 604800,
+              "minimum": 300,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Proposal Ttl Seconds"
+        }
+      },
+      "title": "ObjectiveWorkCustomProfilesLayer",
+      "type": "object"
+    },
+    "ObjectiveWorkProfile": {
+      "additionalProperties": false,
+      "description": "Reusable cadence and budget contract for bounded Objective execution.",
+      "properties": {
+        "budget": {
+          "$ref": "#/$defs/ObjectiveWorkBudget"
+        },
+        "cadence_cron": {
+          "title": "Cadence Cron",
+          "type": "string"
+        },
+        "cadence_timezone": {
+          "default": "owner",
+          "title": "Cadence Timezone",
+          "type": "string"
+        },
+        "message_class": {
+          "const": "ObjectiveWorkProfile",
+          "default": "ObjectiveWorkProfile",
+          "title": "Message Class",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cadence_cron",
+        "budget"
+      ],
+      "title": "ObjectiveWorkProfile",
+      "type": "object"
+    },
+    "ObjectiveWorkSuggestionsLayer": {
+      "additionalProperties": false,
+      "properties": {
+        "eligible_horizons": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Eligible Horizons"
+        },
+        "enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enabled"
+        },
+        "minimum_estimated_sessions": {
+          "anyOf": [
+            {
+              "minimum": 2,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Estimated Sessions"
+        }
+      },
+      "title": "ObjectiveWorkSuggestionsLayer",
+      "type": "object"
+    },
+    "ObjectiveWorkVisibilityLayer": {
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_history_limit": {
+          "anyOf": [
+            {
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint History Limit"
+        },
+        "emit_activity_snapshots": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Emit Activity Snapshots"
+        }
+      },
+      "title": "ObjectiveWorkVisibilityLayer",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/ObjectiveWorkExecutionConfigLayer.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One strict, ordered policy layer; later files override earlier files.",
+  "properties": {
+    "custom_profiles": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ObjectiveWorkCustomProfilesLayer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "default_profile": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Default Profile"
+    },
+    "profiles": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ObjectiveWorkProfile"
+      },
+      "title": "Profiles",
+      "type": "object"
+    },
+    "required_skills": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Required Skills"
+    },
+    "schema_version": {
+      "const": 2,
+      "default": 2,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "suggestions": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ObjectiveWorkSuggestionsLayer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "visibility": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ObjectiveWorkVisibilityLayer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "title": "ObjectiveWorkExecutionConfigLayer",
+  "type": "object"
+}

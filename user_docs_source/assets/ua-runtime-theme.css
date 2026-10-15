@@ -1,0 +1,36 @@
+:root {
+  --ua-runtime-color-mode: dark;
+  --ua-doc-light-blue: #082f73;
+  --ua-doc-light-yellow: #ffd60a;
+  --ua-doc-light-green: #20f05a;
+  --ua-doc-light-red: #ff3030;
+  --ua-doc-light-diffusion: 58;
+  --ua-doc-polygon-opacity-low: 0.200;
+  --ua-doc-polygon-opacity-high: 0.700;
+  --ua-doc-polygon-line-color: #202426;
+  --ua-doc-polygon-line-opacity: 0.080;
+  --ua-light-dynamic: true;
+  --ua-dark-detail: full;
+  --ua-dark-surface: #007007;
+  --ua-dark-metal: #015b1a;
+  --ua-dark-facet-size: 230;
+  --ua-dark-facet-depth: 80;
+  --ua-dark-chrome-faces: 0;
+  --ua-dark-shine: 51;
+  --ua-dark-edge-highlights: 31;
+  --ua-dark-surface-grain: 24;
+  --ua-dark-light-x: -7;
+  --ua-dark-light-y: -5;
+  --ua-dark-light-softness: 37;
+  --ua-dark-light-motion: true;
+  --ua-dark-light-wander: false;
+  --ua-dark-light-wander-distance: 133;
+  --ua-dark-light-speed: 110;
+  --ua-dark-mesh-motion: true;
+  --ua-dark-mesh-speed: 100;
+  --ua-dark-seed: 9187;
+  --ua-dark-gold: #464020;
+  --ua-dark-gold-share: 10;
+  --ua-dark-bronze: #00751d;
+  --ua-dark-bronze-share: 39;
+}

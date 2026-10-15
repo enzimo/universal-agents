@@ -1,0 +1,21 @@
+{
+  "msg_content": {
+    "task_type": "request",
+    "problem_statement": "Create a new skill for yourself on how to use `wttr.in` to check for weather without an API key. Set the default to be New York, then use the skill and provide the result to me. Use `{{TEST_OUTPUT_DIR}}` as the canonical output directory for this test. Place generated files, copied skill sources, packaged artifacts, notes, and reports there. If the runtime needs the final skill mirrored under `.skills` so it can be loaded, that is allowed, but keep a complete copy of the finished skill artifacts under `{{TEST_OUTPUT_DIR}}`.",
+    "message_class": "Task"
+  },
+  "msg_meta": {
+    "from_agent_name": "user",
+    "to_named_agent_type": "TeamArchitect",
+    "is_response_requested": true,
+    "msg_correlation_id": "{{CORRELATION_ID}}"
+  },
+  "msg_header": {
+    "message_id": "{{MESSAGE_ID}}",
+    "from_agent_id": "user",
+    "to_routing_path": "{{TARGET_AGENT_ID}}",
+    "response_routing_key": "{{USER_QUEUE}}",
+    "agent_signature": "",
+    "timestamp": "{{TIMESTAMP}}"
+  }
+}

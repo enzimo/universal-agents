@@ -1,0 +1,308 @@
+{
+  "$defs": {
+    "AccessLevel": {
+      "description": "How much a grant allows; ordered read < write < full.",
+      "enum": [
+        "read",
+        "write",
+        "full"
+      ],
+      "title": "AccessLevel",
+      "type": "string"
+    },
+    "DelegationMode": {
+      "enum": [
+        "automatic",
+        "ask_owner"
+      ],
+      "title": "DelegationMode",
+      "type": "string"
+    },
+    "GrantKind": {
+      "enum": [
+        "access",
+        "block",
+        "credential_use"
+      ],
+      "title": "GrantKind",
+      "type": "string"
+    },
+    "GrantLifetime": {
+      "description": "How long a grant lasts.\n\nA *task* here is the person's request (owner's decision 2026-09-30): the\nwork one signed task context stands for, which every agent task working\non it carries unchanged (the team lead's and each worker it hands work\nto; a scheduled run is one task). ``GrantV1.task_id`` is that context's id.",
+      "enum": [
+        "one_time",
+        "task",
+        "until",
+        "until_revoked"
+      ],
+      "title": "GrantLifetime",
+      "type": "string"
+    },
+    "GrantStatus": {
+      "enum": [
+        "active",
+        "pending",
+        "revoked",
+        "denied"
+      ],
+      "title": "GrantStatus",
+      "type": "string"
+    },
+    "SubjectKind": {
+      "description": "Who a grant is for. A grant to a type, role, or team covers its members.\n\nA schedule holds the access of one scheduled job (owner's decision\n2026-09-30, \"access follows the work\"): every agent in one of its runs is\nin it, whatever agent type runs it. Its id is ``<team>/<schedule id>``.",
+      "enum": [
+        "agent",
+        "agent_type",
+        "role",
+        "team",
+        "user",
+        "schedule"
+      ],
+      "title": "SubjectKind",
+      "type": "string"
+    },
+    "SubjectRefV1": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SubjectKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "SubjectRefV1",
+      "type": "object"
+    },
+    "TargetKind": {
+      "enum": [
+        "tool",
+        "tool_set",
+        "operation",
+        "credential",
+        "folder",
+        "file"
+      ],
+      "title": "TargetKind",
+      "type": "string"
+    },
+    "TargetRefV1": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/TargetKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "TargetRefV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/GrantV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One grant, block, or credential-use permission.\n\nGrants are immutable except for status, use count and revocation fields:\na change means revoke and reissue. A grant is valid only while every grant\nup its parent chain is valid, so revoking a parent ends its children.",
+  "properties": {
+    "approval_id": {
+      "anyOf": [
+        {
+          "maxLength": 240,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Approval Id"
+    },
+    "created_at_utc": {
+      "format": "date-time",
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "delegate_to": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SubjectRefV1"
+      },
+      "title": "Delegate To",
+      "type": "array"
+    },
+    "delegation_depth": {
+      "default": 0,
+      "maximum": 2,
+      "minimum": 0,
+      "title": "Delegation Depth",
+      "type": "integer"
+    },
+    "delegation_mode": {
+      "$ref": "#/$defs/DelegationMode",
+      "default": "automatic"
+    },
+    "expires_at_utc": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expires At Utc"
+    },
+    "for_person_id": {
+      "anyOf": [
+        {
+          "maxLength": 240,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "For Person Id"
+    },
+    "grant_id": {
+      "maxLength": 120,
+      "minLength": 1,
+      "title": "Grant Id",
+      "type": "string"
+    },
+    "granted_by": {
+      "$ref": "#/$defs/SubjectRefV1"
+    },
+    "kind": {
+      "$ref": "#/$defs/GrantKind",
+      "default": "access"
+    },
+    "level": {
+      "$ref": "#/$defs/AccessLevel",
+      "default": "full"
+    },
+    "lifetime": {
+      "$ref": "#/$defs/GrantLifetime",
+      "default": "until_revoked"
+    },
+    "parent_grant_id": {
+      "anyOf": [
+        {
+          "maxLength": 120,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Grant Id"
+    },
+    "reason": {
+      "default": "",
+      "maxLength": 2000,
+      "title": "Reason",
+      "type": "string"
+    },
+    "revoked_at_utc": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Revoked At Utc"
+    },
+    "revoked_by": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SubjectRefV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/GrantStatus",
+      "default": "active"
+    },
+    "subject": {
+      "$ref": "#/$defs/SubjectRefV1"
+    },
+    "target": {
+      "$ref": "#/$defs/TargetRefV1"
+    },
+    "task_id": {
+      "anyOf": [
+        {
+          "maxLength": 240,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Task Id"
+    },
+    "team_id": {
+      "maxLength": 120,
+      "minLength": 1,
+      "title": "Team Id",
+      "type": "string"
+    },
+    "uses_remaining": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Uses Remaining"
+    }
+  },
+  "required": [
+    "grant_id",
+    "team_id",
+    "subject",
+    "target",
+    "granted_by",
+    "created_at_utc"
+  ],
+  "title": "GrantV1",
+  "type": "object"
+}

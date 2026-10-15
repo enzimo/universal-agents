@@ -1,0 +1,42 @@
+{
+  "$defs": {
+    "JsonValue": {},
+    "ObjectiveKind": {
+      "enum": [
+        "objective",
+        "work_profile",
+        "work_policy"
+      ],
+      "title": "ObjectiveKind",
+      "type": "string"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/ObjectiveTransferRecordV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "document": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Document",
+      "type": "object"
+    },
+    "kind": {
+      "$ref": "#/$defs/ObjectiveKind"
+    },
+    "record_id": {
+      "maxLength": 400,
+      "minLength": 1,
+      "title": "Record Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "record_id",
+    "document"
+  ],
+  "title": "ObjectiveTransferRecordV1",
+  "type": "object"
+}

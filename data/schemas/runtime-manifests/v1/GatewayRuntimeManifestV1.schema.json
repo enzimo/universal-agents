@@ -1,0 +1,394 @@
+{
+  "$defs": {
+    "GatewayAssistantRuntimeContextV1": {
+      "additionalProperties": false,
+      "properties": {
+        "available_message_template": {
+          "title": "Available Message Template",
+          "type": "string"
+        },
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "manager_transition_notices_enabled": {
+          "title": "Manager Transition Notices Enabled",
+          "type": "boolean"
+        },
+        "unavailable_message_template": {
+          "title": "Unavailable Message Template",
+          "type": "string"
+        }
+      },
+      "required": [
+        "display_name",
+        "manager_transition_notices_enabled",
+        "unavailable_message_template",
+        "available_message_template"
+      ],
+      "title": "GatewayAssistantRuntimeContextV1",
+      "type": "object"
+    },
+    "GatewayUserRuntimeContextV1": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_user_id": {
+          "title": "Canonical User Id",
+          "type": "string"
+        },
+        "default_session_key": {
+          "title": "Default Session Key",
+          "type": "string"
+        },
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "timezone": {
+          "title": "Timezone",
+          "type": "string"
+        },
+        "users_enabled": {
+          "title": "Users Enabled",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "display_name",
+        "canonical_user_id",
+        "timezone",
+        "default_session_key",
+        "users_enabled"
+      ],
+      "title": "GatewayUserRuntimeContextV1",
+      "type": "object"
+    },
+    "RuntimeNatsManifestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "ack_wait_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Ack Wait Seconds",
+          "type": "number"
+        },
+        "client_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Client Name"
+        },
+        "credentials_file_env_var": {
+          "default": "NATS_CREDENTIALS_FILE",
+          "title": "Credentials File Env Var",
+          "type": "string"
+        },
+        "duplicate_window_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Duplicate Window Seconds",
+          "type": "number"
+        },
+        "jetstream_enabled": {
+          "title": "Jetstream Enabled",
+          "type": "boolean"
+        },
+        "max_deliver": {
+          "minimum": 1,
+          "title": "Max Deliver",
+          "type": "integer"
+        },
+        "password": {
+          "$ref": "#/$defs/RuntimeSecretReferenceV1"
+        },
+        "presence_max_age_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Presence Max Age Seconds"
+        },
+        "process_consumer_inactive_threshold_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Process Consumer Inactive Threshold Seconds",
+          "type": "number"
+        },
+        "replicas": {
+          "minimum": 1,
+          "title": "Replicas",
+          "type": "integer"
+        },
+        "servers": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Servers",
+          "type": "array"
+        },
+        "storage": {
+          "title": "Storage",
+          "type": "string"
+        },
+        "subject_prefix": {
+          "title": "Subject Prefix",
+          "type": "string"
+        },
+        "user": {
+          "$ref": "#/$defs/RuntimeSecretReferenceV1"
+        },
+        "work_max_age_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Work Max Age Seconds"
+        }
+      },
+      "required": [
+        "servers",
+        "jetstream_enabled",
+        "subject_prefix",
+        "storage",
+        "replicas",
+        "ack_wait_seconds",
+        "max_deliver",
+        "duplicate_window_seconds",
+        "process_consumer_inactive_threshold_seconds",
+        "user",
+        "password"
+      ],
+      "title": "RuntimeNatsManifestV1",
+      "type": "object"
+    },
+    "RuntimeSecretReferenceV1": {
+      "additionalProperties": false,
+      "description": "Environment/file reference; secret material never enters a manifest.",
+      "properties": {
+        "env_var": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Env Var",
+          "type": "string"
+        },
+        "file_env_var": {
+          "maxLength": 245,
+          "minLength": 1,
+          "title": "File Env Var",
+          "type": "string"
+        }
+      },
+      "required": [
+        "env_var",
+        "file_env_var"
+      ],
+      "title": "RuntimeSecretReferenceV1",
+      "type": "object"
+    },
+    "RuntimeStorageManifestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "enum": [
+            "sqlite",
+            "postgres"
+          ],
+          "title": "Backend",
+          "type": "string"
+        },
+        "postgres_dsn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimeSecretReferenceV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sqlite_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sqlite Path"
+        }
+      },
+      "required": [
+        "backend"
+      ],
+      "title": "RuntimeStorageManifestV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/runtime-manifests/v1/GatewayRuntimeManifestV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "activity_collector_base_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Activity Collector Base Url"
+    },
+    "activity_collector_ingest_token": {
+      "$ref": "#/$defs/RuntimeSecretReferenceV1"
+    },
+    "assistant": {
+      "$ref": "#/$defs/GatewayAssistantRuntimeContextV1"
+    },
+    "authorization_enabled": {
+      "title": "Authorization Enabled",
+      "type": "boolean"
+    },
+    "content_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "enabled_interactive_channels": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Enabled Interactive Channels",
+      "type": "array"
+    },
+    "instance_name": {
+      "title": "Instance Name",
+      "type": "string"
+    },
+    "instance_root_path": {
+      "title": "Instance Root Path",
+      "type": "string"
+    },
+    "manager_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Manager Agent Id"
+    },
+    "manager_named_agent_type": {
+      "title": "Manager Named Agent Type",
+      "type": "string"
+    },
+    "manager_request_timeout_seconds": {
+      "exclusiveMinimum": 0,
+      "title": "Manager Request Timeout Seconds",
+      "type": "number"
+    },
+    "response_route": {
+      "title": "Response Route",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "secure_broker_internal_base_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Secure Broker Internal Base Url"
+    },
+    "secure_broker_token": {
+      "$ref": "#/$defs/RuntimeSecretReferenceV1"
+    },
+    "service": {
+      "const": "gateway",
+      "default": "gateway",
+      "title": "Service",
+      "type": "string"
+    },
+    "source_config_schema_version": {
+      "minimum": 1,
+      "title": "Source Config Schema Version",
+      "type": "integer"
+    },
+    "source_config_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Config Sha256",
+      "type": "string"
+    },
+    "state_storage": {
+      "$ref": "#/$defs/RuntimeStorageManifestV1"
+    },
+    "team_id": {
+      "title": "Team Id",
+      "type": "string"
+    },
+    "transport": {
+      "$ref": "#/$defs/RuntimeNatsManifestV1"
+    },
+    "user": {
+      "$ref": "#/$defs/GatewayUserRuntimeContextV1"
+    },
+    "workspace_path": {
+      "title": "Workspace Path",
+      "type": "string"
+    }
+  },
+  "required": [
+    "content_sha256",
+    "source_config_schema_version",
+    "source_config_sha256",
+    "instance_name",
+    "instance_root_path",
+    "workspace_path",
+    "team_id",
+    "manager_named_agent_type",
+    "response_route",
+    "manager_request_timeout_seconds",
+    "user",
+    "assistant",
+    "state_storage",
+    "transport",
+    "authorization_enabled",
+    "secure_broker_token",
+    "activity_collector_ingest_token",
+    "enabled_interactive_channels"
+  ],
+  "title": "GatewayRuntimeManifestV1",
+  "type": "object"
+}

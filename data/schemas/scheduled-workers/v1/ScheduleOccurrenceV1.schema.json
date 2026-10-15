@@ -1,0 +1,165 @@
+{
+  "$id": "https://universal-agents.dev/schemas/scheduled-workers/v1/ScheduleOccurrenceV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "admitted_at_utc": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Admitted At Utc"
+    },
+    "agent_id": {
+      "title": "Agent Id",
+      "type": "string"
+    },
+    "claim_token": {
+      "title": "Claim Token",
+      "type": "string"
+    },
+    "coalesced_into_task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Coalesced Into Task Id"
+    },
+    "created_at_utc": {
+      "format": "date-time",
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "due_at": {
+      "title": "Due At",
+      "type": "string"
+    },
+    "execution_digest": {
+      "title": "Execution Digest",
+      "type": "string"
+    },
+    "finished_at_utc": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Finished At Utc"
+    },
+    "launch_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Launch Id"
+    },
+    "named_agent_type": {
+      "title": "Named Agent Type",
+      "type": "string"
+    },
+    "occurrence_id": {
+      "title": "Occurrence Id",
+      "type": "string"
+    },
+    "outcome": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Outcome"
+    },
+    "owner_canonical_user_id": {
+      "title": "Owner Canonical User Id",
+      "type": "string"
+    },
+    "policy_revision": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Policy Revision"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reason"
+    },
+    "schedule_id": {
+      "title": "Schedule Id",
+      "type": "string"
+    },
+    "state": {
+      "default": "reserved",
+      "enum": [
+        "reserved",
+        "admitted",
+        "coalesced",
+        "blocked",
+        "finished",
+        "superseded"
+      ],
+      "title": "State",
+      "type": "string"
+    },
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "team_id": {
+      "title": "Team Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "occurrence_id",
+    "schedule_id",
+    "due_at",
+    "task_id",
+    "team_id",
+    "owner_canonical_user_id",
+    "named_agent_type",
+    "execution_digest",
+    "agent_id",
+    "claim_token"
+  ],
+  "title": "ScheduleOccurrenceV1",
+  "type": "object"
+}

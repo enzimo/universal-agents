@@ -1,0 +1,1171 @@
+[
+  {
+    "complexity": 0,
+    "file_name": "sealbox_tenants.py",
+    "function_name": "_base_environment",
+    "path": "secure_tool_broker/sealbox_tenants.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "sealbox_tenants.py",
+    "function_name": "_material_id",
+    "path": "secure_tool_broker/sealbox_tenants.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "sealbox_tenants.py",
+    "function_name": "_persist_provisioning_metadata",
+    "path": "secure_tool_broker/sealbox_tenants.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "sealbox_tenants.py",
+    "function_name": "_catalog_store",
+    "path": "secure_tool_broker/sealbox_tenants.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "sealbox_tenants.py",
+    "function_name": "_root_token_file",
+    "path": "secure_tool_broker/sealbox_tenants.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "sealbox_tenants.py",
+    "function_name": "_material_root",
+    "path": "secure_tool_broker/sealbox_tenants.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 3,
+    "file_name": "sealbox_tenants.py",
+    "function_name": "_provisioning_lock",
+    "path": "secure_tool_broker/sealbox_tenants.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "sealbox_tenants.py",
+    "function_name": "_read_provisioning_metadata",
+    "path": "secure_tool_broker/sealbox_tenants.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "sealbox_tenants.py",
+    "function_name": "_root_environment",
+    "path": "secure_tool_broker/sealbox_tenants.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "sealbox_tenants.py",
+    "function_name": "_run_checked",
+    "path": "secure_tool_broker/sealbox_tenants.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "sealbox_tenants.py",
+    "function_name": "_tenant_environment",
+    "path": "secure_tool_broker/sealbox_tenants.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 5,
+    "file_name": "sealbox_tenants.py",
+    "function_name": "sealbox_tenant_environment",
+    "path": "secure_tool_broker/sealbox_tenants.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 21,
+    "file_name": "sealbox_tenants.py",
+    "function_name": "_provision",
+    "path": "secure_tool_broker/sealbox_tenants.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "SealboxRuntimeConfig::listen_addr",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "apply_sealbox_cli_env",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "ensure_managed_sealbox_material",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "SealboxRuntimeConfig::url",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "_env_int",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "_env_string",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "_resolve_path",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "_setting",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "chmod_public_file",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "sealbox_cli_env",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "sealbox_server_env",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "ensure_sealbox_token_file",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 3,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "_env_bool",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 3,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "ensure_sealbox_key_pair_files",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "_coerce_bool",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 18,
+    "file_name": "sealbox_runtime.py",
+    "function_name": "resolve_sealbox_runtime_config",
+    "path": "secure_tool_broker/sealbox_runtime.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "defaults.py",
+    "function_name": "secure_tool_broker_starts",
+    "path": "secure_tool_broker/defaults.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "defaults.py",
+    "function_name": "should_enable_secure_tool_broker",
+    "path": "secure_tool_broker/defaults.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "defaults.py",
+    "function_name": "resolve_secure_tool_broker_internal_base_url",
+    "path": "secure_tool_broker/defaults.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "security.py",
+    "function_name": "OpenShellSecuritySettings::_normalize_optional_strings",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "security.py",
+    "function_name": "SecurityLayerSettings::_normalize_broker_bind_host",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "security.py",
+    "function_name": "SecurityLayerSettings::_normalize_broker_credentials_dir",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "security.py",
+    "function_name": "SecurityLayerSettings::_normalize_broker_urls",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "security.py",
+    "function_name": "CodeExecutionSecuritySettings::_validate_sandbox",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "security.py",
+    "function_name": "CredentialCatalogSettings::_normalize_default_write_source",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "security.py",
+    "function_name": "CredentialCatalogSettings::_normalize_path",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "security.py",
+    "function_name": "CredentialStateBackendSettings::_normalize_source",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "security.py",
+    "function_name": "CredentialStateBackendSettings::_validate_mode",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "security.py",
+    "function_name": "OpenShellSecuritySettings::_normalize_gateway_driver",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "security.py",
+    "function_name": "SealboxSecuritySettings::_normalize_api_version",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "security.py",
+    "function_name": "SealboxSecuritySettings::_normalize_bind_host",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "security.py",
+    "function_name": "SecurityLayerSettings::_validate_mode",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "security.py",
+    "function_name": "CredentialCatalogSettings::_validate_non_negative_secret_cache_ttl",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "security.py",
+    "function_name": "CredentialCatalogSettings::_validate_positive_ttl",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "security.py",
+    "function_name": "CredentialStateBackendSettings::_normalize_namespace",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "security.py",
+    "function_name": "CredentialStateBackendSettings::_validate_source_for_mode",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "security.py",
+    "function_name": "OpenShellSecuritySettings::_normalize_workspace_mount",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "security.py",
+    "function_name": "SealboxSecuritySettings::_normalize_paths",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "security.py",
+    "function_name": "SealboxSecuritySettings::_normalize_ready_timeout",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 3,
+    "file_name": "security.py",
+    "function_name": "SealboxSecuritySettings::_normalize_bind_port",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 3,
+    "file_name": "security.py",
+    "function_name": "SecurityLayerSettings::_normalize_bitwarden_server_url",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "security.py",
+    "function_name": "SecurityLayerSettings::_normalize_broker_bind_port",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "security.py",
+    "function_name": "SecurityLayerSettings::_normalize_broker_public_port",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "security.py",
+    "function_name": "SecurityLayerSettings::_reject_removed_broker_base_url",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 5,
+    "file_name": "security.py",
+    "function_name": "reject_removed_sealbox_env_vars",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 6,
+    "file_name": "security.py",
+    "function_name": "CodeExecutionSecuritySettings::_validate_paths",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 6,
+    "file_name": "security.py",
+    "function_name": "SealboxSecuritySettings::_reject_removed_single_tenant_fields",
+    "path": "runtime_settings/security.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "instance_secrets.py",
+    "function_name": "SecretRequirement::as_dict",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "instance_secrets.py",
+    "function_name": "internal_credential_request",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "instance_secrets.py",
+    "function_name": "model_key_env_var",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "instance_secrets.py",
+    "function_name": "_entered_requirements",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "instance_secrets.py",
+    "function_name": "_is_local_nats_endpoint",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "instance_secrets.py",
+    "function_name": "_model_key_requirements",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "instance_secrets.py",
+    "function_name": "environment_secret_values",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "instance_secrets.py",
+    "function_name": "missing_secrets_text",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "instance_secrets.py",
+    "function_name": "required_secrets",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "instance_secrets.py",
+    "function_name": "secret_present",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "instance_secrets.py",
+    "function_name": "_internal_requirements",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "instance_secrets.py",
+    "function_name": "_split_nats_servers",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "instance_secrets.py",
+    "function_name": "missing_secrets",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "instance_secrets.py",
+    "function_name": "generate_credentials_command",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 6,
+    "file_name": "instance_secrets.py",
+    "function_name": "_channel_requirements",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 8,
+    "file_name": "instance_secrets.py",
+    "function_name": "should_generate_internal_nats_credentials",
+    "path": "assistant_gateway/instance_secrets.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "launch_headless.py",
+    "function_name": "_run_openshell",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "launch_headless.py",
+    "function_name": "build_manager_command",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "launch_headless.py",
+    "function_name": "build_openshell_gateway_env",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "launch_headless.py",
+    "function_name": "build_parser",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "launch_headless.py",
+    "function_name": "resolve_external_skills_destination",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "launch_headless.py",
+    "function_name": "should_manage_openshell_sandbox",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "launch_headless.py",
+    "function_name": "startup_agent_type",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "_ensure_instance_scoped_openshell_env",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "_env_bool",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "_instance_slug",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "_render_instance_config_migration_notice",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "_run_openshell_best_effort",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "_sealbox_server_executable",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "_warn_ignored_team_env",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "append_headless_startup_notice",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "broker_token_missing",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "build_activity_collector_command",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "build_adapter_host_command",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "build_execution_controller_command",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "build_gateway_command",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "build_secure_tool_broker_command",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "build_startup_agent_environments",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "internal_website_will_serve_docs",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "register_openshell_gateway",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "resolve_openshell_gateway_name",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "resolve_openshell_sandbox_name",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "should_manage_openshell_gateway",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "should_start_adapter_host",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "launch_headless.py",
+    "function_name": "should_start_execution_controller",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "launch_headless.py",
+    "function_name": "_env_int",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "launch_headless.py",
+    "function_name": "_openshell_command",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "launch_headless.py",
+    "function_name": "_openshell_gateway_command",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "launch_headless.py",
+    "function_name": "broker_token_message",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "launch_headless.py",
+    "function_name": "build_service_process_environments",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "launch_headless.py",
+    "function_name": "ensure_instance_config_ready_for_headless_launch",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "launch_headless.py",
+    "function_name": "missing_secret_refusal",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "launch_headless.py",
+    "function_name": "missing_task_context_keys",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "launch_headless.py",
+    "function_name": "resolve_manager_db_path",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "launch_headless.py",
+    "function_name": "run_nats_consumer_preflight",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 3,
+    "file_name": "launch_headless.py",
+    "function_name": "_managed_openshell_secret",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 3,
+    "file_name": "launch_headless.py",
+    "function_name": "build_agent_command",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 3,
+    "file_name": "launch_headless.py",
+    "function_name": "configured_secret_names",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 3,
+    "file_name": "launch_headless.py",
+    "function_name": "ensure_openshell_gateway",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 3,
+    "file_name": "launch_headless.py",
+    "function_name": "scoped_environment",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 3,
+    "file_name": "launch_headless.py",
+    "function_name": "should_start_managed_sealbox",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 3,
+    "file_name": "launch_headless.py",
+    "function_name": "with_website_base_url",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "launch_headless.py",
+    "function_name": "refresh_external_skills_before_launch",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "launch_headless.py",
+    "function_name": "resolve_openshell_gateway_endpoint",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "launch_headless.py",
+    "function_name": "task_context_keys_message",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "launch_headless.py",
+    "function_name": "terminate_process",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "launch_headless.py",
+    "function_name": "with_verify_keys",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 5,
+    "file_name": "launch_headless.py",
+    "function_name": "build_openshell_gateway_command",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 5,
+    "file_name": "launch_headless.py",
+    "function_name": "load_env_file_values",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 5,
+    "file_name": "launch_headless.py",
+    "function_name": "validate_memory_graph_embedding_preflight",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 5,
+    "file_name": "launch_headless.py",
+    "function_name": "validate_runtime_layout",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 5,
+    "file_name": "launch_headless.py",
+    "function_name": "wait_for_sealbox_tcp",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 6,
+    "file_name": "launch_headless.py",
+    "function_name": "ensure_managed_sealbox_service",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 6,
+    "file_name": "launch_headless.py",
+    "function_name": "wait_for_openshell_gateway_ready",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 6,
+    "file_name": "launch_headless.py",
+    "function_name": "warn_missing_environment_secrets",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 7,
+    "file_name": "launch_headless.py",
+    "function_name": "build_process_env",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 7,
+    "file_name": "launch_headless.py",
+    "function_name": "pop_runtime_restart_request",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 8,
+    "file_name": "launch_headless.py",
+    "function_name": "cleanup_openshell_sandbox",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 8,
+    "file_name": "launch_headless.py",
+    "function_name": "resolve_team_composition_startup_agents",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 9,
+    "file_name": "launch_headless.py",
+    "function_name": "_parse_startup_notices",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 9,
+    "file_name": "launch_headless.py",
+    "function_name": "ensure_openshell_sandbox",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 10,
+    "file_name": "launch_headless.py",
+    "function_name": "build_startup_agent_commands",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 11,
+    "file_name": "launch_headless.py",
+    "function_name": "resolve_env_file_path",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 19,
+    "file_name": "launch_headless.py",
+    "function_name": "_runtime_restart_authority_error",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 29,
+    "file_name": "launch_headless.py",
+    "function_name": "main",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 58,
+    "file_name": "launch_headless.py",
+    "function_name": "build_instance_env_defaults",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 62,
+    "file_name": "launch_headless.py",
+    "function_name": "run_supervised",
+    "path": "docker/launch_headless.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 167,
+    "file_name": "environment.py",
+    "function_name": "_apply_env_overrides",
+    "path": "runtime_settings/environment.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "settings_import.py",
+    "function_name": "SkippedSetting::as_dict",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "settings_import.py",
+    "function_name": "_channel",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 0,
+    "file_name": "settings_import.py",
+    "function_name": "_site",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "settings_import.py",
+    "function_name": "_appearance",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "settings_import.py",
+    "function_name": "_is_scalar",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "settings_import.py",
+    "function_name": "_listed",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 1,
+    "file_name": "settings_import.py",
+    "function_name": "looks_like_instance_config",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "settings_import.py",
+    "function_name": "_known_top_level_keys",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 2,
+    "file_name": "settings_import.py",
+    "function_name": "read_onboarding_import",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "settings_import.py",
+    "function_name": "_lookup",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 4,
+    "file_name": "settings_import.py",
+    "function_name": "_top_level_reason",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 5,
+    "file_name": "settings_import.py",
+    "function_name": "_removed_paths",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 5,
+    "file_name": "settings_import.py",
+    "function_name": "_startup_agents",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 6,
+    "file_name": "settings_import.py",
+    "function_name": "_import_field",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 6,
+    "file_name": "settings_import.py",
+    "function_name": "_parse_mapping",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 6,
+    "file_name": "settings_import.py",
+    "function_name": "_top_level_skips",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 8,
+    "file_name": "settings_import.py",
+    "function_name": "_kept",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 11,
+    "file_name": "settings_import.py",
+    "function_name": "_partly_imported_sections",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  },
+  {
+    "complexity": 13,
+    "file_name": "settings_import.py",
+    "function_name": "_convert",
+    "path": "assistant_gateway/onboarding_web/settings_import.py",
+    "refactor_plans": []
+  }
+]

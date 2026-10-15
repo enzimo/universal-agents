@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en" data-color-mode="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Universal Agents Onboarding</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/appearance.js"></script>
+</head>
+<body>
+  <canvas id="mesh-canvas" data-ua-metallic-mesh aria-hidden="true"></canvas>
+  <div class="mesh-scrim" aria-hidden="true"></div>
+
+  <main class="preview-shell" aria-labelledby="page-title">
+    <header class="top-bar">
+      <a class="brand-lockup" href="#welcome" aria-label="Universal Agents onboarding">
+        <img class="brand-mark" src="/agent-mark.png" alt="">
+        <span>Universal Agents</span>
+      </a>
+    </header>
+
+    <section class="workbench">
+      <nav class="step-rail" aria-label="Onboarding pages">
+        <div id="step-list" class="step-list"></div>
+      </nav>
+
+      <article class="page-panel">
+        <div class="page-heading">
+          <p id="page-kicker" class="page-kicker"></p>
+          <h1 id="page-title"></h1>
+          <p id="page-copy" class="page-copy"></p>
+        </div>
+
+        <div id="page-body" class="page-body"></div>
+
+        <footer class="page-actions">
+          <button id="back-button" class="button ghost" type="button">Back</button>
+          <div class="progress-wrap" aria-label="Onboarding completion">
+            <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
+            <span id="progress-label" class="progress-label"></span>
+          </div>
+          <button id="next-button" class="button primary" type="button">Next &gt;&gt;</button>
+        </footer>
+      </article>
+    </section>
+  </main>
+
+  <script src="/appearance_customizer.js"></script>
+  <script src="/metallic_mesh.js"></script>
+  <script src="/mesh_motion.js"></script>
+  <script src="/glass_mesh.js"></script>
+  <script src="/ui_motion.js"></script>
+  <script src="/intro_word.js"></script>
+  <script src="/panel_motion.js"></script>
+  <script src="/credential_controls.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

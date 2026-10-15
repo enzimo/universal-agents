@@ -1,0 +1,125 @@
+{
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/ExportedFactV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One pinned fact as the old instance held it.",
+  "properties": {
+    "bank": {
+      "title": "Bank",
+      "type": "string"
+    },
+    "created_at_utc": {
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "created_by_display_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Created By Display Name"
+    },
+    "created_by_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Created By Id"
+    },
+    "created_by_kind": {
+      "title": "Created By Kind",
+      "type": "string"
+    },
+    "fact_text": {
+      "minLength": 1,
+      "title": "Fact Text",
+      "type": "string"
+    },
+    "invalid_after_utc": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Invalid After Utc"
+    },
+    "memory_id": {
+      "description": "The fact's number in the old instance, for reference only",
+      "minimum": 1,
+      "title": "Memory Id",
+      "type": "integer"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "title": "Metadata",
+      "type": "object"
+    },
+    "person_id": {
+      "anyOf": [
+        {
+          "maxLength": 240,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Person Id"
+    },
+    "source_key": {
+      "anyOf": [
+        {
+          "maxLength": 240,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Key"
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tags",
+      "type": "array"
+    },
+    "updated_at_utc": {
+      "title": "Updated At Utc",
+      "type": "string"
+    },
+    "valid_from_utc": {
+      "title": "Valid From Utc",
+      "type": "string"
+    }
+  },
+  "required": [
+    "bank",
+    "memory_id",
+    "fact_text",
+    "valid_from_utc",
+    "created_by_kind",
+    "created_at_utc",
+    "updated_at_utc"
+  ],
+  "title": "ExportedFactV1",
+  "type": "object"
+}

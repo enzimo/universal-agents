@@ -1,0 +1,199 @@
+{
+  "$defs": {
+    "ExporterV1": {
+      "additionalProperties": false,
+      "description": "Who exported the team.\n\nThe host has no signed-in person: whoever runs the command holds the\ninstance's root keys. ``--owner`` must name an active owner; the name is\nrecorded here and in the notices people get after import. It is\nattribution, not sign-in.",
+      "properties": {
+        "owner_person_id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Owner Person Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "owner_person_id"
+      ],
+      "title": "ExporterV1",
+      "type": "object"
+    },
+    "KeyDerivationV1": {
+      "additionalProperties": false,
+      "description": "How the transfer passphrase becomes keys (``team_transfer.crypto``).",
+      "properties": {
+        "algorithm": {
+          "const": "argon2id",
+          "default": "argon2id",
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "memlimit": {
+          "maximum": 1073741824,
+          "minimum": 8192,
+          "title": "Memlimit",
+          "type": "integer"
+        },
+        "opslimit": {
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Opslimit",
+          "type": "integer"
+        },
+        "salt_b64": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Salt B64",
+          "type": "string"
+        }
+      },
+      "required": [
+        "salt_b64",
+        "opslimit",
+        "memlimit"
+      ],
+      "title": "KeyDerivationV1",
+      "type": "object"
+    },
+    "MemberV1": {
+      "additionalProperties": false,
+      "description": "One file inside the archive.",
+      "properties": {
+        "path": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size": {
+          "minimum": 0,
+          "title": "Size",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "size",
+        "sha256"
+      ],
+      "title": "MemberV1",
+      "type": "object"
+    },
+    "SectionEntryV1": {
+      "additionalProperties": false,
+      "description": "One section in the manifest.",
+      "properties": {
+        "encrypted": {
+          "default": false,
+          "title": "Encrypted",
+          "type": "boolean"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "record_count": {
+          "minimum": 0,
+          "title": "Record Count",
+          "type": "integer"
+        },
+        "schema_version": {
+          "minimum": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "schema_version",
+        "record_count"
+      ],
+      "title": "SectionEntryV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/TransferManifestV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "application_version": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Application Version",
+      "type": "string"
+    },
+    "exported_at_utc": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Exported At Utc",
+      "type": "string"
+    },
+    "exported_by": {
+      "$ref": "#/$defs/ExporterV1"
+    },
+    "format": {
+      "const": "universal-agents-team-transfer",
+      "default": "universal-agents-team-transfer",
+      "title": "Format",
+      "type": "string"
+    },
+    "format_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Format Version",
+      "type": "integer"
+    },
+    "instance_name": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Instance Name",
+      "type": "string"
+    },
+    "key_derivation": {
+      "$ref": "#/$defs/KeyDerivationV1"
+    },
+    "mac": {
+      "default": "",
+      "pattern": "^([a-f0-9]{64})?$",
+      "title": "Mac",
+      "type": "string"
+    },
+    "members": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/MemberV1"
+      },
+      "title": "Members",
+      "type": "array"
+    },
+    "sections": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SectionEntryV1"
+      },
+      "title": "Sections",
+      "type": "array"
+    },
+    "team_id": {
+      "maxLength": 120,
+      "minLength": 1,
+      "title": "Team Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "application_version",
+    "exported_at_utc",
+    "team_id",
+    "instance_name",
+    "exported_by",
+    "key_derivation"
+  ],
+  "title": "TransferManifestV1",
+  "type": "object"
+}

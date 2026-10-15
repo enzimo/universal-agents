@@ -1,0 +1,49 @@
+{
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/MCPStaticBaselineV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "connection_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Connection Ids",
+      "type": "array"
+    },
+    "initialized_at_utc": {
+      "format": "date-time",
+      "title": "Initialized At Utc",
+      "type": "string"
+    },
+    "instance_config_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Instance Config Sha256",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_config_digests": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Source Config Digests",
+      "type": "array"
+    },
+    "upgrade_mode": {
+      "title": "Upgrade Mode",
+      "type": "string"
+    }
+  },
+  "required": [
+    "initialized_at_utc",
+    "instance_config_sha256",
+    "source_config_digests",
+    "connection_ids",
+    "upgrade_mode"
+  ],
+  "title": "MCPStaticBaselineV1",
+  "type": "object"
+}

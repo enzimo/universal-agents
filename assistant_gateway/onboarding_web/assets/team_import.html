@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en" data-color-mode="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Choose what to import</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/team_review.css">
+  <script src="/appearance.js"></script>
+</head>
+<body class="config-editor-body" data-review-api="/api/team-import">
+  <canvas class="ua-doc-static-mesh" data-ua-metallic-mesh aria-hidden="true"></canvas>
+  <main class="config-editor-shell">
+    <header class="config-editor-header">
+      <div class="brand-lockup"><img class="brand-mark" src="/agent-mark.png" alt=""><span>Universal Agents</span></div>
+      <button id="theme" class="button secondary" type="button">Switch theme</button>
+    </header>
+    <section class="config-editor-app">
+      <h1>Choose what to import</h1>
+      <p id="source"></p>
+      <p>Everything in the export is selected. Unselect what you don't want in the new instance. Settings, memories and schedules can be edited below. Confirm each selected schedule after you have checked it; editing it again clears the confirmation.</p>
+      <p>Validate the selection, then import. The new instance starts as soon as the import finishes, and stored sign-ins and keys move when it starts.</p>
+      <div id="destination" class="shim-card review-destination"></div>
+      <div class="review-toolbar">
+        <label for="section">Show</label><select id="section" class="input"><option value="">All sections</option></select>
+        <label for="filter">Find a record</label><input id="filter" class="input" type="search">
+        <button id="select" class="button secondary" type="button">Select shown</button>
+        <button id="unselect" class="button secondary" type="button">Unselect shown</button>
+      </div>
+      <p id="count"></p>
+      <div id="records" class="review-records"></div>
+      <div class="review-toolbar review-actions">
+        <button id="validate" class="button secondary" type="button">Validate selected records</button>
+        <button id="import" class="button primary" type="button" disabled>Import and start the team</button>
+      </div>
+      <p id="status" role="status" aria-live="polite"></p>
+      <div id="results"></div>
+    </section>
+  </main>
+  <script src="/metallic_mesh.js" defer></script>
+  <script src="/team_review.js" defer></script>
+</body>
+</html>

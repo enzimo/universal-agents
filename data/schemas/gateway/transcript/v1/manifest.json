@@ -1,0 +1,36 @@
+{
+  "contract": "universal-agents-gateway-transcript",
+  "fixtures": {
+    "filename": "fixtures/conformance_cases.json",
+    "sha256": "c7ecbea3244f390b17f8e7554369f2580903b69bf914cd3479c2333e59ccc2ea"
+  },
+  "json_schema_draft": "2020-12",
+  "schema_version": 1,
+  "schemas": [
+    {
+      "filename": "WebTranscriptAttachmentV1.schema.json",
+      "model": "WebTranscriptAttachmentV1",
+      "sha256": "c1a6b520c87da9ce9715d2762037da580873ef398c2825d26cd96b5e51cf1716"
+    },
+    {
+      "filename": "WebTranscriptMessageV1.schema.json",
+      "model": "WebTranscriptMessageV1",
+      "sha256": "a16f3a3983d225bfe1ceda7b3537e7bbfe0770a1751dc24650f63c87369267f5"
+    },
+    {
+      "filename": "WebTranscriptHistoryPageV1.schema.json",
+      "model": "WebTranscriptHistoryPageV1",
+      "sha256": "694ecc2b45bc9bbee4c44bb8cd0cccd19cccb40eb9d61d18892eccc562e3c007"
+    },
+    {
+      "filename": "WebTranscriptEventPageV1.schema.json",
+      "model": "WebTranscriptEventPageV1",
+      "sha256": "762b18d6e0d434f85f57deca18688947baa68c4dc4b73fbaa15b0da17121a8ac"
+    },
+    {
+      "filename": "WebChatThreadStatesV1.schema.json",
+      "model": "WebChatThreadStatesV1",
+      "sha256": "eed5798f57189bd07e879cac47d7088e911c9a1053e32e7cc25cf5eba0bb6222"
+    }
+  ]
+}

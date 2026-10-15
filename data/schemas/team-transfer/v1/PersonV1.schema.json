@@ -1,0 +1,218 @@
+{
+  "$defs": {
+    "ChatAccountV1": {
+      "additionalProperties": false,
+      "properties": {
+        "channel_name": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Channel Name",
+          "type": "string"
+        },
+        "chat_scope": {
+          "default": "",
+          "maxLength": 500,
+          "title": "Chat Scope",
+          "type": "string"
+        },
+        "external_user_id": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "External User Id",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Metadata",
+          "type": "object"
+        }
+      },
+      "required": [
+        "channel_name",
+        "external_user_id"
+      ],
+      "title": "ChatAccountV1",
+      "type": "object"
+    },
+    "DeliveryTargetV1": {
+      "additionalProperties": false,
+      "properties": {
+        "channel_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Channel Name"
+        },
+        "chat_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Chat Id"
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thread Id"
+        }
+      },
+      "title": "DeliveryTargetV1",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "WebSignInV1": {
+      "additionalProperties": false,
+      "properties": {
+        "expires_at_utc": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires At Utc"
+        },
+        "label": {
+          "default": "",
+          "maxLength": 500,
+          "title": "Label",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Metadata",
+          "type": "object"
+        },
+        "token_hash": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Token Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "token_hash"
+      ],
+      "title": "WebSignInV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/PersonV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "appearance": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Appearance"
+    },
+    "chat_accounts": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ChatAccountV1"
+      },
+      "title": "Chat Accounts",
+      "type": "array"
+    },
+    "default_target": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DeliveryTargetV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "display_name": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Display Name",
+      "type": "string"
+    },
+    "metadata": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Metadata",
+      "type": "object"
+    },
+    "person_id": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Person Id",
+      "type": "string"
+    },
+    "role": {
+      "maxLength": 40,
+      "minLength": 1,
+      "title": "Role",
+      "type": "string"
+    },
+    "status": {
+      "maxLength": 40,
+      "minLength": 1,
+      "title": "Status",
+      "type": "string"
+    },
+    "timezone": {
+      "maxLength": 120,
+      "minLength": 1,
+      "title": "Timezone",
+      "type": "string"
+    },
+    "web_sign_ins": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/WebSignInV1"
+      },
+      "title": "Web Sign Ins",
+      "type": "array"
+    }
+  },
+  "required": [
+    "person_id",
+    "display_name",
+    "timezone",
+    "status",
+    "role"
+  ],
+  "title": "PersonV1",
+  "type": "object"
+}

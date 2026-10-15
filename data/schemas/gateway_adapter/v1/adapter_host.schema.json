@@ -1,0 +1,2061 @@
+{
+  "$defs": {
+    "AdapterAttachmentUploadAcceptedV1": {
+      "additionalProperties": false,
+      "description": "Opaque upload ticket; the path is relative to the authenticated API.",
+      "properties": {
+        "adapter_instance_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Adapter Instance Id",
+          "type": "string"
+        },
+        "expires_at_utc": {
+          "format": "date-time",
+          "title": "Expires At Utc",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "max_bytes": {
+          "maximum": 268435456,
+          "minimum": 0,
+          "title": "Max Bytes",
+          "type": "integer"
+        },
+        "message_type": {
+          "const": "adapter.attachment_upload_accepted.v1",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "plugin_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Plugin Id",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "session_epoch": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Session Epoch",
+          "type": "string"
+        },
+        "storage_reference": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Storage Reference",
+          "type": "string"
+        },
+        "upload_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Upload Id",
+          "type": "string"
+        },
+        "upload_path": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "pattern": "^/v1/adapter-host/uploads/[A-Za-z0-9._:/-]+$",
+          "title": "Upload Path",
+          "type": "string"
+        },
+        "upload_request_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Upload Request Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_type",
+        "upload_request_id",
+        "idempotency_key",
+        "plugin_id",
+        "adapter_instance_id",
+        "session_epoch",
+        "upload_id",
+        "upload_path",
+        "storage_reference",
+        "expires_at_utc",
+        "max_bytes"
+      ],
+      "title": "AdapterAttachmentUploadAcceptedV1",
+      "type": "object"
+    },
+    "AdapterAttachmentUploadRequestV1": {
+      "additionalProperties": false,
+      "description": "Request a bounded one-use upload target for inbound attachment bytes.",
+      "properties": {
+        "adapter_instance_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Adapter Instance Id",
+          "type": "string"
+        },
+        "content_type": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Content Type",
+          "type": "string"
+        },
+        "filename": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Filename",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "kind": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "message_type": {
+          "const": "adapter.attachment_upload_request.v1",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "plugin_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Plugin Id",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "requested_at_utc": {
+          "format": "date-time",
+          "title": "Requested At Utc",
+          "type": "string"
+        },
+        "session_epoch": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Session Epoch",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[A-Fa-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "maximum": 268435456,
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "upload_request_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Upload Request Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_type",
+        "upload_request_id",
+        "idempotency_key",
+        "plugin_id",
+        "adapter_instance_id",
+        "session_epoch",
+        "filename",
+        "content_type",
+        "kind",
+        "size_bytes",
+        "sha256",
+        "requested_at_utc"
+      ],
+      "title": "AdapterAttachmentUploadRequestV1",
+      "type": "object"
+    },
+    "AdapterAttachmentV1": {
+      "additionalProperties": false,
+      "description": "Attachment metadata with an opaque, non-filesystem storage reference.",
+      "properties": {
+        "attachment_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Attachment Id",
+          "type": "string"
+        },
+        "content_type": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Content Type",
+          "type": "string"
+        },
+        "filename": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Filename",
+          "type": "string"
+        },
+        "kind": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[A-Fa-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "maximum": 104857600,
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "storage_reference": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Storage Reference",
+          "type": "string"
+        }
+      },
+      "required": [
+        "attachment_id",
+        "filename",
+        "content_type",
+        "kind",
+        "size_bytes",
+        "sha256",
+        "storage_reference"
+      ],
+      "title": "AdapterAttachmentV1",
+      "type": "object"
+    },
+    "AdapterCapabilityV1": {
+      "description": "Capabilities that may be declared across the process boundary.",
+      "enum": [
+        "inbound_text",
+        "outbound_text",
+        "proactive_delivery",
+        "attachments",
+        "images",
+        "audio_voice",
+        "threads_topics",
+        "group_conversations",
+        "native_commands",
+        "rich_text",
+        "native_activity_indicator",
+        "message_edit_delete",
+        "delivery_receipts",
+        "webhook_lifecycle",
+        "polling_lifecycle"
+      ],
+      "title": "AdapterCapabilityV1",
+      "type": "string"
+    },
+    "AdapterDeliveryAcknowledgementV1": {
+      "additionalProperties": false,
+      "description": "Receipt or external-platform completion for one ordered delivery.",
+      "properties": {
+        "acknowledgement_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Acknowledgement Id",
+          "type": "string"
+        },
+        "adapter_instance_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Adapter Instance Id",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "event_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "message_type": {
+          "const": "adapter.delivery_ack.v1",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "observed_at_utc": {
+          "format": "date-time",
+          "title": "Observed At Utc",
+          "type": "string"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryOutcomeV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "plugin_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Plugin Id",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "provider_message_id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Message Id"
+        },
+        "session_epoch": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Session Epoch",
+          "type": "string"
+        },
+        "stage": {
+          "$ref": "#/$defs/DeliveryAcknowledgementStageV1"
+        },
+        "stream_position": {
+          "minimum": 1,
+          "title": "Stream Position",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_type",
+        "acknowledgement_id",
+        "idempotency_key",
+        "plugin_id",
+        "adapter_instance_id",
+        "session_epoch",
+        "event_id",
+        "stream_position",
+        "stage",
+        "observed_at_utc"
+      ],
+      "title": "AdapterDeliveryAcknowledgementV1",
+      "type": "object"
+    },
+    "AdapterHealthStateV1": {
+      "description": "Adapter-host lifecycle state reported to the gateway.",
+      "enum": [
+        "starting",
+        "ready",
+        "degraded",
+        "stopping"
+      ],
+      "title": "AdapterHealthStateV1",
+      "type": "string"
+    },
+    "AdapterHealthV1": {
+      "additionalProperties": false,
+      "description": "Redacted health reported by one authenticated adapter instance.",
+      "properties": {
+        "adapter_instance_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Adapter Instance Id",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "health_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Health Id",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "in_flight_events": {
+          "default": 0,
+          "minimum": 0,
+          "title": "In Flight Events",
+          "type": "integer"
+        },
+        "inbound_committed_position": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Inbound Committed Position",
+          "type": "integer"
+        },
+        "local_queue_depth": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Local Queue Depth",
+          "type": "integer"
+        },
+        "message_type": {
+          "const": "adapter.health.v1",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "observed_at_utc": {
+          "format": "date-time",
+          "title": "Observed At Utc",
+          "type": "string"
+        },
+        "outbound_completed_position": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Outbound Completed Position",
+          "type": "integer"
+        },
+        "outbound_received_position": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Outbound Received Position",
+          "type": "integer"
+        },
+        "plugin_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Plugin Id",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "session_epoch": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Session Epoch",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/AdapterHealthStateV1"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_type",
+        "health_id",
+        "idempotency_key",
+        "plugin_id",
+        "adapter_instance_id",
+        "session_epoch",
+        "state",
+        "observed_at_utc"
+      ],
+      "title": "AdapterHealthV1",
+      "type": "object"
+    },
+    "AdapterHeartbeatV1": {
+      "additionalProperties": false,
+      "description": "Lease renewal and durable cursor report for one adapter instance.",
+      "properties": {
+        "adapter_instance_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Adapter Instance Id",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "heartbeat_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Heartbeat Id",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "in_flight_events": {
+          "default": 0,
+          "minimum": 0,
+          "title": "In Flight Events",
+          "type": "integer"
+        },
+        "inbound_committed_position": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Inbound Committed Position",
+          "type": "integer"
+        },
+        "local_queue_depth": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Local Queue Depth",
+          "type": "integer"
+        },
+        "message_type": {
+          "const": "adapter.heartbeat.v1",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "observed_at_utc": {
+          "format": "date-time",
+          "title": "Observed At Utc",
+          "type": "string"
+        },
+        "outbound_completed_position": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Outbound Completed Position",
+          "type": "integer"
+        },
+        "outbound_received_position": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Outbound Received Position",
+          "type": "integer"
+        },
+        "plugin_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Plugin Id",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "session_epoch": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Session Epoch",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/AdapterHealthStateV1"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_type",
+        "heartbeat_id",
+        "idempotency_key",
+        "plugin_id",
+        "adapter_instance_id",
+        "session_epoch",
+        "state",
+        "observed_at_utc"
+      ],
+      "title": "AdapterHeartbeatV1",
+      "type": "object"
+    },
+    "AdapterProtocolErrorV1": {
+      "additionalProperties": false,
+      "description": "Stable fail-closed response for HTTP and WebSocket transports.",
+      "properties": {
+        "detail": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Detail",
+          "type": "string"
+        },
+        "error_code": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Error Code",
+          "type": "string"
+        },
+        "error_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Error Id",
+          "type": "string"
+        },
+        "expected_stream_position": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Stream Position"
+        },
+        "message_type": {
+          "const": "adapter.error.v1",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Id"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_type",
+        "error_id",
+        "error_code",
+        "detail"
+      ],
+      "title": "AdapterProtocolErrorV1",
+      "type": "object"
+    },
+    "AdapterProtocolLimitsV1": {
+      "additionalProperties": false,
+      "description": "Negotiated flow-control and payload limits for one registration epoch.",
+      "properties": {
+        "acknowledgement_timeout_seconds": {
+          "maximum": 86400.0,
+          "minimum": 1.0,
+          "title": "Acknowledgement Timeout Seconds",
+          "type": "number"
+        },
+        "heartbeat_interval_seconds": {
+          "maximum": 3600.0,
+          "minimum": 1.0,
+          "title": "Heartbeat Interval Seconds",
+          "type": "number"
+        },
+        "max_attachment_bytes": {
+          "maximum": 268435456,
+          "minimum": 0,
+          "title": "Max Attachment Bytes",
+          "type": "integer"
+        },
+        "max_in_flight_events": {
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Max In Flight Events",
+          "type": "integer"
+        },
+        "max_payload_bytes": {
+          "maximum": 268435456,
+          "minimum": 1024,
+          "title": "Max Payload Bytes",
+          "type": "integer"
+        },
+        "max_pending_events": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Max Pending Events",
+          "type": "integer"
+        },
+        "retention_seconds": {
+          "maximum": 31536000,
+          "minimum": 60,
+          "title": "Retention Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_in_flight_events",
+        "max_payload_bytes",
+        "max_attachment_bytes",
+        "max_pending_events",
+        "heartbeat_interval_seconds",
+        "acknowledgement_timeout_seconds",
+        "retention_seconds"
+      ],
+      "title": "AdapterProtocolLimitsV1",
+      "type": "object"
+    },
+    "AdapterRegistrationAcceptedV1": {
+      "additionalProperties": false,
+      "description": "Gateway acknowledgement of one authenticated adapter registration.",
+      "properties": {
+        "accepted": {
+          "title": "Accepted",
+          "type": "boolean"
+        },
+        "accepted_at_utc": {
+          "format": "date-time",
+          "title": "Accepted At Utc",
+          "type": "string"
+        },
+        "adapter_instance_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Adapter Instance Id",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "gateway_instance_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Gateway Instance Id",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "lease_expires_at_utc": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lease Expires At Utc"
+        },
+        "message_type": {
+          "const": "adapter.registration_accepted.v1",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "negotiated_capabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AdapterCapabilityV1"
+          },
+          "title": "Negotiated Capabilities",
+          "type": "array"
+        },
+        "negotiated_limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdapterProtocolLimitsV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "plugin_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Plugin Id",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "registration_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Registration Id",
+          "type": "string"
+        },
+        "resume": {
+          "$ref": "#/$defs/AdapterResumePositionV1"
+        },
+        "session_epoch": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Epoch"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_type",
+        "registration_id",
+        "idempotency_key",
+        "plugin_id",
+        "adapter_instance_id",
+        "gateway_instance_id",
+        "accepted",
+        "accepted_at_utc"
+      ],
+      "title": "AdapterRegistrationAcceptedV1",
+      "type": "object"
+    },
+    "AdapterRegistrationV1": {
+      "additionalProperties": false,
+      "description": "One adapter instance declaring routing and rendering capabilities.",
+      "properties": {
+        "adapter_instance_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Adapter Instance Id",
+          "type": "string"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/AdapterCapabilityV1"
+          },
+          "title": "Capabilities",
+          "type": "array"
+        },
+        "channel_names": {
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+            "type": "string"
+          },
+          "title": "Channel Names",
+          "type": "array"
+        },
+        "configuration_digest": {
+          "pattern": "^[A-Fa-f0-9]{64}$",
+          "title": "Configuration Digest",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "implementation_version": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Implementation Version",
+          "type": "string"
+        },
+        "message_type": {
+          "const": "adapter.registration.v1",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "plugin_api_version": {
+          "const": "1",
+          "title": "Plugin Api Version",
+          "type": "string"
+        },
+        "plugin_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Plugin Id",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "registered_at_utc": {
+          "format": "date-time",
+          "title": "Registered At Utc",
+          "type": "string"
+        },
+        "registration_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Registration Id",
+          "type": "string"
+        },
+        "resume": {
+          "$ref": "#/$defs/AdapterResumePositionV1"
+        },
+        "supported_limits": {
+          "$ref": "#/$defs/AdapterProtocolLimitsV1"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_type",
+        "registration_id",
+        "idempotency_key",
+        "plugin_id",
+        "adapter_instance_id",
+        "plugin_api_version",
+        "implementation_version",
+        "configuration_digest",
+        "channel_names",
+        "capabilities",
+        "supported_limits",
+        "registered_at_utc"
+      ],
+      "title": "AdapterRegistrationV1",
+      "type": "object"
+    },
+    "AdapterRepliedMessageV1": {
+      "additionalProperties": false,
+      "description": "The chat message an inbound message replies to, as the platform reported it.\n\nMirrors ``custom_messages.contracts.replied_message_v1.RepliedMessage``\n(its docstring explains why agents need it and how they show it); the\nlimits match, so the gateway rebuilds that model without cutting again.",
+      "properties": {
+        "author": {
+          "enum": [
+            "assistant",
+            "requester",
+            "other"
+          ],
+          "title": "Author",
+          "type": "string"
+        },
+        "author_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Author Name"
+        },
+        "quoted_text": {
+          "anyOf": [
+            {
+              "maxLength": 16000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quoted Text"
+        },
+        "sent_at_utc": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sent At Utc"
+        },
+        "shortened": {
+          "default": false,
+          "title": "Shortened",
+          "type": "boolean"
+        },
+        "text": {
+          "maxLength": 16000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "author",
+        "text"
+      ],
+      "title": "AdapterRepliedMessageV1",
+      "type": "object"
+    },
+    "AdapterResumePositionV1": {
+      "additionalProperties": false,
+      "description": "Last durable positions known to the reconnecting adapter host.",
+      "properties": {
+        "inbound_committed_position": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Inbound Committed Position",
+          "type": "integer"
+        },
+        "outbound_completed_position": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Outbound Completed Position",
+          "type": "integer"
+        },
+        "outbound_received_position": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Outbound Received Position",
+          "type": "integer"
+        }
+      },
+      "title": "AdapterResumePositionV1",
+      "type": "object"
+    },
+    "ChannelCommandV1": {
+      "additionalProperties": false,
+      "description": "Platform-native input normalized to a gateway-owned command name.",
+      "properties": {
+        "adapter_instance_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Adapter Instance Id",
+          "type": "string"
+        },
+        "arguments": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Arguments",
+          "type": "object"
+        },
+        "channel_name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Channel Name",
+          "type": "string"
+        },
+        "chat_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Chat Id",
+          "type": "string"
+        },
+        "command_name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Command Name",
+          "type": "string"
+        },
+        "external_message_id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Message Id"
+        },
+        "external_user_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "External User Id",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "message_type": {
+          "const": "channel.command.v1",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "plugin_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Plugin Id",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "received_at_utc": {
+          "format": "date-time",
+          "title": "Received At Utc",
+          "type": "string"
+        },
+        "request_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "session_epoch": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Session Epoch",
+          "type": "string"
+        },
+        "stream_position": {
+          "minimum": 1,
+          "title": "Stream Position",
+          "type": "integer"
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thread Id"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_type",
+        "request_id",
+        "idempotency_key",
+        "plugin_id",
+        "adapter_instance_id",
+        "session_epoch",
+        "stream_position",
+        "channel_name",
+        "external_user_id",
+        "chat_id",
+        "command_name",
+        "received_at_utc"
+      ],
+      "title": "ChannelCommandV1",
+      "type": "object"
+    },
+    "ChannelInboundMessageV1": {
+      "additionalProperties": false,
+      "description": "Untrusted external text normalized by one adapter instance.",
+      "properties": {
+        "adapter_instance_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Adapter Instance Id",
+          "type": "string"
+        },
+        "attachments": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AdapterAttachmentV1"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
+        "channel_name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Channel Name",
+          "type": "string"
+        },
+        "chat_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Chat Id",
+          "type": "string"
+        },
+        "external_message_id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Message Id"
+        },
+        "external_user_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "External User Id",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "message_type": {
+          "const": "channel.inbound.v1",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "plugin_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Plugin Id",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "received_at_utc": {
+          "format": "date-time",
+          "title": "Received At Utc",
+          "type": "string"
+        },
+        "replied_message": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdapterRepliedMessageV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reply_to_external_message_id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reply To External Message Id"
+        },
+        "request_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "session_epoch": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Session Epoch",
+          "type": "string"
+        },
+        "stream_position": {
+          "minimum": 1,
+          "title": "Stream Position",
+          "type": "integer"
+        },
+        "text": {
+          "maxLength": 200000,
+          "title": "Text",
+          "type": "string"
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thread Id"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_type",
+        "request_id",
+        "idempotency_key",
+        "plugin_id",
+        "adapter_instance_id",
+        "session_epoch",
+        "stream_position",
+        "channel_name",
+        "external_user_id",
+        "chat_id",
+        "text",
+        "received_at_utc"
+      ],
+      "title": "ChannelInboundMessageV1",
+      "type": "object"
+    },
+    "ChannelRequestAcceptedV1": {
+      "additionalProperties": false,
+      "description": "Immediate admission result; terminal work arrives as later events.",
+      "properties": {
+        "accepted_at_utc": {
+          "format": "date-time",
+          "title": "Accepted At Utc",
+          "type": "string"
+        },
+        "correlation_id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Correlation Id"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "idempotency_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "message_type": {
+          "const": "channel.request_accepted.v1",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "request_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ChannelRequestStatusV1"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_type",
+        "request_id",
+        "idempotency_key",
+        "status",
+        "accepted_at_utc"
+      ],
+      "title": "ChannelRequestAcceptedV1",
+      "type": "object"
+    },
+    "ChannelRequestStatusV1": {
+      "description": "Immediate gateway admission result for an adapter request.",
+      "enum": [
+        "accepted",
+        "duplicate",
+        "rejected"
+      ],
+      "title": "ChannelRequestStatusV1",
+      "type": "string"
+    },
+    "DeliveryAcknowledgementStageV1": {
+      "description": "Durable delivery boundary acknowledged by an adapter host.",
+      "enum": [
+        "received",
+        "completed"
+      ],
+      "title": "DeliveryAcknowledgementStageV1",
+      "type": "string"
+    },
+    "DeliveryMessageLevelV1": {
+      "description": "Portable attention level for one user-visible delivery.",
+      "enum": [
+        "normal",
+        "attention"
+      ],
+      "title": "DeliveryMessageLevelV1",
+      "type": "string"
+    },
+    "DeliveryOutcomeV1": {
+      "description": "Final external-platform outcome reported after a delivery attempt.",
+      "enum": [
+        "delivered",
+        "failed",
+        "outcome_unknown"
+      ],
+      "title": "DeliveryOutcomeV1",
+      "type": "string"
+    },
+    "GatewayDeliveryEventV1": {
+      "additionalProperties": false,
+      "description": "User-visible delivery routed from the gateway to one channel plugin.",
+      "properties": {
+        "access_request_id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Access Request Id"
+        },
+        "adapter_instance_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Adapter Instance Id",
+          "type": "string"
+        },
+        "attachments": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AdapterAttachmentV1"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
+        "channel_name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Channel Name",
+          "type": "string"
+        },
+        "chat_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Chat Id",
+          "type": "string"
+        },
+        "content_message_type": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content Message Type"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Id"
+        },
+        "correlation_id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Correlation Id"
+        },
+        "emitted_at_utc": {
+          "format": "date-time",
+          "title": "Emitted At Utc",
+          "type": "string"
+        },
+        "event_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "external_user_id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External User Id"
+        },
+        "idempotency_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "in_reply_to_external_message_id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "In Reply To External Message Id"
+        },
+        "message_level": {
+          "$ref": "#/$defs/DeliveryMessageLevelV1",
+          "default": "normal"
+        },
+        "message_type": {
+          "const": "gateway.delivery.v1",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "plugin_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Plugin Id",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "review_choices": {
+          "default": [],
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+            "type": "string"
+          },
+          "title": "Review Choices",
+          "type": "array"
+        },
+        "review_url": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review Url"
+        },
+        "session_epoch": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Session Epoch",
+          "type": "string"
+        },
+        "session_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Session Key",
+          "type": "string"
+        },
+        "stream_position": {
+          "minimum": 1,
+          "title": "Stream Position",
+          "type": "integer"
+        },
+        "text": {
+          "maxLength": 200000,
+          "title": "Text",
+          "type": "string"
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thread Id"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_type",
+        "event_id",
+        "idempotency_key",
+        "plugin_id",
+        "adapter_instance_id",
+        "session_epoch",
+        "stream_position",
+        "channel_name",
+        "chat_id",
+        "session_key",
+        "text",
+        "emitted_at_utc"
+      ],
+      "title": "GatewayDeliveryEventV1",
+      "type": "object"
+    },
+    "GatewayRequestStateV1": {
+      "additionalProperties": false,
+      "description": "Asynchronous request-state event with no canonical ownership data.",
+      "properties": {
+        "adapter_instance_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Adapter Instance Id",
+          "type": "string"
+        },
+        "channel_name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Channel Name",
+          "type": "string"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Id"
+        },
+        "correlation_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Correlation Id",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "event_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "message_type": {
+          "const": "gateway.request_state.v1",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "plugin_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Plugin Id",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "reason_code": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason Code"
+        },
+        "session_epoch": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Session Epoch",
+          "type": "string"
+        },
+        "session_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Session Key",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/GatewayRequestStatusV1"
+        },
+        "stream_position": {
+          "minimum": 1,
+          "title": "Stream Position",
+          "type": "integer"
+        },
+        "updated_at_utc": {
+          "format": "date-time",
+          "title": "Updated At Utc",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_type",
+        "event_id",
+        "idempotency_key",
+        "plugin_id",
+        "adapter_instance_id",
+        "session_epoch",
+        "stream_position",
+        "channel_name",
+        "correlation_id",
+        "session_key",
+        "status",
+        "updated_at_utc"
+      ],
+      "title": "GatewayRequestStateV1",
+      "type": "object"
+    },
+    "GatewayRequestStatusV1": {
+      "description": "Asynchronous gateway request lifecycle visible to an adapter host.",
+      "enum": [
+        "accepted",
+        "running",
+        "waiting",
+        "completed",
+        "failed",
+        "timed_out",
+        "cancelled"
+      ],
+      "title": "GatewayRequestStatusV1",
+      "type": "string"
+    },
+    "JsonValue": {}
+  },
+  "$id": "https://universal-agents.local/schemas/gateway_adapter/v1/adapter_host.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/ChannelInboundMessageV1"
+    },
+    {
+      "$ref": "#/$defs/ChannelCommandV1"
+    },
+    {
+      "$ref": "#/$defs/ChannelRequestAcceptedV1"
+    },
+    {
+      "$ref": "#/$defs/GatewayDeliveryEventV1"
+    },
+    {
+      "$ref": "#/$defs/GatewayRequestStateV1"
+    },
+    {
+      "$ref": "#/$defs/AdapterRegistrationV1"
+    },
+    {
+      "$ref": "#/$defs/AdapterRegistrationAcceptedV1"
+    },
+    {
+      "$ref": "#/$defs/AdapterHealthV1"
+    },
+    {
+      "$ref": "#/$defs/AdapterHeartbeatV1"
+    },
+    {
+      "$ref": "#/$defs/AdapterDeliveryAcknowledgementV1"
+    },
+    {
+      "$ref": "#/$defs/AdapterAttachmentUploadRequestV1"
+    },
+    {
+      "$ref": "#/$defs/AdapterAttachmentUploadAcceptedV1"
+    },
+    {
+      "$ref": "#/$defs/AdapterProtocolErrorV1"
+    }
+  ],
+  "title": "Universal Agents Adapter Host Protocol V1"
+}

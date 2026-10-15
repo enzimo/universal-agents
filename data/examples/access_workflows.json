@@ -1,0 +1,124 @@
+[
+  {
+    "title": "Set up a recurring research specialist",
+    "goal": "Create a specialist that produces the requested recurring research report",
+    "target_agent_type": "ResearchAgent",
+    "steps": [
+      {
+        "step_id": "definition",
+        "title": "Create the research specialist",
+        "reason": "Give this plan a worker with a reviewed role and instructions",
+        "success_criterion": "The approved specialist definition is installed",
+        "kind": "setup",
+        "change_kinds": ["agent_definition"]
+      },
+      {
+        "step_id": "restart",
+        "title": "Load the new setup",
+        "reason": "A new specialist loads when the team restarts; its tools then follow the access it is given",
+        "success_criterion": "The specialist is running with the approved setup",
+        "kind": "setup",
+        "depends_on": ["definition"],
+        "change_kinds": ["runtime_restart"]
+      },
+      {
+        "step_id": "research",
+        "title": "Prepare the report",
+        "reason": "Search the web and read sources to answer the question",
+        "success_criterion": "The report cites checked sources",
+        "kind": "work",
+        "depends_on": ["restart"],
+        "tool_access": [{"tool_id": "fn:web_research", "level": "read"}]
+      },
+      {
+        "step_id": "schedule",
+        "title": "Schedule future reports",
+        "reason": "Repeat the research on the agreed cadence without more access",
+        "success_criterion": "A schedule owned by the person has the agreed cadence",
+        "kind": "work",
+        "depends_on": ["research"],
+        "tool_access": [{"tool_id": "fn:schedules", "level": "write"}]
+      },
+      {
+        "step_id": "verify",
+        "title": "Check the first scheduled report",
+        "reason": "Confirm the complete result, not just the setup",
+        "success_criterion": "The person received the first scheduled report",
+        "kind": "review",
+        "depends_on": ["schedule"]
+      }
+    ]
+  },
+  {
+    "title": "Prepare and publish an announcement",
+    "goal": "Publish the reviewed announcement and check that it is live",
+    "target_agent_type": "CommunicationsAgent",
+    "steps": [
+      {
+        "step_id": "account",
+        "title": "Link or reuse the account",
+        "reason": "The person chooses which account posts; linking gives no access by itself",
+        "success_criterion": "An account is linked to the posting tool",
+        "kind": "account"
+      },
+      {
+        "step_id": "draft",
+        "title": "Prepare the announcement",
+        "reason": "Write the text the person asked for",
+        "success_criterion": "The person agreed the exact text",
+        "kind": "work",
+        "depends_on": ["account"]
+      },
+      {
+        "step_id": "publish",
+        "title": "Publish this draft",
+        "reason": "Posting needs read-and-change access to X for this exact text",
+        "success_criterion": "The post is published once",
+        "kind": "review",
+        "depends_on": ["draft"],
+        "tool_access": [{"tool_id": "cli:x", "level": "write"}]
+      },
+      {
+        "step_id": "verify",
+        "title": "Check the published post",
+        "reason": "Confirm the post exists before reporting success",
+        "success_criterion": "The post is visible with the agreed text",
+        "kind": "work",
+        "depends_on": ["publish"],
+        "tool_access": [{"tool_id": "cli:x", "level": "read"}]
+      }
+    ]
+  },
+  {
+    "title": "Read pages with a crawler",
+    "goal": "Install the crawler MCP server, read pages with it and finish the requested report",
+    "target_agent_type": "TeamArchitect",
+    "steps": [
+      {
+        "step_id": "install",
+        "title": "Install the crawler MCP server",
+        "reason": "The crawler is a proposed MCP server that is not installed yet; one review installs it and lets TeamArchitect use all its tools",
+        "success_criterion": "The approved server is installed",
+        "kind": "setup",
+        "change_kinds": ["access_proposal"]
+      },
+      {
+        "step_id": "crawler_access",
+        "title": "Read pages with the crawler",
+        "reason": "Reading pages is all the report needs; nothing is changed on the sites",
+        "success_criterion": "Pages are read with the crawler",
+        "kind": "capability",
+        "depends_on": ["install"],
+        "tool_access": [{"tool_id": "mcp:crawl4ai", "level": "read"}]
+      },
+      {
+        "step_id": "verify",
+        "title": "Finish and check the report",
+        "reason": "Confirm the complete result the person asked for",
+        "success_criterion": "The report uses the crawled pages and cites them",
+        "kind": "work",
+        "depends_on": ["crawler_access"]
+      }
+    ]
+  }
+]

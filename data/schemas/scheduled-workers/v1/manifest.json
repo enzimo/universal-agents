@@ -1,0 +1,37 @@
+{
+  "contract": "universal-agents-scheduled-workers",
+  "json_schema_draft": "2020-12",
+  "schema_version": 1,
+  "schemas": [
+    {
+      "filename": "AgentLaunchV1.schema.json",
+      "model": "AgentLaunchV1",
+      "sha256": "85e5479f2325193df9c512b2e9dbb529b211e0bd354fe28bc8b8940c00033a1e"
+    },
+    {
+      "filename": "AgentCreationResultV1.schema.json",
+      "model": "AgentCreationResultV1",
+      "sha256": "84e2112ff836d21a8efad249f5d2d0e080529a67083319189d1b0a23b1b6dbc7"
+    },
+    {
+      "filename": "ScheduleWorkerBindingV1.schema.json",
+      "model": "ScheduleWorkerBindingV1",
+      "sha256": "1ba2c4972aaf137688f55845f8cc2ee80147156df8a8bd0be554309516969979"
+    },
+    {
+      "filename": "ScheduleReadinessV1.schema.json",
+      "model": "ScheduleReadinessV1",
+      "sha256": "4471e190820690ca2857ba4d26200f966b0d5d72d0ac3d495582e2d9446a12dd"
+    },
+    {
+      "filename": "ScheduleOccurrenceV1.schema.json",
+      "model": "ScheduleOccurrenceV1",
+      "sha256": "75f0b64b145157e1ceeb36213ae00c94acbdb5fba04dee9042d99b4fe1e6555a"
+    },
+    {
+      "filename": "WorkerDefinitionRecordV1.schema.json",
+      "model": "WorkerDefinitionRecordV1",
+      "sha256": "d061e931c4d8fa50bc369b2ef64a822f49c7cc5b29c3e2a2a2532019cf10a009"
+    }
+  ]
+}

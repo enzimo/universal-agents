@@ -1,0 +1,125 @@
+// Access model (version 2) Cedar schema.
+//
+// Principals form a membership hierarchy so one grant can name an exact agent,
+// every instance of an agent type, every holder of a team role, or a team:
+//   Agent in AgentType in Role in Team; User in Role in Team.
+// During a scheduled run the agent is also in that Schedule, which holds the
+// scheduled job's access ("access follows the work"); outside its runs no
+// agent is in it.
+// Targets form a containment hierarchy so one grant covers everything inside
+// its target: Operation/Endpoint in Tool in ToolSet; File in Folder in Folder.
+// Access levels are Cedar action groups: a grant links a template whose action
+// scope is one level group, and each concrete use.* action belongs to every
+// level group at or above its own level (read < write < full).
+//
+// Trusted code builds every entity and attribute (access_control.entities);
+// nothing here comes from request fields an agent controls.
+
+// ---------- Principals ----------
+entity Team;
+entity Role in [Team] = { team: Team };
+entity User in [Role, Team] = { team: Team };
+entity AgentType in [Role, Team] = { team: Team };
+entity Schedule in [Team] = { team: Team };
+entity Agent in [AgentType, Schedule, Role, Team] = {
+  team: Team,
+  agentType: AgentType,
+};
+
+// ---------- Access targets ----------
+// Every target carries its team and that team's administrator role so the
+// standard administrator policy applies without per-target grants. `platform`
+// marks platform objects (settings, access, capabilities, restarts);
+// `adminOnly` marks tools only administrators hold (catalog owner_scope
+// administrators, such as model choice).
+entity ToolSet = { team: Team, adminRole: Role };
+entity Tool in [ToolSet] = {
+  team: Team,
+  adminRole: Role,
+  kind: String,
+  platform: Bool,
+  adminOnly: Bool,
+  owner?: User,
+};
+entity Operation in [Tool] = {
+  team: Team,
+  adminRole: Role,
+  requiredLevel: String,
+  platform: Bool,
+  adminOnly: Bool,
+  owner?: User,
+};
+// route is the named route trusted, segment-aware code matched from the tool
+// definition ("" when none matched). Rules compare route names, never raw
+// paths, because Cedar `like` treats `*` as crossing `/`.
+entity Endpoint in [Tool] = {
+  team: Team,
+  adminRole: Role,
+  method: String,
+  route: String,
+  platform: Bool,
+  adminOnly: Bool,
+  owner?: User,
+};
+entity Folder in [Folder] = { team: Team, adminRole: Role, path: String, owner?: User };
+entity File in [Folder] = { team: Team, adminRole: Role, path: String, owner?: User };
+entity Credential = { team: Team, adminRole: Role, owner?: User };
+
+// ---------- Level groups (never requested directly) ----------
+action "level.read";
+action "level.write";
+action "level.full";
+action "delegation.read";
+action "delegation.write";
+action "delegation.full";
+
+// person: who the task works for, from its signed context (trusted code only).
+type UseContext = { taskId?: String, person?: User };
+
+// ---------- Concrete actions requested by enforcement points ----------
+action "use.read" in ["level.read", "level.write", "level.full"] appliesTo {
+  principal: [User, Agent],
+  resource: [ToolSet, Tool, Operation, Endpoint, Folder, File],
+  context: UseContext,
+};
+action "use.write" in ["level.write", "level.full"] appliesTo {
+  principal: [User, Agent],
+  resource: [ToolSet, Tool, Operation, Endpoint, Folder, File],
+  context: UseContext,
+};
+action "use.full" in ["level.full"] appliesTo {
+  principal: [User, Agent],
+  resource: [ToolSet, Tool, Operation, Endpoint, Folder, File],
+  context: UseContext,
+};
+
+// Handing down level L on a target needs delegate.L: a delegable grant at L or
+// above covering the target, or administrator or owner authority.
+action "delegate.read" in ["delegation.read", "delegation.write", "delegation.full"] appliesTo {
+  principal: [User, Agent],
+  resource: [ToolSet, Tool, Operation, Endpoint, Folder, File, Credential],
+  context: UseContext,
+};
+action "delegate.write" in ["delegation.write", "delegation.full"] appliesTo {
+  principal: [User, Agent],
+  resource: [ToolSet, Tool, Operation, Endpoint, Folder, File, Credential],
+  context: UseContext,
+};
+action "delegate.full" in ["delegation.full"] appliesTo {
+  principal: [User, Agent],
+  resource: [ToolSet, Tool, Operation, Endpoint, Folder, File, Credential],
+  context: UseContext,
+};
+
+// Credentials are never readable. "use" lets the broker apply the secret for a
+// linked tool on the principal's behalf; "manage" rotates, relinks or deletes.
+action "credential.use" appliesTo {
+  principal: [User, Agent],
+  resource: [Credential],
+  context: UseContext,
+};
+action "credential.manage" appliesTo {
+  principal: [User, Agent],
+  resource: [Credential],
+  context: UseContext,
+};

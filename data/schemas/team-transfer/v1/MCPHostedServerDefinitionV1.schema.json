@@ -1,0 +1,195 @@
+{
+  "$defs": {
+    "HostedMCPBehavior": {
+      "enum": [
+        "echo_arguments",
+        "static_response"
+      ],
+      "title": "HostedMCPBehavior",
+      "type": "string"
+    },
+    "HostedMCPLifecycle": {
+      "enum": [
+        "pending",
+        "stopped",
+        "running",
+        "removed"
+      ],
+      "title": "HostedMCPLifecycle",
+      "type": "string"
+    },
+    "HostedMCPToolDefinitionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "behavior": {
+          "$ref": "#/$defs/HostedMCPBehavior"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 4000,
+          "title": "Description",
+          "type": "string"
+        },
+        "input_schema": {
+          "additionalProperties": true,
+          "title": "Input Schema",
+          "type": "object"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "output_schema": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Schema"
+        },
+        "static_response": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Static Response"
+        }
+      },
+      "required": [
+        "name",
+        "behavior"
+      ],
+      "title": "HostedMCPToolDefinitionV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/MCPHostedServerDefinitionV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "bind_host": {
+      "title": "Bind Host",
+      "type": "string"
+    },
+    "created_at_utc": {
+      "format": "date-time",
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "definition_digest": {
+      "default": "",
+      "title": "Definition Digest",
+      "type": "string"
+    },
+    "hosted_server_id": {
+      "title": "Hosted Server Id",
+      "type": "string"
+    },
+    "installed_by_principal_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Installed By Principal Id"
+    },
+    "last_transition_by_principal_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Transition By Principal Id"
+    },
+    "lifecycle": {
+      "$ref": "#/$defs/HostedMCPLifecycle"
+    },
+    "owner_canonical_user_id": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Owner Canonical User Id",
+      "type": "string"
+    },
+    "port": {
+      "maximum": 65535,
+      "minimum": 1024,
+      "title": "Port",
+      "type": "integer"
+    },
+    "purpose": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Purpose",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "server_name": {
+      "title": "Server Name",
+      "type": "string"
+    },
+    "target_agent_types": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Target Agent Types",
+      "type": "array"
+    },
+    "team_id": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Team Id",
+      "type": "string"
+    },
+    "tools": {
+      "items": {
+        "$ref": "#/$defs/HostedMCPToolDefinitionV1"
+      },
+      "title": "Tools",
+      "type": "array"
+    },
+    "updated_at_utc": {
+      "format": "date-time",
+      "title": "Updated At Utc",
+      "type": "string"
+    }
+  },
+  "required": [
+    "hosted_server_id",
+    "server_name",
+    "purpose",
+    "owner_canonical_user_id",
+    "team_id",
+    "target_agent_types",
+    "tools",
+    "bind_host",
+    "port",
+    "lifecycle",
+    "created_at_utc",
+    "updated_at_utc"
+  ],
+  "title": "MCPHostedServerDefinitionV1",
+  "type": "object"
+}

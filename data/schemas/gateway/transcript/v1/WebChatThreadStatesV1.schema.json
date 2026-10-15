@@ -1,0 +1,33 @@
+{
+  "$id": "https://universal-agents.local/schemas/gateway/transcript/v1/WebChatThreadStatesV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Live thread-list state each open page compares on every event read.\n\nThe durable event stream carries only transcript rows, so a rename, an\narchive, a thread started on another device, or a task still running\nwould otherwise reach other open pages only on reload.",
+  "properties": {
+    "busy_session_keys": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Busy Session Keys",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "threads_revision": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Threads Revision",
+      "type": "string"
+    }
+  },
+  "required": [
+    "threads_revision"
+  ],
+  "title": "WebChatThreadStatesV1",
+  "type": "object"
+}

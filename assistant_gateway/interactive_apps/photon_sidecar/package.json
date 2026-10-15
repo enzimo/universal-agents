@@ -1,0 +1,25 @@
+{
+  "name": "@universal-agents/photon-sidecar",
+  "private": true,
+  "version": "0.9.3",
+  "description": "Spectrum-ts bridge for the Universal Agents Photon interactive app.",
+  "type": "module",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs",
+    "test": "node --test *.test.mjs"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "@spectrum-ts/core": "12.10.1",
+    "@spectrum-ts/imessage": "12.10.1"
+  },
+  "overrides": {
+    "@opentelemetry/core@<2.8.0": "2.8.0"
+  },
+  "devDependencies": {
+    "@photon-ai/otel": "3.8.1"
+  }
+}

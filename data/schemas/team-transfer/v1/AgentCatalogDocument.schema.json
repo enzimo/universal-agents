@@ -1,0 +1,126 @@
+{
+  "$defs": {
+    "AgentTemplateDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "definition": {
+          "additionalProperties": true,
+          "title": "Definition",
+          "type": "object"
+        },
+        "parameters": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AgentTemplateParameter"
+          },
+          "title": "Parameters",
+          "type": "object"
+        }
+      },
+      "required": [
+        "definition"
+      ],
+      "title": "AgentTemplateDefinition",
+      "type": "object"
+    },
+    "AgentTemplateParameter": {
+      "additionalProperties": false,
+      "properties": {
+        "default": {
+          "default": null,
+          "title": "Default"
+        },
+        "type": {
+          "default": "string",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "AgentTemplateParameter",
+      "type": "object"
+    },
+    "TeamTemplateDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "members": {
+          "items": {
+            "$ref": "#/$defs/TeamTemplateMemberDefinition"
+          },
+          "title": "Members",
+          "type": "array"
+        }
+      },
+      "title": "TeamTemplateDefinition",
+      "type": "object"
+    },
+    "TeamTemplateMemberDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_type": {
+          "title": "Agent Type",
+          "type": "string"
+        },
+        "count": {
+          "default": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "mcp_profile_names": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Mcp Profile Names",
+          "type": "array"
+        },
+        "notes": {
+          "default": "",
+          "title": "Notes",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_type"
+      ],
+      "title": "TeamTemplateMemberDefinition",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/AgentCatalogDocument.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "agent_templates": {
+      "additionalProperties": {
+        "$ref": "#/$defs/AgentTemplateDefinition"
+      },
+      "title": "Agent Templates",
+      "type": "object"
+    },
+    "agent_types": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Agent Types",
+      "type": "object"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "team_templates": {
+      "additionalProperties": {
+        "$ref": "#/$defs/TeamTemplateDefinition"
+      },
+      "title": "Team Templates",
+      "type": "object"
+    }
+  },
+  "title": "AgentCatalogDocument",
+  "type": "object"
+}

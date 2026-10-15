@@ -1,0 +1,12 @@
+# Usage:
+#   TEAM_CODEX_HOME_HOST_DIR=/path/to/file-backed-codex-home \
+#   docker compose -f docker-compose.yml -f docker-compose.codex-auth.example.yml up -d
+#
+# The mounted directory must contain Codex CLI file credentials at auth.json.
+services:
+  team-assistant-bundle:
+    volumes:
+      - ${TEAM_CODEX_HOME_HOST_DIR:?set TEAM_CODEX_HOME_HOST_DIR to a file-backed Codex CLI home}:/codex-home:ro
+    environment:
+      - OPENAI_CODEX_SHARED_HOME=/codex-home
+      - OPENAI_CODEX_ALLOW_SHARED_AUTH_READ=true

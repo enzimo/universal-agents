@@ -1,0 +1,755 @@
+# Built-in function tools (fn:*, code:*) and the level each operation needs.
+#
+# Every function in custom_tools/registry.py must appear here exactly once
+# (tests/test_access_catalog.py fails otherwise). Levels:
+#   read  - looks without changing anything outside the agent;
+#   write - creates or changes things (sends, schedules, writes files);
+#   full  - deletes, administers, changes access, or reaches platform controls.
+# A function whose level depends on an argument lists the argument and a level
+# per value; any other value needs full.
+#
+# owner_scope: platform marks platform objects (settings, access, capabilities,
+# restarts): only administrators hold full on them, and agents may only propose.
+# owner_scope: administrators marks team settings every person shares (model
+# choice): only administrators hold them at any level, and agents may hold
+# them for an administrator's work.
+#
+# Tool sets with standard grants (access_control.standard_grants), which need no
+# grant rows: agent_runtime (every agent's own work: messages, its task queue,
+# memory, skills, its execution plan and notes, its own status, recording its
+# scheduled run, the file tools; each file use is also decided on its folder),
+# team_lead_runtime (the team lead's orchestration: workers, objectives, its
+# heartbeat checklist, and staging platform plans), system_duties (fixed
+# duties of built-in system agents, which also hold sandboxed_code) and
+# internet (web research, the web search services it calls through the broker
+# with linked keys, http:exa, http:brave-search and http:crawl4ai in
+# broker.yaml, and the network for code; on by default for every agent and
+# person, decision D14; people turn it off with a block). The standard set is what starter profiles grant:
+# tools whose use changes things outside the agent.
+#
+# operations: named operations an enforcement point decides itself rather than
+# through a function call (the sandbox launcher decides code:unconfined).
+#
+# changes: lists kinds of exact, staged changes a tool applies through
+# apply_change (access_control.changes): operation "change:<kind>" at the given
+# level. Platform changes are always decided by a person; the plan's own tool
+# only stages them.
+tool_sets:
+  - tool_set_id: agent_runtime
+    display_name: Agent runtime tools
+    description: What every agent needs for its own work; every agent and team member holds it.
+  - tool_set_id: team_lead_runtime
+    display_name: Team lead tools
+    description: Creating, messaging and steering the team's agents; held by the team lead.
+  - tool_set_id: system_duties
+    display_name: System duties
+    description: Fixed duties of built-in system agents, such as memory review, memory-review cleanup and model capability lookup.
+  # Reviewing the knowledge base (fn:knowledge_curation): the curator holds it
+  # on the agent side and people on the person side, never the team lead or
+  # workers (owner's decision 2026-10-10: only the curator working for a
+  # person, or that person, publishes the team changes proposed from their
+  # work). Its standard grant names KnowledgeCuratorAgent, not the system role.
+  - tool_set_id: knowledge_review
+    display_name: Knowledge review
+    description: Publishing or rejecting team knowledge changes proposed from a person's work, and keeping the knowledge base tidy.
+  - tool_set_id: internet
+    display_name: Internet access
+    description: Web search and research tools, and the network for code in the sandbox. Every agent and person holds it unless someone blocks it.
+  # Sandboxed code only (never code:unconfined): it reaches the person's own
+  # folders and the shared team/ and agents/ folders, and the network only with
+  # internet access, so it gives agents nothing beyond the person's file tools
+  # and internet. Members hold it; the Trusted starter profile gives it to
+  # TeamLead to hand on.
+  - tool_set_id: sandboxed_code
+    display_name: Sandboxed code
+    description: Shell commands and Python environments in the code sandbox; never running outside it.
+  # Every installed MCP server (mcp:<name>) joins this set when it is loaded
+  # from the MCP registry (access_catalog.catalog.mcp_tool_definition); no file
+  # lists its members. Members hold it, so each person authorizes agents for
+  # their own work with an installed server, and TeamLead hands on what it
+  # holds, as for other team tools. Credentials still come from account links.
+  - tool_set_id: mcp_servers
+    display_name: Installed MCP servers
+    description: MCP servers an administrator installed for the team. Agents use one when the person they work for authorized it.
+
+tools:
+  - tool_id: fn:files
+    provider: files
+    display_name: Files
+    description: Read, write and move files in the task's folders and folders shared with its person.
+    tool_sets: [agent_runtime]
+    functions:
+      file_read: read
+      file_write: write
+      file_move: write
+    # A person sends a file into another person's folder (decision D15): the
+    # recipient or an administrator approves, and the gateway applies it.
+    changes:
+      file_delivery: write
+
+  - tool_id: fn:local_context
+    provider: local_context
+    display_name: Attachments and saved results
+    description: Inspect chat uploads, local media, and saved tool results.
+    tool_sets: [agent_runtime]
+    functions:
+      inspect_user_attachment: read
+      load_local_media_for_model_context: read
+      inspect_tool_result_artifact: read
+
+  # Pure computation: SymPy math on the expression given, with no files,
+  # network or code beyond the checked expression (custom_tools.calculator).
+  - tool_id: fn:calculator
+    provider: calculator
+    display_name: Calculator
+    description: Exact and numeric math with SymPy - arithmetic, equations, derivatives, integrals, limits, series and matrices.
+    tool_sets: [agent_runtime]
+    functions:
+      calculator: read
+
+  - tool_id: fn:web_research
+    provider: web_research
+    display_name: Web research
+    description: Search the web and save research artifacts in the task's folder.
+    tool_sets: [internet]
+    functions:
+      exa_search: read
+      exa_get_contents: read
+      brave_web_search_artifact: read
+      brave_llm_context_artifact: read
+      capture_web_screenshot: read
+      searxng: read
+      web_artifact_inspect: read
+
+  - tool_id: fn:publishing
+    provider: publishing
+    display_name: Published pages
+    description: Publish a single-page website with embedded chat.
+    tool_sets: [standard]
+    functions:
+      publish_single_page_site: write
+
+  - tool_id: fn:task_queue
+    provider: task_queue
+    display_name: Task queue
+    description: See and pause, resume, or stop this agent's own tasks.
+    tool_sets: [agent_runtime, standard]
+    functions:
+      list_task_queue: read
+      control_task_queue: write
+
+  # Worker pools (owner's decision 2026-10-04): delegated tasks wait in their
+  # worker type's shared queue and the runtime starts workers up to each pool
+  # size. The team lead sees the queues and pools, sets pool sizes inside the
+  # operator ceilings (administrators get a notice of every change), and sees or
+  # stops the delegated tasks of its current request.
+  - tool_id: fn:worker_pools
+    provider: worker_pools
+    display_name: Worker pools and delegated work
+    description: See worker queues and pools, set pool sizes within the operator ceilings, and see or stop the current request's delegated tasks.
+    tool_sets: [team_lead_runtime]
+    functions:
+      inspect_worker_pools: read
+      inspect_delegated_work: read
+      set_worker_pool_limit: write
+      cancel_delegated_task: write
+
+  - tool_id: fn:diagnostics
+    provider: diagnostics
+    display_name: Task notes and diagnostics
+    tool_sets: [agent_runtime]
+    functions:
+      get_recovery_context: read
+      log_task_history_entry: write
+      get_execution_digest: read
+      get_task_history_window: read
+
+  - tool_id: fn:execution_plan
+    provider: execution_plan
+    display_name: Execution plan
+    description: The agent's own plan, steps, open questions and plan actions for its task.
+    tool_sets: [agent_runtime]
+    functions:
+      set_execution_plan: write
+      update_execution_plan_status: write
+      update_execution_plan_step: write
+      update_execution_unknown: write
+      record_plan_action: write
+
+  # Comparing candidate solutions is the team lead's planning work.
+  - tool_id: fn:solution_variations
+    provider: solution_variations
+    display_name: Solution comparisons
+    tool_sets: [team_lead_runtime]
+    functions:
+      start_solution_variation: write
+      record_solution_candidate: write
+      record_solution_evaluation: write
+      inspect_solution_variation: read
+      select_solution_candidate: write
+      close_solution_variation: write
+
+  - tool_id: fn:communication
+    provider: communication
+    display_name: Messages to people and agents
+    tool_sets: [agent_runtime]
+    functions:
+      send_message: write
+      notify_user: write
+
+  # Conversations and memory are split by who needs them (as the tool groups
+  # did before Phase 7): every agent reads its own task history and context;
+  # reading people's conversations is the team lead's; team and personal
+  # memory is the team lead's and the memory review agent's. A worker that
+  # needs more asks with request_access.
+  - tool_id: fn:own_context
+    provider: own_context
+    display_name: Own task history and context
+    description: Your archived tasks and your own conversation context.
+    tool_sets: [agent_runtime]
+    functions:
+      list_archived_tasks: read
+      get_context_status: read
+      compact_conversation_context: write
+      list_context_epochs: read
+      get_context_epoch: read
+
+  - tool_id: fn:conversations
+    provider: conversations
+    display_name: Conversations
+    description: Read people's conversation history, open focused conversations, and review after-action reports.
+    tool_sets: [team_lead_runtime]
+    functions:
+      list_conversations: read
+      get_conversation_summary: read
+      get_conversation_turns: read
+      create_focused_conversation: write
+      get_conversation_context_slice: read
+      list_pending_after_action_reports: read
+      resolve_after_action_report_review: write
+
+  - tool_id: fn:memory
+    provider: memory
+    display_name: Team and personal memory
+    description: Manage team and personal memory facts and topic tags.
+    tool_sets: [team_lead_runtime, system_duties]
+    # memory and topic_tags each take an action (custom_tools.providers.memory);
+    # deleting a fact stays full, as delete_coremem and delete_usermem were.
+    functions:
+      memory:
+        argument: action
+        values: {list: read, create: write, replace: write, delete: full, undo: write}
+      topic_tags:
+        argument: action
+        values: {list: read, tag_thread: write, tag_turn: write, untag: write, find: read}
+      resolve_memory_review_job: write
+
+  # The shared knowledge base (knowledge_base.service): every agent searches
+  # and reads it and adds to it. In work for a person, team-space changes are
+  # proposed for review rather than made; archiving keeps every revision, so it
+  # is a write, and nothing here deletes a page.
+  - tool_id: fn:knowledge
+    provider: knowledge
+    display_name: Knowledge base
+    description: Search, read and add to the team's and the person's knowledge pages.
+    tool_sets: [agent_runtime]
+    functions:
+      knowledge_search: read
+      knowledge_read: read
+      knowledge_history: read
+      knowledge_write: write
+      knowledge_add_note: write
+      knowledge_archive: write
+
+  # KnowledgeCuratorAgent's tools (custom_tools/providers/knowledge_curation.py).
+  # A contribution is reachable only in work for its own person; decisions are
+  # writes because they change team pages, and nothing here deletes.
+  - tool_id: fn:knowledge_curation
+    provider: knowledge_curation
+    display_name: Knowledge review
+    description: Review proposed team knowledge changes, merge notes and duplicate pages, and fix pages agents fight over.
+    tool_sets: [knowledge_review]
+    functions:
+      list_pending_contributions: read
+      read_contribution: read
+      knowledge_activity_report: read
+      knowledge_problems: read
+      list_open_knowledge_notes: read
+      publish_contribution: write
+      reject_contribution: write
+      resolve_knowledge_note: write
+      freeze_knowledge_page: write
+      unfreeze_knowledge_page: write
+      merge_knowledge_pages: write
+      revert_knowledge_page: write
+
+  - tool_id: fn:heartbeat
+    provider: heartbeat
+    display_name: Heartbeat checklist
+    description: The team lead's own recurring checklist.
+    tool_sets: [team_lead_runtime]
+    functions:
+      list_heartbeat_items: read
+      add_heartbeat_item: write
+      update_heartbeat_item: write
+      remove_heartbeat_item: full
+      enable_heartbeat_item: write
+      disable_heartbeat_item: write
+
+  - tool_id: fn:objectives
+    provider: objectives
+    display_name: Objectives and work sessions
+    description: The team lead's long-running outcomes, plan execution and recovery.
+    tool_sets: [team_lead_runtime]
+    # objectives, objective_work_sessions and objective_work_profiles each take
+    # an action (custom_tools.providers.objectives); removing a reusable
+    # profile stays full. Functions with many inputs of their own stay apart.
+    functions:
+      objectives:
+        argument: action
+        values: {get: read, list: read, update_progress: write, update_status: write}
+      objective_work_sessions:
+        argument: action
+        values: {suggest: read, enable: write, disable: write, status: read, start: write}
+      objective_work_profiles:
+        argument: action
+        values: {list: read, export: write, apply: write, remove: full}
+      propose_objective_work_profile: write
+      record_objective_work_checkpoint: write
+      create_objective: write
+      start_objective_task: write
+      activate_plan_execution: write
+      start_isolated_recovery: write
+
+  # The person's own schedules: each call is decided here and the tool checks
+  # that the schedule belongs to the person the task works for. A change to a
+  # schedule the runtime manages is staged instead and needs a person's
+  # approval (fn:system_schedules below).
+  - tool_id: fn:schedules
+    provider: schedules
+    display_name: Schedules
+    tool_sets: [standard]
+    functions:
+      authorize_scheduled_job_access: full
+      configure_scheduled_worker: full
+      prepare_scheduled_job_access: read
+      create_scheduled_job: write
+      update_scheduled_job: write
+      remove_scheduled_job: full
+      disable_scheduled_job: write
+      resume_scheduled_job: write
+      pause_scheduled_job: write
+
+  # Changes to schedules the runtime manages (memory review, heartbeat,
+  # Objective work sessions), staged by the schedule tools and applied with
+  # apply_change. A platform tool, so agents never hold full here and a person
+  # (an administrator) approves each exact change; in the gateway the same
+  # people may change them directly. No standard tool set contains it.
+  - tool_id: fn:system_schedules
+    display_name: Schedules the runtime manages
+    description: Change, pause, resume or remove a schedule the runtime manages; a person approves each change.
+    owner_scope: platform
+    functions: {}
+    changes:
+      system_schedule: full
+
+  # In system work (a built-in system agent's run for no person) these show
+  # and record only the schedule the run's signed context names
+  # (access_control.ownership.system_work_schedule_access).
+  - tool_id: fn:schedule_runs
+    provider: schedule_runs
+    display_name: Schedule status and run records
+    description: See the person's schedules and record the scheduled run the agent is doing.
+    tool_sets: [agent_runtime]
+    functions:
+      inspect_scheduled_worker: read
+      list_scheduled_jobs: read
+      get_schedule_telemetry: read
+      record_scheduled_run: write
+
+  # Review jobs hold one person's conversation turns or memory facts, so the
+  # tools show only jobs made for the person the task works for
+  # (access_control.ownership). That lets members hold it (team_lead_runtime,
+  # like fn:memory): MemReviewAgent's runs work for the schedule's owner, and
+  # the person side of the check applies to them.
+  - tool_id: fn:memory_review_inspection
+    provider: memory_review_inspection
+    display_name: Memory review queue
+    tool_sets: [team_lead_runtime, system_duties]
+    functions:
+      list_pending_memory_review_jobs: read
+      get_memory_review_job: read
+
+  - tool_id: fn:memory_review_maintenance
+    provider: memory_review_maintenance
+    display_name: Memory review cleanup
+    tool_sets: [system_duties]
+    functions:
+      inspect_memory_review_cleanup: read
+      maintain_memory_review_jobs:
+        argument: operation
+        values: {archive: write, purge: full}
+
+  - tool_id: fn:agent_management
+    provider: agent_management
+    display_name: Agents
+    description: See agents, steer them, and create new ones.
+    tool_sets: [team_lead_runtime]
+    functions:
+      get_known_agents: read
+      query_agent_state: read
+      get_available_agent_types: read
+      instantiate_agent: full
+      list_team_templates: read
+      instantiate_team_template: full
+      send_control_instruction: write
+      get_current_task_status: read
+      get_runtime_pressure: read
+
+  # Jobs and SSH sessions are write, decided on every call; the runtime decides
+  # again before each run and SSH use, so revoking the grant stops them.
+  # Managed services and typing into SSH are exact changes a person approves
+  # (changes: below, applied with apply_change).
+  - tool_id: fn:execution_control
+    provider: execution_control
+    display_name: Deterministic execution and SSH
+    description: Promote fixed code, run it as jobs, stage managed services, and use pinned SSH hosts.
+    owner_scope: platform
+    functions:
+      list_execution_profiles: read
+      promote_execution_revision: write
+      create_execution_job: write
+      set_execution_job_enabled: write
+      list_execution_jobs: read
+      list_execution_runs: read
+      plan_managed_execution_service: write
+      plan_managed_execution_service_state: write
+      list_managed_execution_services: read
+      list_execution_ssh_targets: read
+      create_execution_ssh_session: write
+      open_execution_ssh_session: write
+      read_execution_ssh_session: read
+      plan_execution_ssh_interaction: write
+      # Typing into a remote shell runs arbitrary commands on that host, so each
+      # session needs a person's approval (execution_ssh_interaction), which the
+      # broker checks on every call. The call itself is write: before Phase 4a
+      # typing was possible after one approval per session, and platform full
+      # would refuse it to every agent for good (agents never hold full here).
+      write_execution_ssh_session: write
+      resize_execution_ssh_session: write
+      close_execution_ssh_session: write
+      list_execution_ssh_sessions: read
+    changes:
+      managed_execution_service: full
+      execution_ssh_interaction: full
+
+  - tool_id: fn:capabilities
+    provider: capabilities
+    display_name: Capabilities, MCP, and specialists
+    description: Stage new specialists (a person approves them), and propose MCP servers and installed procedures.
+    owner_scope: platform
+    tool_sets: [team_lead_runtime]
+    # Four tools that take an action (custom_tools.providers.capabilities).
+    functions:
+      # propose records an inert connection and asks for its install as an
+      # access proposal (change access_proposal on fn:access_proposals): an
+      # administrator approves installing it and who may use it in one review.
+      mcp_connections:
+        argument: action
+        values: {list: read, propose: write}
+      # plan_install and plan_remove only stage the change (hosted_mcp_server
+      # below), which a person approves.
+      hosted_mcp_servers:
+        argument: action
+        values: {list: read, propose: write, start: write, stop: write, plan_install: write, plan_remove: write}
+      installed_permissions:
+        argument: action
+        values: {list: read, propose: write}
+      # plan and plan_removal stage the changes agent_definition and
+      # agent_definition_rollback below.
+      specialist_definitions:
+        argument: action
+        values: {plan: write, status: read, plan_removal: write}
+    changes:
+      agent_definition: full
+      agent_definition_rollback: full
+      hosted_mcp_server: full
+      # Installing or rejecting a proposed procedure; administrators do it in
+      # the gateway (agents only propose).
+      installed_procedure: full
+
+  # Staging team skill changes is the team lead's own work; applying them is
+  # fn:team_skills below.
+  - tool_id: fn:team_skill_plans
+    provider: team_skill_plans
+    display_name: Team skill proposals
+    description: Scan and stage team skill installs, replacements and removals.
+    tool_sets: [team_lead_runtime]
+    functions:
+      plan_skill_installation: write
+      plan_team_skill_change: write
+      get_skill_installation_status: read
+      plan_skill_uninstallation: write
+      get_skill_uninstallation_status: read
+
+  # Team skills are team-owned (decision L2): an administrator may grant the
+  # team lead full access here, delegable, so it installs and removes skills
+  # itself and administrators get a notice; otherwise a person approves each
+  # change. No standard tool set contains this tool.
+  - tool_id: fn:team_skills
+    provider: team_skills
+    display_name: Team skills
+    description: Install, replace or remove the team's skills.
+    functions: {}
+    changes:
+      team_skill_install: full
+      team_skill_uninstall: full
+
+  # Every agent's own access tools. The access service still decides what
+  # a request, hand-down, restriction or revocation may do.
+  - tool_id: fn:access
+    provider: access
+    display_name: Asking for and restricting access
+    tool_sets: [agent_runtime]
+    functions:
+      list_my_access: read
+      request_access: write
+      restrict_access: write
+      revoke_access: write
+
+  # Searching the catalog and adding tools that load on request (on_request
+  # below) to the agent's tool list for its task. It changes what the model is
+  # shown, never what it may use, so it is read and works in both
+  # authorization modes (custom_agents.tool_loading).
+  - tool_id: fn:tool_loading
+    provider: tool_loading
+    display_name: Finding and loading tools
+    description: Search the tool catalog and add tools that load on request to your tool list for this task.
+    tool_sets: [agent_runtime]
+    functions:
+      find_tools: read
+      use_tools: read
+
+  # The team lead sets up the tools a request needs in one call, without asking
+  # the person first (owner's decision 2026-09-28): trusted code checks access
+  # for itself, a worker and the person, the person's sign-in or linked
+  # account, the team's sign-in app and the tool's catalog setup data, asks
+  # for missing access, opens the setup pages and waits. Only TeamLead can ask
+  # the person, so only it holds this; the account check is
+  # procedure:tool_setup in broker.yaml. Standard for the team lead in both
+  # authorization modes. It asks and opens pages, so it is write.
+  - tool_id: fn:tool_setup
+    provider: tool_setup
+    display_name: Tool setup
+    description: Set up the tools a request needs for the person (access, sign-in, linked account, team sign-in app, steps outside Universal Agents) and wait until they are ready.
+    tool_sets: [team_lead_runtime]
+    functions:
+      set_up_tools: write
+
+  # The team lead's published plans. They coordinate and grant nothing: each
+  # request a plan shows is decided by a person or the access service, and each
+  # batch of approvals is one change request per staged change. A workflow is
+  # the person's own record (team-owned, not a platform object).
+  - tool_id: fn:access_workflows
+    provider: access_workflows
+    display_name: Access workflows
+    description: Publish a plan for a goal, report its progress, and ask for its staged changes together.
+    tool_sets: [team_lead_runtime]
+    functions:
+      submit_access_workflow: write
+      update_access_workflow: write
+      revise_access_workflow_step: write
+      get_access_workflow: read
+      request_access_workflow_approvals: write
+
+  - tool_id: fn:runtime_control
+    provider: runtime_control
+    display_name: Runtime restarts
+    owner_scope: platform
+    tool_sets: [team_lead_runtime]
+    functions:
+      plan_runtime_restart: write
+      get_runtime_restart_status: read
+    changes:
+      runtime_restart: full
+
+  - tool_id: fn:runtime_status
+    provider: runtime_status
+    display_name: Own status and configuration
+    description: Read the agent's own status and configuration.
+    tool_sets: [agent_runtime]
+    functions:
+      get_self_status: read
+      get_runtime_configuration_context: read
+
+  # Evidence for model capability settings. Keeping model capability metadata
+  # current is one of InternalImprovementAgent's duties, done in its
+  # maintenance runs for no person, so the tool is in system_duties; the team
+  # lead uses it when a person asks about a model.
+  - tool_id: fn:model_lookup
+    provider: model_lookup
+    display_name: Model capability lookup
+    description: Look up what a model supports (images, audio) in public model catalogs.
+    tool_sets: [team_lead_runtime, system_duties]
+    functions:
+      lookup_model_capability_candidates: read
+
+  - tool_id: fn:runtime_settings
+    provider: runtime_settings
+    display_name: Runtime settings and team roster
+    description: Read the team roster and settings options, and stage exact changes to settings, the team lead's profile and the startup roster.
+    owner_scope: platform
+    tool_sets: [team_lead_runtime]
+    functions:
+      get_team_composition: read
+      list_runtime_settings_options: read
+      validate_llm_overrides_yaml: read
+      set_team_startup_agent: write
+      set_ephemeral_agent_policy: write
+      plan_runtime_settings_change: write
+      plan_runtime_setting_change: write
+    changes:
+      runtime_settings: full
+
+  # Switching an agent's model (owner's decision 2026-09-27). A runtime
+  # settings plan that changes only model-choice settings of the current agent
+  # or of named agent types (custom_agents.model_choice) is this change kind
+  # instead of runtime_settings: it applies at once when TeamLead and the
+  # person it works for hold it, and that person gets a notice; otherwise a
+  # person approves it in the Inbox. Model settings apply to the whole team,
+  # so only administrators hold it (owner_scope administrators,
+  # guard:admin-only-tools); the Trusted starter profile gives it to TeamLead
+  # for an administrator's work. No standard tool set contains it.
+  - tool_id: fn:model_choice
+    display_name: Model choice
+    description: Switch an agent type's provider, model, reasoning and input settings without a review each time; administrators only.
+    owner_scope: administrators
+    functions: {}
+    changes:
+      model_choice: write
+
+  # Asking a person to approve a staged change is not the change itself.
+  - tool_id: fn:changes
+    provider: changes
+    display_name: Approving staged changes
+    description: Apply a staged change after a person approves it (or with agreement when authorization is off).
+    tool_sets: [team_lead_runtime]
+    functions:
+      apply_change: write
+
+  # Code runs in the sandbox, reaching only the folders its agent and person
+  # may use (custom_agents.code_access). The network comes from fn:internet.
+  # TeamLead proposes several access changes for one administrator review
+  # (access_control.proposals); the gateway applies an approved proposal at
+  # the decision. Agents never hold full on it, so every proposal is reviewed.
+  # Installing a proposed MCP server is an item of a proposal too.
+  - tool_id: fn:access_proposals
+    provider: access_proposals
+    display_name: Access proposals
+    description: Propose new web API tools, MCP servers to install, access for agent types, restrictions, data folders and account links for one review.
+    owner_scope: platform
+    tool_sets: [team_lead_runtime]
+    functions:
+      propose_access_change: write
+      get_proposal_status: read
+    changes:
+      access_proposal: full
+
+  - tool_id: code:shell
+    provider: execution
+    display_name: Shell commands
+    description: Run shell commands in the code sandbox. The commands reach the network only with internet access.
+    tool_sets: [sandboxed_code]
+    functions:
+      shell: write
+
+  - tool_id: code:python
+    provider: execution
+    display_name: Python environments
+    description: Create Python environments and run code in the code sandbox. Installing packages needs internet access too.
+    tool_sets: [sandboxed_code]
+    functions:
+      python_env:
+        argument: action
+        values:
+          list: read
+          inspect: read
+          create: write
+          write_file: write
+          install: write
+          run: write
+          delete: write
+
+  # Decided by the sandbox launcher for every command (decision D14): with it
+  # the command may open TCP connections. Standard for every role, so code
+  # reaches the web by default; a block on it or on the internet set closes it.
+  - tool_id: fn:internet
+    display_name: Internet access
+    description: Let code in the sandbox open network connections (TCP), for example to download data or install packages.
+    tool_sets: [internet]
+    operations:
+      connect: read
+
+  # Decided by the sandbox launcher when a shell or python_env call asks to run
+  # outside the sandbox (decision D9). Such code can read and change everything
+  # the runtime can, including control files and the access store, so it is its
+  # own tool: full access to shell commands never includes it.
+  - tool_id: code:unconfined
+    provider: execution
+    display_name: Unconfined host execution
+    description: Run shell or Python commands outside the sandbox, with the runtime's own rights over every file and the network. Give it only for a stated need, and preferably for one task.
+    operations:
+      run: full
+
+  # Registered by the Strands skills plugin rather than a provider.
+  - tool_id: fn:skills
+    display_name: Skills
+    description: Load a skill's instructions.
+    tool_sets: [agent_runtime]
+    functions:
+      skills: read
+
+# Functions that keep a catalog level (every function needs one) but are never
+# offered to models: agents' tool lists follow their grants (access Phase 7),
+# and no agent was ever given these. send_message is the raw transport (agents
+# use the typed task and escalation tools); the context-epoch tools and
+# get_current_task_status are internal views kept for runtime code and tests.
+not_offered:
+  - send_message
+  - get_context_status
+  - compact_conversation_context
+  - list_context_epochs
+  - get_context_epoch
+  - get_current_task_status
+
+# Tools whose functions are not in an agent's tool list until it loads them
+# with use_tools (custom_agents.tool_loading). A model request may carry only
+# so many tools (OpenAI models take at most 128), and the team lead's standard
+# tools alone were 140, so these groups, used now and then, wait until a task
+# needs them. Loading changes what the model is shown, never what it may use:
+# the access hook still decides every call. A group stays shown for an agent
+# type whose definition names it in default_tools, and keep_shown lists the
+# functions of a group that stay shown for everyone (plan execution and
+# recovery are part of the team lead's everyday work; plan_runtime_setting_change
+# is how an agent asks for a higher tool cap).
+on_request:
+  fn:objectives:
+    keep_shown: [activate_plan_execution, start_isolated_recovery]
+  fn:capabilities: {}
+  # plan_runtime_setting_change is how an agent at its model's tool cap asks
+  # for a higher one (model.max_tools_per_request), so it is always reachable.
+  fn:runtime_settings:
+    keep_shown: [plan_runtime_setting_change]
+  fn:solution_variations: {}
+  fn:heartbeat: {}
+  fn:team_skill_plans: {}
+  fn:access_workflows: {}
+  fn:access_proposals: {}
+  fn:worker_pools: {}
+
+# Functions whose operations belong to the tools they reach: secure_cli runs a
+# broker action (cli:*, http:*, procedure:credentials) and
+# invoke_installed_permission runs an installed procedure (procedure:*).
+dispatchers:
+  secure_cli: broker
+  invoke_installed_permission: procedure

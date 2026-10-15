@@ -1,0 +1,75 @@
+schema_version: 2                               # Required policy schema version.
+
+suggestions:
+  enabled: true                                 # Allow agents to suggest bounded Objective work sessions.
+  eligible_horizons: [long_horizon, recurring, standing] # Objective horizons eligible for suggestions.
+  minimum_estimated_sessions: 3                 # Minimum estimated sessions before suggesting this workflow.
+
+required_skills:
+  - long-horizon-plan-execution                 # Mandatory planning skill for bounded Objective runs.
+
+default_profile: nightly                        # Profile selected by default; must exist under profiles.
+
+# Agent-proposed profiles require authenticated owner acceptance before use.
+custom_profiles:
+  enabled: true                                 # Allow agents to propose custom profiles.
+  allow_reusable_installation: true             # Allow accepted custom profiles to be saved for reuse.
+  proposal_ttl_seconds: 86400                   # Time allowed to accept a proposal: 24 hours.
+  minimum_cadence_interval_seconds: 3600        # Minimum interval between custom-profile scheduled runs: 1 hour.
+  max_installed_profiles_per_owner: 50          # Maximum saved profiles per user and TeamArchitect.
+
+  # Inclusive limits for agent-proposed profiles.
+  budget_bounds:
+    minimum:
+      active_seconds: 300                       # Minimum total session duration: 5 minutes.
+      checkpoint_reserve_seconds: 60            # Minimum checkpoint time reserve: 1 minute.
+      checkpoint_reserve_turns: 1               # Minimum model cycles reserved for checkpointing.
+      checkpoint_reserve_tokens: 10000          # Minimum input + output tokens reserved for checkpointing.
+      checkpoint_reserve_tool_calls: 1          # Minimum tool calls reserved for checkpointing.
+      turns: 2                                  # Minimum total model cycles per session, including the reserve.
+      total_tokens: 25000                       # Minimum total input + output tokens per session, including the reserve.
+      tool_calls: 2                             # Minimum total tool calls per session, including the reserve.
+
+    maximum:
+      active_seconds: 28800                     # Maximum total session duration: 8 hours.
+      checkpoint_reserve_seconds: 3600          # Maximum checkpoint time reserve: 1 hour.
+      checkpoint_reserve_turns: 20              # Maximum model cycles reserved for checkpointing.
+      checkpoint_reserve_tokens: 500000         # Maximum input + output tokens reserved for checkpointing.
+      checkpoint_reserve_tool_calls: 5          # Maximum tool calls reserved for checkpointing.
+      turns: 200                                # Maximum total model cycles per session, including the reserve.
+      total_tokens: 3000000                     # Maximum total input + output tokens per session, including the reserve.
+      tool_calls: 500                           # Maximum total tool calls per session, including the reserve.
+
+# Budgets apply separately to each work session.
+# Reserves are included in totals, not added on top.
+# Each reserve must be positive and smaller than its corresponding total.
+profiles:
+  nightly:
+    cadence_cron: "0 3 * * *"                   # Run daily at 03:00 in cadence_timezone.
+    cadence_timezone: owner                     # "owner" (the Objective owner's time zone, else the instance's) or an IANA time zone.
+    budget:
+      active_seconds: 1800                      # Total session duration: 30 minutes.
+      checkpoint_reserve_seconds: 300           # Reserve 5 minutes for checkpointing; 25 minutes remain for work.
+      checkpoint_reserve_turns: 2               # Reserve 2 of the 30 model cycles for checkpointing.
+      checkpoint_reserve_tokens: 150000         # Reserve 150,000 of the total tokens for checkpointing.
+      checkpoint_reserve_tool_calls: 5          # Reserve 5 of the 150 tool calls for checkpointing.
+      turns: 30                                 # Total cumulative model cycles per session.
+      total_tokens: 1500000                     # Total cumulative input + output tokens; 1,350,000 remain for work.
+      tool_calls: 150                           # Total cumulative tool calls per session; 145 remain for work.
+
+  deep:
+    cadence_cron: "0 4 * * *"                   # Run daily at 04:00 in cadence_timezone.
+    cadence_timezone: owner                     # "owner" (the Objective owner's time zone, else the instance's) or an IANA time zone.
+    budget:
+      active_seconds: 5400                      # Total session duration: 90 minutes.
+      checkpoint_reserve_seconds: 300           # Reserve 5 minutes for checkpointing; 85 minutes remain for work.
+      checkpoint_reserve_turns: 3               # Reserve 3 of the 50 model cycles for checkpointing.
+      checkpoint_reserve_tokens: 250000         # Reserve 250,000 of the total tokens for checkpointing.
+      checkpoint_reserve_tool_calls: 5          # Reserve 5 of the 300 tool calls for checkpointing.
+      turns: 50                                 # Total cumulative model cycles per session.
+      total_tokens: 3000000                     # Total cumulative input + output tokens; 2,750,000 remain for work.
+      tool_calls: 300                           # Total cumulative tool calls per session; 295 remain for work.
+
+visibility:
+  emit_activity_snapshots: true                 # Include Objective work-session state in activity snapshots.
+  checkpoint_history_limit: 50                  # Maximum checkpoint records included in an Objective work snapshot.

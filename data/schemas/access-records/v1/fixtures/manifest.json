@@ -1,0 +1,15 @@
+{
+  "fixtures": [
+    {
+      "filename": "change_approval.json",
+      "model": "ChangeApprovalRecordV1",
+      "sha256": "a71a3a15ea0ddb9802a693dfc7a43983584676e30966156da0f559eafe91fe81"
+    },
+    {
+      "filename": "generated_agent_provisioning.json",
+      "model": "GeneratedAgentProvisioningRecordV1",
+      "sha256": "5a3135f36249812c11601a1e5f8e5d38742cc406d4d14c2ca00a561003c6b4fd"
+    }
+  ],
+  "schema_version": 1
+}

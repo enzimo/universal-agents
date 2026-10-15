@@ -1,0 +1,186 @@
+{
+  "$defs": {
+    "ChangeApprovalMode": {
+      "enum": [
+        "person_approval",
+        "held_access",
+        "agreement",
+        "operator_configuration"
+      ],
+      "title": "ChangeApprovalMode",
+      "type": "string"
+    },
+    "ChangeApprovalRecordV1": {
+      "additionalProperties": false,
+      "description": "How a staged change was approved, kept with what it created.\n\nSaved in approved configuration (team roster attachments, MCP connection\napprovals, generated specialists) and in receipts. ``access_request_id``\nnames the Inbox request a person approved; it is empty when a person\nre-approved existing configuration from the command line.",
+      "properties": {
+        "access_request_id": {
+          "anyOf": [
+            {
+              "maxLength": 120,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Access Request Id"
+        },
+        "approved_at_utc": {
+          "format": "date-time",
+          "title": "Approved At Utc",
+          "type": "string"
+        },
+        "approved_by": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Approved By",
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/ChangeApprovalMode"
+        }
+      },
+      "required": [
+        "mode",
+        "approved_by",
+        "approved_at_utc"
+      ],
+      "title": "ChangeApprovalRecordV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/access-records/v1/GeneratedAgentProvisioningRecordV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Language-neutral activation/rollback record stored beside a generated bundle.",
+  "properties": {
+    "actor_principal_id": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Actor Principal Id",
+      "type": "string"
+    },
+    "agent_type": {
+      "maxLength": 64,
+      "minLength": 3,
+      "title": "Agent Type",
+      "type": "string"
+    },
+    "applied_at_utc": {
+      "format": "date-time",
+      "title": "Applied At Utc",
+      "type": "string"
+    },
+    "approval": {
+      "$ref": "#/$defs/ChangeApprovalRecordV1"
+    },
+    "catalog_sha256": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Catalog Sha256",
+      "type": "string"
+    },
+    "change_id": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Change Id",
+      "type": "string"
+    },
+    "created_at_utc": {
+      "format": "date-time",
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "default_tools": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 8,
+      "minItems": 1,
+      "title": "Default Tools",
+      "type": "array"
+    },
+    "owner_canonical_user_id": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Owner Canonical User Id",
+      "type": "string"
+    },
+    "plan_digest": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Plan Digest",
+      "type": "string"
+    },
+    "provisioning_id": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Provisioning Id",
+      "type": "string"
+    },
+    "record_type": {
+      "const": "generated_agent_provisioning",
+      "default": "generated_agent_provisioning",
+      "title": "Record Type",
+      "type": "string"
+    },
+    "rolled_back_at_utc": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rolled Back At Utc"
+    },
+    "schema_version": {
+      "const": 3,
+      "default": 3,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "status": {
+      "enum": [
+        "ready",
+        "rolled_back"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "team_id": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Team Id",
+      "type": "string"
+    },
+    "template_name": {
+      "const": "TaskSpecialistTemplate",
+      "default": "TaskSpecialistTemplate",
+      "title": "Template Name",
+      "type": "string"
+    }
+  },
+  "required": [
+    "provisioning_id",
+    "change_id",
+    "plan_digest",
+    "status",
+    "agent_type",
+    "team_id",
+    "owner_canonical_user_id",
+    "actor_principal_id",
+    "default_tools",
+    "catalog_sha256",
+    "approval",
+    "created_at_utc",
+    "applied_at_utc"
+  ],
+  "title": "GeneratedAgentProvisioningRecordV1",
+  "type": "object"
+}

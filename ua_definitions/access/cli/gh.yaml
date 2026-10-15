@@ -1,0 +1,171 @@
+# Access levels for gh passthrough commands (cli:github).
+# Commands not listed require full access. `api` is classified by its HTTP
+# method in access_catalog (GET/HEAD read; anything else full, because a POST
+# may be a GraphQL mutation). Blocked commands and flags are refused by the
+# broker whatever access is held.
+cli: gh
+commands:
+  status: read
+  search.code: read
+  search.commits: read
+  search.issues: read
+  search.prs: read
+  search.repos: read
+  issue.list: read
+  issue.status: read
+  issue.view: read
+  issue.create: write
+  issue.comment: write
+  issue.edit: write
+  issue.close: write
+  issue.reopen: write
+  issue.lock: write
+  issue.unlock: write
+  issue.pin: write
+  issue.unpin: write
+  issue.develop: write
+  issue.delete: full
+  issue.transfer: full
+  pr.list: read
+  pr.status: read
+  pr.view: read
+  pr.checks: read
+  pr.diff: read
+  pr.create: write
+  pr.comment: write
+  pr.edit: write
+  pr.close: write
+  pr.reopen: write
+  pr.ready: write
+  pr.review: write
+  pr.lock: write
+  pr.unlock: write
+  pr.update-branch: write
+  # Merging changes repository content like any commit; branch protection
+  # rules still apply on GitHub's side.
+  pr.merge: write
+  release.list: read
+  release.view: read
+  release.edit: write
+  release.delete: full
+  release.delete-asset: full
+  repo.list: read
+  repo.view: read
+  repo.deploy-key.list: read
+  repo.create: write
+  repo.fork: write
+  repo.sync: write
+  repo.edit: full
+  repo.rename: full
+  repo.archive: full
+  repo.unarchive: full
+  repo.deploy-key.add: full
+  repo.deploy-key.delete: full
+  run.list: read
+  run.view: read
+  run.watch: read
+  run.rerun: write
+  run.cancel: write
+  run.delete: full
+  workflow.list: read
+  workflow.view: read
+  workflow.run: write
+  workflow.enable: full
+  workflow.disable: full
+  gist.list: read
+  gist.view: read
+  gist.delete: full
+  label.list: read
+  label.create: write
+  label.edit: write
+  label.clone: write
+  label.delete: full
+  project.list: read
+  project.view: read
+  project.field-list: read
+  project.item-list: read
+  project.item-add: write
+  project.item-create: write
+  project.item-edit: write
+  project.item-archive: write
+  project.field-create: full
+  project.field-delete: full
+  project.item-delete: full
+  project.create: full
+  project.edit: full
+  project.close: full
+  project.delete: full
+  cache.list: read
+  cache.delete: full
+  variable.list: read
+  variable.get: read
+  variable.set: full
+  variable.delete: full
+  ruleset.list: read
+  ruleset.view: read
+  ruleset.check: read
+  org.list: read
+  api: full
+blocked_commands:
+  alias: changes the broker's gh configuration
+  auth: manages the broker's GitHub credentials
+  browse: opens a local browser
+  codespace: manages remote development machines and local copies
+  completion: prints shell completion scripts
+  config: changes the broker's gh configuration
+  copilot: runs local assistant extensions
+  extension: installs and runs local programs
+  gpg-key: manages account signing keys
+  secret: manages repository and organization secrets
+  ssh-key: manages account SSH keys
+  attestation: downloads and verifies local files
+  gist.clone: writes a local copy on the broker host
+  gist.create: uploads local files from the broker host
+  gist.edit: reads local files on the broker host
+  pr.checkout: writes a local copy on the broker host
+  release.create: uploads local files from the broker host
+  release.download: writes local files on the broker host
+  release.upload: uploads local files from the broker host
+  repo.clone: writes a local copy on the broker host
+  repo.delete: deletes a repository
+  repo.set-default: changes local git configuration on the broker host
+  run.download: writes local files on the broker host
+global_flags:
+  - --help
+  - --version
+global_flags_with_value: []
+blocked_flags:
+  - --browser
+  - --config
+  - --editor
+  - --hostname
+  - --insecure-storage
+  - --oauth
+  - --password
+  - --token
+  - --verbose
+  - --web
+  - -w
+  - --with-token
+  - --source
+# Per-command flags that read or write files on the broker host. gh's short
+# flags mean different things in different commands (-F is --body-file in
+# 'issue create' but --field in 'api'), so these rules are per command.
+#   stdin_only: the value must be '-' (standard input).
+#   fields: 'key=value' parameters; a value starting with '@' reads a file and
+#           is refused.
+#   blocked: refused in this command.
+command_flag_rules:
+  issue.create: {stdin_only: [--body-file, -F]}
+  issue.comment: {stdin_only: [--body-file, -F]}
+  issue.edit: {stdin_only: [--body-file, -F]}
+  pr.create: {stdin_only: [--body-file, -F]}
+  pr.comment: {stdin_only: [--body-file, -F]}
+  pr.edit: {stdin_only: [--body-file, -F]}
+  pr.merge: {stdin_only: [--body-file, -F]}
+  pr.review: {stdin_only: [--body-file, -F]}
+  release.edit: {stdin_only: [--notes-file, -F]}
+  api: {stdin_only: [--input], fields: [-F, --field, -f, --raw-field]}
+  workflow.run: {fields: [-F, --field, -f, --raw-field]}
+  repo.create: {blocked: [--clone, -c, --source, -s, --push]}
+  variable.set: {blocked: [--env-file, -f]}

@@ -1,0 +1,15 @@
+[package]
+name = "ua-anydoc-cli"
+# Keep the wrapper version aligned with the pinned upstream library so
+# `anydoc --version` reports the document converter version operators expect.
+version = "0.1.9"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anydoc.workspace = true
+
+[[bin]]
+name = "anydoc"
+path = "src/main.rs"

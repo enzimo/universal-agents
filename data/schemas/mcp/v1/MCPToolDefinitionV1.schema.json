@@ -1,0 +1,56 @@
+{
+  "$defs": {
+    "JsonValue": {}
+  },
+  "$id": "https://universal-agents.dev/schemas/mcp/v1/MCPToolDefinitionV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "description": {
+      "default": "",
+      "maxLength": 4000,
+      "title": "Description",
+      "type": "string"
+    },
+    "inputSchema": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Inputschema",
+      "type": "object"
+    },
+    "name": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "operation_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Operation Digest",
+      "type": "string"
+    },
+    "outputSchema": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Outputschema"
+    }
+  },
+  "required": [
+    "name",
+    "inputSchema",
+    "operation_digest"
+  ],
+  "title": "MCPToolDefinitionV1",
+  "type": "object"
+}

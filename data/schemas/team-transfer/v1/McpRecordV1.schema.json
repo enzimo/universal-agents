@@ -1,0 +1,57 @@
+{
+  "$defs": {
+    "JsonValue": {},
+    "McpKind": {
+      "enum": [
+        "connection",
+        "hosted",
+        "static_baseline"
+      ],
+      "title": "McpKind",
+      "type": "string"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/McpRecordV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "document": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Document",
+      "type": "object"
+    },
+    "kind": {
+      "$ref": "#/$defs/McpKind"
+    },
+    "levels": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Levels"
+    },
+    "record_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "title": "Record Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "record_id",
+    "document"
+  ],
+  "title": "McpRecordV1",
+  "type": "object"
+}

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en" data-color-mode="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Review team import</title>
+  <link rel="icon" href="/assets/favicon.ico" sizes="any">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/team_review.css">
+  <script src="/assets/appearance.js"></script>
+</head>
+<body class="config-editor-body">
+  <canvas class="ua-doc-static-mesh" data-ua-metallic-mesh aria-hidden="true"></canvas>
+  <main class="config-editor-shell">
+    <header class="config-editor-header">
+      <div class="brand-lockup"><img class="brand-mark" src="/assets/agent-mark.png" alt=""><span>Universal Agents</span></div>
+      <button id="theme" class="button secondary" type="button">Switch theme</button>
+    </header>
+    <section class="config-editor-app">
+      <h1>Review team import</h1>
+      <p id="source"></p>
+      <p>Choose the records to import. Edit settings, memories, and schedule Markdown below. Confirm each selected schedule after editing it. You can import more records from this backup later.</p>
+      <p id="files"></p>
+      <div class="review-toolbar">
+        <label for="section">Show</label><select id="section" class="input"><option value="">All sections</option></select>
+        <label for="filter">Find a record</label><input id="filter" class="input" type="search">
+        <button id="select" class="button secondary" type="button">Select shown</button>
+        <button id="unselect" class="button secondary" type="button">Unselect shown</button>
+      </div>
+      <p id="count"></p>
+      <div id="records" class="review-records"></div>
+      <div class="review-toolbar review-actions">
+        <button id="validate" class="button secondary" type="button">Validate selected records</button>
+        <button id="import" class="button primary" type="button" disabled>Import selected records</button>
+      </div>
+      <p id="status" role="status" aria-live="polite"></p>
+      <div id="results"></div>
+    </section>
+  </main>
+  <script src="/assets/metallic_mesh.js" defer></script>
+  <script src="/assets/team_review.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+[package]
+name = "ua-cedar-authorizer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cedar-policy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[lib]
+name = "ua_cedar_authorizer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ua-cedar-authorizer"
+path = "src/main.rs"

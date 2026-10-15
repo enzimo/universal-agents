@@ -1,0 +1,165 @@
+{
+  "$defs": {
+    "ScheduleReadinessCheckV1": {
+      "additionalProperties": false,
+      "properties": {
+        "access_level": {
+          "anyOf": [
+            {
+              "enum": [
+                "read",
+                "write",
+                "full"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Access Level"
+        },
+        "access_operation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Access Operation"
+        },
+        "capability_id": {
+          "title": "Capability Id",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "missing_access_for": {
+          "default": [],
+          "items": {
+            "enum": [
+              "worker_type",
+              "owner"
+            ],
+            "type": "string"
+          },
+          "title": "Missing Access For",
+          "type": "array"
+        },
+        "operation": {
+          "title": "Operation",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "ready",
+            "deferred",
+            "blocked"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "suggestions": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Suggestions",
+          "type": "array"
+        },
+        "tool_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Id"
+        }
+      },
+      "required": [
+        "capability_id",
+        "operation",
+        "status",
+        "reason"
+      ],
+      "title": "ScheduleReadinessCheckV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/scheduled-workers/v1/ScheduleReadinessV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "checked_at_utc": {
+      "format": "date-time",
+      "title": "Checked At Utc",
+      "type": "string"
+    },
+    "checks": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ScheduleReadinessCheckV1"
+      },
+      "title": "Checks",
+      "type": "array"
+    },
+    "execution_digest": {
+      "default": "",
+      "title": "Execution Digest",
+      "type": "string"
+    },
+    "policy_snapshot_digest": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Policy Snapshot Digest"
+    },
+    "status": {
+      "enum": [
+        "ready",
+        "provisional",
+        "blocked"
+      ],
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "title": "ScheduleReadinessV1",
+  "type": "object"
+}

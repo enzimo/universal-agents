@@ -1,0 +1,29 @@
+{
+  "$defs": {
+    "JsonValue": {}
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/ProcedureRecordV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "definition_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "title": "Definition Id",
+      "type": "string"
+    },
+    "document": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Document",
+      "type": "object"
+    }
+  },
+  "required": [
+    "definition_id",
+    "document"
+  ],
+  "title": "ProcedureRecordV1",
+  "type": "object"
+}

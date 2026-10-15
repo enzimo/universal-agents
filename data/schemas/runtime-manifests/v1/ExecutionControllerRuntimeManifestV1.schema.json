@@ -1,0 +1,691 @@
+{
+  "$defs": {
+    "ExecutionBackendKind": {
+      "enum": [
+        "local",
+        "openshell",
+        "kubernetes"
+      ],
+      "title": "ExecutionBackendKind",
+      "type": "string"
+    },
+    "ExecutionControllerSettingsV1": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "lease_ttl_seconds": {
+          "minimum": 1,
+          "title": "Lease Ttl Seconds",
+          "type": "integer"
+        },
+        "max_concurrent_jobs": {
+          "minimum": 1,
+          "title": "Max Concurrent Jobs",
+          "type": "integer"
+        },
+        "service_reconcile_interval_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Service Reconcile Interval Seconds",
+          "type": "number"
+        },
+        "tick_interval_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Tick Interval Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "enabled",
+        "tick_interval_seconds",
+        "max_concurrent_jobs",
+        "lease_ttl_seconds",
+        "service_reconcile_interval_seconds"
+      ],
+      "title": "ExecutionControllerSettingsV1",
+      "type": "object"
+    },
+    "ExecutionLanguage": {
+      "enum": [
+        "python",
+        "rust"
+      ],
+      "title": "ExecutionLanguage",
+      "type": "string"
+    },
+    "ExecutionProfileV1": {
+      "additionalProperties": false,
+      "description": "Operator-authored build and runtime policy selected by stable id.",
+      "properties": {
+        "allow_controller_host_execution": {
+          "default": false,
+          "title": "Allow Controller Host Execution",
+          "type": "boolean"
+        },
+        "artifact_fetcher_executable": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Fetcher Executable"
+        },
+        "backend": {
+          "$ref": "#/$defs/ExecutionBackendKind"
+        },
+        "builder_executable": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Builder Executable"
+        },
+        "kubernetes_artifact_pvc_name": {
+          "anyOf": [
+            {
+              "maxLength": 253,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kubernetes Artifact Pvc Name"
+        },
+        "kubernetes_namespace": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kubernetes Namespace"
+        },
+        "kubernetes_service_account_name": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kubernetes Service Account Name"
+        },
+        "kubernetes_workload_pvc_name": {
+          "anyOf": [
+            {
+              "maxLength": 253,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kubernetes Workload Pvc Name"
+        },
+        "language": {
+          "$ref": "#/$defs/ExecutionLanguage"
+        },
+        "limits": {
+          "$ref": "#/$defs/ResourceLimitsV1"
+        },
+        "network_enabled": {
+          "default": false,
+          "title": "Network Enabled",
+          "type": "boolean"
+        },
+        "openshell_sandbox_name": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Openshell Sandbox Name"
+        },
+        "openshell_workspace_mount": {
+          "default": "/workspace",
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Openshell Workspace Mount",
+          "type": "string"
+        },
+        "profile_digest": {
+          "default": "",
+          "title": "Profile Digest",
+          "type": "string"
+        },
+        "profile_id": {
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "read_only_root": {
+          "default": true,
+          "title": "Read Only Root",
+          "type": "boolean"
+        },
+        "run_as_non_root": {
+          "default": true,
+          "title": "Run As Non Root",
+          "type": "boolean"
+        },
+        "runtime_executable": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Runtime Executable",
+          "type": "string"
+        },
+        "runtime_image": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runtime Image"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "toolchain_identity": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Toolchain Identity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile_id",
+        "language",
+        "backend",
+        "runtime_executable",
+        "toolchain_identity"
+      ],
+      "title": "ExecutionProfileV1",
+      "type": "object"
+    },
+    "ExecutionSSHTargetSettings": {
+      "properties": {
+        "credential_binding_id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Credential Binding Id",
+          "type": "string"
+        },
+        "host": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Host",
+          "type": "string"
+        },
+        "host_key_algorithm": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Host Key Algorithm",
+          "type": "string"
+        },
+        "host_key_fingerprint": {
+          "pattern": "^SHA256:[A-Za-z0-9+/]{16,}={0,2}$",
+          "title": "Host Key Fingerprint",
+          "type": "string"
+        },
+        "identity_file": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Identity File",
+          "type": "string"
+        },
+        "known_hosts_file": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Known Hosts File",
+          "type": "string"
+        },
+        "port": {
+          "default": 22,
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        },
+        "remote_persistent_session_name": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Remote Persistent Session Name"
+        },
+        "target_id": {
+          "pattern": "^[a-z][a-z0-9_.-]{0,119}$",
+          "title": "Target Id",
+          "type": "string"
+        },
+        "username": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Username",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_id",
+        "host",
+        "username",
+        "host_key_algorithm",
+        "host_key_fingerprint",
+        "credential_binding_id",
+        "identity_file",
+        "known_hosts_file"
+      ],
+      "title": "ExecutionSSHTargetSettings",
+      "type": "object"
+    },
+    "ResourceLimitsV1": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_bytes": {
+          "default": 268435456,
+          "minimum": 1024,
+          "title": "Artifact Bytes",
+          "type": "integer"
+        },
+        "cpu_time_seconds": {
+          "default": 300,
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Cpu Time Seconds",
+          "type": "integer"
+        },
+        "memory_bytes": {
+          "default": 536870912,
+          "minimum": 16777216,
+          "title": "Memory Bytes",
+          "type": "integer"
+        },
+        "process_count": {
+          "default": 64,
+          "maximum": 4096,
+          "minimum": 1,
+          "title": "Process Count",
+          "type": "integer"
+        },
+        "stderr_bytes": {
+          "default": 65536,
+          "minimum": 1024,
+          "title": "Stderr Bytes",
+          "type": "integer"
+        },
+        "stdout_bytes": {
+          "default": 65536,
+          "minimum": 1024,
+          "title": "Stdout Bytes",
+          "type": "integer"
+        },
+        "wall_time_seconds": {
+          "default": 300,
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Wall Time Seconds",
+          "type": "integer"
+        },
+        "writable_bytes": {
+          "default": 268435456,
+          "minimum": 1048576,
+          "title": "Writable Bytes",
+          "type": "integer"
+        }
+      },
+      "title": "ResourceLimitsV1",
+      "type": "object"
+    },
+    "RuntimeNatsManifestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "ack_wait_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Ack Wait Seconds",
+          "type": "number"
+        },
+        "client_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Client Name"
+        },
+        "credentials_file_env_var": {
+          "default": "NATS_CREDENTIALS_FILE",
+          "title": "Credentials File Env Var",
+          "type": "string"
+        },
+        "duplicate_window_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Duplicate Window Seconds",
+          "type": "number"
+        },
+        "jetstream_enabled": {
+          "title": "Jetstream Enabled",
+          "type": "boolean"
+        },
+        "max_deliver": {
+          "minimum": 1,
+          "title": "Max Deliver",
+          "type": "integer"
+        },
+        "password": {
+          "$ref": "#/$defs/RuntimeSecretReferenceV1"
+        },
+        "presence_max_age_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Presence Max Age Seconds"
+        },
+        "process_consumer_inactive_threshold_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Process Consumer Inactive Threshold Seconds",
+          "type": "number"
+        },
+        "replicas": {
+          "minimum": 1,
+          "title": "Replicas",
+          "type": "integer"
+        },
+        "servers": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Servers",
+          "type": "array"
+        },
+        "storage": {
+          "title": "Storage",
+          "type": "string"
+        },
+        "subject_prefix": {
+          "title": "Subject Prefix",
+          "type": "string"
+        },
+        "user": {
+          "$ref": "#/$defs/RuntimeSecretReferenceV1"
+        },
+        "work_max_age_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Work Max Age Seconds"
+        }
+      },
+      "required": [
+        "servers",
+        "jetstream_enabled",
+        "subject_prefix",
+        "storage",
+        "replicas",
+        "ack_wait_seconds",
+        "max_deliver",
+        "duplicate_window_seconds",
+        "process_consumer_inactive_threshold_seconds",
+        "user",
+        "password"
+      ],
+      "title": "RuntimeNatsManifestV1",
+      "type": "object"
+    },
+    "RuntimeSecretReferenceV1": {
+      "additionalProperties": false,
+      "description": "Environment/file reference; secret material never enters a manifest.",
+      "properties": {
+        "env_var": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Env Var",
+          "type": "string"
+        },
+        "file_env_var": {
+          "maxLength": 245,
+          "minLength": 1,
+          "title": "File Env Var",
+          "type": "string"
+        }
+      },
+      "required": [
+        "env_var",
+        "file_env_var"
+      ],
+      "title": "RuntimeSecretReferenceV1",
+      "type": "object"
+    },
+    "RuntimeStorageManifestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "enum": [
+            "sqlite",
+            "postgres"
+          ],
+          "title": "Backend",
+          "type": "string"
+        },
+        "postgres_dsn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimeSecretReferenceV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sqlite_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sqlite Path"
+        }
+      },
+      "required": [
+        "backend"
+      ],
+      "title": "RuntimeStorageManifestV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/runtime-manifests/v1/ExecutionControllerRuntimeManifestV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifact_store_path": {
+      "title": "Artifact Store Path",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "controller": {
+      "$ref": "#/$defs/ExecutionControllerSettingsV1"
+    },
+    "instance_name": {
+      "title": "Instance Name",
+      "type": "string"
+    },
+    "kubectl_executable": {
+      "title": "Kubectl Executable",
+      "type": "string"
+    },
+    "kubernetes_network_policy_enforced": {
+      "title": "Kubernetes Network Policy Enforced",
+      "type": "boolean"
+    },
+    "maximum_artifact_bytes": {
+      "minimum": 1,
+      "title": "Maximum Artifact Bytes",
+      "type": "integer"
+    },
+    "profiles": {
+      "items": {
+        "$ref": "#/$defs/ExecutionProfileV1"
+      },
+      "title": "Profiles",
+      "type": "array"
+    },
+    "run_path": {
+      "title": "Run Path",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "service": {
+      "const": "execution_controller",
+      "default": "execution_controller",
+      "title": "Service",
+      "type": "string"
+    },
+    "source_config_schema_version": {
+      "minimum": 1,
+      "title": "Source Config Schema Version",
+      "type": "integer"
+    },
+    "source_config_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Config Sha256",
+      "type": "string"
+    },
+    "ssh_enabled": {
+      "title": "Ssh Enabled",
+      "type": "boolean"
+    },
+    "ssh_executable": {
+      "title": "Ssh Executable",
+      "type": "string"
+    },
+    "ssh_lease_ttl_seconds": {
+      "minimum": 1,
+      "title": "Ssh Lease Ttl Seconds",
+      "type": "integer"
+    },
+    "ssh_targets": {
+      "items": {
+        "$ref": "#/$defs/ExecutionSSHTargetSettings"
+      },
+      "title": "Ssh Targets",
+      "type": "array"
+    },
+    "ssh_transcript_limit_bytes": {
+      "minimum": 1,
+      "title": "Ssh Transcript Limit Bytes",
+      "type": "integer"
+    },
+    "storage": {
+      "$ref": "#/$defs/RuntimeStorageManifestV1"
+    },
+    "team_id": {
+      "title": "Team Id",
+      "type": "string"
+    },
+    "transport": {
+      "$ref": "#/$defs/RuntimeNatsManifestV1"
+    },
+    "workspace_path": {
+      "title": "Workspace Path",
+      "type": "string"
+    }
+  },
+  "required": [
+    "content_sha256",
+    "source_config_schema_version",
+    "source_config_sha256",
+    "instance_name",
+    "team_id",
+    "workspace_path",
+    "storage",
+    "transport",
+    "artifact_store_path",
+    "run_path",
+    "maximum_artifact_bytes",
+    "profiles",
+    "kubectl_executable",
+    "kubernetes_network_policy_enforced",
+    "ssh_enabled",
+    "ssh_executable",
+    "ssh_lease_ttl_seconds",
+    "ssh_transcript_limit_bytes",
+    "ssh_targets",
+    "controller"
+  ],
+  "title": "ExecutionControllerRuntimeManifestV1",
+  "type": "object"
+}

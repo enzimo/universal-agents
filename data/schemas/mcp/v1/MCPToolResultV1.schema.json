@@ -1,0 +1,68 @@
+{
+  "$defs": {
+    "JsonValue": {}
+  },
+  "$id": "https://universal-agents.dev/schemas/mcp/v1/MCPToolResultV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "MCP-native result; Strands projection remains in the agent adapter.",
+  "properties": {
+    "_meta": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Meta"
+    },
+    "content": {
+      "items": {
+        "additionalProperties": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "type": "object"
+      },
+      "title": "Content",
+      "type": "array"
+    },
+    "isError": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Iserror"
+    },
+    "structuredContent": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Structuredcontent"
+    }
+  },
+  "required": [
+    "content"
+  ],
+  "title": "MCPToolResultV1",
+  "type": "object"
+}

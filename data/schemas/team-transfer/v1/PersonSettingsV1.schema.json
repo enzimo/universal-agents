@@ -1,0 +1,163 @@
+{
+  "$defs": {
+    "EndpointKind": {
+      "description": "What protocol an endpoint speaks, which decides how a key is tested and sent.",
+      "enum": [
+        "openai_compatible",
+        "openai",
+        "anthropic",
+        "gemini",
+        "xai"
+      ],
+      "title": "EndpointKind",
+      "type": "string"
+    },
+    "PersonModelProfileV1": {
+      "additionalProperties": false,
+      "description": "A person's own model, as they saved and tested it.\n\n``base_url`` is the address that answered the test (with or without\n``/v1``, ``model_providers.connection_test.check_endpoint_address``).\n``context_window_tokens`` is None when the person did not say; agents\nthen use the window of the model they would otherwise use.",
+      "properties": {
+        "api_mode": {
+          "default": "chat_completions",
+          "enum": [
+            "chat_completions",
+            "responses"
+          ],
+          "title": "Api Mode",
+          "type": "string"
+        },
+        "base_url": {
+          "maxLength": 520,
+          "minLength": 1,
+          "title": "Base Url",
+          "type": "string"
+        },
+        "context_window_tokens": {
+          "anyOf": [
+            {
+              "minimum": 1024,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context Window Tokens"
+        },
+        "kind": {
+          "$ref": "#/$defs/EndpointKind"
+        },
+        "model_id": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "supports_files": {
+          "default": false,
+          "title": "Supports Files",
+          "type": "boolean"
+        },
+        "supports_images": {
+          "default": false,
+          "title": "Supports Images",
+          "type": "boolean"
+        },
+        "tested_at_utc": {
+          "format": "date-time",
+          "title": "Tested At Utc",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "base_url",
+        "model_id",
+        "tested_at_utc"
+      ],
+      "title": "PersonModelProfileV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/PersonSettingsV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One person's record (module docstring); ``uses_team_keys`` None means \"never decided\": allowed.",
+  "properties": {
+    "changed_at_utc": {
+      "format": "date-time",
+      "title": "Changed At Utc",
+      "type": "string"
+    },
+    "changed_by_person_id": {
+      "anyOf": [
+        {
+          "maxLength": 240,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Changed By Person Id"
+    },
+    "own_model": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PersonModelProfileV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "person_id": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Person Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "shared_folders": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 20,
+      "title": "Shared Folders",
+      "type": "array"
+    },
+    "team_id": {
+      "maxLength": 120,
+      "minLength": 1,
+      "title": "Team Id",
+      "type": "string"
+    },
+    "uses_team_keys": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Uses Team Keys"
+    }
+  },
+  "required": [
+    "team_id",
+    "person_id",
+    "changed_at_utc"
+  ],
+  "title": "PersonSettingsV1",
+  "type": "object"
+}

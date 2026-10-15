@@ -1,0 +1,175 @@
+{
+  "$defs": {
+    "ReleaseDefinitionChangeV1": {
+      "additionalProperties": false,
+      "description": "What a deploy changed in a scheduled worker's tools or prompt.",
+      "properties": {
+        "changed_at_utc": {
+          "format": "date-time",
+          "title": "Changed At Utc",
+          "type": "string"
+        },
+        "declaration_changed": {
+          "default": false,
+          "title": "Declaration Changed",
+          "type": "boolean"
+        },
+        "prompt_changed": {
+          "default": false,
+          "title": "Prompt Changed",
+          "type": "boolean"
+        },
+        "tools_added": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Tools Added",
+          "type": "array"
+        },
+        "tools_removed": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Tools Removed",
+          "type": "array"
+        }
+      },
+      "required": [
+        "changed_at_utc"
+      ],
+      "title": "ReleaseDefinitionChangeV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/scheduled-workers/v1/WorkerDefinitionRecordV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The target definition as saved with a schedule's worker policy.\n\nKept beside the binding so a paused schedule can show what changed. It is\nevidence for review, never authority. Team-written definitions keep their\nown prompt text; shipped definitions keep only a fingerprint of theirs.",
+  "properties": {
+    "agent_type": {
+      "title": "Agent Type",
+      "type": "string"
+    },
+    "authored_digest": {
+      "title": "Authored Digest",
+      "type": "string"
+    },
+    "backstory": {
+      "title": "Backstory",
+      "type": "string"
+    },
+    "default_tools": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Default Tools",
+      "type": "array"
+    },
+    "include_shared_prompt": {
+      "title": "Include Shared Prompt",
+      "type": "boolean"
+    },
+    "last_release_change": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReleaseDefinitionChangeV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "launch_digest": {
+      "title": "Launch Digest",
+      "type": "string"
+    },
+    "own_prompt": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Own Prompt"
+    },
+    "own_prompt_digest": {
+      "title": "Own Prompt Digest",
+      "type": "string"
+    },
+    "policy_revision": {
+      "minimum": 1,
+      "title": "Policy Revision",
+      "type": "integer"
+    },
+    "prompt_digest": {
+      "title": "Prompt Digest",
+      "type": "string"
+    },
+    "recorded_at_utc": {
+      "format": "date-time",
+      "title": "Recorded At Utc",
+      "type": "string"
+    },
+    "role": {
+      "title": "Role",
+      "type": "string"
+    },
+    "schedule_id": {
+      "title": "Schedule Id",
+      "type": "string"
+    },
+    "skills_enabled": {
+      "title": "Skills Enabled",
+      "type": "boolean"
+    },
+    "source": {
+      "enum": [
+        "release",
+        "team"
+      ],
+      "title": "Source",
+      "type": "string"
+    },
+    "source_path": {
+      "title": "Source Path",
+      "type": "string"
+    },
+    "team_id": {
+      "title": "Team Id",
+      "type": "string"
+    },
+    "tool_names": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Tool Names",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schedule_id",
+    "team_id",
+    "policy_revision",
+    "agent_type",
+    "source",
+    "source_path",
+    "authored_digest",
+    "launch_digest",
+    "role",
+    "own_prompt_digest",
+    "prompt_digest",
+    "include_shared_prompt",
+    "backstory",
+    "skills_enabled"
+  ],
+  "title": "WorkerDefinitionRecordV1",
+  "type": "object"
+}

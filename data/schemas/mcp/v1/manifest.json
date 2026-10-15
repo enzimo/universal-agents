@@ -1,0 +1,42 @@
+{
+  "contract": "universal-agents-mcp-broker",
+  "json_schema_draft": "2020-12",
+  "schema_version": 1,
+  "schemas": [
+    {
+      "filename": "MCPDiscoveryRequestV1.schema.json",
+      "model": "MCPDiscoveryRequestV1",
+      "sha256": "dda6498a39aa9ef26b56dfc84ba240c7c4073bda48dfe44abbedcb5618043ecc"
+    },
+    {
+      "filename": "MCPDiscoveryResponseV1.schema.json",
+      "model": "MCPDiscoveryResponseV1",
+      "sha256": "16c588fb0dd0613024bf28172dff9b0b4beaa871920a4f6d045a7966245b3c7a"
+    },
+    {
+      "filename": "MCPInvocationRequestV1.schema.json",
+      "model": "MCPInvocationRequestV1",
+      "sha256": "702c62b1c5604cd2497efd707866dacdd231feee11bcb36e5a92f6527d4a5d01"
+    },
+    {
+      "filename": "MCPInvocationResponseV1.schema.json",
+      "model": "MCPInvocationResponseV1",
+      "sha256": "161120dbe481ef940d2ebb310c1e619598f06fa1b5be3e69c4f1b65ddc1c751f"
+    },
+    {
+      "filename": "MCPHostLifecycleRequestV1.schema.json",
+      "model": "MCPHostLifecycleRequestV1",
+      "sha256": "122899baa51963625a7afed418f9dce6de3d87b92153453a3e0398d7a9dc358b"
+    },
+    {
+      "filename": "MCPToolDefinitionV1.schema.json",
+      "model": "MCPToolDefinitionV1",
+      "sha256": "8ea8afc8800ee7d7ef6235ea4c8b4ddd9f31ba44f5cf4d7c1a8221403a8e1511"
+    },
+    {
+      "filename": "MCPToolResultV1.schema.json",
+      "model": "MCPToolResultV1",
+      "sha256": "c912cedc8286416a831d7ac942e847619e062be436b31a1a0c35eea076083b7e"
+    }
+  ]
+}

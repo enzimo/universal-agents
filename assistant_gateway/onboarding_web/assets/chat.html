@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en" data-color-mode="dark" data-ua-background-hold>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Universal Agents Web Chat</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/workflow.css">
+  <script src="/appearance.js"></script>
+</head>
+<body class="chat-body">
+  <canvas id="chat-mesh-canvas" data-ua-metallic-mesh aria-hidden="true"></canvas>
+  <main class="chat-preview" aria-labelledby="chat-title">
+    <section id="chat-auth" class="chat-sign-in">
+      <h1 id="chat-title" class="ua-intro-title chat-greeting-title"></h1>
+      <div id="chat-auth-card" class="chat-auth-panel is-intro-hidden" inert>
+        <form id="chat-auth-form" class="chat-auth-form">
+          <label for="chat-auth-token">Web Chat token or invitation code</label>
+          <p id="chat-auth-copy" class="chat-auth-copy">Use your reusable Web Chat token or a one-time invitation code from an administrator.</p>
+          <div class="credential-input">
+            <input id="chat-auth-token" class="input" type="password" autocomplete="current-password" aria-describedby="chat-auth-copy">
+            <button id="chat-auth-reveal" class="credential-reveal-button" type="button" title="Show or hide value" aria-label="Show or hide value" aria-controls="chat-auth-token" aria-pressed="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+            </button>
+          </div>
+          <p id="chat-auth-error" class="runtime-test-status is-error" hidden></p>
+          <button id="chat-auth-submit" class="button primary" type="submit">Unlock Chat</button>
+          <button id="chat-auth-forget" class="chat-auth-forget" type="button" hidden></button>
+        </form>
+      </div>
+      <img class="chat-sign-in-mark" src="/agent-mark.png" alt="">
+    </section>
+
+    <section id="chat-app" class="chat-app" hidden>
+      <aside class="chat-sidebar">
+        <div class="chat-sidebar-header">
+          <a class="brand-lockup chat-brand" href="/config-editor" aria-label="Open configuration editor">
+            <img class="brand-mark" src="/agent-mark.png" alt="">
+            <span data-assistant-name>Lisa</span>
+          </a>
+          <button id="settings-button" class="settings-button" type="button" aria-label="Open Settings" data-tooltip="Settings">
+            <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.09A1.7 1.7 0 0 0 9 19.36a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15 1.7 1.7 0 0 0 3.09 14H3v-4h.09A1.7 1.7 0 0 0 4.64 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63h.01A1.7 1.7 0 0 0 10 3.09V3h4v.09A1.7 1.7 0 0 0 15 4.64a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9v.01A1.7 1.7 0 0 0 20.91 10H21v4h-.09A1.7 1.7 0 0 0 19.4 15Z"></path>
+            </svg>
+            <span id="settings-button-count" class="settings-button-count" aria-hidden="true" hidden></span>
+          </button>
+        </div>
+        <button id="new-thread-button" class="button primary new-chat-button" type="button">New Chat</button>
+        <section class="chat-thread-history" aria-labelledby="chat-thread-history-label">
+          <div id="chat-thread-history-label" class="chat-thread-search">Thread history</div>
+          <div id="thread-list" class="thread-list" aria-label="Thread history"></div>
+        </section>
+        <div id="debug-context-controls" class="chat-debug-controls" hidden>
+          <label class="chat-debug-toggle">
+            <input id="debug-context-toggle" type="checkbox">
+            <span>Dump Context</span>
+          </label>
+          <label class="chat-debug-field" for="debug-context-mode">
+            <span>Mode</span>
+            <select id="debug-context-mode">
+              <option value="always">always</option>
+              <option value="on_error">on error</option>
+              <option value="on_budget_warning">on budget warn</option>
+            </select>
+          </label>
+          <div id="debug-context-last-dump" class="chat-debug-last-dump" hidden>
+            <span>Last context dump</span>
+            <strong id="debug-context-last-dump-value">Never</strong>
+            <em id="debug-context-dump-id" hidden></em>
+          </div>
+          <p id="debug-context-status" class="chat-debug-status" hidden></p>
+        </div>
+        <div id="chat-activity" class="chat-activity" hidden></div>
+        <div class="chat-account-controls">
+          <div class="chat-account-meta">
+            <strong id="chat-account-name">Web Chat user</strong>
+            <p id="chat-connection-status" class="chat-version" role="status" aria-live="polite">Connecting live updates…</p>
+            <p id="chat-version" class="chat-version" aria-label="Universal Agents version" hidden></p>
+          </div>
+        </div>
+      </aside>
+
+      <section class="chat-main" aria-label="Conversation">
+        <div id="message-list" class="message-list"></div>
+        <form id="message-form" class="message-form">
+          <label class="sr-only" for="message-input">Message</label>
+          <input id="message-attachment-input" type="file" multiple hidden>
+          <div id="message-attachment-preview" class="message-attachment-preview" hidden></div>
+          <div class="message-input-row">
+            <button id="message-attach-button" class="composer-icon-button" type="button" title="Attach files" aria-label="Attach files">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21.4 11.6-9.7 9.7a6 6 0 0 1-8.5-8.5l9.7-9.7a4 4 0 0 1 5.7 5.7l-9.8 9.7a2 2 0 0 1-2.8-2.8l9.1-9.1"></path></svg>
+            </button>
+            <textarea id="message-input" class="message-input" rows="3" placeholder="Type your message here..."></textarea>
+            <button class="button primary send-icon-button" type="submit" aria-label="Send message">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-7-7 14-2-5-5-2Z"></path><path d="m12 14 7-9"></path></svg>
+            </button>
+          </div>
+        </form>
+      </section>
+    </section>
+
+    <section id="objectives-app" class="objectives-app" aria-labelledby="objectives-title" hidden>
+      <header class="objectives-header">
+        <a class="brand-lockup objectives-brand" href="/webchat" aria-label="Return to Web Chat">
+          <img class="brand-mark" src="/agent-mark.png" alt="">
+          <span data-assistant-name>Lisa</span>
+        </a>
+        <div class="objectives-heading">
+          <p class="page-kicker">Trusted Runtime Controls</p>
+          <h1 id="objectives-title">Runtime Controls</h1>
+          <p>Review and control your Objectives, scheduled work, and MCP resources.</p>
+        </div>
+        <div class="objectives-actions">
+          <span id="objectives-updated-at" class="objectives-updated-at" aria-live="polite"></span>
+          <button id="objectives-refresh" class="button ghost" type="button">Refresh</button>
+          <button id="objectives-logout" class="button ghost" type="button">Log out</button>
+        </div>
+      </header>
+      <div class="settings-status-slot objectives-status-slot">
+        <p id="objectives-status" class="settings-status" role="status" aria-live="polite" hidden></p>
+      </div>
+      <nav class="runtime-control-tabs" aria-label="Runtime resource type">
+        <button id="runtime-objectives-tab" class="settings-tab is-active" type="button" aria-selected="true">Objectives</button>
+        <button id="runtime-schedules-tab" class="settings-tab" type="button" aria-selected="false">Schedules</button>
+        <button id="runtime-mcp-tab" class="settings-tab" type="button" aria-selected="false">MCP</button>
+      </nav>
+      <div id="objectives-content" class="objectives-content"></div>
+    </section>
+
+    <section id="workspace-app" class="workspace-app" aria-labelledby="workspace-title" hidden>
+      <header class="workspace-header">
+        <a class="brand-lockup workspace-brand" href="/webchat" aria-label="Return to Web Chat">
+          <img class="brand-mark" src="/agent-mark.png" alt="">
+          <span data-assistant-name>Lisa</span>
+        </a>
+        <div class="workspace-heading">
+          <p class="page-kicker">Workspace Files</p>
+          <h1 id="workspace-title">Workspace Files</h1>
+          <p>Browse and preview files. The viewer never changes them. Select an item in your own folder, then use Share… or Send… above the preview to give it to someone.</p>
+        </div>
+        <div class="workspace-actions">
+          <button id="workspace-refresh" class="button ghost" type="button">Refresh</button>
+          <button id="workspace-logout" class="button ghost" type="button">Log out</button>
+        </div>
+      </header>
+      <div class="settings-status-slot workspace-status-slot">
+        <p id="workspace-status" class="settings-status" role="status" aria-live="polite" hidden></p>
+      </div>
+      <div class="workspace-layout">
+        <aside class="workspace-browser-pane" aria-label="Workspace file browser">
+          <div class="workspace-browser-heading">
+            <strong id="workspace-tree-heading">Workspace Files</strong>
+            <span>Read only</span>
+          </div>
+          <div id="workspace-tree" class="workspace-tree" role="tree" aria-label="Workspace Files"></div>
+        </aside>
+        <section class="workspace-viewer-pane" aria-labelledby="workspace-viewer-title">
+          <header class="workspace-viewer-heading">
+            <div>
+              <h2 id="workspace-viewer-title">Select a file</h2>
+              <p id="workspace-viewer-meta"></p>
+            </div>
+            <div id="workspace-viewer-tools" class="workspace-viewer-tools" hidden></div>
+            <div id="workspace-item-actions" class="workspace-item-actions" role="group" hidden></div>
+          </header>
+          <div id="workspace-viewer" class="workspace-viewer"></div>
+        </section>
+      </div>
+    </section>
+
+    <section id="status-app" class="workspace-app status-app" aria-labelledby="status-title" hidden>
+      <header class="workspace-header">
+        <a class="brand-lockup workspace-brand" href="/webchat" aria-label="Return to Web Chat">
+          <img class="brand-mark" src="/agent-mark.png" alt="">
+          <span data-assistant-name>Lisa</span>
+        </a>
+        <div class="workspace-heading">
+          <p class="page-kicker">Status</p>
+          <h1 id="status-title">Status</h1>
+          <p>What needs attention now: problems first, then settings that work differently than saved, then notes. A finding disappears once it is fixed.</p>
+        </div>
+        <div class="workspace-actions">
+          <span id="status-updated-at" class="objectives-updated-at" aria-live="polite"></span>
+          <button id="status-refresh" class="button ghost" type="button">Refresh</button>
+          <button id="status-logout" class="button ghost" type="button">Log out</button>
+        </div>
+      </header>
+      <div class="settings-status-slot workspace-status-slot">
+        <p id="status-status" class="settings-status" role="status" aria-live="polite" hidden></p>
+      </div>
+      <div id="status-content" class="status-content"></div>
+    </section>
+
+    <section id="knowledge-app" class="workspace-app knowledge-app" aria-labelledby="knowledge-title" hidden>
+      <header class="workspace-header">
+        <a class="brand-lockup workspace-brand" href="/webchat" aria-label="Return to Web Chat">
+          <img class="brand-mark" src="/agent-mark.png" alt="">
+          <span data-assistant-name>Lisa</span>
+        </a>
+        <div class="workspace-heading">
+          <p class="page-kicker">Knowledge</p>
+          <h1 id="knowledge-title">Knowledge</h1>
+          <p>Pages you and your agents write together: how-tos, decisions, lessons and references. Team pages are for everyone on the team; personal pages are only for you and the agents working for you.</p>
+        </div>
+        <div class="workspace-actions">
+          <button id="knowledge-new" class="button primary" type="button">New page</button>
+          <button id="knowledge-refresh" class="button ghost" type="button">Refresh</button>
+          <button id="knowledge-logout" class="button ghost" type="button">Log out</button>
+        </div>
+      </header>
+      <div class="settings-status-slot workspace-status-slot">
+        <p id="knowledge-status" class="settings-status" role="status" aria-live="polite" hidden></p>
+      </div>
+      <nav class="permission-tabs knowledge-tabs" aria-label="Knowledge views" role="tablist">
+        <button id="knowledge-team-tab" class="permission-tab is-active" type="button" role="tab" aria-selected="true">Team</button>
+        <button id="knowledge-personal-tab" class="permission-tab" type="button" role="tab" aria-selected="false">Personal</button>
+        <button id="knowledge-proposals-tab" class="permission-tab" type="button" role="tab" aria-selected="false">My proposals <span id="knowledge-proposals-count" class="settings-tab-count" hidden></span></button>
+      </nav>
+      <div class="workspace-layout knowledge-layout">
+        <aside class="workspace-browser-pane knowledge-list-pane" aria-label="Knowledge list">
+          <form id="knowledge-search" class="knowledge-search" role="search">
+            <label class="sr-only" for="knowledge-query">Search pages</label>
+            <input id="knowledge-query" class="memory-editor-input" type="search" placeholder="Search pages" maxlength="400">
+            <button class="button ghost" type="submit">Search</button>
+            <label class="sr-only" for="knowledge-page-status">Page status</label>
+            <select id="knowledge-page-status" class="memory-editor-input">
+              <option value="active">Current pages</option>
+              <option value="archived">Archived pages</option>
+            </select>
+          </form>
+          <div id="knowledge-list" class="knowledge-list"></div>
+        </aside>
+        <section class="workspace-viewer-pane" aria-labelledby="knowledge-viewer-title">
+          <header class="workspace-viewer-heading">
+            <div>
+              <h2 id="knowledge-viewer-title">Select a page</h2>
+              <p id="knowledge-viewer-meta"></p>
+            </div>
+            <div id="knowledge-viewer-tools" class="workspace-viewer-tools knowledge-viewer-tools" role="group" aria-label="Page actions" hidden></div>
+          </header>
+          <div id="knowledge-viewer" class="workspace-viewer knowledge-viewer"></div>
+        </section>
+      </div>
+    </section>
+
+    <section id="chat-settings-overlay" class="setup-overlay chat-settings-overlay" aria-hidden="true" hidden>
+      <div id="settings-dialog" class="setup-dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title" tabindex="-1">
+        <header class="settings-dialog-header">
+          <div>
+            <p class="page-kicker">Trusted Runtime Controls</p>
+            <h2 id="settings-dialog-title">Settings</h2>
+            <p class="settings-trust-copy">Review access requests, see who can use what and whose accounts agents use, view the live team and your tasks, and manage memories and appearance.</p>
+          </div>
+          <button id="settings-dialog-close" class="settings-close-button" type="button" aria-label="Close Settings">×</button>
+        </header>
+        <div class="settings-layout">
+          <div class="settings-primary-rail">
+            <nav class="settings-primary-tabs" aria-label="Settings views" role="tablist">
+              <button id="settings-inbox-tab" class="settings-primary-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-inbox-panel">Inbox <span id="settings-inbox-count" class="settings-tab-count" hidden></span></button>
+              <button id="settings-access-tab" class="settings-primary-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-access-panel">Access</button>
+              <button id="settings-accounts-tab" class="settings-primary-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-accounts-panel">Accounts</button>
+              <button id="settings-team-tab" class="settings-primary-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="settings-team-panel">Team</button>
+              <button id="settings-tasks-tab" class="settings-primary-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-tasks-panel">Tasks</button>
+              <button id="settings-memories-tab" class="settings-primary-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-memories-panel">Memories</button>
+              <button id="settings-appearance-tab" class="settings-primary-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-appearance-panel">Appearance</button>
+            </nav>
+            <div class="settings-page-links">
+              <div class="chat-alerts-control">
+                <span id="chat-alerts-label">Chat Alerts</span>
+                <label class="toggle"><input id="browser-notifications-toggle" type="checkbox" role="switch" aria-labelledby="chat-alerts-label"><span></span></label>
+              </div>
+              <p id="browser-notifications-status" class="task-metadata" role="status"></p>
+              <a id="settings-workspace-link" class="settings-objectives-link" href="/webchat?view=files" target="_blank" rel="noopener noreferrer" hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path><path d="M3 9h18"></path></svg>
+                <span>Workspace</span>
+              </a>
+              <a id="settings-knowledge-link" class="settings-objectives-link" href="/webchat?view=knowledge" target="_blank" rel="noopener noreferrer" hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5Z"></path><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5a1.5 1.5 0 0 0 1.5-1.5Z"></path></svg>
+                <span>Knowledge</span>
+                <span id="settings-knowledge-count" class="settings-tab-count" hidden></span>
+              </a>
+              <a class="settings-objectives-link" href="/webchat?view=objectives" target="_blank" rel="noopener noreferrer">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 5h5v5"></path><path d="m19 5-8 8"></path><path d="M18 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"></path></svg>
+                <span>Runtime</span>
+              </a>
+              <a id="settings-status-link" class="settings-objectives-link" href="/webchat?view=status" target="_blank" rel="noopener noreferrer" hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"></path></svg>
+                <span>Status</span>
+              </a>
+              <button id="settings-logout-button" class="button chat-logout-button" type="button">Log out</button>
+            </div>
+          </div>
+          <div class="settings-panels">
+            <section id="settings-inbox-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-inbox-tab" hidden>
+              <div class="settings-panel-heading">
+                <div>
+                  <h3>Inbox</h3>
+                  <p>Access requests from agents and notices about access changes. Opening a request never approves it.</p>
+                </div>
+                <div class="settings-panel-actions">
+                  <a class="button ghost settings-refresh-button inbox-workflows-link" href="/workflows">Open Workflows</a>
+                  <button id="settings-inbox-refresh" class="button ghost settings-refresh-button" type="button">Refresh</button>
+                </div>
+              </div>
+              <div class="settings-status-slot">
+                <p id="settings-inbox-status" class="settings-status" role="status" aria-live="polite" hidden></p>
+              </div>
+              <div id="settings-access-inbox" class="access-inbox"></div>
+            </section>
+            <section id="settings-access-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-access-tab" hidden>
+              <div class="settings-panel-heading">
+                <div>
+                  <h3>Access</h3>
+                  <p>Who can use which tools, where that access came from, and what is blocked. Opening this page never changes access.</p>
+                </div>
+                <button id="settings-access-refresh" class="button ghost settings-refresh-button" type="button">Refresh</button>
+              </div>
+              <div id="settings-access-map" class="access-map"></div>
+            </section>
+            <section id="settings-accounts-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-accounts-tab" hidden>
+              <div class="settings-panel-heading">
+                <div>
+                  <h3>Accounts</h3>
+                  <p>Whose account agents use for each service. Shared: the team's account serves anyone without their own. Private: agents use only each person's own account.</p>
+                </div>
+                <button id="settings-accounts-refresh" class="button ghost settings-refresh-button" type="button">Refresh</button>
+              </div>
+              <div class="settings-status-slot">
+                <p id="settings-accounts-status" class="settings-status" role="status" aria-live="polite" hidden></p>
+              </div>
+              <div id="settings-accounts-content" class="settings-content"></div>
+            </section>
+            <section id="settings-team-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-team-tab">
+              <div class="settings-panel-heading">
+                <div>
+                  <h3>Team</h3>
+                  <p>Live team presence, agent classes, MCP connections and installed procedures.</p>
+                </div>
+                <button id="settings-team-refresh" class="button ghost settings-refresh-button" type="button">Refresh</button>
+              </div>
+              <div class="settings-status-slot">
+                <p id="settings-team-status" class="settings-status" role="status" aria-live="polite" hidden></p>
+              </div>
+              <div id="settings-team-content" class="settings-content"></div>
+              <section id="settings-procedures" class="settings-procedures"></section>
+            </section>
+            <section id="settings-tasks-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-tasks-tab" hidden>
+              <div class="settings-panel-heading">
+                <div>
+                  <h3>Tasks</h3>
+                  <p>Your current, queued, and waiting work across all running agents. Each agent updates every 10 seconds.</p>
+                </div>
+                <div class="tasks-actions">
+                  <button class="button ghost tasks-refresh" type="button">Refresh</button>
+                  <button class="button danger tasks-purge" type="button" disabled>Purge queue</button>
+                </div>
+              </div>
+              <p class="tasks-summary"></p>
+              <div class="settings-status-slot">
+                <p class="settings-status tasks-status" role="status" aria-live="polite" hidden></p>
+              </div>
+              <div class="tasks-confirmation" role="region" aria-label="Confirm task removal" hidden></div>
+              <div class="settings-content tasks-content"></div>
+            </section>
+            <section id="settings-memories-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-memories-tab" hidden>
+              <div class="settings-panel-heading">
+                <div>
+                  <h3>Memories</h3>
+                  <p>Review the active facts kept for you and your team.</p>
+                </div>
+                <div class="settings-panel-actions">
+                  <button id="settings-memories-new" class="button primary settings-refresh-button" type="button" hidden>New</button>
+                  <button id="settings-memories-refresh" class="button ghost settings-refresh-button" type="button">Refresh</button>
+                </div>
+              </div>
+              <nav class="permission-tabs memory-tabs" aria-label="Memory categories" role="tablist">
+                <button id="memory-personal-tab" class="permission-tab is-active" type="button" role="tab" aria-selected="true">Personal</button>
+                <button id="memory-team-tab" class="permission-tab" type="button" role="tab" aria-selected="false">Team</button>
+              </nav>
+              <div class="settings-status-slot">
+                <p id="settings-memories-status" class="settings-status" role="status" aria-live="polite" hidden></p>
+              </div>
+              <div id="settings-memories-content" class="settings-content memory-content"></div>
+            </section>
+            <section id="settings-appearance-panel" class="settings-panel settings-appearance-panel" role="tabpanel" aria-labelledby="settings-appearance-tab" hidden>
+              <div class="settings-panel-heading">
+                <div>
+                  <h3>Appearance</h3>
+                  <p>Choose the active theme and tune its background.</p>
+                </div>
+                <button id="settings-appearance-reset" class="button ghost settings-refresh-button" type="button">Reset to Defaults</button>
+              </div>
+              <p id="settings-appearance-status" class="settings-status" role="status" aria-live="polite" hidden></p>
+              <div id="settings-appearance-content" class="settings-content settings-appearance-content"></div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="chat-enrollment-overlay" class="setup-overlay chat-enrollment-overlay" aria-hidden="true" hidden>
+      <div class="setup-dialog chat-enrollment-dialog" role="dialog" aria-modal="true" aria-labelledby="chat-enrollment-title">
+        <p class="page-kicker">Permanent Web Chat Access</p>
+        <h2 id="chat-enrollment-title">Finish Setting Up Web Chat</h2>
+        <p id="chat-enrollment-copy" class="setup-intro">
+          Generate a permanent access token. You will use it whenever you need to sign in again.
+        </p>
+        <div class="field generated-token-field">
+          <label for="chat-enrollment-token">Permanent access token</label>
+          <div class="generated-token-control">
+            <div class="generated-token-input-wrap">
+              <input id="chat-enrollment-token" class="input" type="password" autocomplete="off" readonly>
+              <button id="chat-enrollment-reveal" class="token-icon-button" type="button" title="Show or hide token" aria-label="Show or hide token" aria-controls="chat-enrollment-token" aria-pressed="false" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+              </button>
+              <button id="chat-enrollment-copy-button" class="token-icon-button" type="button" title="Copy token" aria-label="Copy token" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              </button>
+            </div>
+            <button id="chat-enrollment-generate-button" class="token-mini-button" type="button">Generate</button>
+          </div>
+          <p id="chat-enrollment-message" class="generated-token-message" aria-live="polite">
+            Generate your token, copy it somewhere safe, then confirm that you saved it.
+          </p>
+        </div>
+        <div class="chat-enrollment-actions">
+          <button id="chat-enrollment-cancel-button" class="button ghost" type="button">Cancel And Log Out</button>
+          <button id="chat-enrollment-complete-button" class="button primary" type="button" disabled>I’ve Saved My Token</button>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="/appearance_customizer.js"></script>
+  <script src="/metallic_mesh.js"></script>
+  <script src="/mesh_motion.js"></script>
+  <script src="/glass_mesh.js"></script>
+  <script src="/ui_motion.js"></script>
+  <script src="/intro_word.js"></script>
+  <script src="/panel_motion.js"></script>
+  <script src="/chat_markdown.js"></script>
+  <script src="/chat_delivery.js"></script>
+  <script src="/workspace_browser.js"></script>
+  <script src="/operational_ids.js"></script>
+  <script src="/credential_controls.js"></script>
+  <script src="/action_feedback.js"></script>
+  <script src="/pagination.js"></script>
+  <script src="/task_controls.js"></script>
+  <script type="module" src="/chat.js"></script>
+</body>
+</html>

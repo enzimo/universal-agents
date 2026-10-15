@@ -1,0 +1,110 @@
+{
+  "$defs": {
+    "AccessLevel": {
+      "description": "How much a grant allows; ordered read < write < full.",
+      "enum": [
+        "read",
+        "write",
+        "full"
+      ],
+      "title": "AccessLevel",
+      "type": "string"
+    },
+    "MCPOperationLevelV1": {
+      "additionalProperties": false,
+      "properties": {
+        "confirmed_at_utc": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confirmed At Utc"
+        },
+        "confirmed_by": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confirmed By"
+        },
+        "confirmed_level": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccessLevel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "hints": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "title": "Hints",
+          "type": "object"
+        },
+        "operation_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Operation Digest",
+          "type": "string"
+        },
+        "suggested_level": {
+          "$ref": "#/$defs/AccessLevel"
+        }
+      },
+      "required": [
+        "operation_digest",
+        "suggested_level"
+      ],
+      "title": "MCPOperationLevelV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/MCPOperationLevelsV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "connection_id": {
+      "title": "Connection Id",
+      "type": "string"
+    },
+    "operations": {
+      "additionalProperties": {
+        "$ref": "#/$defs/MCPOperationLevelV1"
+      },
+      "title": "Operations",
+      "type": "object"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "connection_id"
+  ],
+  "title": "MCPOperationLevelsV1",
+  "type": "object"
+}

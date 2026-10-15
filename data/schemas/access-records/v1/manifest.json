@@ -1,0 +1,17 @@
+{
+  "contract": "universal-agents-access-records",
+  "json_schema_draft": "2020-12",
+  "schema_version": 1,
+  "schemas": [
+    {
+      "filename": "GeneratedAgentProvisioningRecordV1.schema.json",
+      "model": "GeneratedAgentProvisioningRecordV1",
+      "sha256": "631d520f4a1e387fab06ea7a07befc06a095ccecdb5b947584e832dbe22ab838"
+    },
+    {
+      "filename": "ChangeApprovalRecordV1.schema.json",
+      "model": "ChangeApprovalRecordV1",
+      "sha256": "74767d688a6164348128acbe46dbc06f47f24cab1efbc77c7e87175da330b893"
+    }
+  ]
+}

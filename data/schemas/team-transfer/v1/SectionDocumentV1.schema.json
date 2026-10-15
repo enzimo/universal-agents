@@ -1,0 +1,32 @@
+{
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/SectionDocumentV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The JSON stored at ``sections/<name>.json``.\n\n``records`` stays a plain list here; each section validates it with its\nown export models after any one-version-back conversion\n(``team_transfer.sections``).",
+  "properties": {
+    "records": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Records",
+      "type": "array"
+    },
+    "schema_version": {
+      "minimum": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "section": {
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "title": "Section",
+      "type": "string"
+    }
+  },
+  "required": [
+    "section",
+    "schema_version"
+  ],
+  "title": "SectionDocumentV1",
+  "type": "object"
+}

@@ -1,0 +1,81 @@
+## To run manually, set these env variables, make sure your mapped directories exist and then execute docker compose
+# export NETWORK_PUBLIC_ORIGIN=http://127.0.0.1               # set this to the IP where you're hosting the stack. Default is your local machine: http://127.0.0.1
+# export BUILD_VER="ua-bundle:latest"
+# export INSTANCE_NAME="jarvis"                               # give your personal agent a name
+# export HOST_ROOT="/<local_dir>/container_configs"           # define a root folder where all data will be saved
+# export INSTANCE_ROOT="/data"                                # this internal default is fine
+# export SEARXNG_SECRET="your-random-secret"                  # set a secret key for managing searxng (default: AABBCCDD)
+# mkdir -p $HOST_ROOT/$INSTANCE_NAME
+# mkdir -p $HOST_ROOT/secrets
+# openssl rand -hex 32 > $HOST_ROOT/secrets/crawl4ai_api_token
+# chmod 600 $HOST_ROOT/secrets/crawl4ai_api_token
+# The Crawl4AI container reads that token. Universal Agents keeps it in its
+# credential store instead: after the first start, an administrator links it
+# in chat with /link http:crawl4ai team and /link mcp:crawl4ai team.
+# mkdir -p $HOST_ROOT/valkey
+
+secrets:
+  crawl4ai_api_token:
+    file: ${HOST_ROOT}/secrets/crawl4ai_api_token
+
+services:
+  ua:
+    image: ${BUILD_VER:-ua-bundle:latest}
+    container_name: ua
+    ports:
+      - "18090:18090"
+      - "18600:18600"
+    volumes:
+      - ${HOST_ROOT}/${INSTANCE_NAME}:${INSTANCE_ROOT:-/data}
+    environment:
+      - NETWORK_PUBLIC_ORIGIN=${NETWORK_PUBLIC_ORIGIN:-http://127.0.0.1}
+      - TEAM_REFRESH_EXTERNAL_SKILLS=${TEAM_REFRESH_EXTERNAL_SKILLS:-}
+      # Connect to internal docker-compose services
+      - SEARXNG_BASE_URL=http://searxng:8080
+      - CRAWL4AI_BASE_URL=http://crawl4ai:11235
+      - CRAWL4AI_MCP_SERVER_URL=http://crawl4ai:11235/mcp/sse
+    depends_on:
+      - searxng
+      - crawl4ai
+    command: ["run"]
+    restart: unless-stopped
+
+  searxng:
+    # searxng tags: https://hub.docker.com/r/searxng/searxng/tags
+    image: searxng/searxng:2026.6.13-a29cda858
+    volumes:
+      - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    ports:
+      - "8088:8080"
+    environment:
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-AABBCCDD}
+    depends_on:
+      - valkey-searxng
+    restart: unless-stopped
+
+  valkey-searxng:
+    image: valkey/valkey:8-alpine
+    command:
+      - valkey-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    volumes:
+      - ${HOST_ROOT}/valkey:/data
+    restart: unless-stopped
+
+  crawl4ai:
+    # crawl4ai tags: https://hub.docker.com/r/unclecode/crawl4ai/tags
+    image: unclecode/crawl4ai:0.9.2
+    secrets:
+      - source: crawl4ai_api_token
+        target: api_token
+    ports:
+      - "11235:11235"
+    environment:
+      TZ: America/Chicago
+      PYTHONUNBUFFERED: "1"
+      CRAWL4AI_HOOKS_ENABLED: ${CRAWL4AI_HOOKS_ENABLED:-true}
+      CRAWL4AI_EXECUTE_JS_ENABLED: ${CRAWL4AI_EXECUTE_JS_ENABLED:-false}
+    restart: unless-stopped

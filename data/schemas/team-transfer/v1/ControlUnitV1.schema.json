@@ -1,0 +1,77 @@
+{
+  "$defs": {
+    "ControlFileV1": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size": {
+          "minimum": 0,
+          "title": "Size",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "size",
+        "sha256"
+      ],
+      "title": "ControlFileV1",
+      "type": "object"
+    },
+    "ControlKind": {
+      "enum": [
+        "soul",
+        "llm_overrides",
+        "team_composition",
+        "team_templates",
+        "agent_definitions",
+        "agent_bundle",
+        "specialist",
+        "objective_profile",
+        "other"
+      ],
+      "title": "ControlKind",
+      "type": "string"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/ControlUnitV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One file, or one agent bundle folder, relative to ``control/``.",
+  "properties": {
+    "files": {
+      "items": {
+        "$ref": "#/$defs/ControlFileV1"
+      },
+      "minItems": 1,
+      "title": "Files",
+      "type": "array"
+    },
+    "kind": {
+      "$ref": "#/$defs/ControlKind"
+    },
+    "unit": {
+      "maxLength": 1024,
+      "minLength": 1,
+      "title": "Unit",
+      "type": "string"
+    }
+  },
+  "required": [
+    "unit",
+    "kind",
+    "files"
+  ],
+  "title": "ControlUnitV1",
+  "type": "object"
+}

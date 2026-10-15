@@ -1,0 +1,474 @@
+{
+  "$defs": {
+    "CarriedScheduleV2": {
+      "additionalProperties": false,
+      "description": "Markdown is the schedule configuration, with separate immutable provenance.",
+      "properties": {
+        "markdown": {
+          "minLength": 1,
+          "title": "Markdown",
+          "type": "string"
+        },
+        "owner_vouched": {
+          "default": false,
+          "title": "Owner Vouched",
+          "type": "boolean"
+        },
+        "remaining_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Remaining Count"
+        }
+      },
+      "required": [
+        "markdown"
+      ],
+      "title": "CarriedScheduleV2",
+      "type": "object"
+    },
+    "ExecutionRecordV1": {
+      "additionalProperties": false,
+      "description": "An automation job or managed service, listed so the operator sets it up again.",
+      "properties": {
+        "name": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "owner_kind": {
+          "maxLength": 40,
+          "minLength": 1,
+          "title": "Owner Kind",
+          "type": "string"
+        },
+        "record_id": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Record Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "name",
+        "owner_kind",
+        "owner_id"
+      ],
+      "title": "ExecutionRecordV1",
+      "type": "object"
+    },
+    "HeartbeatItemV1": {
+      "additionalProperties": false,
+      "properties": {
+        "conversation_id": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "heartbeat_item_id": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Heartbeat Item Id",
+          "type": "string"
+        },
+        "instruction": {
+          "title": "Instruction",
+          "type": "string"
+        },
+        "objective_id": {
+          "anyOf": [
+            {
+              "maxLength": 400,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Objective Id"
+        },
+        "source_id": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_key": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Key"
+        },
+        "target_agent_type": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Agent Type"
+        },
+        "title": {
+          "maxLength": 500,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "heartbeat_item_id",
+        "source_id",
+        "title",
+        "instruction",
+        "conversation_id",
+        "enabled"
+      ],
+      "title": "HeartbeatItemV1",
+      "type": "object"
+    },
+    "HeartbeatSourceV1": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "source_id": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 500,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "title",
+        "enabled"
+      ],
+      "title": "HeartbeatSourceV1",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "ScheduleRecordKind": {
+      "enum": [
+        "session",
+        "schedule",
+        "scheduled_target",
+        "heartbeat_source",
+        "heartbeat_item",
+        "worker_binding",
+        "pool_limit",
+        "execution_job",
+        "managed_service"
+      ],
+      "title": "ScheduleRecordKind",
+      "type": "string"
+    },
+    "ScheduledTargetV1": {
+      "additionalProperties": false,
+      "properties": {
+        "conversation_id": {
+          "anyOf": [
+            {
+              "maxLength": 400,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Id"
+        },
+        "owner_person_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Owner Person Id"
+        },
+        "schedule_id": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Schedule Id",
+          "type": "string"
+        },
+        "session_key": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Session Key",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schedule_id",
+        "session_key"
+      ],
+      "title": "ScheduledTargetV1",
+      "type": "object"
+    },
+    "SessionRouteV1": {
+      "additionalProperties": false,
+      "description": "A chat session's name and route, without its conversation.",
+      "properties": {
+        "channel_current": {
+          "default": false,
+          "title": "Channel Current",
+          "type": "boolean"
+        },
+        "channel_name": {
+          "anyOf": [
+            {
+              "maxLength": 120,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Channel Name"
+        },
+        "chat_id": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Chat Id"
+        },
+        "manager_agent_id": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manager Agent Id"
+        },
+        "owner_person_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Owner Person Id"
+        },
+        "session_alias": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Alias"
+        },
+        "session_key": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Session Key",
+          "type": "string"
+        },
+        "status": {
+          "maxLength": 40,
+          "minLength": 1,
+          "title": "Status",
+          "type": "string"
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thread Id"
+        },
+        "user_id": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Id"
+        }
+      },
+      "required": [
+        "session_key",
+        "status"
+      ],
+      "title": "SessionRouteV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/ScheduleTransferRecordV2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "document": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Document"
+    },
+    "execution": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionRecordV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "heartbeat_item": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HeartbeatItemV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "heartbeat_source": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HeartbeatSourceV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "kind": {
+      "$ref": "#/$defs/ScheduleRecordKind"
+    },
+    "record_id": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Record Id",
+      "type": "string"
+    },
+    "schedule": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CarriedScheduleV2"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "session": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SessionRouteV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "target": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScheduledTargetV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "kind",
+    "record_id"
+  ],
+  "title": "ScheduleTransferRecordV2",
+  "type": "object"
+}

@@ -1,0 +1,270 @@
+{
+  "$defs": {
+    "WebTranscriptAttachmentV1": {
+      "additionalProperties": false,
+      "description": "Display-safe attachment reference in a durable transcript message.",
+      "properties": {
+        "attachment_id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Attachment Id",
+          "type": "string"
+        },
+        "caption": {
+          "anyOf": [
+            {
+              "maxLength": 4000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "content_type": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Content Type",
+          "type": "string"
+        },
+        "filename": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Filename",
+          "type": "string"
+        },
+        "kind": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "size_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Size Bytes"
+        },
+        "url": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "attachment_id",
+        "filename",
+        "content_type",
+        "kind",
+        "url"
+      ],
+      "title": "WebTranscriptAttachmentV1",
+      "type": "object"
+    },
+    "WebTranscriptMessageV1": {
+      "additionalProperties": false,
+      "description": "Server-authoritative Web Chat presentation message.",
+      "properties": {
+        "access_request_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Access Request Id"
+        },
+        "attachments": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WebTranscriptAttachmentV1"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
+        "client_request_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Client Request Id"
+        },
+        "content": {
+          "maxLength": 1000000,
+          "title": "Content",
+          "type": "string"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Id"
+        },
+        "correlation_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Correlation Id"
+        },
+        "created_at_utc": {
+          "format": "date-time",
+          "title": "Created At Utc",
+          "type": "string"
+        },
+        "delivery_status": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Delivery Status",
+          "type": "string"
+        },
+        "event_sequence": {
+          "minimum": 1,
+          "title": "Event Sequence",
+          "type": "integer"
+        },
+        "message_id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Message Id",
+          "type": "string"
+        },
+        "message_level": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Message Level",
+          "type": "string"
+        },
+        "message_type": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Message Type",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "user",
+            "assistant",
+            "system"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_key": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Session Key",
+          "type": "string"
+        },
+        "session_sequence": {
+          "minimum": 1,
+          "title": "Session Sequence",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "message_id",
+        "session_key",
+        "session_sequence",
+        "event_sequence",
+        "role",
+        "content",
+        "message_type",
+        "message_level",
+        "delivery_status",
+        "created_at_utc"
+      ],
+      "title": "WebTranscriptMessageV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.local/schemas/gateway/transcript/v1/WebTranscriptHistoryPageV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One owner-authorized page of durable session history.",
+  "properties": {
+    "before_cursor": {
+      "anyOf": [
+        {
+          "maxLength": 4000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Before Cursor"
+    },
+    "has_more": {
+      "title": "Has More",
+      "type": "boolean"
+    },
+    "messages": {
+      "items": {
+        "$ref": "#/$defs/WebTranscriptMessageV1"
+      },
+      "title": "Messages",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "messages",
+    "has_more"
+  ],
+  "title": "WebTranscriptHistoryPageV1",
+  "type": "object"
+}

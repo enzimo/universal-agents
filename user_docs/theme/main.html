@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block extrahead %}
+  {{ super() }}
+  {# Apply the configured palette after styles load, before the body can paint. #}
+  <script src="{{ 'assets/appearance.js' | url }}"></script>
+{% endblock %}

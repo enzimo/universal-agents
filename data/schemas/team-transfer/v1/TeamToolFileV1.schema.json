@@ -1,0 +1,79 @@
+{
+  "$defs": {
+    "ToolProgramV1": {
+      "additionalProperties": false,
+      "description": "An installed CLI's program, at its path under ``workspaces/``.",
+      "properties": {
+        "binary_path": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Binary Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size": {
+          "minimum": 0,
+          "title": "Size",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "binary_path",
+        "size",
+        "sha256"
+      ],
+      "title": "ToolProgramV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/TeamToolFileV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One catalog file the team added, and the programs its CLIs need.",
+  "properties": {
+    "file_name": {
+      "maxLength": 255,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._-]+\\.ya?ml$",
+      "title": "File Name",
+      "type": "string"
+    },
+    "programs": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ToolProgramV1"
+      },
+      "title": "Programs",
+      "type": "array"
+    },
+    "sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Sha256",
+      "type": "string"
+    },
+    "size": {
+      "minimum": 0,
+      "title": "Size",
+      "type": "integer"
+    },
+    "tool_ids": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Tool Ids",
+      "type": "array"
+    }
+  },
+  "required": [
+    "file_name",
+    "size",
+    "sha256"
+  ],
+  "title": "TeamToolFileV1",
+  "type": "object"
+}

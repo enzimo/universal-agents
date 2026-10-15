@@ -1,0 +1,33 @@
+# Cognitive complexity is an advisory review signal, not a merge gate. The
+# threshold identifies changed functions that deserve explicit attention while
+# the existing codebase is incrementally simplified.
+paths = [
+    "activity_collector",
+    "assistant_gateway",
+    "custom_agents",
+    "custom_messages",
+    "custom_tools",
+    "custom_transport",
+    "knowledge_base",
+    "mcp",
+    "scripts",
+    "secure_tool_broker",
+    "storage",
+    "team_transfer",
+    "assistant_cli.py",
+    "config_backup_retention.py",
+    "config_loader.py",
+    "default_values.py",
+    "env_secrets.py",
+    "id_generation.py",
+    "internal_credentials.py",
+    "reply_routing_trace.py",
+    "strands_main.py",
+    "time_presentation.py",
+    "vulture_whitelist.py",
+]
+max-complexity-allowed = 15
+ignore-complexity = true
+check-script = false
+sort = "desc"
+color = "auto"

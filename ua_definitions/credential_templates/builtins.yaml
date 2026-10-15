@@ -1,0 +1,333 @@
+schema_version: 1
+templates:
+  generic_username_password:
+    template_id: generic_username_password
+    display_name: Generic Username And Password
+    description: Collect an existing username or email plus password for a service account.
+    credential_kind: username_password
+    aliases:
+      - username password
+      - login
+      - account login
+      - update credential
+      - update login
+      - rotate password
+      - replace password
+    domains: []
+    default_credential_key_template: "{{service_slug}}_login"
+    default_purpose_template: "Login credential for approved {{service_name}} workflows."
+    flow: credential_collection
+    store_target: default
+    fields:
+      - name: username
+        kind: username
+        visibility: metadata_visible
+        value_source: user_or_agent_supplied_metadata
+        required: true
+        label: Username or email
+        form:
+          input_control: text
+          autocomplete: username
+      - name: service_password
+        kind: password
+        visibility: secret
+        value_source: user_input
+        required: true
+        label: Password
+        form:
+          input_control: password
+          autocomplete: current-password
+
+  generic_signup_username_password:
+    template_id: generic_signup_username_password
+    display_name: Generic Signup Username And Password
+    description: Create a service account with a metadata-visible username and a store-generated password.
+    credential_kind: username_password
+    aliases:
+      - signup
+      - create account
+      - registration
+    domains: []
+    extends: generic_username_password
+    default_credential_key_template: "{{service_slug}}_signup_login"
+    default_purpose_template: "Account created for approved {{service_name}} workflows."
+    flow: signup
+    fields:
+      - name: username
+        kind: username
+        visibility: metadata_visible
+        value_source: user_or_agent_supplied_metadata
+        required: true
+        label: Username or email
+        form:
+          input_control: text
+          autocomplete: username
+      - name: service_password
+        kind: password
+        visibility: secret
+        value_source: store_generated_secret
+        generation_policy: store_native
+        required: true
+        label: Password
+        form:
+          input_control: password
+          autocomplete: new-password
+    automation_steps:
+      - Open {{signup_url}}.
+      - Fill the approved username or email.
+      - Let the broker generate the password inside the configured credential store.
+      - Submit registration only after user approval.
+      - Stop and request manual signup for CAPTCHA, bot detection, MFA, payment, passkey-only registration, or unexplained repeated submission failure.
+
+  home_assistant_login:
+    template_id: home_assistant_login
+    display_name: Home Assistant Login
+    description: Collect, update, or repair a Home Assistant username/password for approved browser automation.
+    credential_kind: username_password
+    aliases:
+      - home assistant
+      - homeassistant
+      - home assistant login
+      - ha login
+      - hass
+      - hassio
+    domains:
+      - homeassistant.local
+    extends: generic_username_password
+    default_credential_key_template: "home_assistant_login"
+    default_purpose_template: "Home Assistant login for approved browser automation workflows."
+
+  home_assistant_api_token:
+    template_id: home_assistant_api_token
+    display_name: Home Assistant Long-Lived Access Token
+    description: Collect or register a Home Assistant long-lived access token for broker-owned REST API calls.
+    credential_kind: api_token
+    aliases:
+      - home assistant token
+      - home assistant api
+      - home assistant long lived token
+      - home assistant access token
+      - ha token
+      - ha api token
+    domains:
+      - homeassistant.local
+    extends: generic_api_token
+    default_credential_key_template: "home_assistant_token"
+    default_purpose_template: "Home Assistant long-lived access token for approved REST API workflows."
+
+  generic_api_token:
+    template_id: generic_api_token
+    display_name: Generic API Token
+    description: Collect or register a single API token or bearer token.
+    credential_kind: api_token
+    aliases:
+      - api token
+      - bearer token
+      - access token
+    domains: []
+    default_credential_key_template: "{{service_slug}}_api_token"
+    default_purpose_template: "API access for approved {{service_name}} workflows."
+    flow: credential_collection
+    store_target: default
+    fields:
+      - name: api_token
+        kind: token
+        visibility: secret
+        value_source: user_input
+        required: true
+        label: API token
+        form:
+          input_control: password
+          autocomplete: "off"
+
+  github_pat:
+    template_id: github_pat
+    display_name: GitHub Personal Access Token
+    description: Collect or register a GitHub personal access token for API, CLI, or integration use.
+    credential_kind: api_token
+    aliases:
+      - github
+      - github token
+      - github pat
+      - personal access token
+      - pat
+      - github api token
+    domains:
+      - github.com
+      - api.github.com
+    extends: generic_api_token
+    default_credential_key_template: "github_pat"
+    default_purpose_template: "GitHub API and CLI access for approved workflows."
+    flow: credential_collection
+    store_target: default
+    fields:
+      - name: api_token
+        kind: token
+        visibility: secret
+        value_source: user_input
+        required: true
+        label: GitHub personal access token
+        description: Paste a GitHub personal access token. It is collected only through the secure broker form.
+        form:
+          input_control: password
+          autocomplete: "off"
+
+  generic_oauth_client_secret:
+    template_id: generic_oauth_client_secret
+    display_name: Generic OAuth Client Secret
+    description: Collect OAuth client credentials where the client id is metadata and the client secret is broker-owned.
+    credential_kind: oauth_client_secret
+    aliases:
+      - oauth
+      - client secret
+      - oauth client
+    domains: []
+    default_credential_key_template: "{{service_slug}}_oauth_client"
+    default_purpose_template: "OAuth client credential for approved {{service_name}} workflows."
+    flow: credential_collection
+    store_target: default
+    fields:
+      - name: client_id
+        kind: account_id
+        visibility: metadata_visible
+        value_source: user_or_agent_supplied_metadata
+        required: true
+        label: Client ID
+        form:
+          input_control: text
+          autocomplete: "off"
+      - name: client_secret
+        kind: secret
+        visibility: secret
+        value_source: user_input
+        required: true
+        label: Client secret
+        form:
+          input_control: password
+          autocomplete: "off"
+      - name: tenant_or_project
+        kind: service_label
+        visibility: metadata_visible
+        value_source: user_or_agent_supplied_metadata
+        required: false
+        label: Tenant or project
+        form:
+          input_control: text
+          autocomplete: "off"
+
+  generic_service_account_file:
+    template_id: generic_service_account_file
+    display_name: Generic Service Account File
+    description: Collect a service-account credential file directly through the secure broker form.
+    credential_kind: service_account_file
+    aliases:
+      - service account
+      - json key
+      - credential file
+    domains: []
+    default_credential_key_template: "{{service_slug}}_service_account"
+    default_purpose_template: "Service account credential for approved {{service_name}} workflows."
+    flow: credential_collection
+    store_target: default
+    fields:
+      - name: service_account_json
+        kind: credential_file
+        visibility: secret
+        value_source: user_input
+        required: true
+        label: Service account JSON
+        form:
+          input_control: file
+          accept:
+            - application/json
+            - .json
+          autocomplete: "off"
+          help_text: Upload the service-account JSON file through the secure broker form.
+
+  x_twitter_login:
+    template_id: x_twitter_login
+    display_name: X/Twitter Login
+    description: Sign up for or collect an X/Twitter login credential for approved workflows.
+    credential_kind: username_password
+    aliases:
+      - twitter
+      - x
+      - x.com
+      - twitter login
+      - x login
+    domains:
+      - x.com
+      - twitter.com
+    extends: generic_signup_username_password
+    default_credential_key_template: "x_twitter_login"
+    default_purpose_template: "X/Twitter account login for approved agent workflows."
+    signup_url: https://x.com/signup
+    automation_steps:
+      - Open https://x.com/signup.
+      - Fill the approved username or email.
+      - Let the broker generate the password inside the configured credential store.
+      - Stop and request manual signup for CAPTCHA, bot detection, MFA, SMS or email confirmation unavailable to the agent, passkey-only registration, payment or identity verification, or repeated unexplained form failure.
+
+  x_twitter_api_bearer_token:
+    template_id: x_twitter_api_bearer_token
+    display_name: X/Twitter API Bearer Token
+    description: Collect or register an X/Twitter API bearer token for broker-owned API access.
+    credential_kind: api_token
+    aliases:
+      - twitter api
+      - x api
+      - x bearer token
+      - twitter bearer token
+    domains:
+      - api.x.com
+      - api.twitter.com
+      - x.com
+      - twitter.com
+    extends: generic_api_token
+    default_credential_key_template: "x_twitter_api_token"
+    default_purpose_template: "X/Twitter API bearer token for approved agent workflows."
+
+  huggingface_api_token:
+    template_id: huggingface_api_token
+    display_name: Hugging Face API Token
+    description: Collect a fine-grained Hugging Face token for brokered hf identity, downloads, and explicit file uploads.
+    credential_kind: api_token
+    aliases: [hugging face, huggingface, hf cli]
+    domains: [huggingface.co]
+    default_credential_key_template: "huggingface_api_token"
+    default_purpose_template: "Approved Hugging Face Hub operations."
+    flow: credential_collection
+    store_target: default
+    fields:
+      - name: api_token
+        kind: token
+        visibility: secret
+        value_source: user_input
+        required: true
+        label: Fine-grained Hugging Face token
+        form:
+          input_control: password
+          autocomplete: "off"
+
+  xurl_oauth2:
+    template_id: xurl_oauth2
+    display_name: X CLI OAuth 2.0
+    description: Import an authorized X user OAuth bundle for brokered posting and token refresh. App-only bearer tokens cannot publish as a user.
+    credential_kind: oauth_token
+    aliases: [xurl, x posting, x oauth]
+    domains: [x.com, api.x.com]
+    default_credential_key_template: "xurl_oauth2"
+    default_purpose_template: "Approved X account identity and text posting."
+    flow: credential_collection
+    store_target: default
+    fields:
+      - name: oauth_json
+        kind: token
+        visibility: secret
+        value_source: user_input
+        required: true
+        label: X OAuth bundle JSON file
+        description: Upload the file produced by scripts/export_xurl_credential.py on the authorized operator computer. Never send it through chat.
+        form:
+          input_control: file
+          autocomplete: "off"

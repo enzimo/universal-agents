@@ -1,0 +1,478 @@
+{
+  "$defs": {
+    "ContractJsonValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/ContractJsonValue"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/ContractJsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "JsonValue": {},
+    "PrincipalDescriptorV1": {
+      "additionalProperties": false,
+      "description": "Who a request acts as, and for which person (``on_behalf_of_user_id``).",
+      "properties": {
+        "attributes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ContractJsonValue"
+          },
+          "title": "Attributes",
+          "type": "object"
+        },
+        "named_agent_type": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Named Agent Type"
+        },
+        "on_behalf_of_user_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "On Behalf Of User Id"
+        },
+        "principal_id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Principal Id",
+          "type": "string"
+        },
+        "principal_type": {
+          "$ref": "#/$defs/PrincipalType"
+        },
+        "roles": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Roles",
+          "type": "array"
+        },
+        "team_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Team Id"
+        }
+      },
+      "required": [
+        "principal_type",
+        "principal_id"
+      ],
+      "title": "PrincipalDescriptorV1",
+      "type": "object"
+    },
+    "PrincipalType": {
+      "enum": [
+        "User",
+        "Agent",
+        "Service",
+        "System"
+      ],
+      "title": "PrincipalType",
+      "type": "string"
+    },
+    "SchedulePermitV1": {
+      "additionalProperties": false,
+      "description": "The manager's signed statement that one schedule's runs work for one person.\n\nThe scheduler signs it once per schedule and renews it before it expires\n(``custom_agents.schedule_permits``), so a worker that holds no key can\nstart the schedule's runs without asking the manager each time. It names\nno roles: whoever checks a run reads the person's current roles and\nstanding, and the schedule row's current owner (``access_control.task_identity``).\n``person_id`` None is system work for no person, only for the runtime's\nmaintenance schedule of a built-in system agent. ``record_kind`` and the\nsignature's own domain keep a permit from ever passing as a task context.",
+      "properties": {
+        "expires_at_utc": {
+          "format": "date-time",
+          "title": "Expires At Utc",
+          "type": "string"
+        },
+        "issued_at_utc": {
+          "format": "date-time",
+          "title": "Issued At Utc",
+          "type": "string"
+        },
+        "issuer": {
+          "const": "scheduler",
+          "title": "Issuer",
+          "type": "string"
+        },
+        "permit_id": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Permit Id",
+          "type": "string"
+        },
+        "person_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Person Id"
+        },
+        "record_kind": {
+          "const": "schedule_permit",
+          "default": "schedule_permit",
+          "title": "Record Kind",
+          "type": "string"
+        },
+        "schedule_id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Schedule Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "team_id": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Team Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "permit_id",
+        "issuer",
+        "team_id",
+        "schedule_id",
+        "issued_at_utc",
+        "expires_at_utc"
+      ],
+      "title": "SchedulePermitV1",
+      "type": "object"
+    },
+    "ScheduleRunIdentityV1": {
+      "additionalProperties": false,
+      "description": "Who one scheduled run works for: its schedule's signed permit and this run's own fields.\n\nTravels in ``GatewayContext.schedule_run`` instead of a signed task\ncontext when the agent that started the run holds no scheduler key.\n``context_id``, ``conversation_id`` and ``started_at_utc`` are not signed:\nthey tie the run's tasks together and date the run, and grant nothing.",
+      "properties": {
+        "context_id": {
+          "maxLength": 120,
+          "minLength": 1,
+          "pattern": "^schedule_run_",
+          "title": "Context Id",
+          "type": "string"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Id"
+        },
+        "permit": {
+          "$ref": "#/$defs/SignedSchedulePermitV1"
+        },
+        "started_at_utc": {
+          "format": "date-time",
+          "title": "Started At Utc",
+          "type": "string"
+        }
+      },
+      "required": [
+        "permit",
+        "context_id",
+        "started_at_utc"
+      ],
+      "title": "ScheduleRunIdentityV1",
+      "type": "object"
+    },
+    "SignedSchedulePermitV1": {
+      "additionalProperties": false,
+      "properties": {
+        "key_id": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Key Id",
+          "type": "string"
+        },
+        "permit": {
+          "$ref": "#/$defs/SchedulePermitV1"
+        },
+        "signature": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Signature",
+          "type": "string"
+        }
+      },
+      "required": [
+        "permit",
+        "key_id",
+        "signature"
+      ],
+      "title": "SignedSchedulePermitV1",
+      "type": "object"
+    },
+    "SignedTaskContextV1": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/TaskContextV1"
+        },
+        "key_id": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Key Id",
+          "type": "string"
+        },
+        "signature": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Signature",
+          "type": "string"
+        }
+      },
+      "required": [
+        "context",
+        "key_id",
+        "signature"
+      ],
+      "title": "SignedTaskContextV1",
+      "type": "object"
+    },
+    "TaskContextV1": {
+      "additionalProperties": false,
+      "description": "Who an agent task works for, signed by a trusted issuer.\n\nThe gateway signs a context when it admits a person's task; the scheduler\nsigns one for a schedule's owner; delegated child tasks carry their root\ncontext unchanged, so later hops cannot widen it.",
+      "properties": {
+        "context_id": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Context Id",
+          "type": "string"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Id"
+        },
+        "expires_at_utc": {
+          "format": "date-time",
+          "title": "Expires At Utc",
+          "type": "string"
+        },
+        "issued_at_utc": {
+          "format": "date-time",
+          "title": "Issued At Utc",
+          "type": "string"
+        },
+        "issuer": {
+          "enum": [
+            "gateway",
+            "scheduler"
+          ],
+          "title": "Issuer",
+          "type": "string"
+        },
+        "person_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Person Id"
+        },
+        "person_roles": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Person Roles",
+          "type": "array"
+        },
+        "root_task_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Root Task Id"
+        },
+        "schedule_id": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schedule Id"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "team_id": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Team Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "context_id",
+        "issuer",
+        "team_id",
+        "issued_at_utc",
+        "expires_at_utc"
+      ],
+      "title": "TaskContextV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/mcp/v1/MCPInvocationRequestV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "arguments": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Arguments",
+      "type": "object"
+    },
+    "operation_name": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Operation Name",
+      "type": "string"
+    },
+    "principal": {
+      "$ref": "#/$defs/PrincipalDescriptorV1"
+    },
+    "record_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Record Digest",
+      "type": "string"
+    },
+    "record_type": {
+      "const": "mcp_invocation_request",
+      "default": "mcp_invocation_request",
+      "title": "Record Type",
+      "type": "string"
+    },
+    "schedule_run": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScheduleRunIdentityV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "task_context": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SignedTaskContextV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "task_id": {
+      "default": "",
+      "maxLength": 240,
+      "title": "Task Id",
+      "type": "string"
+    },
+    "tool_use_id": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Tool Use Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "record_digest",
+    "operation_name",
+    "tool_use_id",
+    "principal"
+  ],
+  "title": "MCPInvocationRequestV1",
+  "type": "object"
+}

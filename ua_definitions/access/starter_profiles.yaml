@@ -1,0 +1,64 @@
+# Starter profiles: the team lead's standing access for one person's work when
+# authorization is on (access plan section 9.5, decision D13). Each person
+# chooses their own; authorization.starter_profile is the first user's default
+# until they choose. Changing the choice replaces the grants the previous
+# profile made. Trusted includes sandboxed shell and Python (owner's decision
+# 2026-09-25); running outside the sandbox (code:unconfined) and platform
+# tools stay with people.
+#
+# A grant names a tool_set or a tool. A grant with if_person_may_give is given
+# only when the person may give it themselves (the access service decides),
+# and is left out otherwise: Trusted gives TeamLead model choice
+# (fn:model_choice, owner's decision 2026-09-27) only for administrators'
+# work, because only administrators hold it.
+#
+# Trusted also lets TeamLead look up the person's saved credentials at read
+# level (owner's decision 2026-09-27): searching Sealbox and reading a saved
+# credential's details (name, username, whether a secret is stored; never the
+# secret itself), so a request such as "delete the bank credential" needs no
+# approval before the person's own deletion form opens. Using or saving a
+# credential is write level and still asks. TeamLead keeps this to itself
+# (no delegation), and a person gets it only if they may give it.
+profiles:
+  trusted:
+    display_name: Trusted team
+    description: >-
+      TeamLead gets full access to the standard tool set and may run shell
+      commands and Python in the sandbox, and may give both to workers without
+      asking you; you get a notice each time. For an administrator, TeamLead
+      may also switch agents' models without asking; you get a notice each
+      time. TeamLead may also look up your saved credentials (names and
+      usernames, never the secrets) without asking; using or saving one still
+      asks you.
+    grants:
+      - tool_set: standard
+        level: full
+        delegation_depth: 1
+        delegation_mode: automatic
+      - tool_set: sandboxed_code
+        level: write
+        delegation_depth: 1
+        delegation_mode: automatic
+      - tool: fn:model_choice
+        level: write
+        if_person_may_give: true
+      - tool: cli:sealbox
+        level: read
+        if_person_may_give: true
+      - tool: procedure:credentials
+        level: read
+        if_person_may_give: true
+  careful:
+    display_name: Careful team
+    description: >-
+      TeamLead gets read access to the standard tool set and may give it to
+      workers; any change needs your approval.
+    grants:
+      - tool_set: standard
+        level: read
+        delegation_depth: 1
+        delegation_mode: automatic
+  manual:
+    display_name: Manual
+    description: TeamLead gets nothing; every access is asked for.
+    grants: []

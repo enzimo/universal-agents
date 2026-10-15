@@ -1,0 +1,24 @@
+{
+  "$defs": {
+    "JsonValue": {}
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/PinnedMemoryFactRecordV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One pinned fact; ``document`` is ``custom_agents.pinned_memory_transfer.ExportedFactV1``.",
+  "properties": {
+    "document": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "minProperties": 1,
+      "title": "Document",
+      "type": "object"
+    }
+  },
+  "required": [
+    "document"
+  ],
+  "title": "PinnedMemoryFactRecordV1",
+  "type": "object"
+}

@@ -1,0 +1,389 @@
+name: Security Quality
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docker-compose-setup.html'
+      - 'user_docs/**'
+      - 'mkdocs.yml'
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.md'
+      - 'docker-compose-setup.html'
+      - 'user_docs/**'
+      - 'mkdocs.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: rtk proxy bash --noprofile --norc -e -o pipefail {0}
+
+jobs:
+  security-quality:
+    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    timeout-minutes: 30
+    steps:
+      - name: Require managed local runner
+        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - name: Make disposable Python work with isolated child processes
+        run: '"$UA_CI_PYTHON" .github/runner/relocate_python.py'
+      - name: Create disposable Python environment
+        run: |
+          python -m venv .venv
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/.venv" >> "$GITHUB_ENV"
+      - name: Ensure pinned Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal --no-self-update --component rustfmt,clippy
+      - name: Install dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.lock.txt
+      - name: Ruff security-sensitive modules
+        run: |
+          python -m ruff check \
+            activity_collector/service.py \
+            assistant_gateway/gateway.py \
+            assistant_gateway/interactive_apps/telegram.py \
+            assistant_gateway/interactive_apps/discord.py \
+            assistant_gateway/interactive_apps/whatsapp.py \
+            assistant_gateway/interactive_apps/signal.py \
+            assistant_gateway/application/commands/ \
+            assistant_gateway/application/command_operations.py \
+            assistant_gateway/application/interactive_commands.py \
+            assistant_gateway/interactive_apps/website.py \
+            assistant_gateway/access_inbox.py \
+            assistant_gateway/access_setup.py \
+            assistant_gateway/mcp_controls.py \
+            assistant_gateway/installed_procedures.py \
+            custom_agents/agent_catalog.py \
+            custom_agents/default_tools.py \
+            custom_agents/access_runtime.py \
+            custom_agents/access_request_runtime.py \
+            access_catalog/ \
+            access_control/ \
+            knowledge_base/ \
+            custom_agents/generated_agent_provisioning.py \
+            custom_messages/contracts/common_v1.py \
+            custom_messages/contracts/mcp_v1.py \
+            custom_messages/contracts/runtime_v1.py \
+            custom_agents/skill_installation.py \
+            custom_agents/skill_repository.py \
+            custom_agents/runtime_restart_service.py \
+            custom_agents/runtime_setting_registry.py \
+            custom_agents/runtime_settings_service.py \
+            custom_agents/schedule_store.py \
+            custom_agents/schedule_changes.py \
+            custom_agents/schedule_access.py \
+            custom_agents/system_schedule_changes.py \
+            custom_agents/sdk/strands/mcp.py \
+            custom_messages/ \
+            custom_tools/comms_tools.py \
+            custom_tools/non_interactive_shell.py \
+            custom_tools/path_policy.py \
+            assistant_gateway/attachments.py \
+            custom_agents/scratch_retention.py \
+            custom_agents/stale_schedules.py \
+            custom_agents/model_choice.py \
+            custom_agents/model_settings_view.py \
+            custom_agents/runtime_settings_summary.py \
+            custom_agents/task_context_runtime.py \
+            custom_agents/scheduled_run_contexts.py \
+            custom_agents/schedule_permits.py \
+            assistant_gateway/people_directory_sync.py \
+            user_docs/published_sites.py \
+            user_docs/service.py \
+            assistant_gateway/interactive_apps/website_handlers/sites.py \
+            custom_tools/single_page_site_tools.py \
+            custom_agents/code_access.py \
+            assistant_gateway/file_sharing.py \
+            custom_agents/tool_sync.py \
+            custom_agents/mcp_server_tools.py \
+            assistant_gateway/access_commands.py \
+            custom_agents/folder_access.py \
+            custom_tools/code_sandbox.py \
+            custom_tools/calculator.py \
+            custom_tools/calculator_parsing.py \
+            custom_tools/calculator_time_limit.py \
+            custom_tools/file_access.py \
+            custom_tools/openshell_sandboxes.py \
+            secure_tool_broker/task_files.py \
+            custom_tools/python_env_tool.py \
+            custom_tools/secure_cli_tool.py \
+            custom_tools/providers/ \
+            mcp_control/ \
+            runtime_hosting/ \
+            secure_tool_broker/access_gate.py \
+            secure_tool_broker/account_links.py \
+            secure_tool_broker/credential_catalog_store.py \
+            secure_tool_broker/mcp_client.py \
+            secure_tool_broker/mcp_config.py \
+            secure_tool_broker/mcp_runtime.py \
+            secure_tool_broker/service.py \
+            secure_tool_broker/model_keys.py \
+            secure_tool_broker/model_key_page.py \
+            custom_agents/model_keys.py \
+            model_providers/ \
+            custom_agents/endpoint_switch.py \
+            custom_agents/status_findings.py \
+            assistant_gateway/status_page.py \
+            storage/old_access_tables.py \
+            storage/schedule_repository.py \
+            tests/test_message_types.py \
+            tests/test_docker_compose_setup_html.py \
+            tests/test_gateway_telegram_app.py \
+            tests/test_gateway_discord_app.py \
+            tests/test_gateway_whatsapp_app.py \
+            tests/test_gateway_signal_app.py \
+            tests/test_gateway_website_app.py \
+            tests/test_access_review_buttons.py \
+            tests/test_access_inbox_gateway.py \
+            tests/test_installed_permissions.py \
+            tests/test_access_runtime.py \
+            tests/test_knowledge_sensitive_content.py \
+            tests/test_knowledge_service.py \
+            tests/test_knowledge_tools.py \
+            tests/test_knowledge_repository.py \
+            tests/test_access_request_tools.py \
+            tests/test_old_access_tables.py \
+            tests/test_agent_catalog.py \
+            tests/test_team_composition.py \
+            tests/test_access_service.py \
+            tests/test_account_links.py \
+            tests/test_broker_access_gate.py \
+            tests/test_generated_agent_provisioning.py \
+            tests/test_secure_tool_broker.py \
+            tests/test_broker_model_keys.py \
+            tests/test_model_keys_runtime.py \
+            tests/test_gateway_model_keys.py \
+            tests/test_shell_execution.py \
+            tests/test_skill_installation.py \
+            tests/test_skill_repository.py \
+            tests/test_strands_team_skills.py \
+            tests/test_runtime_restart_service.py \
+            tests/test_runtime_python_and_skillspector_packaging.py \
+            tests/live_skill_installation_canary.py \
+            tests/test_python_env_tool.py \
+            tests/test_runtime_settings_tools.py \
+            tests/test_schedule_repository.py \
+            tests/test_schedule_store.py \
+            tests/test_scheduled_run_contexts.py \
+            tests/test_schedule_permits.py \
+            tests/test_schedule_tools.py \
+            tests/test_system_schedule_changes.py \
+            tests/test_schedule_worker_binding_cutover.py \
+            tests/test_gateway_system_schedule_controls.py \
+            tests/test_strands_mcp.py \
+            tests/test_mcp_sdk_compat.py \
+            tests/test_safe_open.py \
+            tests/test_sensitive_paths.py \
+            tests/test_file_access.py \
+            tests/test_access_folders.py \
+            tests/test_code_access.py \
+            tests/test_code_sandbox.py \
+            tests/test_calculator_tool.py \
+            tests/test_openshell_sandboxes.py \
+            tests/test_notify_attachment_scope.py \
+            tests/staged_attachment_helpers.py \
+            tests/test_scratch_retention.py \
+            tests/test_single_page_site_tools.py \
+            tests/test_user_docs_service.py \
+            tests/test_gateway_photon_app.py \
+            tests/test_data_folders.py \
+            tests/test_file_sharing.py \
+            tests/test_file_sharing_commands.py \
+            tests/test_access_proposals.py \
+            tests/test_tool_sync.py \
+            tests/test_mcp_follows_grants.py \
+            tests/test_access_map_files.py \
+            tests/test_access_review_choices.py \
+            tests/test_attachment_sources.py \
+            tests/test_web_research_artifact_tools.py \
+            tests/test_tool_security_policy.py
+      - name: Cognitive complexity advisory for changed functions
+        continue-on-error: true
+        env:
+          COMPLEXITY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python scripts/report_cognitive_complexity.py "${COMPLEXITY_BASE_SHA}"
+      - name: Rust Cedar evaluator quality
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo test --locked --workspace
+          cargo build --locked --workspace
+          target/debug/ua-cedar-authorizer validate-access \
+            --policy ua_definitions/access/cedar/policies.cedar \
+            --schema ua_definitions/access/cedar/schema.cedarschema
+      - name: Vulture security-sensitive modules
+        run: |
+          python -m vulture \
+            activity_collector/service.py \
+            assistant_gateway/gateway.py \
+            assistant_gateway/application/commands/ \
+            assistant_gateway/application/command_operations.py \
+            assistant_gateway/application/interactive_commands.py \
+            assistant_gateway/interactive_apps/website.py \
+            assistant_gateway/access_inbox.py \
+            assistant_gateway/access_commands.py \
+            assistant_gateway/access_setup.py \
+            assistant_gateway/mcp_controls.py \
+            assistant_gateway/installed_procedures.py \
+            custom_agents/agent_catalog.py \
+            custom_agents/default_tools.py \
+            custom_agents/access_runtime.py \
+            custom_agents/access_request_runtime.py \
+            access_catalog/ \
+            access_control/ \
+            knowledge_base/ \
+            custom_agents/generated_agent_provisioning.py \
+            custom_messages/contracts/common_v1.py \
+            custom_messages/contracts/mcp_v1.py \
+            custom_messages/contracts/runtime_v1.py \
+            custom_agents/skill_installation.py \
+            custom_agents/skill_repository.py \
+            custom_agents/runtime_restart_service.py \
+            custom_agents/runtime_setting_registry.py \
+            custom_agents/runtime_settings_service.py \
+            custom_agents/schedule_store.py \
+            custom_agents/schedule_changes.py \
+            custom_agents/schedule_access.py \
+            custom_agents/system_schedule_changes.py \
+            custom_agents/sdk/strands/mcp.py \
+            custom_messages/ \
+            custom_tools/comms_tools.py \
+            custom_tools/non_interactive_shell.py \
+            custom_tools/path_policy.py \
+            assistant_gateway/attachments.py \
+            custom_agents/scratch_retention.py \
+            custom_agents/stale_schedules.py \
+            custom_agents/model_choice.py \
+            custom_agents/model_settings_view.py \
+            custom_agents/runtime_settings_summary.py \
+            custom_agents/task_context_runtime.py \
+            custom_agents/scheduled_run_contexts.py \
+            custom_agents/schedule_permits.py \
+            assistant_gateway/people_directory_sync.py \
+            user_docs/published_sites.py \
+            assistant_gateway/interactive_apps/website_handlers/sites.py \
+            custom_agents/code_access.py \
+            assistant_gateway/file_sharing.py \
+            custom_agents/tool_sync.py \
+            custom_agents/mcp_server_tools.py \
+            access_control/data_folders.py \
+            custom_agents/folder_access.py \
+            custom_tools/code_sandbox.py \
+            custom_tools/calculator.py \
+            custom_tools/calculator_parsing.py \
+            custom_tools/calculator_time_limit.py \
+            custom_tools/file_access.py \
+            custom_tools/openshell_sandboxes.py \
+            secure_tool_broker/task_files.py \
+            custom_tools/python_env_tool.py \
+            custom_tools/secure_cli_tool.py \
+            custom_tools/providers/ \
+            mcp_control/ \
+            runtime_hosting/ \
+            secure_tool_broker/access_gate.py \
+            secure_tool_broker/account_links.py \
+            secure_tool_broker/credential_catalog_store.py \
+            secure_tool_broker/mcp_client.py \
+            secure_tool_broker/mcp_config.py \
+            secure_tool_broker/mcp_runtime.py \
+            secure_tool_broker/service.py \
+            secure_tool_broker/model_keys.py \
+            secure_tool_broker/model_key_page.py \
+            custom_agents/model_keys.py \
+            model_providers/ \
+            custom_agents/endpoint_switch.py \
+            custom_agents/status_findings.py \
+            assistant_gateway/status_page.py \
+            storage/old_access_tables.py \
+            storage/schedule_repository.py \
+            vulture_whitelist.py \
+            --min-confidence 80
+      - name: Coverage for security-sensitive regressions
+        run: |
+          python -m coverage run \
+            --include='activity_collector/service.py,assistant_gateway/application/*.py,assistant_gateway/application/commands/*.py,assistant_gateway/gateway.py,assistant_gateway/interactive_apps/telegram.py,assistant_gateway/interactive_apps/discord.py,assistant_gateway/interactive_apps/whatsapp.py,assistant_gateway/interactive_apps/signal.py,assistant_gateway/interactive_apps/website.py,assistant_gateway/access_inbox.py,assistant_gateway/access_setup.py,assistant_gateway/mcp_controls.py,assistant_gateway/installed_procedures.py,custom_agents/agent_catalog.py,custom_agents/default_tools.py,custom_agents/access_runtime.py,custom_agents/access_request_runtime.py,access_catalog/*.py,access_control/*.py,custom_agents/generated_agent_provisioning.py,custom_messages/contracts/common_v1.py,custom_messages/contracts/mcp_v1.py,custom_messages/contracts/runtime_v1.py,custom_agents/skill_installation.py,custom_agents/skill_repository.py,custom_agents/runtime_restart_service.py,custom_agents/runtime_setting_registry.py,custom_agents/runtime_settings_service.py,custom_agents/schedule_store.py,custom_agents/schedule_changes.py,custom_agents/schedule_access.py,custom_agents/system_schedule_changes.py,custom_agents/sdk/strands/mcp.py,custom_messages/*.py,custom_tools/comms_tools.py,custom_tools/non_interactive_shell.py,custom_tools/path_policy.py,assistant_gateway/attachments.py,custom_agents/scratch_retention.py,custom_agents/stale_schedules.py,custom_agents/model_choice.py,custom_agents/model_settings_view.py,custom_agents/runtime_settings_summary.py,custom_agents/task_context_runtime.py,custom_agents/scheduled_run_contexts.py,custom_agents/schedule_permits.py,assistant_gateway/people_directory_sync.py,user_docs/published_sites.py,assistant_gateway/interactive_apps/website_handlers/sites.py,custom_tools/single_page_site_tools.py,assistant_gateway/file_sharing.py,assistant_gateway/access_commands.py,custom_agents/tool_sync.py,custom_agents/mcp_server_tools.py,custom_agents/code_access.py,custom_tools/workspace_scope.py,custom_agents/folder_access.py,custom_tools/code_sandbox.py,custom_tools/calculator.py,custom_tools/calculator_parsing.py,custom_tools/calculator_time_limit.py,custom_tools/file_access.py,custom_tools/openshell_sandboxes.py,secure_tool_broker/task_files.py,custom_tools/python_env_tool.py,custom_tools/secure_cli_tool.py,custom_tools/providers/*.py,mcp_control/*.py,runtime_hosting/*.py,secure_tool_broker/access_gate.py,secure_tool_broker/account_links.py,secure_tool_broker/credential_catalog_store.py,secure_tool_broker/defaults.py,secure_tool_broker/mcp_client.py,secure_tool_broker/mcp_config.py,secure_tool_broker/mcp_runtime.py,secure_tool_broker/service.py,storage/old_access_tables.py,storage/schedule_repository.py,knowledge_base/*.py,storage/knowledge_repository.py' \
+            -m pytest -m 'not live and not external' \
+            tests/test_message_types.py \
+            tests/test_docker_compose_setup_html.py \
+            tests/test_gateway_telegram_app.py \
+            tests/test_gateway_discord_app.py \
+            tests/test_gateway_whatsapp_app.py \
+            tests/test_gateway_signal_app.py \
+            tests/test_gateway_website_app.py \
+            tests/test_access_review_buttons.py \
+            tests/test_access_inbox_gateway.py \
+            tests/test_installed_permissions.py \
+            tests/test_access_runtime.py \
+            tests/test_access_request_tools.py \
+            tests/test_old_access_tables.py \
+            tests/test_agent_catalog.py \
+            tests/test_team_composition.py \
+            tests/test_access_service.py \
+            tests/test_account_links.py \
+            tests/test_broker_access_gate.py \
+            tests/test_generated_agent_provisioning.py \
+            tests/test_mcp_broker_contracts.py \
+            tests/test_mcp_connections.py \
+            tests/test_mcp_hosting.py \
+            tests/test_runtime_architecture_boundaries.py \
+            tests/test_secure_tool_broker.py \
+            tests/test_shell_execution.py \
+            tests/test_skill_installation.py \
+            tests/test_skill_repository.py \
+            tests/test_strands_team_skills.py \
+            tests/test_runtime_restart_service.py \
+            tests/test_runtime_python_and_skillspector_packaging.py \
+            tests/test_python_env_tool.py \
+            tests/test_runtime_settings_tools.py \
+            tests/test_schedule_repository.py \
+            tests/test_schedule_store.py \
+            tests/test_scheduled_run_contexts.py \
+            tests/test_schedule_permits.py \
+            tests/test_schedule_tools.py \
+            tests/test_system_schedule_changes.py \
+            tests/test_schedule_worker_binding_cutover.py \
+            tests/test_gateway_system_schedule_controls.py \
+            tests/test_strands_mcp.py \
+            tests/test_mcp_sdk_compat.py \
+            tests/test_safe_open.py \
+            tests/test_sensitive_paths.py \
+            tests/test_file_access.py \
+            tests/test_access_folders.py \
+            tests/test_code_access.py \
+            tests/test_code_sandbox.py \
+            tests/test_openshell_sandboxes.py \
+            tests/test_notify_attachment_scope.py \
+            tests/test_scratch_retention.py \
+            tests/test_single_page_site_tools.py \
+            tests/test_user_docs_service.py \
+            tests/test_gateway_photon_app.py \
+            tests/test_data_folders.py \
+            tests/test_file_sharing.py \
+            tests/test_file_sharing_commands.py \
+            tests/test_access_proposals.py \
+            tests/test_tool_sync.py \
+            tests/test_mcp_follows_grants.py \
+            tests/test_access_map_files.py \
+            tests/test_access_review_choices.py \
+            tests/test_attachment_sources.py \
+            tests/test_web_research_artifact_tools.py \
+            tests/test_tool_security_policy.py \
+            tests/test_calculator_tool.py
+          python -m coverage report

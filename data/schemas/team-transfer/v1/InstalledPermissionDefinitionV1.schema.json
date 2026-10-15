@@ -1,0 +1,104 @@
+{
+  "$defs": {
+    "PermissionRisk": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ],
+      "title": "PermissionRisk",
+      "type": "string"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/InstalledPermissionDefinitionV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Installed, content-addressed definition of a trusted managed operation.",
+  "properties": {
+    "definition_digest": {
+      "default": "",
+      "title": "Definition Digest",
+      "type": "string"
+    },
+    "definition_id": {
+      "title": "Definition Id",
+      "type": "string"
+    },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "display_name": {
+      "title": "Display Name",
+      "type": "string"
+    },
+    "handler_descriptor_digest": {
+      "title": "Handler Descriptor Digest",
+      "type": "string"
+    },
+    "handler_id": {
+      "title": "Handler Id",
+      "type": "string"
+    },
+    "impact_description": {
+      "title": "Impact Description",
+      "type": "string"
+    },
+    "input_schema_digest": {
+      "title": "Input Schema Digest",
+      "type": "string"
+    },
+    "installed_at_utc": {
+      "format": "date-time",
+      "title": "Installed At Utc",
+      "type": "string"
+    },
+    "installed_by_principal_id": {
+      "title": "Installed By Principal Id",
+      "type": "string"
+    },
+    "manager_delegable": {
+      "title": "Manager Delegable",
+      "type": "boolean"
+    },
+    "owner_canonical_user_id": {
+      "title": "Owner Canonical User Id",
+      "type": "string"
+    },
+    "proposal_id": {
+      "title": "Proposal Id",
+      "type": "string"
+    },
+    "risk": {
+      "$ref": "#/$defs/PermissionRisk"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "team_id": {
+      "title": "Team Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "definition_id",
+    "proposal_id",
+    "installed_at_utc",
+    "installed_by_principal_id",
+    "team_id",
+    "owner_canonical_user_id",
+    "handler_id",
+    "handler_descriptor_digest",
+    "input_schema_digest",
+    "display_name",
+    "description",
+    "impact_description",
+    "risk",
+    "manager_delegable"
+  ],
+  "title": "InstalledPermissionDefinitionV1",
+  "type": "object"
+}

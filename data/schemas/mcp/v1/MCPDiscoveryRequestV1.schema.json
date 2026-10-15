@@ -1,0 +1,37 @@
+{
+  "$id": "https://universal-agents.dev/schemas/mcp/v1/MCPDiscoveryRequestV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "List an active connection's tools for an agent type.\n\nThe broker checks that the connection is active and that the calling\nprocess (its token) may act for that agent type; listing tools needs no\nperson. Whether an agent may call a tool is decided by its grants.",
+  "properties": {
+    "named_agent_type": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Named Agent Type",
+      "type": "string"
+    },
+    "record_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Record Digest",
+      "type": "string"
+    },
+    "record_type": {
+      "const": "mcp_discovery_request",
+      "default": "mcp_discovery_request",
+      "title": "Record Type",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "record_digest",
+    "named_agent_type"
+  ],
+  "title": "MCPDiscoveryRequestV1",
+  "type": "object"
+}

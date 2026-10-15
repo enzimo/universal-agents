@@ -1,0 +1,21 @@
+{
+  "msg_content": {
+    "task_type": "request",
+    "problem_statement": "Create a simple website where users can log in and see an album of images. Use this explicit MVP contract and do not ask clarifying questions unless something here is internally contradictory: build a runnable local full-stack web app, not a mockup; use a simple server-rendered Python Flask app with SQLite; use a preconfigured demo account username `demo` and password `demo123`; no registration flow; no image upload flow; show a predefined gallery of placeholder/sample images after login; this is for local development only, not deployment hardening; basic clean styling is sufficient; build the app entirely inside `{{TEST_OUTPUT_DIR}}` and treat that directory as the project root for all generated files; return the implementation result as a final Task response.",
+    "message_class": "Task"
+  },
+  "msg_meta": {
+    "from_agent_name": "user",
+    "to_named_agent_type": "TeamArchitect",
+    "is_response_requested": true,
+    "msg_correlation_id": "{{CORRELATION_ID}}"
+  },
+  "msg_header": {
+    "message_id": "{{MESSAGE_ID}}",
+    "from_agent_id": "user",
+    "to_routing_path": "{{TARGET_AGENT_ID}}",
+    "response_routing_key": "{{USER_QUEUE}}",
+    "agent_signature": "",
+    "timestamp": "{{TIMESTAMP}}"
+  }
+}

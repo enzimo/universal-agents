@@ -1,0 +1,29 @@
+{
+  "$defs": {
+    "JsonValue": {}
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/SettingV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One setting the team changed from the default.",
+  "properties": {
+    "path": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "title": "Path",
+      "type": "array"
+    },
+    "value": {
+      "$ref": "#/$defs/JsonValue",
+      "default": null
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "title": "SettingV1",
+  "type": "object"
+}

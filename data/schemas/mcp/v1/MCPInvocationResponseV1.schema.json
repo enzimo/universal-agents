@@ -1,0 +1,93 @@
+{
+  "$defs": {
+    "JsonValue": {},
+    "MCPToolResultV1": {
+      "additionalProperties": false,
+      "description": "MCP-native result; Strands projection remains in the agent adapter.",
+      "properties": {
+        "_meta": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Meta"
+        },
+        "content": {
+          "items": {
+            "additionalProperties": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "type": "object"
+          },
+          "title": "Content",
+          "type": "array"
+        },
+        "isError": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Iserror"
+        },
+        "structuredContent": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Structuredcontent"
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "title": "MCPToolResultV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/mcp/v1/MCPInvocationResponseV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "record_type": {
+      "const": "mcp_invocation_response",
+      "default": "mcp_invocation_response",
+      "title": "Record Type",
+      "type": "string"
+    },
+    "result": {
+      "$ref": "#/$defs/MCPToolResultV1"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "result"
+  ],
+  "title": "MCPInvocationResponseV1",
+  "type": "object"
+}

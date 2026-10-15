@@ -1,0 +1,278 @@
+name: Test Profiles
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docker-compose-setup.html'
+      - 'user_docs/**'
+      - 'mkdocs.yml'
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.md'
+      - 'docker-compose-setup.html'
+      - 'user_docs/**'
+      - 'mkdocs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: rtk proxy bash --noprofile --norc -e -o pipefail {0}
+
+jobs:
+  docs-image-build:
+    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    strategy:
+      matrix:
+        dockerfile: [Dockerfile, Dockerfile.bundle]
+    timeout-minutes: 30
+    steps:
+      - name: Require managed local runner
+        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Record Docker cleanup ownership
+        run: touch "$UA_CI_CACHE/docker-used"
+      - name: Create disposable Docker builder
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        with:
+          name: ${{ env.UA_CI_BUILDER }}
+      - name: Build the image documentation stage
+        run: docker buildx build --builder "$UA_CI_BUILDER" --load --label "com.universalagents.ci.job=$UA_CI_ID" --target user-docs-builder --file "${{ matrix.dockerfile }}" --tag "ua-ci-docs:$UA_CI_ID" .
+      - name: Verify generated documentation
+        run: docker run --rm --label "com.universalagents.ci.job=$UA_CI_ID" "ua-ci-docs:$UA_CI_ID" python -c "from pathlib import Path; assert Path('/app/user_docs/site/index.html').is_file(); assert Path('/app/user_docs/site/search/search_index.json').is_file()"
+
+  runtime-install:
+    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    timeout-minutes: 30
+    steps:
+      - name: Require managed local runner
+        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Make disposable Python work with isolated child processes
+        run: '"$UA_CI_PYTHON" .github/runner/relocate_python.py'
+      - name: Create disposable Python environment
+        run: |
+          python -m venv .venv
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/.venv" >> "$GITHUB_ENV"
+      - name: Install runtime without development dependencies
+        run: |
+          python -m venv .ci-runtime
+          .ci-runtime/bin/python -m pip install --require-hashes -r requirements.lock.txt
+          .ci-runtime/bin/python -m pip check
+      - name: Exercise runtime-only installation
+        run: .ci-runtime/bin/python scripts/verify_runtime_install.py
+
+  fast:
+    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    timeout-minutes: 30
+    steps:
+      - name: Require managed local runner
+        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - name: Make disposable Python work with isolated child processes
+        run: '"$UA_CI_PYTHON" .github/runner/relocate_python.py'
+      - name: Create disposable Python environment
+        run: |
+          python -m venv .venv
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/.venv" >> "$GITHUB_ENV"
+      - name: Ensure pinned Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal --no-self-update
+      - name: Build Cedar evaluator
+        run: cargo build --locked --workspace
+      - name: Validate the shipped access policies
+        run: >-
+          target/debug/ua-cedar-authorizer validate-access
+          --policy ua_definitions/access/cedar/policies.cedar
+          --schema ua_definitions/access/cedar/schema.cedarschema
+      - name: Install dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.lock.txt
+      - name: Install and smoke-test isolated SkillSpector
+        run: |
+          # The scanner removes LD_LIBRARY_PATH at its process boundary. The
+          # provisioned system Python works without setup-python's loader path.
+          "$UA_CI_PYTHON" -m venv .ci-skillspector
+          .ci-skillspector/bin/python -m pip install --require-hashes -r requirements.skillspector.lock.txt
+          env -u LD_LIBRARY_PATH .ci-skillspector/bin/skillspector --version
+          .ci-skillspector/bin/skillspector scan custom_agents/skill_templates/runtime-operations-workflows --no-llm --format json >/dev/null
+      - name: Run reviewed GitHub skill-installation canary
+        run: >-
+          python tests/live_skill_installation_canary.py
+          --scanner .ci-skillspector/bin/skillspector
+          --evidence-output test_results/skill_installation_canary/evidence.json
+      - name: Test runner resource lifecycle
+        run: python -m unittest discover -s .github/runner -v
+      - name: Run hermetic test profile
+        run: ./scripts/run_tests.sh fast -q
+      # Verification above is mandatory. Archiving its evidence is optional.
+      - name: Upload reviewed skill-installation evidence
+        id: canary-evidence
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          retention-days: 7
+          name: skill-installation-canary-evidence
+          path: test_results/skill_installation_canary/evidence.json
+          if-no-files-found: error
+      - name: Report unavailable evidence archive
+        if: always() && steps.canary-evidence.outcome == 'failure'
+        run: echo "::warning::The skill-installation evidence archive could not be uploaded. See the upload step for the cause. Canary and test failures still fail this job."
+
+  photon-sidecar:
+    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    timeout-minutes: 30
+    steps:
+      - name: Require managed local runner
+        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.20.0"
+          package-manager-cache: false
+      - name: Install Photon sidecar dependencies
+        working-directory: assistant_gateway/interactive_apps/photon_sidecar
+        run: npm ci --no-audit --no-fund
+      - name: Test browser page lifecycle
+        run: node --test tests/browser_lifecycle.test.mjs tests/access_inbox.test.mjs tests/access_map.test.mjs tests/chat_links.test.mjs tests/chat_assistant_name.test.mjs tests/chat_delivery.test.mjs tests/workflow_page.test.mjs tests/workflow_card.test.mjs tests/chat_transcript_view.test.mjs tests/settings_controls.test.mjs tests/appearance_customizer.test.mjs tests/ui_motion.test.mjs tests/intro_word.test.mjs tests/panel_motion.test.mjs tests/chat_sign_in.test.mjs tests/team_controls.test.mjs tests/memory_controls.test.mjs tests/status_page.test.mjs tests/knowledge_page.test.mjs tests/team_transfer_review.test.mjs tests/onboarding_secrets_source.test.mjs tests/onboarding_account_sharing.test.mjs
+      - name: Test Photon sidecar
+        working-directory: assistant_gateway/interactive_apps/photon_sidecar
+        run: npm test
+
+  nats-live:
+    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    timeout-minutes: 30
+    steps:
+      - name: Require managed local runner
+        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - name: Make disposable Python work with isolated child processes
+        run: '"$UA_CI_PYTHON" .github/runner/relocate_python.py'
+      - name: Create disposable Python environment
+        run: |
+          python -m venv .venv
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/.venv" >> "$GITHUB_ENV"
+      - name: Ensure pinned Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal --no-self-update
+      - name: Build Cedar evaluator
+        run: cargo build --locked --workspace
+      - name: Install dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.lock.txt
+      - name: Start NATS with JetStream
+        run: python .github/runner/start_service.py nats
+      - name: Wait for NATS
+        run: |
+          python - <<'PY'
+          import socket
+          import os
+          from urllib.parse import urlsplit
+          endpoint = urlsplit(os.environ["NATS_URL"])
+          import time
+
+          for _ in range(30):
+              try:
+                  with socket.create_connection((endpoint.hostname, endpoint.port), timeout=1):
+                      break
+              except OSError:
+                  time.sleep(1)
+          else:
+              raise SystemExit("NATS did not become ready within 30 seconds")
+          PY
+      - name: Run live NATS profile
+        run: ./scripts/run_tests.sh live-nats -q
+
+  postgres-live:
+    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    timeout-minutes: 30
+    steps:
+      - name: Require managed local runner
+        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - name: Make disposable Python work with isolated child processes
+        run: '"$UA_CI_PYTHON" .github/runner/relocate_python.py'
+      - name: Create disposable Python environment
+        run: |
+          python -m venv .venv
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/.venv" >> "$GITHUB_ENV"
+      - name: Ensure pinned Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal --no-self-update
+      - name: Build Cedar evaluator
+        run: cargo build --locked --workspace
+      - name: Install dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.lock.txt
+      - name: Start PostgreSQL with pull retries
+        run: |
+          touch "$UA_CI_CACHE/docker-used"
+          for attempt in 1 2 3; do
+            if docker pull postgres:16-alpine; then
+              break
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "PostgreSQL image pull failed after ${attempt} attempts." >&2
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+          done
+          python .github/runner/start_service.py postgres
+      - name: Wait for PostgreSQL
+        run: |
+          for attempt in $(seq 1 30); do
+            if docker exec "$UA_CI_POSTGRES" pg_isready -U postgres -d ua_live_tests; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs "$UA_CI_POSTGRES"
+          echo "PostgreSQL did not become ready within 60 seconds." >&2
+          exit 1
+      - name: Run live PostgreSQL validation
+        env:
+          STORAGE_BACKEND: postgres
+        run: python tests/live_postgres_storage_validation.py
+      - name: Test knowledge storage and curation with PostgreSQL
+        run: python -m pytest tests/test_knowledge_*.py -m postgres -q --tb=short --show-capture=no

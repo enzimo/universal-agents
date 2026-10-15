@@ -1,0 +1,219 @@
+{
+  "$defs": {
+    "ObjectiveWorkBudget": {
+      "additionalProperties": false,
+      "description": "Immutable budget snapshot for one objective work session.",
+      "properties": {
+        "active_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Active Seconds",
+          "type": "integer"
+        },
+        "checkpoint_reserve_seconds": {
+          "minimum": 0,
+          "title": "Checkpoint Reserve Seconds",
+          "type": "integer"
+        },
+        "checkpoint_reserve_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Checkpoint Reserve Tokens",
+          "type": "integer"
+        },
+        "checkpoint_reserve_tool_calls": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Checkpoint Reserve Tool Calls",
+          "type": "integer"
+        },
+        "checkpoint_reserve_turns": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Checkpoint Reserve Turns",
+          "type": "integer"
+        },
+        "message_class": {
+          "const": "ObjectiveWorkBudget",
+          "default": "ObjectiveWorkBudget",
+          "title": "Message Class",
+          "type": "string"
+        },
+        "tool_calls": {
+          "exclusiveMinimum": 0,
+          "title": "Tool Calls",
+          "type": "integer"
+        },
+        "total_tokens": {
+          "exclusiveMinimum": 0,
+          "title": "Total Tokens",
+          "type": "integer"
+        },
+        "turns": {
+          "exclusiveMinimum": 0,
+          "title": "Turns",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "active_seconds",
+        "checkpoint_reserve_seconds",
+        "turns",
+        "total_tokens",
+        "tool_calls"
+      ],
+      "title": "ObjectiveWorkBudget",
+      "type": "object"
+    },
+    "ObjectiveWorkInstalledProfileStatus": {
+      "description": "Lifecycle of an owner-scoped reusable Objective work profile.",
+      "enum": [
+        "active",
+        "removed"
+      ],
+      "title": "ObjectiveWorkInstalledProfileStatus",
+      "type": "string"
+    },
+    "ObjectiveWorkProfile": {
+      "additionalProperties": false,
+      "description": "Reusable cadence and budget contract for bounded Objective execution.",
+      "properties": {
+        "budget": {
+          "$ref": "#/$defs/ObjectiveWorkBudget"
+        },
+        "cadence_cron": {
+          "title": "Cadence Cron",
+          "type": "string"
+        },
+        "cadence_timezone": {
+          "default": "owner",
+          "title": "Cadence Timezone",
+          "type": "string"
+        },
+        "message_class": {
+          "const": "ObjectiveWorkProfile",
+          "default": "ObjectiveWorkProfile",
+          "title": "Message Class",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cadence_cron",
+        "budget"
+      ],
+      "title": "ObjectiveWorkProfile",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/ObjectiveWorkInstalledProfile.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Owner-scoped reusable profile installed from one accepted proposal.",
+  "properties": {
+    "acceptance_summary": {
+      "title": "Acceptance Summary",
+      "type": "string"
+    },
+    "created_at": {
+      "title": "Created At",
+      "type": "string"
+    },
+    "installed_by_task_id": {
+      "title": "Installed By Task Id",
+      "type": "string"
+    },
+    "installed_profile_id": {
+      "title": "Installed Profile Id",
+      "type": "string"
+    },
+    "message_class": {
+      "const": "ObjectiveWorkInstalledProfile",
+      "default": "ObjectiveWorkInstalledProfile",
+      "title": "Message Class",
+      "type": "string"
+    },
+    "owner_agent_id": {
+      "title": "Owner Agent Id",
+      "type": "string"
+    },
+    "owner_canonical_user_id": {
+      "title": "Owner Canonical User Id",
+      "type": "string"
+    },
+    "profile": {
+      "$ref": "#/$defs/ObjectiveWorkProfile"
+    },
+    "profile_name": {
+      "title": "Profile Name",
+      "type": "string"
+    },
+    "proposal_digest": {
+      "title": "Proposal Digest",
+      "type": "string"
+    },
+    "removal_summary": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Removal Summary"
+    },
+    "removed_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Removed At"
+    },
+    "removed_by_task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Removed By Task Id"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_proposal_id": {
+      "title": "Source Proposal Id",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/ObjectiveWorkInstalledProfileStatus",
+      "default": "active"
+    },
+    "updated_at": {
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "owner_agent_id",
+    "owner_canonical_user_id",
+    "profile_name",
+    "profile",
+    "source_proposal_id",
+    "proposal_digest",
+    "installed_by_task_id",
+    "acceptance_summary"
+  ],
+  "title": "ObjectiveWorkInstalledProfile",
+  "type": "object"
+}

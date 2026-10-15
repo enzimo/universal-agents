@@ -1,0 +1,91 @@
+{
+  "$defs": {
+    "JsonValue": {},
+    "SkillFileV1": {
+      "additionalProperties": false,
+      "properties": {
+        "executable": {
+          "default": false,
+          "title": "Executable",
+          "type": "boolean"
+        },
+        "path": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size": {
+          "minimum": 0,
+          "title": "Size",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "size",
+        "sha256"
+      ],
+      "title": "SkillFileV1",
+      "type": "object"
+    },
+    "SkillKind": {
+      "enum": [
+        "operator",
+        "installed"
+      ],
+      "title": "SkillKind",
+      "type": "string"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/SkillUnitV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One skill folder, or one loose file in ``control/skills`` (``name`` is its name there).",
+  "properties": {
+    "attestation": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Attestation"
+    },
+    "files": {
+      "items": {
+        "$ref": "#/$defs/SkillFileV1"
+      },
+      "minItems": 1,
+      "title": "Files",
+      "type": "array"
+    },
+    "kind": {
+      "$ref": "#/$defs/SkillKind"
+    },
+    "name": {
+      "maxLength": 255,
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "kind",
+    "files"
+  ],
+  "title": "SkillUnitV1",
+  "type": "object"
+}

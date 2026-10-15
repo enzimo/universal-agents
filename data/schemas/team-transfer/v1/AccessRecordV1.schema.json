@@ -1,0 +1,45 @@
+{
+  "$defs": {
+    "AccessKind": {
+      "enum": [
+        "grant",
+        "data_folder",
+        "account_link",
+        "person_settings",
+        "profile_choice",
+        "account_sharing"
+      ],
+      "title": "AccessKind",
+      "type": "string"
+    },
+    "JsonValue": {}
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/AccessRecordV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "document": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Document",
+      "type": "object"
+    },
+    "kind": {
+      "$ref": "#/$defs/AccessKind"
+    },
+    "record_id": {
+      "maxLength": 400,
+      "minLength": 1,
+      "title": "Record Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "record_id",
+    "document"
+  ],
+  "title": "AccessRecordV1",
+  "type": "object"
+}

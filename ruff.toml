@@ -1,0 +1,5 @@
+# Keep the repository's correctness gate stable across Ruff releases. Security-
+# sensitive modules are selected explicitly by the CI workflow; expanding this
+# rule set is a deliberate repository policy change, not a tool-upgrade side effect.
+[lint]
+select = ["E4", "E7", "E9", "F"]

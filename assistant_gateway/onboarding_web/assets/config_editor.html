@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en" data-color-mode="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Universal Agents Config Editor</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/appearance.js"></script>
+</head>
+<body class="config-editor-body">
+  <canvas class="ua-doc-static-mesh" data-ua-metallic-mesh aria-hidden="true"></canvas>
+  <main class="config-editor-shell" aria-labelledby="config-editor-title">
+    <header class="config-editor-header">
+      <a class="brand-lockup" href="/webchat" aria-label="Open Web Chat">
+        <img class="brand-mark" src="/agent-mark.png" alt="">
+        <span>Universal Agents</span>
+      </a>
+      <a class="button secondary" href="/webchat">Web Chat</a>
+    </header>
+
+    <section id="config-editor-auth" class="config-editor-auth">
+      <h1 id="config-editor-title">Edit Instance Config</h1>
+      <p>Enter the Web Chat authentication token to unlock the gateway-owned config editor.</p>
+      <form id="config-editor-auth-form" class="chat-auth-form">
+        <label for="config-editor-token">Authentication token</label>
+        <div class="credential-input">
+          <input id="config-editor-token" class="input" type="password" autocomplete="current-password">
+          <button id="config-editor-token-reveal" class="credential-reveal-button" type="button" title="Show or hide value" aria-label="Show or hide value" aria-controls="config-editor-token" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+          </button>
+        </div>
+        <p id="config-editor-auth-error" class="runtime-test-status is-error" hidden></p>
+        <button class="button primary" type="submit">Unlock Editor</button>
+      </form>
+    </section>
+
+    <section id="config-editor-app" class="config-editor-app" hidden>
+      <div class="config-editor-toolbar">
+        <div>
+          <p class="page-kicker">instance_config.yaml</p>
+          <h1>Edit Runtime Config</h1>
+          <p id="config-editor-path" class="config-editor-path"></p>
+        </div>
+        <div class="config-editor-actions">
+          <button id="config-editor-download" class="button secondary" type="button">Download</button>
+          <button id="config-editor-reload" class="button secondary" type="button">Reload</button>
+          <button id="config-editor-save" class="button primary" type="button">Save</button>
+        </div>
+      </div>
+
+      <div class="config-editor-grid">
+        <label class="config-editor-panel config-editor-yaml-panel" for="config-editor-yaml">
+          <span>YAML</span>
+          <div class="config-editor-code-shell">
+            <pre id="config-editor-highlight" class="config-editor-highlight" aria-hidden="true"></pre>
+            <textarea id="config-editor-yaml" spellcheck="false" aria-label="YAML config editor"></textarea>
+          </div>
+        </label>
+
+        <aside class="config-editor-panel config-editor-side">
+          <section>
+            <h2>Backups</h2>
+            <div id="config-editor-backups" class="config-editor-backups"></div>
+          </section>
+          <section>
+            <h2>Restart</h2>
+            <label class="config-editor-confirm">
+              <input id="config-editor-restart-confirm" type="checkbox">
+              <span>I understand this will restart the supervised runtime.</span>
+            </label>
+            <button id="config-editor-restart" class="button danger" type="button" disabled>Restart Runtime</button>
+          </section>
+        </aside>
+      </div>
+
+      <p id="config-editor-status" class="config-editor-status" hidden></p>
+    </section>
+  </main>
+  <script src="/docs/assets/static-mesh.js" defer></script>
+  <script src="/metallic_mesh.js" defer></script>
+  <script src="/action_feedback.js" defer></script>
+  <script src="/config-editor.js" defer></script>
+</body>
+</html>

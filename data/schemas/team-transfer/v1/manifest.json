@@ -1,0 +1,331 @@
+{
+  "contract": "universal-agents-team-transfer",
+  "json_schema_draft": "2020-12",
+  "schema_version": 1,
+  "schemas": [
+    {
+      "filename": "TransferManifestV1.schema.json",
+      "model": "TransferManifestV1",
+      "sha256": "352861276fb73bc205e6d9a0f5bad0267fc9b3c5567b0df79d7572ad3b9a85f9"
+    },
+    {
+      "filename": "SectionDocumentV1.schema.json",
+      "model": "SectionDocumentV1",
+      "sha256": "1521965ae8d477ff71ed419a534b9248ff3ee2f97566b66c7174bb58d8d9ea32"
+    },
+    {
+      "filename": "ImportReviewV1.schema.json",
+      "model": "ImportReviewV1",
+      "sha256": "1798b1f466b2bf16f903f3b72780f295cd58e9ceeb94fe68f787b8ddb18e35de"
+    },
+    {
+      "filename": "SettingV1.schema.json",
+      "model": "SettingV1",
+      "sha256": "67425d20f6c92475897701b0636669f118f1a4bacbdacb56d4d9784883b16635"
+    },
+    {
+      "filename": "OperatorSecretV1.schema.json",
+      "model": "OperatorSecretV1",
+      "sha256": "875e01f2ac6d753a8ee9f0da2171c5d67f92fd72837bd4436db31aa2cb68895e"
+    },
+    {
+      "filename": "ControlUnitV1.schema.json",
+      "model": "ControlUnitV1",
+      "sha256": "c9ee39fcab81983e53a70de1f2c7624ebace43a3696b6796db0cc294dc24d775"
+    },
+    {
+      "filename": "SkillUnitV1.schema.json",
+      "model": "SkillUnitV1",
+      "sha256": "4418cbd28b5a756855f742d37758e114dbe443b9192a5f7cc6e7ed7fbf84310d"
+    },
+    {
+      "filename": "TeamToolFileV1.schema.json",
+      "model": "TeamToolFileV1",
+      "sha256": "af81f410b707cca569af03d5b12ed7478e18ef7b531b1786775bacc0edb7f900"
+    },
+    {
+      "filename": "McpRecordV1.schema.json",
+      "model": "McpRecordV1",
+      "sha256": "c0b71fb37bae18f2c689290b9aa11afe30940bd85e3cb6209ca0113c7b34243c"
+    },
+    {
+      "filename": "ProcedureRecordV1.schema.json",
+      "model": "ProcedureRecordV1",
+      "sha256": "ae5a46f417ac19686241d6ed213be3fb6ca76105803dc21e59d234ebf205d4bb"
+    },
+    {
+      "filename": "PersonV1.schema.json",
+      "model": "PersonV1",
+      "sha256": "38193ba78ce3235d9125b0078f82e0be98e460dc5c673674a9424e9d013bb1ad"
+    },
+    {
+      "filename": "AccessRecordV1.schema.json",
+      "model": "AccessRecordV1",
+      "sha256": "19965921214c19e05295e49be551f748663ab22d68ebf678617cdc7a6fde1702"
+    },
+    {
+      "filename": "ObjectiveTransferRecordV1.schema.json",
+      "model": "ObjectiveTransferRecordV1",
+      "sha256": "ba456d54abbc8e3ffbded6d6234aea81eaae825f901632344f2aeccc4bdf15b9"
+    },
+    {
+      "filename": "ScheduleTransferRecordV2.schema.json",
+      "model": "ScheduleTransferRecordV2",
+      "sha256": "aa1882cad58134449cdfa1330c8fc02d41410a69c138aaa25be33b21dc9bbd1a"
+    },
+    {
+      "filename": "PinnedMemoryFactRecordV1.schema.json",
+      "model": "PinnedMemoryFactRecordV1",
+      "sha256": "834203c0c6f2295827a802e5532cb9e1a6e9f7b0fa6f93fb169810e82c3fe27c"
+    },
+    {
+      "filename": "KnowledgeTransferRecordV1.schema.json",
+      "model": "KnowledgeTransferRecordV1",
+      "sha256": "4799f03c95eb40fa98683700bd4f2622e806aac1a2f740830c14a4a48700c719"
+    },
+    {
+      "filename": "BrokerCredentialsDocumentV1.schema.json",
+      "model": "BrokerCredentialsDocumentV1",
+      "sha256": "eceb5b5b8162940d2a2673067ec5d6fa18d1ce80b939551917dcbfbc35876a93"
+    },
+    {
+      "filename": "GatewayInstanceConfig.schema.json",
+      "model": "GatewayInstanceConfig",
+      "sha256": "118998d10420078a00e5cb814d6b731cef4d3ddeff4ba7e49693693aec169f01"
+    },
+    {
+      "filename": "AgentCatalogDocument.schema.json",
+      "model": "AgentCatalogDocument",
+      "sha256": "80e0997f656e43bca5511009ad20b6b7a4cd86db91ecb16145fb97ac7c779c07"
+    },
+    {
+      "filename": "TeamCompositionConfig.schema.json",
+      "model": "TeamCompositionConfig",
+      "sha256": "c00c47fb041247e63a391a4f13d654c29b4f8c2ba2b4ba7c195d3f19cea82e0a"
+    },
+    {
+      "filename": "GeneratedAgentProvisioningRecordV1.schema.json",
+      "model": "GeneratedAgentProvisioningRecordV1",
+      "sha256": "64a1f0ded39b722f8db17bca7daf63a16c89a23646018b21cab83eacaab95b9b"
+    },
+    {
+      "filename": "ObjectiveWorkExecutionConfigLayer.schema.json",
+      "model": "ObjectiveWorkExecutionConfigLayer",
+      "sha256": "9c441bbd20d47351de9e8ff6d60b44951c14535a4534dce25852f74a67190ee5"
+    },
+    {
+      "filename": "GrantV1.schema.json",
+      "model": "GrantV1",
+      "sha256": "603a41505c1d6e10e814e7890d43cc88b1b20878f595a06491277358e1c33e97"
+    },
+    {
+      "filename": "DataFolderRecordV1.schema.json",
+      "model": "DataFolderRecordV1",
+      "sha256": "434d1fdecbf4f2e47cd881e14394346dc516e9fbdc420deec20abb2f638a3a12"
+    },
+    {
+      "filename": "AccountLinkV1.schema.json",
+      "model": "AccountLinkV1",
+      "sha256": "fe23d74b3ed9ac3c8f10ce0f0c8a1c43530ab323f341eb7d52dc60cf33499a66"
+    },
+    {
+      "filename": "PersonSettingsV1.schema.json",
+      "model": "PersonSettingsV1",
+      "sha256": "66739a7d14d1d463ae0da876222b360388a2d833db705cc3589aaf28031ad26a"
+    },
+    {
+      "filename": "AccountSharingV1.schema.json",
+      "model": "AccountSharingV1",
+      "sha256": "509c7310337507377925f976f48120dfd7eb21adbeaea0825c6fd5be1c3cb627"
+    },
+    {
+      "filename": "ObjectiveRecord.schema.json",
+      "model": "ObjectiveRecord",
+      "sha256": "38ae5b962c4617c5cfd3d6c01654093f4dc25dd43438a45c3d4e3c1705fc68fb"
+    },
+    {
+      "filename": "ObjectiveWorkInstalledProfile.schema.json",
+      "model": "ObjectiveWorkInstalledProfile",
+      "sha256": "1e1d86851fe24e1190b01fab99bc1316ec1b9f6865c8e92b252ebfdf23a37937"
+    },
+    {
+      "filename": "ObjectiveWorkPolicy.schema.json",
+      "model": "ObjectiveWorkPolicy",
+      "sha256": "9e9ff16ec90a30d2f2c8879ea1a0f7e2daa4147e145d61ae5235289d302adef7"
+    },
+    {
+      "filename": "ScheduledMessage.schema.json",
+      "model": "ScheduledMessage",
+      "sha256": "e5544aa58d3542e28a8fbbe09f632bc2e60e9eba4b585d1f432179405458b0f2"
+    },
+    {
+      "filename": "ScheduleWorkerBindingV1.schema.json",
+      "model": "ScheduleWorkerBindingV1",
+      "sha256": "67292e9a7d80cb82dc20752e242d93ba3ceb5bf00fbe2dc6d3ceb5a5df395839"
+    },
+    {
+      "filename": "WorkerPoolLimitV1.schema.json",
+      "model": "WorkerPoolLimitV1",
+      "sha256": "a35b560e2cc86c02309eae361b5763cd76ac2889f69079fad866bf8b6c9e4f56"
+    },
+    {
+      "filename": "ExportedFactV1.schema.json",
+      "model": "ExportedFactV1",
+      "sha256": "65a70dca10e1623256f4363e9d8aaa211951ae3f2a46561fb22b8c719d27784b"
+    },
+    {
+      "filename": "CatalogCredential.schema.json",
+      "model": "CatalogCredential",
+      "sha256": "5273865388059a661ee4ea6e1d7403609992fb44e4a784d396975ae3170069a4"
+    },
+    {
+      "filename": "StoredModelKey.schema.json",
+      "model": "StoredModelKey",
+      "sha256": "08f9950a4dde6fc83840b77f985f98eb256d4ae37bd3e0273c438f04bda9ff83"
+    },
+    {
+      "filename": "MCPConnectionRecordV1.schema.json",
+      "model": "MCPConnectionRecordV1",
+      "sha256": "26b16cbe8eeced8c47ddc24989e13cb8efe9439a65a12913782612862c73630e"
+    },
+    {
+      "filename": "MCPStaticBaselineV1.schema.json",
+      "model": "MCPStaticBaselineV1",
+      "sha256": "73485265383b0351dd4504e69188a607c51a9f09c8b7b5ed40f76002e037e181"
+    },
+    {
+      "filename": "MCPHostedServerDefinitionV1.schema.json",
+      "model": "MCPHostedServerDefinitionV1",
+      "sha256": "449ba722c878dcf930ff2e519ae78b5d5910baaa4e576b0ffbb143837b9872e5"
+    },
+    {
+      "filename": "MCPOperationLevelsV1.schema.json",
+      "model": "MCPOperationLevelsV1",
+      "sha256": "90060d7eef05f21ece7324c0283f33d3f10536b64b676d26cd0ef36ef2f7e92d"
+    },
+    {
+      "filename": "InstalledPermissionDefinitionV1.schema.json",
+      "model": "InstalledPermissionDefinitionV1",
+      "sha256": "cd946034f39edd44f09df21a5214d6869b835868f92942df45d47e47b9343b3f"
+    }
+  ],
+  "sections": [
+    {
+      "name": "settings",
+      "payload_models": [
+        "GatewayInstanceConfig"
+      ],
+      "record_model": "SettingV1",
+      "schema_version": 4
+    },
+    {
+      "name": "operator_secrets",
+      "payload_models": [],
+      "record_model": "OperatorSecretV1",
+      "schema_version": 2
+    },
+    {
+      "name": "control",
+      "payload_models": [
+        "AgentCatalogDocument",
+        "TeamCompositionConfig",
+        "GeneratedAgentProvisioningRecordV1",
+        "ObjectiveWorkExecutionConfigLayer"
+      ],
+      "record_model": "ControlUnitV1",
+      "schema_version": 2
+    },
+    {
+      "name": "skills",
+      "payload_models": [],
+      "record_model": "SkillUnitV1",
+      "schema_version": 1
+    },
+    {
+      "name": "team_tools",
+      "payload_models": [],
+      "record_model": "TeamToolFileV1",
+      "schema_version": 1
+    },
+    {
+      "name": "mcp",
+      "payload_models": [
+        "MCPConnectionRecordV1",
+        "MCPStaticBaselineV1",
+        "MCPHostedServerDefinitionV1",
+        "MCPOperationLevelsV1"
+      ],
+      "record_model": "McpRecordV1",
+      "schema_version": 1
+    },
+    {
+      "name": "procedures",
+      "payload_models": [
+        "InstalledPermissionDefinitionV1"
+      ],
+      "record_model": "ProcedureRecordV1",
+      "schema_version": 1
+    },
+    {
+      "name": "people",
+      "payload_models": [],
+      "record_model": "PersonV1",
+      "schema_version": 1
+    },
+    {
+      "name": "access",
+      "payload_models": [
+        "GrantV1",
+        "DataFolderRecordV1",
+        "AccountLinkV1",
+        "PersonSettingsV1",
+        "AccountSharingV1"
+      ],
+      "record_model": "AccessRecordV1",
+      "schema_version": 3
+    },
+    {
+      "name": "objectives",
+      "payload_models": [
+        "ObjectiveRecord",
+        "ObjectiveWorkInstalledProfile",
+        "ObjectiveWorkPolicy"
+      ],
+      "record_model": "ObjectiveTransferRecordV1",
+      "schema_version": 1
+    },
+    {
+      "name": "schedules",
+      "payload_models": [
+        "ScheduledMessage",
+        "ScheduleWorkerBindingV1",
+        "WorkerPoolLimitV1"
+      ],
+      "record_model": "ScheduleTransferRecordV2",
+      "schema_version": 4
+    },
+    {
+      "name": "pinned_memory",
+      "payload_models": [
+        "ExportedFactV1"
+      ],
+      "record_model": "PinnedMemoryFactRecordV1",
+      "schema_version": 1
+    },
+    {
+      "name": "knowledge",
+      "payload_models": [],
+      "record_model": "KnowledgeTransferRecordV1",
+      "schema_version": 2
+    },
+    {
+      "name": "broker_credentials",
+      "payload_models": [
+        "CatalogCredential",
+        "StoredModelKey"
+      ],
+      "record_model": "BrokerCredentialsDocumentV1",
+      "schema_version": 2
+    }
+  ]
+}

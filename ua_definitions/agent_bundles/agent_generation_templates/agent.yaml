@@ -1,0 +1,35 @@
+schema_version: 1
+
+agent_templates:
+  TaskSpecialistTemplate:
+    parameters:
+      display_name:
+        type: string
+      role:
+        type: string
+      description:
+        type: string
+      prompt:
+        type: string
+      visible:
+        type: boolean
+        default: false
+    definition:
+      display_name: "{{display_name}}"
+      role: "{{role}}"
+      description: "{{description}}"
+      prompt: "{{prompt}}"
+      backstory: "hub_and_spoke"
+      # Generated specialists replace these with the default tools a person
+      # approved (custom_agents.generated_agent_provisioning).
+      default_tools:
+        - "fn:publishing"
+        - "fn:schedules"
+      skills_enabled: true
+      onboarding:
+        visible: "{{visible}}"
+        locked: false
+        default_enabled: false
+        default_count: 1
+        summary: "{{role}}"
+        description: "{{description}}"

@@ -1,0 +1,8 @@
+schema_version: 1
+
+# Permission definitions may reference only handlers listed here and compiled
+# into TRUSTED_INSTALLED_PERMISSION_EXECUTORS. Agent proposals never add code,
+# schemas, impact claims, or levels to this trusted
+# registry. Each handler names the access level invoking it needs (read, write,
+# or full); the tool catalog lists it as procedure:<handler_id>.
+handlers: {}

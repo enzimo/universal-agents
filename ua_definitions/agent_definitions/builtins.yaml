@@ -1,0 +1,115 @@
+schema_version: 1
+
+# default_tools names the tools a type works with, as tool catalog ids or tool
+# set ids (ua_definitions/access/tools). Every agent also has its role's standard
+# tools. With authorization off the defaults are the agent's other tools; with it
+# on they tell TeamLead what to give a new type, and access comes from grants.
+agent_types:
+  TeamArchitect:
+    display_name: "Team Architect"
+    role: "Experienced, efficient, and thorough problem-solving team leader"
+    description: "The permanent coordinator that receives user requests, plans work, routes tasks to specialists, checks their results, and keeps the final answer coherent."
+    prompt_ref: "prompts/team_architect.md"
+    backstory: "hub_and_spoke"
+    default_tools:
+      - "fn:execution_control"
+      - "fn:memory_review_inspection"
+      - "fn:memory_review_maintenance"
+      - "fn:publishing"
+      - "fn:schedules"
+      - "code:python"
+      - "code:shell"
+      - "google_workspace"
+      - "github"
+    skills_enabled: true
+    onboarding:
+      visible: true
+      locked: true
+      default_enabled: true
+      default_count: 1
+      summary: "Lead architect and coordinator"
+      description: "The permanent team lead. It receives user requests, plans work, routes tasks to specialists, checks their results, and keeps the final response coherent."
+
+  InternalImprovementAgent:
+    display_name: "Internal Improvement Agent"
+    role: "Internal operations builder and system health assistant for team skills, compiled CLIs, templates, housekeeping, and repeatable automation"
+    description: "Builds internal tools that make the team faster and healthier: reusable skills, compiled command-line utilities, structured templates, workflow checklists, workspace artifact review, stale-file cleanup plans, and automation for tedious repeated work."
+    prompt_ref: "prompts/internal_improvement.md"
+    backstory: "hub_and_spoke"
+    # Built-in maintenance agent: its timer runs work for no person (access
+    # plan 7c). Its role's standard tools cover the duties (sandboxed code,
+    # memory-review cleanup, model lookup); the defaults below serve tasks
+    # TeamArchitect delegates for a person.
+    access_role: "system"
+    default_tools:
+      - "fn:publishing"
+      - "fn:schedules"
+      - "github"
+    skills_enabled: true
+    onboarding:
+      visible: true
+      locked: false
+      default_enabled: false
+      default_count: 1
+      summary: "Internal tools, automation, and system health"
+      description: "Creates skills, compiled CLIs, reusable templates, workspace housekeeping plans, and small automation that keeps the team efficient and the internal workspace healthy."
+
+  WebResearchAgent:
+    display_name: "Web Research Agent"
+    role: "Web research assistant for current external facts and source synthesis"
+    description: "Gathers current external information, evaluates source quality, resolves conflicts, and returns concise cited findings."
+    prompt_ref: "prompts/web_research.md"
+    backstory: "hub_and_spoke"
+    default_tools:
+      - "fn:schedules"
+      - "code:python"
+    skills_enabled: true
+    onboarding:
+      visible: true
+      locked: false
+      default_enabled: true
+      default_count: 2
+      summary: "Current information and source synthesis"
+      description: "Finds current public information, reads web pages and documentation, gathers citations, and summarizes what matters."
+
+  MemReviewAgent:
+    display_name: "Memory Review Agent"
+    role: "Memory review specialist for pinned memory creation, reconciliation, and topic tagging"
+    description: "Reviews conversation context for durable team/user memory, reconciles pinned facts, and maintains topic tags for future recall."
+    prompt_ref: "prompts/memory_review.md"
+    backstory: "hub_and_spoke"
+    # Built-in maintenance agent: fixed duties, runs work with no person.
+    access_role: "system"
+    default_tools:
+      - "fn:memory_review_inspection"
+    skills_enabled: true
+    onboarding:
+      visible: true
+      locked: true
+      default_enabled: true
+      default_count: 1
+      summary: "Pinned memory review and topic tagging"
+      description: "Reviews conversation context for durable team/user memory, reconciles pinned facts, and maintains topic tags for future recall."
+
+  KnowledgeCuratorAgent:
+    display_name: "Knowledge Curator"
+    role: "Knowledge base curator who decides which knowledge from a person's work is shared with the team and keeps team pages accurate"
+    description: "Reviews team knowledge changes proposed from each person's work, removes private details before publishing, merges notes, and fixes pages that agents fight over."
+    prompt_ref: "prompts/knowledge_curator.md"
+    backstory: "hub_and_spoke"
+    # Built-in maintenance agent, started when its schedules are due (owner's
+    # decision 2026-10-10). Its per-person run works for that person; its team
+    # run works for nobody. The knowledge_review tool set has a standard grant
+    # for this agent type; fn:knowledge comes with agent_runtime.
+    access_role: "system"
+    default_tools:
+      - "fn:knowledge"
+      - "fn:knowledge_curation"
+    skills_enabled: false
+    onboarding:
+      visible: true
+      locked: false
+      default_enabled: false
+      default_count: 1
+      summary: "Knowledge base review and upkeep"
+      description: "Decides which knowledge from each person's work is shared with the team, removes private details first, merges notes, and keeps team pages accurate."

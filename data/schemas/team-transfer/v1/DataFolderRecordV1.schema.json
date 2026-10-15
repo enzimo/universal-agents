@@ -1,0 +1,137 @@
+{
+  "$defs": {
+    "DataFolderStatus": {
+      "enum": [
+        "active",
+        "removed"
+      ],
+      "title": "DataFolderStatus",
+      "type": "string"
+    },
+    "SubjectKind": {
+      "description": "Who a grant is for. A grant to a type, role, or team covers its members.\n\nA schedule holds the access of one scheduled job (owner's decision\n2026-09-30, \"access follows the work\"): every agent in one of its runs is\nin it, whatever agent type runs it. Its id is ``<team>/<schedule id>``.",
+      "enum": [
+        "agent",
+        "agent_type",
+        "role",
+        "team",
+        "user",
+        "schedule"
+      ],
+      "title": "SubjectKind",
+      "type": "string"
+    },
+    "SubjectRefV1": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SubjectKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "SubjectRefV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://universal-agents.dev/schemas/team-transfer/v1/DataFolderRecordV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A folder outside the workspace registered as an access target (decision D16).\n\nAgents name it ``data/<name>`` (``access_control.folders``). With\nauthorization on an agent reaches it only through folder grants;\n``writable: false`` refuses writes whatever the grants say. Registered by\nan administrator (or through an approved proposal) and read by every\nprocess from the access store, so a new folder needs no restart.",
+  "properties": {
+    "created_at_utc": {
+      "format": "date-time",
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "name": {
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "title": "Name",
+      "type": "string"
+    },
+    "path": {
+      "maxLength": 1000,
+      "minLength": 2,
+      "title": "Path",
+      "type": "string"
+    },
+    "reason": {
+      "default": "",
+      "maxLength": 2000,
+      "title": "Reason",
+      "type": "string"
+    },
+    "record_id": {
+      "maxLength": 120,
+      "minLength": 1,
+      "title": "Record Id",
+      "type": "string"
+    },
+    "registered_by": {
+      "$ref": "#/$defs/SubjectRefV1"
+    },
+    "removed_at_utc": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Removed At Utc"
+    },
+    "removed_by": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SubjectRefV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/DataFolderStatus",
+      "default": "active"
+    },
+    "team_id": {
+      "maxLength": 120,
+      "minLength": 1,
+      "title": "Team Id",
+      "type": "string"
+    },
+    "writable": {
+      "default": true,
+      "title": "Writable",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "record_id",
+    "team_id",
+    "name",
+    "path",
+    "registered_by",
+    "created_at_utc"
+  ],
+  "title": "DataFolderRecordV1",
+  "type": "object"
+}

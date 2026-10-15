@@ -1,0 +1,79 @@
+{
+  "$id": "https://universal-agents.local/schemas/gateway/transcript/v1/WebTranscriptAttachmentV1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Display-safe attachment reference in a durable transcript message.",
+  "properties": {
+    "attachment_id": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Attachment Id",
+      "type": "string"
+    },
+    "caption": {
+      "anyOf": [
+        {
+          "maxLength": 4000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Caption"
+    },
+    "content_type": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Content Type",
+      "type": "string"
+    },
+    "filename": {
+      "maxLength": 1024,
+      "minLength": 1,
+      "title": "Filename",
+      "type": "string"
+    },
+    "kind": {
+      "maxLength": 80,
+      "minLength": 1,
+      "title": "Kind",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "size_bytes": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Size Bytes"
+    },
+    "url": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Url",
+      "type": "string"
+    }
+  },
+  "required": [
+    "attachment_id",
+    "filename",
+    "content_type",
+    "kind",
+    "url"
+  ],
+  "title": "WebTranscriptAttachmentV1",
+  "type": "object"
+}

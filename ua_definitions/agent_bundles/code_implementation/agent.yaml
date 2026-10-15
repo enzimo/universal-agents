@@ -1,0 +1,31 @@
+schema_version: 1
+
+agent_types:
+  CodeWritingAgent:
+    display_name: "Code Writing Agent"
+    role: "Code implementation assistant for scoped product and automation changes"
+    description: "Produces clean, maintainable code changes with focused verification and minimal supporting edits."
+    prompt_ref: "prompts/code_writing.md"
+    backstory: "hub_and_spoke"
+    default_tools:
+      - "fn:schedules"
+      - "code:python"
+      - "code:shell"
+      - "github"
+    skills_enabled: true
+    onboarding:
+      visible: false
+      locked: false
+      default_enabled: false
+      default_count: 1
+      summary: "Focused code implementation"
+      description: "Makes scoped code changes, follows existing project style, and prepares implementation details for review."
+
+team_templates:
+  internal_tooling_team:
+    description: "A builder team for internal skills, compiled CLIs, reusable templates, and automation."
+    members:
+      - agent_type: "InternalImprovementAgent"
+        count: 1
+      - agent_type: "CodeWritingAgent"
+        count: 1
