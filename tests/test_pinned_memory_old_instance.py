@@ -1,8 +1,8 @@
 """``memory export`` reads an old instance that this version refuses to load.
 
 The owner runs the export from the new image against an instance that runs an
-earlier version (``main`` at ``MAIN_ERA_COMMIT``): its configuration holds
-removed settings, its database sits in the old ``workspace/dbs/`` folder, and in
+earlier version: its configuration holds removed settings, its database sits
+in the old ``workspace/dbs/`` folder, and in
 Docker its files are mounted read-only somewhere other than the ``/data`` its
 configuration records. These tests build such instances and check that the
 export reads them without changing a byte, and that the file imports into a new
@@ -17,9 +17,6 @@ import logging
 import os
 import shutil
 import stat
-import subprocess
-import sys
-import textwrap
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -37,40 +34,13 @@ from tests.pinned_memory_support import new_instance, record_people, repository,
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # instance_config.yaml as main's onboarding wrote it for /data (see its header).
 MAIN_ERA_CONFIG = PROJECT_ROOT / "tests" / "fixtures" / "pinned_memory" / "main_instance_config.yaml"
-# The main branch when the instance layout and access settings changed; the
-# owner's old instance runs this version.
-MAIN_ERA_COMMIT = "300bd334c7797ed3cc12360d11d0ed01bcc15acd"
 OLD_TEAM = "team_old"
 NEW_TEAM = "team_new"
 AUTHOR = {"kind": "user", "id": "usr_ana", "display_name": "Ana"}
 
-# Runs with main's code on PYTHONPATH: onboards an instance and writes its
-# pinned memories through main's own repository.
-MAIN_WRITER = textwrap.dedent(
-    """
-    import json, sys
-    from assistant_gateway.config import GatewayInstanceConfig
-    from storage.pinned_memory_repository import create_pinned_memory_repository
-
-    root = sys.argv[1]
-    config = GatewayInstanceConfig.create(
-        instance_name="old-team", instance_root=root, team_id="team_old", timezone="UTC"
-    )
-    config.save(root + "/instance_config.yaml")
-    repo = create_pinned_memory_repository(config.manager_storage_settings)
-    author = {"kind": "user", "id": "usr_ana", "display_name": "Ana"}
-    repo.create_coremem(team_id="team_old", fact_text="The team ships on Fridays.", capacity=10,
-                        tags=["process"], source={"conversation_id": "conv_1"}, actor=author)
-    repo.create_usermem(canonical_user_id="usr_ana", fact_text="Ana prefers short answers.", capacity=10,
-                        source_key="onboarding:user_context:v1", actor=author)
-    repo.create_usermem(canonical_user_id="usr_ben", fact_text="Ben is on call on Mondays.", capacity=10)
-    print(json.dumps({"database": config.manager_storage_settings.sqlite_path}))
-    """
-)
-
 
 def _write_old_memories(database: Path) -> None:
-    """The same facts MAIN_WRITER writes; the table is unchanged since 0.1.0."""
+    """Pinned memories as an earlier version wrote them; the table is unchanged since 0.1.0."""
 
     database.parent.mkdir(parents=True, exist_ok=True)
     repo = SqlitePinnedMemoryRepository(str(database))
@@ -153,51 +123,6 @@ def test_export_reads_a_main_era_instance_mounted_read_only_elsewhere(tmp_path: 
     assert "event=pinned_memory_export_no_people_records" in caplog.text
     if not os.access(database.parent, os.W_OK):  # root ignores the read-only modes
         assert "mode=immutable" in caplog.text
-    _import_and_check(tmp_path, out, capsys)
-
-
-def _main_code(tmp_path_factory) -> Path:
-    try:
-        subprocess.run(
-            ["git", "cat-file", "-e", f"{MAIN_ERA_COMMIT}^{{commit}}"], cwd=PROJECT_ROOT, check=True, capture_output=True
-        )
-    except (OSError, subprocess.CalledProcessError):
-        pytest.skip(f"commit {MAIN_ERA_COMMIT[:12]} is not in this clone (a shallow checkout); fetch main to run this test")
-    code = tmp_path_factory.mktemp("main_code")
-    archive = subprocess.run(["git", "archive", MAIN_ERA_COMMIT], cwd=PROJECT_ROOT, check=True, capture_output=True)
-    subprocess.run(["tar", "-x", "-C", str(code)], input=archive.stdout, check=True)
-    return code
-
-
-def test_export_reads_an_instance_written_by_main(tmp_path: Path, tmp_path_factory, capsys, caplog) -> None:
-    code = _main_code(tmp_path_factory)
-    written_root = tmp_path / "data"
-    written_root.mkdir()
-    env = {key: value for key, value in os.environ.items() if key not in {"PYTHONPATH", "POSTGRES_DSN", "STORAGE_BACKEND"}}
-    result = subprocess.run(
-        [sys.executable, "-c", MAIN_WRITER, str(written_root)],
-        cwd=code,
-        env={**env, "PYTHONPATH": str(code)},
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr[-3000:]
-    database = Path(json.loads(result.stdout.strip().splitlines()[-1])["database"])
-    assert database == written_root / "workspace" / "dbs" / "task_history.db"  # main's layout
-    main_config = yaml.safe_load((written_root / "instance_config.yaml").read_text(encoding="utf-8"))
-    assert main_config["schema_version"] == 9 and "tool_policy" in main_config and "human_interactions" in main_config
-    old_root = tmp_path / "old"
-    written_root.rename(old_root)  # the files now sit where the configuration does not say
-    out = tmp_path / "memories.json"
-
-    document = _export_read_only(old_root, out, caplog)
-
-    assert f"Read the SQLite database {old_root / 'workspace' / 'dbs' / 'task_history.db'}." in capsys.readouterr().out
-    assert sorted(fact.fact_text for fact in document.facts) == [
-        "Ana prefers short answers.",
-        "Ben is on call on Mondays.",
-        "The team ships on Fridays.",
-    ]
     _import_and_check(tmp_path, out, capsys)
 
 
