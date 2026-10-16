@@ -234,3 +234,120 @@ def test_research_writes_refuse_a_link_swapped_in_after_the_folder_was_made(layo
     with pytest.raises(PathPolicyError):
         tools._write_text(artifact_dir / "page.md", "hello")
     assert list(target.iterdir()) == []
+
+
+FIXED_STAMP = "20261016T120000Z"
+
+
+def test_two_result_folders_made_in_the_same_second_for_the_same_query_differ(layout, monkeypatch):
+    from custom_tools import web_research_artifact_tools as tools
+
+    set_agent_ref(_FakeAgent(layout))
+    monkeypatch.setattr(tools, "_now_stamp", lambda: FIXED_STAMP)
+
+    first_dir, first_id, _identity = tools._create_artifact_dir("search", "query")
+    second_dir, second_id, _identity = tools._create_artifact_dir("search", "query")
+
+    assert first_dir != second_dir and first_id != second_id
+    assert first_dir.is_dir() and second_dir.is_dir()
+    assert first_dir.parent == second_dir.parent == _task_research_dir(layout)
+    for artifact_id in (first_id, second_id):
+        readable, _, random_part = artifact_id.rpartition("_")
+        assert readable == f"{FIXED_STAMP}_search_query"
+        assert len(random_part) == 12 and int(random_part, 16) >= 0
+
+
+def _brave_answers(monkeypatch, tools, *titles: str) -> None:
+    """Answer each Brave request with the next title (the broker is faked here;
+    tests/test_broker_web_tools.py runs the real one)."""
+
+    from custom_tools.broker_web_requests import BrokerWebResponse
+
+    pending = list(titles)
+
+    def fake_send(method, url, **_kwargs):
+        title = pending.pop(0)
+        answer = {"web": {"results": [{"title": title, "url": f"https://example.com/{title}"}]}}
+        return BrokerWebResponse(http_status=200, content_type="application/json", json=answer, text="", truncated=False)
+
+    monkeypatch.setattr(tools, "send_web_request", fake_send)
+
+
+def test_two_brave_searches_in_the_same_second_keep_their_own_files(layout, monkeypatch):
+    """The same query with another offset in the same second used to share a
+    folder, and the second search overwrote the first one's files."""
+
+    from custom_tools import web_research_artifact_tools as tools
+
+    set_agent_ref(_FakeAgent(layout))
+    monkeypatch.setattr(tools, "_now_stamp", lambda: FIXED_STAMP)
+    _brave_answers(monkeypatch, tools, "first-page", "second-page")
+
+    first = _payload(tools.brave_web_search_artifact("agent frameworks", offset=0))
+    second = _payload(tools.brave_web_search_artifact("agent frameworks", offset=1))
+
+    assert first["artifact_dir"] != second["artifact_dir"]
+    for payload, title, offset in ((first, "first-page", 0), (second, "second-page", 1)):
+        files = payload["files"]
+        assert all(Path(path).parent == Path(payload["artifact_dir"]) for path in files.values())
+        normalized = json.loads(Path(files["normalized_json"]).read_text(encoding="utf-8"))
+        assert [item["title"] for item in normalized] == [title]
+        manifest = json.loads(Path(files["manifest"]).read_text(encoding="utf-8"))
+        assert manifest["artifact_id"] == payload["artifact_id"]
+        assert manifest["request"]["offset"] == offset
+
+
+def test_ordinary_task_ids_keep_their_folder_name():
+    from custom_tools.research_identity import NO_ACTIVE_TASK, task_folder_name
+
+    for task_id in ("task_web_test", "task_id_0123456789ab", "task_id_0123456789ab_sub_1", NO_ACTIVE_TASK):
+        assert task_folder_name(task_id) == task_id
+    # Exactly 48 safe characters is still ordinary.
+    assert task_folder_name("t" * 48) == "t" * 48
+
+
+def test_long_task_ids_that_share_a_beginning_get_different_folders():
+    """Subtask ids grow as <parent>_sub_<n>; a few levels down they pass 48
+    characters, and cutting them to 48 used to give siblings one folder."""
+
+    from custom_tools.research_identity import safe_slug, task_folder_name
+
+    parent = "task_id_0123456789ab_sub_1_sub_1_sub_1_sub_1"
+    first, second = f"{parent}_sub_1", f"{parent}_sub_2"
+    assert safe_slug(first) == safe_slug(second), "the old name was the same for both"
+
+    names = {task_folder_name(first), task_folder_name(second)}
+
+    assert len(names) == 2
+    for name in names:
+        assert len(name) <= 48
+        assert safe_slug(name) == name, "the name is itself a safe folder name"
+        assert name.startswith("task_id_0123456789ab_sub_1_sub_1")
+    assert task_folder_name(first) == task_folder_name(first), "a task always finds its own folder again"
+
+
+def test_task_ids_that_differ_only_in_case_or_punctuation_get_different_folders():
+    from custom_tools.research_identity import task_folder_name
+
+    names = [task_folder_name(task_id) for task_id in ("report-a", "Report-A", "report a", "report-a_")]
+
+    assert names[0] == "report-a"
+    assert len(set(names)) == len(names)
+    assert all(name.startswith("report-a-") for name in names[1:])
+
+
+def test_a_long_task_id_puts_research_files_in_its_own_folder(tmp_path):
+    from custom_tools.research_identity import ResearchIdentity, task_folder_name
+
+    task_id = "task_id_0123456789ab" + "_sub_1" * 6
+    identity = ResearchIdentity(
+        research_root=tmp_path / "research",
+        team_id=None,
+        agent_id=None,
+        named_agent_type=None,
+        task_id=task_id,
+        conversation_id=None,
+    )
+
+    assert identity.task_folder == tmp_path / "research" / task_folder_name(task_id)
+    assert identity.manifest_fields()["task_id"] == task_id, "manifests keep the full task id"

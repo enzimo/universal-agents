@@ -40,7 +40,7 @@ from custom_tools.broker_web_requests import (
     is_missing_key,
     send_web_request,
 )
-from custom_tools.research_identity import ResearchIdentity, research_identity, safe_slug
+from custom_tools.research_identity import ResearchIdentity, research_identity, result_folder_name
 from runtime_settings.services import CRAWL4AI_URL_SETTING, crawl4ai_base_url
 
 
@@ -102,14 +102,17 @@ def _bool_value(value: Any, *, default: bool) -> bool:
     return default
 
 
+def _now_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
 def _create_artifact_dir(
     service: str, operation: str, label: str
 ) -> tuple[Path, str, ResearchIdentity]:
+    """A new folder for one call's files, named by ``result_folder_name`` so no other call shares it."""
+
     identity = research_identity()
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    artifact_id = (
-        f"{stamp}_{safe_slug(service)}_{safe_slug(operation)}_{safe_slug(label)}"
-    )
+    artifact_id = result_folder_name(_now_stamp(), service, operation, label)
     artifact_dir = file_access.make_directories(identity.task_folder / artifact_id).path
     return artifact_dir, artifact_id, identity
 
