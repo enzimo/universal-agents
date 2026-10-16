@@ -34,6 +34,15 @@ A new task continues an existing conversation only when it works for the
 person the conversation belongs to, and work for no person only an ownerless
 one (``conversation_continuation``), because the earlier turns go into the
 task's prompt.
+
+Objectives are the team lead's records, all kept in its one durable scope, so
+its Objective tools ask ``objective_access`` which ones a task may reach: the
+Objectives of the person the task works for, and the team's Objectives (those
+with no owner, made by work for no person). Every task reads team Objectives;
+only work for no person or for an administrator changes them, the same rule
+as team memory. A tool that takes another task's id as the source of new work
+(an Objective made from it, a task continuing it) asks ``named_task_access``,
+because that work then belongs to the named task's person.
 """
 
 from __future__ import annotations
@@ -166,6 +175,62 @@ def conversation_continuation(
     return _denied("conversation_owner_required", person, RESOURCE_CONVERSATION, conversation_id, PRIVATE_UPDATE)
 
 
+def objective_access(
+    *,
+    person_id: str | None,
+    owner_id: str | None,
+    objective_id: str,
+    action: str = PRIVATE_READ,
+    roles: Iterable[str] = (),
+) -> OwnershipDecision:
+    """Whether a team lead task may read or change one Objective.
+
+    ``person_id`` and ``roles`` are whom the task verifiably works for (None
+    for work for no person); ``owner_id`` is the Objective's recorded owner,
+    set from the source task's person when it was created. The person's own
+    Objectives are theirs to read and change. An Objective with no owner is
+    the team's: every task reads it, and work for no person or for an
+    administrator changes it (owner's decision 2026-10-16, like team memory).
+    Another person's Objective is out of view. The listing query in
+    ``storage.objective_repository`` (``ObjectiveView``) applies the same
+    reading rule.
+    """
+
+    person = str(person_id or "").strip() or None
+    owner = str(owner_id or "").strip() or None
+    if action not in PRIVATE_ACTIONS:
+        return _denied("unknown_private_action", person, RESOURCE_OBJECTIVE, objective_id, action)
+    if owner is None:
+        if action == PRIVATE_READ:
+            return OwnershipDecision(True, "team_objective")
+        if person is None:
+            return OwnershipDecision(True, "team_objective_system_work")
+        if is_administrator(normalized_roles(roles)):
+            return OwnershipDecision(True, "team_objective_admin")
+        return _denied("team_objective_admin_required", person, RESOURCE_OBJECTIVE, objective_id, action)
+    if person == owner:
+        return OwnershipDecision(True, "resource_owner")
+    return _denied("resource_owner_required", person, RESOURCE_OBJECTIVE, objective_id, action)
+
+
+def named_task_access(*, person_id: str | None, owner_id: str | None, task_id: str) -> OwnershipDecision:
+    """Whether a task may name another task as the source of new work or records.
+
+    An Objective made from a task belongs to that task's person, and a task
+    continuing an Objective works for its source task's person, so a task may
+    name only a task that works for the same person. As in
+    ``conversation_continuation``, work for no person may name only a task
+    for no person: a missing person and a person differ in both directions.
+    ``owner_id`` is the named task's person, recorded at admission.
+    """
+
+    person = str(person_id or "").strip() or None
+    owner = str(owner_id or "").strip() or None
+    if person == owner:
+        return OwnershipDecision(True, "same_person_task" if person else "no_person_task")
+    return _denied("same_person_task_required", person, RESOURCE_TASK, task_id, PRIVATE_UPDATE)
+
+
 def system_work_schedule_access(
     *,
     agent_role: str,
@@ -252,6 +317,8 @@ __all__ = [
     "RESOURCE_USER_MEMORY",
     "WORKSPACE_FILE_READ",
     "conversation_continuation",
+    "named_task_access",
+    "objective_access",
     "private_access",
     "system_work_schedule_access",
 ]

@@ -10,7 +10,6 @@ from custom_agents.heartbeat_store import (
     HeartbeatItemRecord,
     HeartbeatStore,
 )
-from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.enums import TaskHistorySource
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.runtime_context import (
@@ -32,7 +31,7 @@ from custom_tools.providers._configuration import (
 from custom_tools.providers._runtime import (
     _new_conversation_id,
     _resolve_heartbeat_source_id,
-    _resolve_objective_id_for_tool,
+    _objective_to_link,
 )
 from custom_tools.providers._user_scope import _private_user_scope
 
@@ -229,14 +228,11 @@ def add_heartbeat_item(
         return json.dumps({"error": "instruction is required"})
     try:
         resolved_source_id = _resolve_heartbeat_source_id(agent, source_id)
-        resolved_objective_id = None
-        if getattr(agent, "named_agent_type", None) == TEAM_ARCHITECT_AGENT_TYPE:
-            resolved_objective_id = _resolve_objective_id_for_tool(
-                agent,
-                objective_id,
-                agent.task_manager.current_task_id or "",
-                "",
-            )
+        resolved_objective_id, objective_refusal = _objective_to_link(
+            agent, objective_id, agent.task_manager.current_task_id or ""
+        )
+        if objective_refusal:
+            return json.dumps({"error": objective_refusal})
         store = _heartbeat_store(agent)
         store.ensure_source(
             source_id=resolved_source_id, title=f"Heartbeat:{resolved_source_id}"
@@ -298,14 +294,11 @@ def update_heartbeat_item(
         return json.dumps({"error": "Agent reference not set"})
     try:
         store = _heartbeat_store(agent)
-        resolved_objective_id = None
-        if (
-            objective_id
-            and getattr(agent, "named_agent_type", None) == TEAM_ARCHITECT_AGENT_TYPE
-        ):
-            resolved_objective_id = _resolve_objective_id_for_tool(
-                agent, objective_id, "", ""
-            )
+        resolved_objective_id, objective_refusal = (
+            _objective_to_link(agent, objective_id, "") if objective_id.strip() else (None, None)
+        )
+        if objective_refusal:
+            return json.dumps({"error": objective_refusal})
         item = store.update_item(
             heartbeat_item_id,
             title=title if title else None,

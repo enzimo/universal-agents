@@ -47,6 +47,22 @@ class ObjectiveListRecord:
     updated_at: Optional[str]
 
 
+@dataclass(frozen=True)
+class ObjectiveView:
+    """Which Objectives a listing may return for one task's work.
+
+    The team's Objectives (no owner) and those of ``person_id``, the person
+    the task verifiably works for (None: work for no person, which sees only
+    the team's). This is the reading rule of
+    ``access_control.ownership.objective_access``, applied in the query so
+    that the limit counts only Objectives the task may see. A listing without
+    a view returns every Objective of the scope and is for trusted runtime
+    code only.
+    """
+
+    person_id: Optional[str]
+
+
 class ObjectiveRepository(Protocol):
     def save_objective(self, objective: ObjectiveRecord) -> None: ...
 
@@ -79,6 +95,7 @@ class ObjectiveRepository(Protocol):
         statuses: Optional[List[str]] = None,
         horizons: Optional[List[str]] = None,
         include_closed: bool = False,
+        view: Optional[ObjectiveView] = None,
     ) -> List[ObjectiveListRecord]: ...
 
     def get_objective_for_user(
@@ -487,6 +504,15 @@ class _RelationalObjectiveRepository:
             return objective
         return None
 
+    def _view_clause(self, view: ObjectiveView) -> tuple[str, list[object]]:
+        """The team's Objectives, plus the person's own when there is one."""
+
+        team_only = "(owner_canonical_user_id IS NULL OR owner_canonical_user_id = '')"
+        person = str(view.person_id or "").strip()
+        if not person:
+            return f"AND {team_only}", []
+        return f"AND ({team_only} OR owner_canonical_user_id = {self._dialect.bind})", [person]
+
     def list_objectives(
         self,
         *,
@@ -495,6 +521,7 @@ class _RelationalObjectiveRepository:
         statuses: Optional[List[str]] = None,
         horizons: Optional[List[str]] = None,
         include_closed: bool = False,
+        view: Optional[ObjectiveView] = None,
     ) -> List[ObjectiveListRecord]:
         owner_agent_id = self._require_owner_agent_id(owner_agent_id)
         safe_limit = max(1, min(int(limit or 20), 100))
@@ -522,6 +549,10 @@ class _RelationalObjectiveRepository:
             placeholders = ",".join(f"{self._dialect.bind}" for _ in horizons)
             query_parts.append(f"AND horizon IN ({placeholders})")
             params.extend(horizons)
+        if view is not None:
+            clause, view_params = self._view_clause(view)
+            query_parts.append(clause)
+            params.extend(view_params)
         query_parts.append(f"ORDER BY updated_at DESC LIMIT {self._dialect.bind}")
         params.append(safe_limit)
 

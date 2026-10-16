@@ -9,7 +9,7 @@ from custom_agents.task_runtime_state import PlanRuntimeState
 from custom_agents.task_runtime_state import TaskRuntimeState
 import logging
 from storage.durable_owner_scope_repository import DurableOwnerScopeRepository
-from storage.objective_repository import ObjectiveRepository
+from storage.objective_repository import ObjectiveRepository, ObjectiveView
 from storage.objective_work_repository import ObjectiveWorkRepository
 from custom_agents.task_manager_plans import PlanCoordinator
 
@@ -521,11 +521,13 @@ class ObjectiveCoordinator:
     def list_objectives(
         self,
         *,
+        view: ObjectiveView,
         limit: int = 20,
         statuses: Optional[List[str]] = None,
         horizons: Optional[List[str]] = None,
         include_closed: bool = False,
     ):
+        """The Objectives one task may see (``view``), newest first."""
         if not self.operations.objectives_enabled() or not self.identity.owner_agent_id:
             return []
         try:
@@ -535,6 +537,7 @@ class ObjectiveCoordinator:
                 statuses=statuses,
                 horizons=horizons,
                 include_closed=include_closed,
+                view=view,
             )
         except Exception as exc:
             self._logger.error("Failed to list objectives: %s", exc)

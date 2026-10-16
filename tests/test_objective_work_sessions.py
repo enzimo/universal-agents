@@ -1029,15 +1029,19 @@ def test_objective_work_policy_reconfiguration_is_canonical_user_scoped(
     denied = yaml.safe_load(
         objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Attempt a cross-user reconfiguration.", profile_name="focused", confirmed=True)
     )
-    assert "belongs to another authenticated user" in denied["error"]
+    # Another person's Objective is out of view: refused as if it did not exist.
+    no_objective = "No objective could be resolved from the supplied context."
+    assert denied["error"] == no_objective
     status_denied = yaml.safe_load(objective_work_sessions(action="status", objective_id=objective.objective_id))
     disable_denied = yaml.safe_load(
         objective_work_sessions(action="disable", objective_id=objective.objective_id, confirmed=True)
     )
     start_denied = yaml.safe_load(objective_work_sessions(action="start", objective_id=objective.objective_id))
-    assert "belongs to another authenticated user" in status_denied["error"]
-    assert "belongs to another authenticated user" in disable_denied["error"]
-    assert "belongs to another authenticated user" in start_denied["error"]
+    suggest_denied = yaml.safe_load(objective_work_sessions(action="suggest", objective_id=objective.objective_id))
+    assert status_denied["error"] == no_objective
+    assert disable_denied["error"] == no_objective
+    assert start_denied["error"] == no_objective
+    assert suggest_denied["error"] == no_objective
     persisted = manager.objective_work_repository.get_policy(
         objective.objective_id,
         owner_agent_id=manager.durable_manager_scope_id(),

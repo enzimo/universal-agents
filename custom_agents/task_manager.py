@@ -103,7 +103,7 @@ from storage.config import StorageSettings, resolve_storage_settings
 from storage.durable_owner_scope_repository import (
     create_durable_owner_scope_repository,
 )
-from storage.objective_repository import create_objective_repository
+from storage.objective_repository import ObjectiveView, create_objective_repository
 from storage.objective_work_repository import create_objective_work_repository
 from storage.plan_repository import create_plan_repository
 from storage.solution_variation_repository import create_solution_variation_repository
@@ -742,12 +742,14 @@ class TaskManager(
     def list_objectives(
         self,
         *,
+        view: ObjectiveView,
         limit: int = 20,
         statuses: Optional[List[str]] = None,
         horizons: Optional[List[str]] = None,
         include_closed: bool = False,
     ):
         return self.objective_coordinator.list_objectives(
+            view=view,
             limit=limit,
             statuses=statuses,
             horizons=horizons,

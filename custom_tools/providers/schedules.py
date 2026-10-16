@@ -74,7 +74,7 @@ from custom_messages.enums import (
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.providers._runtime import (
     _get_current_task_info,
-    _resolve_objective_id_for_tool,
+    _objective_to_link,
     _run_agent_coroutine,
     _schedule_store,
 )
@@ -495,14 +495,11 @@ def create_scheduled_job(
         schedule_id = new_id("sched")
         current_task_id = agent.task_manager.current_task_id
         task_info = _get_current_task_info(agent)
-        resolved_objective_id = None
-        if getattr(agent, "named_agent_type", None) == TEAM_ARCHITECT_AGENT_TYPE:
-            resolved_objective_id = _resolve_objective_id_for_tool(
-                agent,
-                objective_id,
-                current_task_id or "",
-                "",
-            )
+        resolved_objective_id, objective_refusal = _objective_to_link(
+            agent, objective_id, current_task_id or ""
+        )
+        if objective_refusal:
+            return json.dumps({"error": objective_refusal})
         payload_header, payload_meta = _build_schedule_payload_meta(
             agent,
             schedule_id,

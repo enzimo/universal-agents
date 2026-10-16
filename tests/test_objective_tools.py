@@ -81,9 +81,18 @@ def _task_manager(
     return manager
 
 
-def _add_current_task(manager: TaskManager) -> Task:
+def _add_person_task(
+    manager: TaskManager,
+    task_id: str,
+    person_id: str,
+    *,
+    conversation_id: str,
+    roles: tuple[str, ...] = ("owner",),
+) -> Task:
+    """A task one person's gateway request started, with its signed context."""
+
     task = Task(
-        task_id="task_root",
+        task_id=task_id,
         task_type=MessageMetaType.REQUEST,
         problem_statement="Create a durable objective via tool.",
     )
@@ -92,19 +101,24 @@ def _add_current_task(manager: TaskManager) -> Task:
         MessageHeader(from_agent_id="user", agent_signature=""),
         MessageMeta(
             from_agent_name="user",
-            conversation_id="conversation_1",
+            conversation_id=conversation_id,
             requester_type=RequesterType.USER_REQUESTER,
             gateway_context=GatewayContext(
-                session_key="session_objective",
-                canonical_user_id="objective-user",
+                session_key=f"session_{person_id}",
+                canonical_user_id=person_id,
                 heartbeat_source_id="hb_source_objective",
                 task_context=context_signer().issue(
-                    team_id="team_1", person_id="objective-user", person_roles=("owner",)
+                    team_id="team_1", person_id=person_id, person_roles=roles
                 ),
             ),
         ),
-        owner_person_id="objective-user",
+        owner_person_id=person_id,
     )
+    return task
+
+
+def _add_current_task(manager: TaskManager) -> Task:
+    task = _add_person_task(manager, "task_root", "objective-user", conversation_id="conversation_1")
     manager.task_state.current_in_progress_task_id = task.task_id
     return task
 
@@ -198,16 +212,9 @@ def test_objective_tools_continue_across_task_and_plan_attempt_failures(tmp_path
         "First execution attempt failed.",
         "2026-05-23T10:00:00+00:00",
     )
-    controller = Task(
-        task_id="task_controller",
-        task_type=MessageMetaType.REQUEST,
-        problem_statement="Continue an existing Objective.",
-    )
-    assert manager.add_task(
-        controller,
-        MessageHeader(from_agent_id="user", agent_signature=""),
-        MessageMeta(from_agent_name="user", conversation_id="conversation_2"),
-        owner_person_id=None,
+    # A later request from the same person continues the Objective.
+    controller = _add_person_task(
+        manager, "task_controller", "objective-user", conversation_id="conversation_2"
     )
     manager.task_state.current_in_progress_task_id = controller.task_id
 
@@ -376,3 +383,190 @@ def test_objective_lifecycle_cannot_disable_linked_system_schedule(
     objective = manager.get_objective(objective_id)
     assert objective is not None
     assert objective.schedule_links[0].disabled_by_objective_pause is False
+
+
+def _add_no_person_task(manager: TaskManager, task_id: str, *, signed: bool = True) -> Task:
+    """A task that works for no person; unsigned, it has no verified identity at all."""
+
+    task = Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="System work.")
+    gateway_context = (
+        GatewayContext(
+            session_key="session_system",
+            task_context=context_signer().issue(team_id="team_1", person_id=None),
+        )
+        if signed
+        else None
+    )
+    assert manager.add_task(
+        task,
+        MessageHeader(from_agent_id="system", agent_signature=""),
+        MessageMeta(from_agent_name="system", conversation_id=f"conversation_{task_id}", gateway_context=gateway_context),
+        owner_person_id=None,
+    )
+    return task
+
+
+def _objective_from(manager: TaskManager, task: Task, title: str):
+    """Trusted code makes the Objective; its owner is the task's person."""
+
+    objective = manager.create_objective(
+        task_id=task.task_id, title=title, desired_outcome=f"{title} is done.", why="Visibility test."
+    )
+    assert objective is not None
+    return objective
+
+
+def _act_as(manager: TaskManager, task: Task) -> None:
+    manager.task_state.current_in_progress_task_id = task.task_id
+
+
+def _listed(**filters) -> set[str]:
+    return {row["objective_id"] for row in json.loads(objectives(action="list", **filters))["objectives"]}
+
+
+_NO_OBJECTIVE = "No objective could be resolved from the supplied context."
+
+
+@pytest.fixture
+def _people_and_objectives(tmp_path: Path):
+    """Two members, an administrator and system work, each with an Objective of their own."""
+
+    manager = _task_manager(tmp_path)
+    set_agent_ref(_FakeAgent(manager))
+    tasks = {
+        "a": _add_person_task(manager, "task_a", "usr_a", conversation_id="conv_a", roles=("member",)),
+        "b": _add_person_task(manager, "task_b", "usr_b", conversation_id="conv_b", roles=("member",)),
+        "admin": _add_person_task(manager, "task_admin", "usr_admin", conversation_id="conv_admin", roles=("admin",)),
+        "system": _add_no_person_task(manager, "task_system"),
+    }
+    made = {
+        "a": _objective_from(manager, tasks["a"], "Person A's Objective"),
+        "b": _objective_from(manager, tasks["b"], "Person B's Objective"),
+        "team": _objective_from(manager, tasks["system"], "The team's Objective"),
+    }
+    assert made["a"].owner_canonical_user_id == "usr_a"
+    assert made["team"].owner_canonical_user_id is None
+    return manager, tasks, made
+
+
+def test_a_member_sees_their_own_and_the_teams_objectives_only(_people_and_objectives, caplog) -> None:
+    manager, tasks, made = _people_and_objectives
+    a, b, team = made["a"], made["b"], made["team"]
+    _act_as(manager, tasks["a"])
+
+    assert _listed(include_closed=True) == {a.objective_id, team.objective_id}
+    assert json.loads(objectives(action="get", objective_id=team.objective_id))["objective_id"] == team.objective_id
+    # Another person's Objective is refused as if it did not exist, however it is named.
+    with caplog.at_level("INFO", logger="access_control.ownership"):
+        by_id = json.loads(objectives(action="get", objective_id=b.objective_id))
+    assert (by_id["objective"], by_id["error"]) == (None, _NO_OBJECTIVE)
+    assert f"resource_id={b.objective_id}" in caplog.text and "event=private_access_refused" in caplog.text
+    assert json.loads(objectives(action="get", plan_id=b.current_plan_id))["error"] == _NO_OBJECTIVE
+    assert json.loads(objectives(action="get", task_id=tasks["b"].task_id))["error"] == _NO_OBJECTIVE
+
+    refused = json.loads(
+        objectives(action="update_progress", objective_id=b.objective_id, progress_summary="Changed by A.")
+    )
+    assert refused["error"] == _NO_OBJECTIVE
+    assert manager.get_objective(b.objective_id).progress_summary != "Changed by A."
+    assert json.loads(objectives(action="update_progress", objective_id=a.objective_id, progress_summary="Mine."))[
+        "objective"
+    ]["progress_summary"] == "Mine."
+    assert json.loads(start_objective_task(work_brief="Continue B.", objective_id=b.objective_id))["error"] == _NO_OBJECTIVE
+    heartbeat = json.loads(add_heartbeat_item(instruction="Check B.", objective_id=b.objective_id))
+    assert "Unknown Objective" in heartbeat["error"]
+    assert manager.get_objective(b.objective_id).heartbeat_links == []
+
+
+def test_a_member_reads_but_does_not_change_the_teams_objectives(_people_and_objectives) -> None:
+    manager, tasks, made = _people_and_objectives
+    team = made["team"]
+    _act_as(manager, tasks["a"])
+
+    paused = json.loads(objectives(action="update_status", objective_id=team.objective_id, status="paused", summary="A pauses it."))
+    assert paused["error"] == _NO_OBJECTIVE
+    assert manager.get_objective(team.objective_id).status.value == "active"
+    continued = json.loads(start_objective_task(work_brief="Continue the team's.", objective_id=team.objective_id))
+    assert continued["error"] == _NO_OBJECTIVE
+
+
+def test_an_administrator_and_system_work_change_the_teams_objectives(_people_and_objectives) -> None:
+    manager, tasks, made = _people_and_objectives
+    a, team = made["a"], made["team"]
+
+    _act_as(manager, tasks["admin"])
+    assert _listed() == {team.objective_id}  # administrators see no one else's
+    paused = json.loads(objectives(action="update_status", objective_id=team.objective_id, status="paused", summary="Admin pauses it."))
+    assert paused["objective"]["status"] == "paused"
+    assert json.loads(objectives(action="get", objective_id=a.objective_id))["error"] == _NO_OBJECTIVE
+
+    _act_as(manager, tasks["system"])
+    assert _listed(include_closed=True) == {team.objective_id}
+    progressed = json.loads(objectives(action="update_progress", objective_id=team.objective_id, progress_summary="System work."))
+    assert progressed["objective"]["progress_summary"] == "System work."
+    assert json.loads(objectives(action="get", objective_id=a.objective_id))["error"] == _NO_OBJECTIVE
+
+
+def test_a_task_without_a_verified_identity_reaches_no_objective(_people_and_objectives, caplog) -> None:
+    manager, _tasks, made = _people_and_objectives
+    _act_as(manager, _add_no_person_task(manager, "task_unsigned", signed=False))
+
+    with caplog.at_level("WARNING", logger="custom_tools.providers._runtime"):
+        assert _listed(include_closed=True) == set()
+        refused = json.loads(objectives(action="update_progress", objective_id=made["team"].objective_id, progress_summary="?"))
+    assert refused["error"] == _NO_OBJECTIVE
+    assert "event=objective_task_identity_unverified" in caplog.text
+
+
+def test_a_task_names_only_its_own_persons_tasks_as_a_source(_people_and_objectives) -> None:
+    manager, tasks, made = _people_and_objectives
+    a, b = made["a"], made["b"]
+    _act_as(manager, tasks["a"])
+    count_before = len(manager.objective_repository.list_objectives(limit=100, owner_agent_id=manager.durable_manager_scope_id()))
+
+    # An Objective made from B's task would be B's; a continuation from it would work for B.
+    created = json.loads(create_objective(title="Made from B", desired_outcome="x", why="y", task_id=tasks["b"].task_id))
+    assert created["error"] == f"Task {tasks['b'].task_id} was not found among this person's tasks."
+    continued = json.loads(
+        start_objective_task(work_brief="Continue as B.", objective_id=a.objective_id, source_task_id=tasks["b"].task_id)
+    )
+    assert "was not found among this person's tasks" in continued["error"]
+    noted = json.loads(
+        objectives(action="update_progress", objective_id=a.objective_id, task_id=tasks["b"].task_id, progress_summary="x")
+    )
+    assert "was not found among this person's tasks" in noted["error"]
+    assert len(manager.objective_repository.list_objectives(limit=100, owner_agent_id=manager.durable_manager_scope_id())) == count_before
+
+    # Plans: another person's plan is out of view, and a named Objective never falls back to the task's plan.
+    by_plan = json.loads(update_execution_plan_status("failed", "A fails B's plan.", plan_id=b.current_plan_id))
+    assert by_plan["error"] == "No plan could be resolved from the supplied context."
+    by_objective = json.loads(update_execution_plan_status("failed", "A fails B's plan.", objective_id=b.objective_id))
+    assert by_objective["error"] == "No plan could be resolved from the supplied context."
+    assert manager.get_plan(b.current_plan_id).status.value == "active"
+    assert manager.get_plan(a.current_plan_id).status.value == "active"
+
+
+def test_a_finished_tasks_plan_stays_its_persons_after_a_team_lead_restart(_people_and_objectives) -> None:
+    """The plan's root task was archived by an earlier team lead process under another agent id."""
+
+    from storage.sqlite_connection import connect_sqlite
+
+    manager, tasks, _made = _people_and_objectives
+    done = _add_person_task(manager, "task_a_done", "usr_a", conversation_id="conv_a_done", roles=("member",))
+    assert manager.set_task_plan(done.task_id, "Finish the report.") is not None
+    plan_id = manager.get_task_plan_id(done.task_id)
+    # Archived while its plan stays open (a plan outlives its task).
+    manager._save_completed_task(done.task_id, "completed")
+    assert manager.get_task_info(done.task_id) is None
+    assert manager.get_plan(plan_id).status.value == "active"
+    with connect_sqlite(manager._db_path) as conn:
+        conn.execute("UPDATE completed_tasks SET owner_agent_id = 'earlier_process' WHERE task_id = ?", (done.task_id,))
+        conn.commit()
+
+    _act_as(manager, tasks["b"])
+    refused = json.loads(update_execution_plan_status("cancelled", "B cancels A's plan.", plan_id=plan_id))
+    assert refused["error"] == "No plan could be resolved from the supplied context."
+
+    _act_as(manager, tasks["a"])
+    cancelled = json.loads(update_execution_plan_status("cancelled", "A cancels their own plan.", plan_id=plan_id))
+    assert cancelled["plan"]["status"] == "cancelled"

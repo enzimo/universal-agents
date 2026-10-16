@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Dict
 
 import yaml
 
+from access_control.ownership import PRIVATE_READ
 from custom_agents.runtime_paths import agent_layout
 from custom_messages.enums import RequesterType
 from custom_messages.records.objectives import ObjectiveWorkProfile
@@ -52,7 +53,10 @@ def _resolve_profile_for_export(
         resolved_objective_id,
         task_id,
         "",
+        action=PRIVATE_READ,
     )
+    if not resolved_objective_id:
+        raise ValueError(f"Unknown Objective {objective_id.strip()!r} for this manager.")
     policy = agent.task_manager.operations_runtime.run_sync(
         agent.task_manager.objective_work_repository.get_policy,
         resolved_objective_id,

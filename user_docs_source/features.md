@@ -952,6 +952,12 @@ same Plan. If the strategy itself is ended, Team Architect can close that Plan
 attempt and start a revised Plan under the same non-terminal Objective. You do
 not need to preserve or supply internal Objective, Plan, or Task identifiers.
 
+An Objective belongs to the person whose request created it. While Team
+Architect works for you, it sees your Objectives and the team's Objectives
+(ones created by work that runs for no person, such as a system timer), and
+never another person's. The team's Objectives change only in work for an
+administrator or in work that runs for no person.
+
 ### Runtime controls
 
 Open **Settings → Runtime** to see authoritative state owned by
