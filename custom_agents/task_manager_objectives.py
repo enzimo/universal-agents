@@ -9,7 +9,7 @@ from custom_agents.task_runtime_state import PlanRuntimeState
 from custom_agents.task_runtime_state import TaskRuntimeState
 import logging
 from storage.durable_owner_scope_repository import DurableOwnerScopeRepository
-from storage.objective_repository import ObjectiveRepository
+from storage.objective_repository import ObjectiveRepository, ObjectiveView
 from storage.objective_work_repository import ObjectiveWorkRepository
 from custom_agents.task_manager_plans import PlanCoordinator
 
@@ -318,6 +318,20 @@ class ObjectiveCoordinator:
     ) -> Optional[str]:
         existing_plan_id = self.operations.get_task_plan_id(task_id)
         if existing_plan_id:
+            existing_plan = self.operations.get_plan(existing_plan_id)
+            if existing_plan is not None and existing_plan.objective_id:
+                # One Plan belongs to one Objective. Even an administrator
+                # must not turn a team Plan into their personal Plan by
+                # promoting a task that already shares it.
+                self._logger.warning(
+                    "Cannot promote a task whose Plan already belongs to an Objective. "
+                    "event=objective_creation_plan_already_owned task_id=%s plan_id=%s objective_id=%s",
+                    task_id, existing_plan_id, existing_plan.objective_id,
+                )
+                raise ValueError(
+                    "This task's Plan already belongs to an Objective. "
+                    "Use creation_mode='spawn_task' to create separate Objective work."
+                )
             self.operations.sync_plan_from_task(task_id, create=True)
             return existing_plan_id
 
@@ -521,11 +535,13 @@ class ObjectiveCoordinator:
     def list_objectives(
         self,
         *,
+        view: ObjectiveView,
         limit: int = 20,
         statuses: Optional[List[str]] = None,
         horizons: Optional[List[str]] = None,
         include_closed: bool = False,
     ):
+        """The Objectives one task may see (``view``), newest first."""
         if not self.operations.objectives_enabled() or not self.identity.owner_agent_id:
             return []
         try:
@@ -535,6 +551,7 @@ class ObjectiveCoordinator:
                 statuses=statuses,
                 horizons=horizons,
                 include_closed=include_closed,
+                view=view,
             )
         except Exception as exc:
             self._logger.error("Failed to list objectives: %s", exc)

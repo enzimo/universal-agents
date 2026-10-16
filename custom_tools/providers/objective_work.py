@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from strands import tool
 
+from access_control.ownership import PRIVATE_READ, PRIVATE_UPDATE
 from custom_agents.schedule_management import (
     ScheduleMutationOperation,
     agent_tool_authority_mode,
@@ -41,6 +42,7 @@ from custom_messages.records.objectives import (
     OWNER_CADENCE_TIMEZONE,
     ObjectiveWorkBudget,
     ObjectiveWorkProfile,
+    ObjectiveWorkProfileProposal,
 )
 from custom_tools.action_inputs import actions, input_refusal
 from custom_tools.runtime_context import (
@@ -68,6 +70,10 @@ from custom_tools.providers.diagnostics import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The reply when the Objective is unknown or out of this task's view
+# (``ownership.objective_access``); the same words as the ``objectives`` tool.
+_NO_OBJECTIVE = {"error": "No objective could be resolved from the supplied context."}
 
 
 def _build_objective_work_schedule(
@@ -329,11 +335,16 @@ def _suggest_session(
     )
     if owner_denial is not None:
         return json.dumps(owner_denial)
+    resolved_objective_id = _resolve_objective_id_for_tool(
+        agent, objective_id.strip(), "", "", action=PRIVATE_READ
+    )
+    if not resolved_objective_id:
+        return json.dumps(_NO_OBJECTIVE)
     try:
         return json.dumps(
             agent.task_manager.operations_runtime.run_sync(
                 agent.task_manager.objective_work_coordinator.suggest,
-                objective_id.strip(),
+                resolved_objective_id,
                 estimated_sessions=max(1, int(estimated_sessions)),
                 owner_canonical_user_id=owner,
             )
@@ -375,8 +386,10 @@ def _enable_sessions(
             }
         )
     resolved_objective_id = _resolve_objective_id_for_tool(
-        agent, objective_id, current.task.task_id, ""
+        agent, objective_id, current.task.task_id, "", action=PRIVATE_UPDATE
     )
+    if not resolved_objective_id:
+        return json.dumps(_NO_OBJECTIVE)
     policy = None
     previous_policy = None
     try:
@@ -493,7 +506,10 @@ def propose_objective_work_profile(
                 objective_id,
                 current.task.task_id,
                 "",
+                action=PRIVATE_UPDATE,
             )
+            if not resolved_objective_id:
+                return json.dumps(_NO_OBJECTIVE)
         proposal = agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.objective_work_coordinator.propose_profile,
             owner_canonical_user_id=owner,
@@ -523,6 +539,18 @@ def propose_objective_work_profile(
         return json.dumps({"error": str(exc)})
 
 
+def _profile_objective_in_view(agent: "UniversalAgent", proposal: ObjectiveWorkProfileProposal) -> bool:
+    """Reusable profiles are personal; one-time profiles need current Objective authority."""
+
+    if proposal.scope == ObjectiveWorkProfileScope.REUSABLE:
+        return True
+    if not proposal.objective_id:
+        return False
+    return _resolve_objective_id_for_tool(
+        agent, proposal.objective_id, "", "", action=PRIVATE_UPDATE
+    ) is not None
+
+
 def _apply_profile_proposal(
     proposal_id: str,
     proposal_digest: str,
@@ -531,6 +559,8 @@ def _apply_profile_proposal(
 ) -> str:
     """Apply one exact accepted proposal: install reusable or enable its target Objective."""
     agent = get_agent_ref()
+    if agent is None:
+        return json.dumps({"error": "Agent reference not set"})
     denial = _require_manager_tool(agent, "objective_work_profiles")
     if denial:
         return json.dumps(denial)
@@ -558,6 +588,10 @@ def _apply_profile_proposal(
             proposal_digest=proposal_digest,
             owner_canonical_user_id=owner,
         )
+        # A proposal records the exact bounds, not lasting authority over
+        # its Objective. The person's roles may have changed since staging.
+        if not _profile_objective_in_view(agent, proposal):
+            return json.dumps(_NO_OBJECTIVE)
         if proposal.status == ObjectiveWorkProfileProposalStatus.APPLIED:
             return json.dumps(
                 {
@@ -583,18 +617,22 @@ def _apply_profile_proposal(
                     "missing_skills": unavailable,
                 }
             )
+        repository = agent.task_manager.objective_work_repository
+        if repository is None:
+            raise RuntimeError("Bounded Objective execution is unavailable.")
+        objective_id = proposal.objective_id or ""
         previous_policy = agent.task_manager.operations_runtime.run_sync(
-            agent.task_manager.objective_work_repository.get_policy,
-            proposal.objective_id,
+            repository.get_policy,
+            objective_id,
             owner_agent_id=agent.task_manager.operations_runtime.run_sync(
-                agent.task_manager.durable_manager_scope_id
+                coordinator._require_owner
             ),
         )
         if previous_policy is not None:
             previous_policy = previous_policy.model_copy(deep=True)
         policy = agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.objective_work_coordinator.enable_policy,
-            proposal.objective_id,
+            objective_id,
             profile_name=proposal.profile_name,
             accepted_by_task_id=current.task.task_id,
             acceptance_summary=summary,
@@ -679,7 +717,11 @@ def _session_status(objective_id: str = "") -> str:
         return json.dumps(owner_denial)
     current = _get_current_task_info(agent)
     task_id = current.task.task_id if current else ""
-    resolved = _resolve_objective_id_for_tool(agent, objective_id, task_id, "")
+    resolved = _resolve_objective_id_for_tool(
+        agent, objective_id, task_id, "", action=PRIVATE_READ
+    )
+    if not resolved:
+        return json.dumps(_NO_OBJECTIVE)
     try:
         return json.dumps(
             agent.task_manager.operations_runtime.run_sync(
@@ -711,8 +753,10 @@ def _disable_sessions(
     if owner_denial is not None:
         return json.dumps(owner_denial)
     resolved = _resolve_objective_id_for_tool(
-        agent, objective_id, current.task.task_id, ""
+        agent, objective_id, current.task.task_id, "", action=PRIVATE_UPDATE
     )
+    if not resolved:
+        return json.dumps(_NO_OBJECTIVE)
     try:
         policy = agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.objective_work_coordinator.disable_policy,
@@ -741,8 +785,10 @@ def _start_session(objective_id: str = "") -> str:
     if current.meta.requester_type != RequesterType.USER_REQUESTER:
         return json.dumps({"error": "direct_user_request_required"})
     resolved = _resolve_objective_id_for_tool(
-        agent, objective_id, current.task.task_id, ""
+        agent, objective_id, current.task.task_id, "", action=PRIVATE_UPDATE
     )
+    if not resolved:
+        return json.dumps(_NO_OBJECTIVE)
     try:
         session = agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.objective_work_coordinator.start_session,

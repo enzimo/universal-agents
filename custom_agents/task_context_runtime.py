@@ -128,7 +128,7 @@ def run_owner(agent: Any, meta: Any) -> PersonNow | None:
     return people_directory(agent).person(person_id) if person_id else None
 
 
-def _owner_roles(gateway_context: Any, owner: PersonNow, *, schedule_id: str, system_managed: bool) -> tuple[str, ...]:
+def scheduled_owner_roles(gateway_context: Any, owner: PersonNow, *, schedule_id: str, system_managed: bool) -> tuple[str, ...]:
     """The owner's current roles when the owner is vouched for (module docstring), else none (logged)."""
 
     if not (system_managed or gateway_vouches(gateway_context, owner.person_id)):
@@ -205,7 +205,7 @@ def issue_scheduled_context(
     """
 
     roles = (
-        _owner_roles(gateway_context, owner, schedule_id=schedule_id, system_managed=system_managed)
+        scheduled_owner_roles(gateway_context, owner, schedule_id=schedule_id, system_managed=system_managed)
         if owner is not None
         else ()
     )
@@ -337,7 +337,7 @@ def sign_system_escalation(agent: Any, meta: Any, *, task_id: str) -> Any:
     stored on the system-managed schedule that the verified context names:
     the first user, an administrator. The scheduler signs it for that owner,
     with their current roles as for any scheduled run of a system-managed
-    schedule (``_owner_roles``). Nothing the escalation itself says about a
+    schedule (``scheduled_owner_roles``). Nothing the escalation itself says about a
     person is used. Runs only in the manager, which holds the scheduler key.
 
     Returns a re-signed copy of ``meta``, or ``meta`` unchanged when this does
@@ -357,7 +357,7 @@ def sign_system_escalation(agent: Any, meta: Any, *, task_id: str) -> Any:
         return meta
     schedule, owner = found
     stored_context = getattr(schedule.payload_meta, "gateway_context", None)
-    roles = _owner_roles(
+    roles = scheduled_owner_roles(
         stored_context, people_directory(agent).person(owner), schedule_id=schedule.schedule_id, system_managed=True
     )
     signed = meta.model_copy(deep=True)
@@ -416,7 +416,7 @@ def sign_for_maintenance_owner(
         return meta
     schedule, owner = found
     stored_context = getattr(schedule.payload_meta, "gateway_context", None)
-    roles = _owner_roles(
+    roles = scheduled_owner_roles(
         stored_context, people_directory(agent).person(owner), schedule_id=schedule_id, system_managed=True
     )
     signed = meta.model_copy(deep=True)

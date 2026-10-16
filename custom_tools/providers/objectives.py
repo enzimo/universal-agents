@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 
 from strands import tool
 
+from access_control.ownership import PRIVATE_READ, PRIVATE_UPDATE
 from custom_agents.schedule_management import (
     ScheduleMutationOperation,
     is_system_managed_schedule,
@@ -63,7 +64,10 @@ if TYPE_CHECKING:
 
 from custom_tools.providers._runtime import (
     _get_current_task_info,
+    _named_task_refusal,
     _new_conversation_id,
+    _objective_in_view,
+    _objective_view,
     _require_manager_tool,
     _resolve_objective_id_for_tool,
     _schedule_store,
@@ -176,6 +180,30 @@ def record_objective_work_checkpoint(
         return json.dumps({"error": str(exc)})
 
 
+def _plan_in_view(agent: "UniversalAgent", plan_id: str) -> bool:
+    """Whether the active task may change one Plan: its Objective's, or its root task's person.
+
+    Missing and inaccessible Plans both fail without revealing which case
+    occurred.
+    """
+
+    plan = agent.task_manager.operations_runtime.run_sync(
+        agent.task_manager.get_plan, plan_id
+    )
+    if plan is None:
+        return False
+    if plan.objective_id:
+        return _objective_in_view(agent, plan.objective_id, action=PRIVATE_UPDATE)
+    if plan.root_task_id:
+        return _named_task_refusal(agent, plan.root_task_id) is None
+    logger.warning(
+        "Plan with neither an Objective nor a root task was refused. "
+        "event=plan_owner_unknown plan_id=%s",
+        plan_id,
+    )
+    return False
+
+
 def _resolve_plan_id_for_tool(
     agent: "UniversalAgent",
     *,
@@ -190,6 +218,7 @@ def _resolve_plan_id_for_tool(
         objective_id,
         task_id,
         "",
+        action=PRIVATE_UPDATE,
     )
     objective = (
         agent.task_manager.operations_runtime.run_sync(
@@ -200,6 +229,9 @@ def _resolve_plan_id_for_tool(
     )
     if objective is not None and objective.current_plan_id:
         return objective.current_plan_id
+    if objective_id.strip():
+        # A named Objective means its own plan, never the task's instead.
+        return ""
     return (
         agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.get_task_plan_id, task_id
@@ -235,9 +267,15 @@ def create_objective(
     - promote_task: the source task becomes the Objective root work.
     - spawn_task: the source task creates a separate Objective root task.
 
+    A Plan already owned by an Objective cannot be promoted again. Use
+    spawn_task for separate work with its own Plan.
+
     Objective creation always ensures at least one Objective-owned task and one
     durable plan. Use activate_plan_execution later when the manager decides the
     plan needs staged fresh-context execution.
+
+    The Objective belongs to the person the source task works for, so a
+    specified task must work for the same person as the current one.
     """
     agent = get_agent_ref()
     if agent is None:
@@ -251,6 +289,22 @@ def create_objective(
         return json.dumps(
             {"error": "No task_id provided and no task currently in progress"}
         )
+    task_refusal = _named_task_refusal(agent, resolved_task_id)
+    if task_refusal:
+        return json.dumps({"error": task_refusal})
+    # A person's task can share a team Objective's Plan. Creating an
+    # Objective from it must not move that Plan into personal ownership.
+    source_objective_id = agent.task_manager.operations_runtime.run_sync(
+        agent.task_manager.get_task_objective_id, resolved_task_id
+    )
+    source_plan_id = agent.task_manager.operations_runtime.run_sync(
+        agent.task_manager.get_task_plan_id, resolved_task_id
+    )
+    if (
+        source_objective_id
+        and not _objective_in_view(agent, source_objective_id, action=PRIVATE_UPDATE)
+    ) or (source_plan_id and not _plan_in_view(agent, source_plan_id)):
+        return json.dumps({"error": "No objective could be resolved from the supplied context."})
 
     try:
         success_criteria = _parse_json_list(
@@ -316,7 +370,7 @@ def _get_objective(objective_id: str = "", task_id: str = "", plan_id: str = "")
         return json.dumps({"error": manager_error, "manager_only": True})
 
     resolved_objective_id = _resolve_objective_id_for_tool(
-        agent, objective_id, task_id, plan_id
+        agent, objective_id, task_id, plan_id, action=PRIVATE_READ
     )
     if not resolved_objective_id:
         return json.dumps(
@@ -349,7 +403,7 @@ def _list_objectives(
     include_closed: bool = False,
 ) -> str:
     """
-    List manager-owned durable Objectives.
+    List the Objectives this task may see: the team's and those of the person it works for.
 
     statuses and horizons are optional comma-separated enum values.
     """
@@ -360,8 +414,12 @@ def _list_objectives(
     if manager_error:
         return json.dumps({"error": manager_error, "manager_only": True})
 
+    view = _objective_view(agent)
+    if view is None:
+        return json.dumps({"returned": 0, "objectives": []})
     rows = agent.task_manager.operations_runtime.run_sync(
         agent.task_manager.list_objectives,
+        view=view,
         limit=limit,
         statuses=_parse_objective_status_list(statuses),
         horizons=_parse_objective_horizon_list(horizons),
@@ -397,8 +455,11 @@ def _update_progress(
     if manager_error:
         return json.dumps({"error": manager_error, "manager_only": True})
 
+    task_refusal = _named_task_refusal(agent, task_id)
+    if task_refusal:
+        return json.dumps({"error": task_refusal})
     resolved_objective_id = _resolve_objective_id_for_tool(
-        agent, objective_id, task_id, plan_id
+        agent, objective_id, task_id, plan_id, action=PRIVATE_UPDATE
     )
     if not resolved_objective_id:
         return json.dumps(
@@ -468,10 +529,13 @@ def _update_status(
                 "allowed_statuses": [item.value for item in ObjectiveStatus],
             }
         )
+    task_refusal = _named_task_refusal(agent, task_id)
+    if task_refusal:
+        return json.dumps({"error": task_refusal})
     current_task_id = agent.task_manager.current_task_id
     resolved_task_id = task_id or current_task_id
     resolved_objective_id = _resolve_objective_id_for_tool(
-        agent, objective_id, resolved_task_id or "", plan_id
+        agent, objective_id, resolved_task_id or "", plan_id, action=PRIVATE_UPDATE
     )
     if not resolved_objective_id:
         return json.dumps(
@@ -534,11 +598,16 @@ def start_objective_task(
     resolved_source_task_id = source_task_id or agent.task_manager.current_task_id
     if not resolved_source_task_id:
         return json.dumps({"error": "No source task is currently in progress"})
+    # The new task works for the source task's person.
+    task_refusal = _named_task_refusal(agent, resolved_source_task_id)
+    if task_refusal:
+        return json.dumps({"error": task_refusal})
     resolved_objective_id = _resolve_objective_id_for_tool(
         agent,
         objective_id,
         resolved_source_task_id,
         "",
+        action=PRIVATE_UPDATE,
     )
     if not resolved_objective_id:
         return json.dumps(
@@ -605,6 +674,9 @@ def update_execution_plan_status(
             }
         )
 
+    task_refusal = _named_task_refusal(agent, task_id)
+    if task_refusal:
+        return json.dumps({"error": task_refusal})
     current_task_id = agent.task_manager.current_task_id
     resolved_task_id = task_id or current_task_id
     resolved_plan_id = _resolve_plan_id_for_tool(
@@ -613,7 +685,7 @@ def update_execution_plan_status(
         objective_id=objective_id,
         task_id=resolved_task_id or "",
     )
-    if not resolved_plan_id:
+    if not resolved_plan_id or not _plan_in_view(agent, resolved_plan_id):
         return json.dumps(
             {"error": "No plan could be resolved from the supplied context."}
         )
@@ -1311,8 +1383,10 @@ def objectives(
     satisfied_by_current_task: bool = False,
     user_visible: Optional[bool] = None,
 ) -> str:
-    """See and update the team's durable Objectives (manager-only).
+    """See and update durable Objectives (manager-only).
 
+    A task sees the team's Objectives and those of the person it works for, never another
+    person's. The team's Objectives change only in work for no person or for an administrator.
     An Objective is found by `objective_id`, `task_id` or `plan_id`, or else from the current task.
 
     Actions:

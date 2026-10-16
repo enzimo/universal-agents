@@ -15,6 +15,8 @@ from access_control.ownership import (
     RESOURCE_TEAM_MEMORY,
     RESOURCE_USER_MEMORY,
     WORKSPACE_FILE_READ,
+    named_task_access,
+    objective_access,
     private_access,
 )
 
@@ -141,3 +143,44 @@ def test_personal_knowledge_and_contributions_are_their_owners_alone(action: str
             action=action,
         )
         assert mine.allowed and not admin.allowed
+
+
+def test_a_task_sees_its_persons_objectives_and_the_teams_never_anothers() -> None:
+    def objective(person: str | None, owner: str | None, action: str, roles: tuple[str, ...] = ("member",)):
+        return objective_access(person_id=person, owner_id=owner, objective_id="objective_1", action=action, roles=roles)
+
+    for action in (PRIVATE_READ, PRIVATE_UPDATE, PRIVATE_DELETE):
+        assert objective("usr_a", "usr_a", action).reason == "resource_owner"
+        theirs = objective("usr_a", "usr_b", action)
+        assert (theirs.allowed, theirs.reason) == (False, "resource_owner_required")
+        # Administrators and work for no person get no view of a person's Objectives.
+        assert objective("usr_admin", "usr_b", action, roles=("admin",)).allowed is False
+        assert objective(None, "usr_b", action, roles=()).allowed is False
+
+    # Every task reads the team's Objectives (no owner, also an empty owner).
+    assert objective("usr_a", None, PRIVATE_READ).reason == "team_objective"
+    assert objective("usr_a", "  ", PRIVATE_READ).reason == "team_objective"
+    assert objective(None, None, PRIVATE_READ, roles=()).reason == "team_objective"
+
+
+def test_team_objectives_change_only_in_work_for_no_person_or_an_administrator() -> None:
+    def change(person: str | None, roles: tuple[str, ...]):
+        return objective_access(
+            person_id=person, owner_id=None, objective_id="objective_team", action=PRIVATE_UPDATE, roles=roles
+        )
+
+    member = change("usr_member", ("member",))
+    assert (member.allowed, member.reason) == (False, "team_objective_admin_required")
+    assert change("usr_admin", ("admin",)).reason == "team_objective_admin"
+    assert change("usr_owner", ("owner",)).reason == "team_objective_admin"  # an owner is an administrator
+    assert change(None, ()).reason == "team_objective_system_work"
+    unknown = objective_access(person_id="usr_a", owner_id="usr_a", objective_id="objective_1", action="private.share")
+    assert (unknown.allowed, unknown.reason) == (False, "unknown_private_action")
+
+
+def test_a_task_names_only_tasks_that_work_for_the_same_person() -> None:
+    assert named_task_access(person_id="usr_a", owner_id="usr_a", task_id="task_1").reason == "same_person_task"
+    assert named_task_access(person_id=None, owner_id=None, task_id="task_1").reason == "no_person_task"
+    for person, owner in (("usr_a", "usr_b"), ("usr_a", None), (None, "usr_a")):
+        refused = named_task_access(person_id=person, owner_id=owner, task_id="task_1")
+        assert (refused.allowed, refused.reason) == (False, "same_person_task_required")

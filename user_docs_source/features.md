@@ -952,6 +952,19 @@ same Plan. If the strategy itself is ended, Team Architect can close that Plan
 attempt and start a revised Plan under the same non-terminal Objective. You do
 not need to preserve or supply internal Objective, Plan, or Task identifiers.
 
+An Objective belongs to the person whose request created it. While Team
+Architect works for you, it sees your Objectives and the team's Objectives
+(ones created by work that runs for no person, such as a system timer), and
+never another person's. The team's Objectives change only in work for an
+administrator or in work that runs for no person.
+
+Heartbeat items linked to an Objective follow the same ownership rules. A
+shared heartbeat runs for its launcher's person and skips an Objective that
+person cannot change, with a warning in the runtime log. Use a schedule owned
+by the Objective's person for private recurring work. A saved work-profile
+proposal also requires current authority when you apply it; an earlier
+administrator role does not keep that authority after a role change.
+
 ### Runtime controls
 
 Open **Settings → Runtime** to see authoritative state owned by

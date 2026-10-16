@@ -11,6 +11,7 @@ from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import ExecutionPlanItemStatus, MessageMetaType, ObjectiveCompletionPolicy, ObjectiveCriterionStatus, ObjectiveEventType, ObjectiveHorizon, ObjectiveStatus, PlanStatus
 from custom_messages.records.plans import PlanRecord
 from storage.config import resolve_storage_settings
+from storage.objective_repository import ObjectiveView
 from storage.sqlite_connection import connect_sqlite
 
 
@@ -71,7 +72,8 @@ def test_create_objective_promotes_task_and_creates_initial_plan(tmp_path: Path)
     assert plan is not None
     assert plan.objective_id == objective.objective_id
     assert plan.root_task_id == task.task_id
-    assert manager.list_objectives()[0].objective_id == objective.objective_id
+    # The task works for no person, so this is a team Objective.
+    assert manager.list_objectives(view=ObjectiveView(person_id=None))[0].objective_id == objective.objective_id
 
 
 def test_replacement_manager_adopts_durable_objective_and_plan_scope(

@@ -74,7 +74,7 @@ from custom_messages.enums import (
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.providers._runtime import (
     _get_current_task_info,
-    _resolve_objective_id_for_tool,
+    _objective_to_link,
     _run_agent_coroutine,
     _schedule_store,
 )
@@ -422,7 +422,9 @@ def _build_schedule_payload_meta(
     meta.is_response_requested = True
     meta.msg_correlation_id = f"schedule_corr_{schedule_id}"
     meta.followup_to_task_id = task_info.task.task_id
-    meta.objective_id = objective_id or getattr(meta, "objective_id", None)
+    # The lookup already decided whether this run may inherit the link.
+    # Copying the task's old id back would undo a refusal.
+    meta.objective_id = objective_id
     if meta.gateway_context is not None:
         gateway_context = meta.gateway_context.model_copy(deep=True)
         gateway_context.scheduled_job_id = schedule_id
@@ -495,14 +497,11 @@ def create_scheduled_job(
         schedule_id = new_id("sched")
         current_task_id = agent.task_manager.current_task_id
         task_info = _get_current_task_info(agent)
-        resolved_objective_id = None
-        if getattr(agent, "named_agent_type", None) == TEAM_ARCHITECT_AGENT_TYPE:
-            resolved_objective_id = _resolve_objective_id_for_tool(
-                agent,
-                objective_id,
-                current_task_id or "",
-                "",
-            )
+        resolved_objective_id, objective_refusal = _objective_to_link(
+            agent, objective_id, current_task_id or ""
+        )
+        if objective_refusal:
+            return json.dumps({"error": objective_refusal})
         payload_header, payload_meta = _build_schedule_payload_meta(
             agent,
             schedule_id,
