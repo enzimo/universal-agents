@@ -661,6 +661,14 @@ are never writable, and new or changed skills go through reviewed installation.
 Startup refuses an instance still in the old single-`workspace/` layout and
 prints the move commands rather than moving files itself.
 
+Web research tools save files under `research/<task folder>/<result folder>/`
+in the task's workspace. Every task folder combines a readable prefix with a
+digest of the full task id. Hashing all ids prevents a short, unchanged id
+from matching another task's generated folder name. Each call adds a random
+suffix to its result folder so repeated or parallel searches keep separate
+files. New writes use these names; saved paths remain readable because
+inspection checks the person's research root rather than rebuilding names.
+
 Agents' code can create links in the folders it writes, and it runs at the
 same time as trusted code, so a tool that checks a path and then opens it by
 name can be sent elsewhere. Two real escapes worked this way: a planted

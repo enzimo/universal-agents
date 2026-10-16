@@ -29,7 +29,7 @@ from custom_tools.broker_web_requests import (
     send_web_request,
 )
 from custom_tools.path_policy import PathPolicyError
-from custom_tools.research_identity import ResearchIdentity, research_identity, safe_slug
+from custom_tools.research_identity import ResearchIdentity, research_identity, result_folder_name
 
 # Requests go through the secure tool broker, which adds the Brave key of the
 # account linked to http:brave-search (custom_tools.broker_web_requests).
@@ -73,14 +73,12 @@ def _now_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _artifact_root(identity: ResearchIdentity) -> Path:
-    return identity.task_folder
-
-
 def _create_artifact_dir(kind: str, label: str) -> tuple[Path, str, ResearchIdentity]:
+    """A new folder for one call's files, named by ``result_folder_name`` so no other call shares it."""
+
     identity = research_identity()
-    artifact_id = f"{_now_stamp()}_{kind}_{safe_slug(label)}"
-    artifact_dir = file_access.make_directories(_artifact_root(identity) / artifact_id).path
+    artifact_id = result_folder_name(_now_stamp(), kind, label)
+    artifact_dir = file_access.make_directories(identity.task_folder / artifact_id).path
     return artifact_dir, artifact_id, identity
 
 

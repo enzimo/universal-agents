@@ -178,6 +178,57 @@ def test_searxng_search_preserves_typed_results_and_response_metadata(
     assert Path(payload["manifest"]).is_file()
 
 
+FIXED_STAMP = "20261016T120000000000Z"
+
+
+def test_two_service_result_folders_made_at_the_same_moment_differ(tmp_path, monkeypatch):
+    from custom_tools import web_service_tools as tools
+
+    set_agent_ref(_FakeAgent(tmp_path))
+    monkeypatch.setattr(tools, "_now_stamp", lambda: FIXED_STAMP)
+
+    first_dir, first_id, _identity = tools._create_artifact_dir("searxng", "search", "agent search")
+    second_dir, second_id, _identity = tools._create_artifact_dir("searxng", "search", "agent search")
+
+    assert first_dir != second_dir and first_id != second_id
+    assert first_dir.is_dir() and second_dir.is_dir()
+    assert first_dir.parent == second_dir.parent
+    for artifact_id in (first_id, second_id):
+        readable, _, random_part = artifact_id.rpartition("_")
+        assert readable == f"{FIXED_STAMP}_searxng_search_agent-search"
+        assert len(random_part) == 12 and int(random_part, 16) >= 0
+
+
+def test_two_searxng_searches_at_the_same_moment_keep_their_own_files(tmp_path, monkeypatch):
+    """The same query at the same moment (parallel calls in one turn) used to
+    share a folder, and the second search overwrote the first one's files."""
+
+    from custom_tools import web_service_tools as tools
+
+    set_agent_ref(_FakeAgent(tmp_path))
+    _set_service_environment(monkeypatch)
+    monkeypatch.setattr(tools, "_now_stamp", lambda: FIXED_STAMP)
+    pending = ["first-page", "second-page"]
+
+    def fake_post(url, **kwargs):
+        title = pending.pop(0)
+        return _Response({"query": "agent search", "results": [{"title": title, "url": f"https://example.com/{title}"}]})
+
+    monkeypatch.setattr(tools.requests, "post", fake_post)
+
+    first = _payload(tools.searxng(operation="search", query="agent search"))
+    second = _payload(tools.searxng(operation="search", query="agent search", page=2))
+
+    assert first["artifact_dir"] != second["artifact_dir"]
+    for payload, title in ((first, "first-page"), (second, "second-page")):
+        for key in ("raw_file", "normalized_file", "manifest"):
+            assert Path(payload[key]).parent == Path(payload["artifact_dir"])
+        raw = json.loads(Path(payload["raw_file"]).read_text(encoding="utf-8"))
+        assert [item["title"] for item in raw["results"]] == [title]
+        manifest = json.loads(Path(payload["manifest"]).read_text(encoding="utf-8"))
+        assert manifest["artifact_id"] == payload["artifact_id"]
+
+
 def test_searxng_disabled_format_returns_actionable_error(tmp_path, monkeypatch):
     from custom_tools import web_service_tools as tools
 
