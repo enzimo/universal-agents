@@ -1478,19 +1478,14 @@ async def _finish_objective_deletion(
         response.message = "objective_deletion_incomplete:" + ",".join(incomplete)
         response.objective_status = ObjectiveStatus.DELETING
         return
-    deleted = await _set_objective_status_for_control(
+    await _set_objective_status_for_control(
         agent,
         objective=objective,
         target_status=ObjectiveStatus.DELETED,
-        summary="Recoverable Objective deletion completed.",
-    )
-    deleted.deleted_at = datetime.now(timezone.utc).isoformat()
-    deleted.deletion_summary = (
-        "Future execution is disabled and linked active work was stopped. "
-        "Plans, evidence, checkpoints, and audit history were retained."
-    )
-    await agent.task_manager.operations_runtime.run(
-        agent.task_manager._save_objective, deleted
+        summary=(
+            "Future execution is disabled and linked active work was stopped. "
+            "Plans, evidence, checkpoints, and audit history were retained."
+        ),
     )
     response.success = True
     response.message = "objective_deleted"

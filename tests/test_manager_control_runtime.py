@@ -1202,8 +1202,9 @@ def test_gateway_runtime_has_no_manager_repository_imports() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fail_on_metadata", [False, True], ids=["deleted-status", "deletion-metadata"])
 async def test_objective_deletion_that_was_not_saved_is_not_reported_done(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_on_metadata: bool
 ) -> None:
     config = _config(tmp_path)
     task_manager = TaskManager(
@@ -1227,7 +1228,7 @@ async def test_objective_deletion_that_was_not_saved_is_not_reported_done(
     save = task_manager.objective_repository.save_objective
 
     def fail_when_deleted(record) -> None:
-        if record.status == ObjectiveStatus.DELETED:
+        if record.status == ObjectiveStatus.DELETED and (not fail_on_metadata or record.deleted_at is not None):
             raise sqlite3.OperationalError("disk I/O error")
         save(record)
 
@@ -1265,3 +1266,29 @@ async def test_objective_deletion_that_was_not_saved_is_not_reported_done(
     assert (response.success, response.message) == (False, "objective_update_failed")
     assert response.objective_status == ObjectiveStatus.DELETING
     assert task_manager.get_objective(objective.objective_id).status == ObjectiveStatus.DELETING
+
+    # A failed completion stays retryable, including when the write containing
+    # its completion metadata fails after earlier deletion steps succeeded.
+    monkeypatch.setattr(task_manager.objective_repository, "save_objective", save)
+    retry = response.model_copy(
+        update={
+            "command_type": MessageMetaType.REQUEST,
+            "expected_objective_digest": contract_sha256(
+                task_manager.get_objective(objective.objective_id).model_dump(mode="json")
+            ),
+        }
+    )
+    await handle_manager_runtime_work_command(
+        agent,
+        command=retry,
+        msg_header=MessageHeader(from_agent_id="gateway", response_routing_key="gateway"),
+        msg_meta=MessageMeta(gateway_context=_signed(owner_context, team_id=config.gateway.team_id, roles=["admin"])),
+    )
+    completed = comms.messages[-1].msg_content
+    assert (completed.success, completed.message, completed.objective_status) == (
+        True, "objective_deleted", ObjectiveStatus.DELETED
+    )
+    stored = task_manager.get_objective(objective.objective_id)
+    assert stored.status == ObjectiveStatus.DELETED
+    assert stored.deleted_at is not None
+    assert "Future execution is disabled" in stored.deletion_summary

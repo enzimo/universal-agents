@@ -443,6 +443,10 @@ their own records elsewhere and go on without the Objective's copy, logging
 `event=objective_save_skipped` with the step. A schedule or heartbeat item
 whose Objective could not record it stays, and the reply warns that pausing
 the Objective will not reach it.
+The final deletion status, completion timestamp and summary are saved together.
+A failed completion therefore leaves the Objective deleting and retryable;
+there is no later metadata write after the record becomes deleted, because
+repeated deletion commands return immediately for a completed deletion.
 
 The memory system has the five stores the README lists, which agents recall
 from (conversation history, user memory, team memory, the memory graph and the

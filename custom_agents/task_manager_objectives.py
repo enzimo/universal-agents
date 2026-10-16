@@ -1280,6 +1280,11 @@ class ObjectiveCoordinator:
         if target_status == ObjectiveStatus.SATISFIED:
             objective.satisfied_by_task_id = satisfied_by_task_id or task_id or objective.satisfied_by_task_id
             objective.satisfied_at = objective.satisfied_at or now_ts
+        if target_status == ObjectiveStatus.DELETED:
+            # Commit the completed tombstone in one write. Once DELETED is
+            # stored, repeated deletion commands return without changing it.
+            objective.deleted_at = objective.deleted_at or now_ts
+            objective.deletion_summary = (summary or "").strip() or "Objective deletion completed."
 
         self._append_objective_event(
             objective,
