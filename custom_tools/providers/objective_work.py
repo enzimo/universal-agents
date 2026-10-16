@@ -42,6 +42,7 @@ from custom_messages.records.objectives import (
     OWNER_CADENCE_TIMEZONE,
     ObjectiveWorkBudget,
     ObjectiveWorkProfile,
+    ObjectiveWorkProfileProposal,
 )
 from custom_tools.action_inputs import actions, input_refusal
 from custom_tools.runtime_context import (
@@ -538,6 +539,18 @@ def propose_objective_work_profile(
         return json.dumps({"error": str(exc)})
 
 
+def _profile_objective_in_view(agent: "UniversalAgent", proposal: ObjectiveWorkProfileProposal) -> bool:
+    """Reusable profiles are personal; one-time profiles need current Objective authority."""
+
+    if proposal.scope == ObjectiveWorkProfileScope.REUSABLE:
+        return True
+    if not proposal.objective_id:
+        return False
+    return _resolve_objective_id_for_tool(
+        agent, proposal.objective_id, "", "", action=PRIVATE_UPDATE
+    ) is not None
+
+
 def _apply_profile_proposal(
     proposal_id: str,
     proposal_digest: str,
@@ -546,6 +559,8 @@ def _apply_profile_proposal(
 ) -> str:
     """Apply one exact accepted proposal: install reusable or enable its target Objective."""
     agent = get_agent_ref()
+    if agent is None:
+        return json.dumps({"error": "Agent reference not set"})
     denial = _require_manager_tool(agent, "objective_work_profiles")
     if denial:
         return json.dumps(denial)
@@ -573,6 +588,10 @@ def _apply_profile_proposal(
             proposal_digest=proposal_digest,
             owner_canonical_user_id=owner,
         )
+        # A proposal records the exact bounds, not lasting authority over
+        # its Objective. The person's roles may have changed since staging.
+        if not _profile_objective_in_view(agent, proposal):
+            return json.dumps(_NO_OBJECTIVE)
         if proposal.status == ObjectiveWorkProfileProposalStatus.APPLIED:
             return json.dumps(
                 {
@@ -598,18 +617,22 @@ def _apply_profile_proposal(
                     "missing_skills": unavailable,
                 }
             )
+        repository = agent.task_manager.objective_work_repository
+        if repository is None:
+            raise RuntimeError("Bounded Objective execution is unavailable.")
+        objective_id = proposal.objective_id or ""
         previous_policy = agent.task_manager.operations_runtime.run_sync(
-            agent.task_manager.objective_work_repository.get_policy,
-            proposal.objective_id,
+            repository.get_policy,
+            objective_id,
             owner_agent_id=agent.task_manager.operations_runtime.run_sync(
-                agent.task_manager.durable_manager_scope_id
+                coordinator._require_owner
             ),
         )
         if previous_policy is not None:
             previous_policy = previous_policy.model_copy(deep=True)
         policy = agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.objective_work_coordinator.enable_policy,
-            proposal.objective_id,
+            objective_id,
             profile_name=proposal.profile_name,
             accepted_by_task_id=current.task.task_id,
             acceptance_summary=summary,

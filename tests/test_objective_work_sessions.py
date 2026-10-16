@@ -969,6 +969,50 @@ def test_one_time_profile_applies_only_to_bound_objective_and_is_idempotent(
     )
 
 
+@pytest.mark.parametrize("already_applied", [False, True])
+def test_team_profile_application_rechecks_current_administrator_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, already_applied: bool,
+) -> None:
+    manager = _manager(tmp_path, policy=True)
+    source, _private = _objective(manager)
+    system = Task(task_id="team_root", task_type=MessageMetaType.REQUEST, problem_statement="Team work.")
+    assert manager.add_task(
+        system, MessageHeader(from_agent_id="system"),
+        MessageMeta(from_agent_name="system", conversation_id="team_work", gateway_context=GatewayContext(
+            task_context=context_signer().issue(team_id="team", person_id=None),
+        )), owner_person_id=None,
+    )
+    team = manager.create_objective(task_id=system.task_id, title="Team outcome", desired_outcome="x", why="y")
+    _agent, store = _tool_agent(manager, source.task_id, monkeypatch)
+    proposal = json.loads(propose_objective_work_profile(
+        profile_name="team-window", cadence_cron="0 */4 * * *", active_seconds=3600,
+        checkpoint_reserve_seconds=300, checkpoint_reserve_turns=2,
+        checkpoint_reserve_tokens=50_000, checkpoint_reserve_tool_calls=1,
+        turns=24, total_tokens=320_000, tool_calls=45, rationale="Bounded team work.",
+        scope="objective", objective_id=team.objective_id,
+    ))
+    assert "error" not in proposal
+    acceptance = dict(
+        action="apply", proposal_id=proposal["proposal_id"], proposal_digest=proposal["proposal_digest"],
+        confirmation_summary="Apply these exact team bounds.", confirmed=True,
+    )
+    if already_applied:
+        assert "policy" in json.loads(objective_work_profiles(**acceptance))
+    before = manager.get_objective(team.objective_id).model_dump(mode="json")
+    schedule_count = len(store.get_all())
+    meta = manager.get_task_info(source.task_id).meta.model_copy(deep=True)
+    meta.gateway_context.task_context = context_signer().issue(
+        team_id="team", person_id="objective-user", person_roles=("member",),
+    )
+    member = Task(task_id="member_acceptance", task_type=MessageMetaType.REQUEST, problem_statement="Apply profile.")
+    assert manager.add_task(member, manager.get_task_info(source.task_id).header, meta, owner_person_id="objective-user")
+    manager.task_state.current_in_progress_task_id = member.task_id
+    refused = json.loads(objective_work_profiles(**acceptance))
+    assert refused == {"error": "No objective could be resolved from the supplied context."}
+    assert manager.get_objective(team.objective_id).model_dump(mode="json") == before
+    assert len(store.get_all()) == schedule_count
+
+
 def test_one_time_profile_rejects_policy_state_drift_before_acceptance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

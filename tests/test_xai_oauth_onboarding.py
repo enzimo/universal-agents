@@ -3,7 +3,9 @@ from __future__ import annotations
 from tests.browser_assets import module_source
 
 import asyncio
+import errno
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -110,6 +112,55 @@ async def test_browser_device_flow_never_returns_tokens(
     auth_store = instance_root / "auth" / "xai_oauth_auth.json"
     stored = json.loads(auth_store.read_text(encoding="utf-8"))
     assert stored["tokens"]["access_token"] == "browser-must-never-see-access-token"
+
+
+@pytest.mark.asyncio
+async def test_browser_device_flow_explains_a_store_that_cannot_be_locked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The person sees the lock problem itself, not a generic or "sign in again" failure."""
+
+    def refuse(_descriptor: int, _operation: int) -> None:
+        raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+
+    monkeypatch.setattr(
+        "assistant_gateway.onboarding_web.server.request_xai_device_authorization",
+        lambda *args, **kwargs: _authorization(),
+    )
+    monkeypatch.setattr(
+        "assistant_gateway.onboarding_web.server.poll_xai_device_token",
+        lambda *args, **kwargs: {"access_token": "new-access-token", "refresh_token": "new-refresh-token"},
+    )
+    monkeypatch.setattr("file_locking.fcntl.flock", refuse)
+    instance_root = tmp_path / "instance"
+    service = OnboardingWebService(
+        OnboardingWebSettings(
+            host="127.0.0.1",
+            port=18090,
+            instance_root=str(instance_root),
+            restart_on_complete=False,
+        )
+    )
+
+    async with TestClient(TestServer(service.build_app())) as client:
+        start_response = await client.post(
+            "/api/xai-oauth/device-login",
+            json={"xai_oauth": {"base_url": "https://api.x.ai/v1"}},
+        )
+        login_id = (await start_response.json())["login_id"]
+        for _ in range(50):
+            status_payload = await (await client.get(f"/api/xai-oauth/device-login/{login_id}")).json()
+            if status_payload["status"] != "pending":
+                break
+            await asyncio.sleep(0.01)
+
+    assert status_payload["status"] == "error"
+    assert status_payload["code"] == "xai_oauth_auth_store_lock_unavailable"
+    assert status_payload["relogin_required"] is False
+    assert "could not be locked" in status_payload["message"]
+    assert "supports file locks" in status_payload["message"]
+    assert not (instance_root / "auth" / "xai_oauth_auth.json").exists()
 
 
 @pytest.mark.asyncio

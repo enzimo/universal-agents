@@ -1603,14 +1603,12 @@ def _managed_recovery_overrides(
     subtask_timeout_seconds: int = 12,
     subtask_watchdog_interval_seconds: int = 2,
     max_queued_top_level_tasks: int = 6,
-    max_concurrent_top_level_tasks: int = 1,
 ) -> dict:
     return {
         "agent": {
             "subtask_timeout_seconds": subtask_timeout_seconds,
             "subtask_watchdog_interval_seconds": subtask_watchdog_interval_seconds,
             "max_queued_top_level_tasks": max_queued_top_level_tasks,
-            "max_concurrent_top_level_tasks": max_concurrent_top_level_tasks,
         }
     }
 

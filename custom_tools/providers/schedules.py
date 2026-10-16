@@ -423,7 +423,9 @@ def _build_schedule_payload_meta(
     meta.is_response_requested = True
     meta.msg_correlation_id = f"schedule_corr_{schedule_id}"
     meta.followup_to_task_id = task_info.task.task_id
-    meta.objective_id = objective_id or getattr(meta, "objective_id", None)
+    # The lookup already decided whether this run may inherit the link.
+    # Copying the task's old id back would undo a refusal.
+    meta.objective_id = objective_id
     if meta.gateway_context is not None:
         gateway_context = meta.gateway_context.model_copy(deep=True)
         gateway_context.scheduled_job_id = schedule_id

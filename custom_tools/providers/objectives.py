@@ -185,15 +185,15 @@ def record_objective_work_checkpoint(
 def _plan_in_view(agent: "UniversalAgent", plan_id: str) -> bool:
     """Whether the active task may change one Plan: its Objective's, or its root task's person.
 
-    A plan id this team lead has no Plan for passes, so the caller keeps its
-    own not-found handling.
+    Missing and inaccessible Plans both fail without revealing which case
+    occurred.
     """
 
     plan = agent.task_manager.operations_runtime.run_sync(
         agent.task_manager.get_plan, plan_id
     )
     if plan is None:
-        return True
+        return False
     if plan.objective_id:
         return _objective_in_view(agent, plan.objective_id, action=PRIVATE_UPDATE)
     if plan.root_task_id:
@@ -269,6 +269,9 @@ def create_objective(
     - promote_task: the source task becomes the Objective root work.
     - spawn_task: the source task creates a separate Objective root task.
 
+    A Plan already owned by an Objective cannot be promoted again. Use
+    spawn_task for separate work with its own Plan.
+
     Objective creation always ensures at least one Objective-owned task and one
     durable plan. Use activate_plan_execution later when the manager decides the
     plan needs staged fresh-context execution.
@@ -291,6 +294,19 @@ def create_objective(
     task_refusal = _named_task_refusal(agent, resolved_task_id)
     if task_refusal:
         return json.dumps({"error": task_refusal})
+    # A person's task can share a team Objective's Plan. Creating an
+    # Objective from it must not move that Plan into personal ownership.
+    source_objective_id = agent.task_manager.operations_runtime.run_sync(
+        agent.task_manager.get_task_objective_id, resolved_task_id
+    )
+    source_plan_id = agent.task_manager.operations_runtime.run_sync(
+        agent.task_manager.get_task_plan_id, resolved_task_id
+    )
+    if (
+        source_objective_id
+        and not _objective_in_view(agent, source_objective_id, action=PRIVATE_UPDATE)
+    ) or (source_plan_id and not _plan_in_view(agent, source_plan_id)):
+        return json.dumps({"error": "No objective could be resolved from the supplied context."})
 
     try:
         success_criteria = _parse_json_list(

@@ -73,9 +73,6 @@ class AgentRuntimeDefaultsSettings(BaseModel):
         default_factory=lambda: copy.deepcopy(AGENT_DEFAULTS.schedule_maintenance.value)
     )
     max_queued_top_level_tasks: int = AGENT_DEFAULTS.max_queued_top_level_tasks.value
-    max_concurrent_top_level_tasks: int = (
-        AGENT_DEFAULTS.max_concurrent_top_level_tasks.value
-    )
     task_queue_warning_threshold: int = (
         AGENT_DEFAULTS.task_queue_warning_threshold.value
     )
@@ -263,7 +260,6 @@ class AgentRuntimeOverrideSettings(BaseModel):
     memory_graph_enabled: Optional[bool] = None
     memory: Optional[MemoryConfig] = None
     max_queued_top_level_tasks: Optional[int] = None
-    max_concurrent_top_level_tasks: Optional[int] = None
     task_queue_warning_threshold: Optional[int] = None
     subtask_timeout_seconds: Optional[float] = None
     subtask_watchdog_interval_seconds: Optional[float] = None

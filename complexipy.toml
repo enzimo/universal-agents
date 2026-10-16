@@ -19,6 +19,7 @@ paths = [
     "config_loader.py",
     "default_values.py",
     "env_secrets.py",
+    "file_locking.py",
     "id_generation.py",
     "internal_credentials.py",
     "reply_routing_trace.py",

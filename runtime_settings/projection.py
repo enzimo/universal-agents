@@ -259,10 +259,6 @@ def _project_agent(
             "max_queued_top_level_tasks",
             AGENT_DEFAULTS.max_queued_top_level_tasks.value,
         ),
-        "max_concurrent_top_level_tasks": agent_cfg.get(
-            "max_concurrent_top_level_tasks",
-            AGENT_DEFAULTS.max_concurrent_top_level_tasks.value,
-        ),
         "task_queue_warning_threshold": agent_cfg.get(
             "task_queue_warning_threshold",
             AGENT_DEFAULTS.task_queue_warning_threshold.value,
