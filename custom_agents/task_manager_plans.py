@@ -285,7 +285,7 @@ class PlanCoordinator:
                     self.objective_state.task_to_objective_id[related_task_id] = objective.objective_id
                     changed = True
             if changed:
-                self.operations.save_objective(objective)
+                self.operations.save_objective(objective, step="plan_followed_task")
         return plan
 
     def get_plan(self, plan_id: str) -> Optional[PlanRecord]:

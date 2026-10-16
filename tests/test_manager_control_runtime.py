@@ -5,6 +5,7 @@ from custom_agents.task_operation_runtime import TaskOperationRuntime
 import asyncio
 import json
 import logging
+import sqlite3
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -1198,3 +1199,69 @@ def test_gateway_runtime_has_no_manager_repository_imports() -> None:
         if module in source
     }
     assert violations == {}
+
+
+@pytest.mark.asyncio
+async def test_objective_deletion_that_was_not_saved_is_not_reported_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    task_manager = TaskManager(
+        storage_settings=config.manager_storage_settings,
+        logger=logging.getLogger("test.objective_deletion_not_saved"),
+    )
+    task_manager.set_owner_identity("manager_1", "Manager", config.gateway.team_id, config.gateway.named_agent_type)
+    owner_context = GatewayContext(canonical_user_id="Owner", session_key="session_owner")
+    source = Task(task_id="task_deletion_source", task_type=MessageMetaType.REQUEST, problem_statement="Work.")
+    assert task_manager.add_task(
+        source,
+        MessageHeader(from_agent_id="gateway"),
+        MessageMeta(conversation_id="conv_owner", gateway_context=owner_context),
+        owner_person_id="Owner",
+    )
+    objective = task_manager.create_objective(
+        task_id=source.task_id, title="Delete me", desired_outcome="Deleted.", why="Asked."
+    )
+    assert objective is not None
+    # The deletion starts (DELETING is saved), but its final save fails.
+    save = task_manager.objective_repository.save_objective
+
+    def fail_when_deleted(record) -> None:
+        if record.status == ObjectiveStatus.DELETED:
+            raise sqlite3.OperationalError("disk I/O error")
+        save(record)
+
+    monkeypatch.setattr(task_manager.objective_repository, "save_objective", fail_when_deleted)
+    comms = _CaptureComms()
+    schedule_store = ScheduleStore(storage_settings=config.manager_storage_settings)
+    agent = SimpleNamespace(
+        id="manager_1",
+        name="Manager",
+        is_team_lead=True,
+        team_id=config.gateway.team_id,
+        task_manager=task_manager,
+        team_comms=comms,
+        _logger=logging.getLogger("test.objective_deletion_not_saved"),
+        _ensure_schedule_store=lambda: schedule_store,
+        _scheduler_wake=SimpleNamespace(set=lambda: None),
+    )
+
+    await handle_manager_runtime_work_command(
+        agent,
+        command=ManagerRuntimeWorkCommand(
+            action="delete_objective",
+            scope="objective",
+            target_objective_id=objective.objective_id,
+            expected_objective_digest=contract_sha256(
+                task_manager.get_objective(objective.objective_id).model_dump(mode="json")
+            ),
+        ),
+        msg_header=MessageHeader(from_agent_id="gateway", response_routing_key="gateway"),
+        msg_meta=MessageMeta(gateway_context=_signed(owner_context, team_id=config.gateway.team_id, roles=["admin"])),
+    )
+
+    response = comms.messages[-1].msg_content
+    assert isinstance(response, ManagerRuntimeWorkCommand)
+    assert (response.success, response.message) == (False, "objective_update_failed")
+    assert response.objective_status == ObjectiveStatus.DELETING
+    assert task_manager.get_objective(objective.objective_id).status == ObjectiveStatus.DELETING

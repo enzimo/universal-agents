@@ -25,6 +25,22 @@ from custom_messages.records.plans import PlanRecord
 from id_generation import new_id
 
 
+class ObjectiveSaveFailed(RuntimeError):
+    """An Objective change was not written to the store.
+
+    Raised by ``ObjectiveCoordinator._save_objective`` for changes that a tool
+    call or a person's command asked for, so the reply says the change was
+    not saved instead of returning the changed record as if it were.
+    """
+
+    def __init__(self, objective_id: str) -> None:
+        super().__init__(
+            f"The change to Objective {objective_id} was not saved. "
+            "Try again later; if it keeps failing, tell the person."
+        )
+        self.objective_id = objective_id
+
+
 class ObjectiveCoordinator:
     """Manager-owned Objective creation, linking, progress, and lifecycle."""
 
@@ -73,15 +89,37 @@ class ObjectiveCoordinator:
             PlanStatus.ABANDONED,
         }
 
-    def _save_objective(self, objective: ObjectiveRecord) -> bool:
+    def _save_objective(self, objective: ObjectiveRecord) -> None:
+        """Write the Objective, or raise ``ObjectiveSaveFailed``.
+
+        For changes a tool call or a person's command asked for: the caller
+        reports that nothing was saved. A step that goes on without the write,
+        because its own records are already stored, uses
+        ``_save_objective_logged``. The plan and task lookups change only after
+        the write, so they never point at a change the store does not have.
+        """
         if not self.operations.objectives_enabled():
-            return False
+            self._logger.error(
+                "An Objective change was not saved because Objectives are off. "
+                "event=objective_save_failed objective_id=%s reason=objectives_disabled",
+                objective.objective_id,
+            )
+            raise ObjectiveSaveFailed(objective.objective_id)
         now_ts = datetime.now(timezone.utc).isoformat()
         objective.owner_agent_id = self.operations.durable_manager_scope_id()
         objective.owner_agent_name = objective.owner_agent_name or self.identity.owner_agent_name
         objective.team_id = objective.team_id or self.identity.team_id
         objective.owner_named_agent_type = objective.owner_named_agent_type or self.identity.owner_named_agent_type
         objective.updated_at = now_ts
+        try:
+            self.objective_repository.save_objective(objective)
+        except Exception as exc:
+            self._logger.error(
+                "An Objective change was not saved. event=objective_save_failed objective_id=%s error=%s",
+                objective.objective_id,
+                exc,
+            )
+            raise ObjectiveSaveFailed(objective.objective_id) from exc
         if objective.current_plan_id:
             self.objective_state.plan_to_objective_id[objective.current_plan_id] = objective.objective_id
         for plan_id in objective.plan_ids:
@@ -90,12 +128,26 @@ class ObjectiveCoordinator:
         for task_id in objective.related_task_ids + objective.recovery_task_ids:
             if task_id:
                 self.objective_state.task_to_objective_id[task_id] = objective.objective_id
+
+    def _save_objective_logged(self, objective: ObjectiveRecord, *, step: str) -> bool:
+        """Write the Objective for a step that goes on without it; False when the write failed.
+
+        For trusted steps nobody waits on: a task starting, ending or gaining
+        a subtask, a plan following its task, a work session recording its
+        progress. Their own records are stored elsewhere, so only the
+        Objective's copy of the change (an event, a link, a review) is lost,
+        and the failure is logged with ``step``.
+        """
         try:
-            self.objective_repository.save_objective(objective)
-            return True
-        except Exception as exc:
-            self._logger.error("Failed to persist objective %s: %s", objective.objective_id, exc)
+            self._save_objective(objective)
+        except ObjectiveSaveFailed:
+            self._logger.warning(
+                "Went on without the Objective change. event=objective_save_skipped objective_id=%s step=%s",
+                objective.objective_id,
+                step,
+            )
             return False
+        return True
 
     def _append_objective_event(
         self,
@@ -493,7 +545,7 @@ class ObjectiveCoordinator:
                 task_id=task_id,
                 user_visible=False,
             )
-            self._save_objective(objective)
+            self._save_objective_logged(objective, step="incoming_task_linked")
 
         current_plan = self.operations.get_plan(objective.current_plan_id) if objective.current_plan_id else None
         if current_plan is None or current_plan.status != PlanStatus.ACTIVE:
@@ -852,8 +904,7 @@ class ObjectiveCoordinator:
         self.objective_state.task_to_objective_id[objective_task_id] = objective.objective_id
         self.objective_state.plan_to_objective_id[plan_id] = objective.objective_id
 
-        if not self._save_objective(objective):
-            return None
+        self._save_objective(objective)
         plan: Optional[PlanRecord] = self.operations.get_plan(plan_id)
         if plan is not None:
             plan.objective_id = objective.objective_id
@@ -1057,14 +1108,24 @@ class ObjectiveCoordinator:
             )
             return None
         refreshed = self._get_objective_record(objective.objective_id) or objective
-        self._record_objective_continuation_start(
-            refreshed,
-            source_task_id=source_task_id,
-            continuation_task_id=task_id,
-            work_brief=normalized_work_brief,
-            current_focus=current_focus,
-            user_visible=user_visible,
-        )
+        try:
+            self._record_objective_continuation_start(
+                refreshed,
+                source_task_id=source_task_id,
+                continuation_task_id=task_id,
+                work_brief=normalized_work_brief,
+                current_focus=current_focus,
+                user_visible=user_visible,
+            )
+        except ObjectiveSaveFailed:
+            # An Objective that does not show its continuation would not
+            # review or pause it, so the new task stops before it runs.
+            self.operations.fail_task(
+                task_id,
+                "The Objective could not record this continuation Task.",
+                datetime.now(timezone.utc).isoformat(),
+            )
+            raise
         return task_info
 
     def update_objective_progress(
@@ -1131,16 +1192,16 @@ class ObjectiveCoordinator:
                 "criterion_updates": criterion_updates or [],
             },
         )
-        if self._save_objective(objective):
-            self.operations.emit_activity(
-                activity_type=TaskActivityType.OBJECTIVE_UPDATED,
-                stage=TaskActivityStage.RUNNING,
-                task_id=task_id or (objective.related_task_ids[-1] if objective.related_task_ids else None),
-                summary=f"Objective progress updated: {objective.title}",
-                detail=objective.progress_summary,
-                user_visible=user_visible,
-                details=objective.model_dump(mode="json"),
-            )
+        self._save_objective(objective)
+        self.operations.emit_activity(
+            activity_type=TaskActivityType.OBJECTIVE_UPDATED,
+            stage=TaskActivityStage.RUNNING,
+            task_id=task_id or (objective.related_task_ids[-1] if objective.related_task_ids else None),
+            summary=f"Objective progress updated: {objective.title}",
+            detail=objective.progress_summary,
+            user_visible=user_visible,
+            details=objective.model_dump(mode="json"),
+        )
         return objective
 
     def _transition_current_plan_for_objective_status(
@@ -1220,14 +1281,6 @@ class ObjectiveCoordinator:
             objective.satisfied_by_task_id = satisfied_by_task_id or task_id or objective.satisfied_by_task_id
             objective.satisfied_at = objective.satisfied_at or now_ts
 
-        self._transition_current_plan_for_objective_status(
-            objective,
-            target_status,
-            summary=summary,
-            task_id=task_id or satisfied_by_task_id,
-            timestamp=now_ts,
-        )
-
         self._append_objective_event(
             objective,
             ObjectiveEventType.STATUS_CHANGED,
@@ -1242,18 +1295,27 @@ class ObjectiveCoordinator:
             },
             timestamp=now_ts,
         )
-        if self._save_objective(objective):
-            self.operations.emit_activity(
-                activity_type=TaskActivityType.OBJECTIVE_UPDATED,
-                stage=TaskActivityStage.COMPLETED if target_status == ObjectiveStatus.SATISFIED else TaskActivityStage.RUNNING,
-                task_id=task_id or satisfied_by_task_id or (objective.related_task_ids[-1] if objective.related_task_ids else None),
-                summary=f"Objective status changed: {objective.title}",
-                detail=f"{previous_status.value} -> {target_status.value}",
-                user_visible=user_visible,
-                details=objective.model_dump(mode="json"),
-            )
+        # Saved before its Plan closes, so a failed save leaves both unchanged.
+        self._save_objective(objective)
+        self._transition_current_plan_for_objective_status(
+            objective,
+            target_status,
+            summary=summary,
+            task_id=task_id or satisfied_by_task_id,
+            timestamp=now_ts,
+        )
+        self.operations.emit_activity(
+            activity_type=TaskActivityType.OBJECTIVE_UPDATED,
+            stage=TaskActivityStage.COMPLETED if target_status == ObjectiveStatus.SATISFIED else TaskActivityStage.RUNNING,
+            task_id=task_id or satisfied_by_task_id or (objective.related_task_ids[-1] if objective.related_task_ids else None),
+            summary=f"Objective status changed: {objective.title}",
+            detail=f"{previous_status.value} -> {target_status.value}",
+            user_visible=user_visible,
+            details=objective.model_dump(mode="json"),
+        )
         self.operations.persist_runtime_state()
-        return objective
+        # Closing the Plan may have saved its own links on the Objective.
+        return self._get_objective_record(objective.objective_id) or objective
 
     def _review_objective_with_active_plan(
         self,
@@ -1306,7 +1368,7 @@ class ObjectiveCoordinator:
             active_task_ids=[],
             active_plan_ids=active_plan_ids,
         )
-        self._save_objective(objective)
+        self._save_objective_logged(objective, step=f"task_end_review:{conclusion}")
         self.operations.persist_runtime_state()
         return objective
 
@@ -1364,7 +1426,7 @@ class ObjectiveCoordinator:
                 active_task_ids=active_task_ids,
                 active_plan_ids=active_plan_ids,
             )
-            self._save_objective(objective)
+            self._save_objective_logged(objective, step="task_end_review:active_work_remains")
             self.operations.persist_runtime_state()
             return objective
 
@@ -1389,7 +1451,7 @@ class ObjectiveCoordinator:
                 active_task_ids=[],
                 active_plan_ids=[],
             )
-            self._save_objective(objective)
+            self._save_objective_logged(objective, step="task_end_review:objective_paused")
             self.operations.persist_runtime_state()
             return objective
 
@@ -1432,7 +1494,9 @@ class ObjectiveCoordinator:
                 active_task_ids=[],
                 active_plan_ids=[],
             )
-            self._save_objective(objective)
+            self._save_objective_logged(
+                objective, step="task_end_review:standing_or_recurring_objective_remains_active"
+            )
             self.operations.persist_runtime_state()
             return objective
 
@@ -1501,7 +1565,7 @@ class ObjectiveCoordinator:
             active_task_ids=[],
             active_plan_ids=[],
         )
-        if self._save_objective(objective):
+        if self._save_objective_logged(objective, step=f"task_end_review:{conclusion}"):
             self.operations.emit_activity(
                 activity_type=TaskActivityType.OBJECTIVE_UPDATED,
                 stage=(

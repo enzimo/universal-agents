@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -570,3 +571,93 @@ def test_a_finished_tasks_plan_stays_its_persons_after_a_team_lead_restart(_peop
     _act_as(manager, tasks["a"])
     cancelled = json.loads(update_execution_plan_status("cancelled", "A cancels their own plan.", plan_id=plan_id))
     assert cancelled["plan"]["status"] == "cancelled"
+
+
+def _break_objective_saves(monkeypatch: pytest.MonkeyPatch, manager: TaskManager) -> None:
+    """Every Objective write fails, as when the database is locked or the disk is full."""
+
+    def fail(objective) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(manager.objective_repository, "save_objective", fail)
+
+
+def _not_saved(objective_id: str) -> str:
+    return (
+        f"The change to Objective {objective_id} was not saved. "
+        "Try again later; if it keeps failing, tell the person."
+    )
+
+
+def test_objective_changes_that_were_not_saved_are_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    manager = _task_manager(tmp_path)
+    current = _add_current_task(manager)
+    set_agent_ref(_FakeAgent(manager))
+    created = json.loads(create_objective(title="Write the report", desired_outcome="A report.", why="Asked."))
+    objective_id, plan_id = created["objective_id"], created["plan_id"]
+    _break_objective_saves(monkeypatch, manager)
+
+    with caplog.at_level("ERROR", logger="test_objective_tools"):
+        progressed = json.loads(
+            objectives(action="update_progress", objective_id=objective_id, progress_summary="Half done.")
+        )
+    assert progressed == {"error": _not_saved(objective_id)}
+    assert f"event=objective_save_failed objective_id={objective_id}" in caplog.text
+    closed = json.loads(objectives(action="update_status", status="cancelled", objective_id=objective_id))
+    assert closed == {"error": _not_saved(objective_id)}
+    stored = manager.get_objective(objective_id)
+    assert (stored.progress_summary, stored.status.value) == (None, "active")
+    # The Plan closes only after its Objective's new status is saved.
+    assert manager.get_plan(plan_id).status.value == "active"
+
+    # A continuation its Objective cannot record stops before it runs.
+    continued = json.loads(start_objective_task(objective_id=objective_id, work_brief="Keep going."))
+    assert continued == {"error": _not_saved(objective_id)}
+    still_open = [
+        info.task.task_id
+        for info in manager.task_state.tasks.values()
+        if not manager.is_terminal_state(info.state)
+    ]
+    assert still_open == [current.task_id]
+
+
+def test_a_schedule_or_heartbeat_item_its_objective_could_not_record_stays_with_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _task_manager(tmp_path)
+    _add_current_task(manager)
+    agent = _FakeAgent(manager)
+    set_agent_ref(agent)
+    created = json.loads(
+        create_objective(title="Check daily", desired_outcome="Checked.", why="Asked.", horizon="recurring")
+    )
+    _break_objective_saves(monkeypatch, manager)
+
+    scheduled = json.loads(create_scheduled_job(instruction="Check.", schedule_name="daily", interval_seconds=60))
+    assert agent._schedule_store.get_scheduled_message(scheduled["schedule_id"]) is not None
+    assert "could not record it" in scheduled["objective_link_warning"]
+    heartbeat = json.loads(add_heartbeat_item(instruction="Check.", title="Check"))
+    assert heartbeat["heartbeat_item_id"]
+    assert "could not record it" in heartbeat["objective_link_warning"]
+    stored = manager.get_objective(created["objective_id"])
+    assert (stored.schedule_links, stored.heartbeat_links) == ([], [])
+
+
+def test_a_task_ends_normally_when_its_objective_review_is_not_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    manager = _task_manager(tmp_path)
+    task = _add_current_task(manager)
+    set_agent_ref(_FakeAgent(manager))
+    created = json.loads(create_objective(title="Try once", desired_outcome="Tried.", why="Asked."))
+    _break_objective_saves(monkeypatch, manager)
+
+    with caplog.at_level("WARNING", logger="test_objective_tools"):
+        manager.fail_task(task.task_id, "The attempt failed.", "2026-10-16T10:00:00+00:00")
+
+    assert manager.get_task_info(task.task_id) is None or manager.is_terminal_state(
+        manager.get_task_info(task.task_id).state
+    )
+    assert f"event=objective_save_skipped objective_id={created['objective_id']} step=task_end_review:" in caplog.text

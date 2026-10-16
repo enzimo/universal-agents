@@ -434,6 +434,16 @@ conversations, memory, authorization records, gateway sessions, and execution
 attempts. Agents still coordinate through NATS rather than polling one
 another's tables.
 
+An Objective change that a tool call or a person's command asked for is
+reported as not saved when the write fails (`ObjectiveSaveFailed` in
+`custom_agents/task_manager_objectives.py`), so the caller never gets back a
+changed record the store does not hold. Steps nobody waits on (a task starting
+or ending, a plan following its task, a work session recording progress) keep
+their own records elsewhere and go on without the Objective's copy, logging
+`event=objective_save_skipped` with the step. A schedule or heartbeat item
+whose Objective could not record it stays, and the reply warns that pausing
+the Objective will not reach it.
+
 The memory system has the five stores the README lists, which agents recall
 from (conversation history, user memory, team memory, the memory graph and the
 knowledge base), plus task history:

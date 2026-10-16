@@ -74,6 +74,7 @@ from custom_messages.enums import (
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.providers._runtime import (
     _get_current_task_info,
+    _link_to_objective,
     _objective_to_link,
     _run_agent_coroutine,
     _schedule_store,
@@ -600,19 +601,20 @@ def create_scheduled_job(
                     ),
                 },
             )
-        if resolved_objective_id:
-            agent.task_manager.operations_runtime.run_sync(
-                agent.task_manager.link_schedule_to_objective,
-                resolved_objective_id,
-                schedule_id,
-                managed_by_objective=True,
-                user_visible=True,
-                reason="Scheduled job created from objective-linked task context.",
-            )
+        objective_link_fields = _link_to_objective(
+            agent,
+            "schedule",
+            resolved_objective_id,
+            schedule_id,
+            managed_by_objective=True,
+            user_visible=True,
+            reason="Scheduled job created from objective-linked task context.",
+        )
         if getattr(agent, "_scheduler_wake", None):
             agent._scheduler_wake.set()
         return json.dumps(
             {
+                **objective_link_fields,
                 "schedule_id": scheduled_message.schedule_id,
                 "schedule_name": scheduled_message.schedule_name,
                 "worker": worker_result,

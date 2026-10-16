@@ -48,6 +48,7 @@ from custom_agents.schedule_management import (
     is_system_managed_schedule,
 )
 from custom_agents.schedule_store import ScheduleStore, owner_canonical_user_id_for_schedule
+from custom_agents.task_manager_objectives import ObjectiveSaveFailed
 from custom_messages.contracts.common_v1 import contract_sha256
 from custom_messages.contracts.control_v1 import (
     ManagerMemoryCommand,
@@ -1369,9 +1370,14 @@ async def _apply_objective_future_control(
             tolerate_missing=tolerate_missing,
         )
     )
-    await agent.task_manager.operations_runtime.run(
-        agent.task_manager._save_objective, objective
-    )
+    try:
+        await agent.task_manager.operations_runtime.run(
+            agent.task_manager._save_objective, objective
+        )
+    except ObjectiveSaveFailed:
+        # The links changed but the Objective does not record it, so a later
+        # resume would not undo it: the command reports itself incomplete.
+        failures.append(f"objective:{objective.objective_id}")
     if getattr(agent, "_scheduler_wake", None):
         agent._scheduler_wake.set()
     return failures
@@ -1446,6 +1452,49 @@ async def _prepare_objective_control_state(
         should_enable=should_enable,
         person=person,
     )
+
+
+async def _finish_objective_deletion(
+    agent: Any,
+    objective: Any,
+    *,
+    incomplete: list[str],
+    response: ManagerRuntimeWorkCommand,
+) -> None:
+    """Record a deletion as waiting on ``incomplete`` controls, or as done.
+
+    A save that fails raises ``ObjectiveSaveFailed``, so the person is never
+    told an Objective was deleted that the store still holds.
+    """
+
+    if incomplete:
+        objective.deletion_summary = (
+            "Deletion is waiting for controls to finish: " + ", ".join(incomplete)
+        )
+        await agent.task_manager.operations_runtime.run(
+            agent.task_manager._save_objective, objective
+        )
+        response.success = False
+        response.message = "objective_deletion_incomplete:" + ",".join(incomplete)
+        response.objective_status = ObjectiveStatus.DELETING
+        return
+    deleted = await _set_objective_status_for_control(
+        agent,
+        objective=objective,
+        target_status=ObjectiveStatus.DELETED,
+        summary="Recoverable Objective deletion completed.",
+    )
+    deleted.deleted_at = datetime.now(timezone.utc).isoformat()
+    deleted.deletion_summary = (
+        "Future execution is disabled and linked active work was stopped. "
+        "Plans, evidence, checkpoints, and audit history were retained."
+    )
+    await agent.task_manager.operations_runtime.run(
+        agent.task_manager._save_objective, deleted
+    )
+    response.success = True
+    response.message = "objective_deleted"
+    response.objective_status = ObjectiveStatus.DELETED
 
 
 def _runtime_work_scope_matches(
@@ -1668,34 +1717,12 @@ async def _apply_objective_control(
     ]
     incomplete = failures + [f"task:{task_id}" for task_id in unconfirmed]
     if command.action == "delete_objective":
-        if incomplete:
-            updated.deletion_summary = (
-                "Deletion is waiting for controls to finish: " + ", ".join(incomplete)
-            )
-            await agent.task_manager.operations_runtime.run(
-                agent.task_manager._save_objective, updated
-            )
+        try:
+            await _finish_objective_deletion(agent, updated, incomplete=incomplete, response=response)
+        except ObjectiveSaveFailed:
             response.success = False
-            response.message = "objective_deletion_incomplete:" + ",".join(incomplete)
+            response.message = "objective_update_failed"
             response.objective_status = ObjectiveStatus.DELETING
-            return
-        deleted = await _set_objective_status_for_control(
-            agent,
-            objective=updated,
-            target_status=ObjectiveStatus.DELETED,
-            summary="Recoverable Objective deletion completed.",
-        )
-        deleted.deleted_at = datetime.now(timezone.utc).isoformat()
-        deleted.deletion_summary = (
-            "Future execution is disabled and linked active work was stopped. "
-            "Plans, evidence, checkpoints, and audit history were retained."
-        )
-        await agent.task_manager.operations_runtime.run(
-            agent.task_manager._save_objective, deleted
-        )
-        response.success = True
-        response.message = "objective_deleted"
-        response.objective_status = ObjectiveStatus.DELETED
         return
 
     response.success = not incomplete
