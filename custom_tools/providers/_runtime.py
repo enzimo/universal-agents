@@ -92,7 +92,8 @@ def _task_person(agent: "UniversalAgent") -> Optional[PersonPrincipal]:
 
     None is work for no person. A task without a valid signed context or
     schedule run identity raises ``_UnverifiedTask`` instead of counting as
-    work for no person, which may change the team's Objectives.
+    work for no person, which may change the team's Objectives and read the
+    tasks of other work for no person.
     """
 
     from custom_agents.access_runtime import runtime_access, task_person
@@ -101,8 +102,8 @@ def _task_person(agent: "UniversalAgent") -> Optional[PersonPrincipal]:
         person, _task_id = task_person(agent, runtime_access(agent))
     except (IdentityRejected, RuntimeError) as exc:
         logger.warning(
-            "Objective tools refused a task without a verified identity. "
-            "event=objective_task_identity_unverified agent_id=%s task_id=%s reason=%s",
+            "A tool refused a task without a verified identity. "
+            "event=task_identity_unverified agent_id=%s task_id=%s reason=%s",
             getattr(agent, "id", None),
             agent.task_manager.current_task_id,
             exc,
@@ -203,12 +204,16 @@ def _objective_to_link(
     return resolved, None
 
 
-def _named_task_refusal(agent: "UniversalAgent", task_id: str) -> Optional[str]:
-    """Why the active task may not name ``task_id`` as a source of work, or None.
+def _named_task_refusal(
+    agent: "UniversalAgent", task_id: str, *, action: str = PRIVATE_UPDATE
+) -> Optional[str]:
+    """Why the active task may not name ``task_id``, or None.
 
-    The current task is always allowed. Another task must work for the same
-    person (``ownership.named_task_access``); its person is the one recorded
-    at admission, read from the archive once the task has finished.
+    For tools that take a task id from the model, to read that task
+    (``action=PRIVATE_READ``) or use it as a source of work. The current task
+    is always allowed. Another task must work for the same person
+    (``ownership.named_task_access``); its person is the one recorded at
+    admission, read from the archive once the task has finished.
     """
 
     task_id = str(task_id or "").strip()
@@ -223,6 +228,7 @@ def _named_task_refusal(agent: "UniversalAgent", task_id: str) -> Optional[str]:
         person_id=person.person_id if person is not None else None,
         owner_id=owner,
         task_id=task_id,
+        action=action,
     ).allowed:
         return None
     return f"Task {task_id} was not found among this person's tasks."

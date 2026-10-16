@@ -42,7 +42,8 @@ with no owner, made by work for no person). Every task reads team Objectives;
 only work for no person or for an administrator changes them, the same rule
 as team memory. A tool that takes another task's id as the source of new work
 (an Objective made from it, a task continuing it) asks ``named_task_access``,
-because that work then belongs to the named task's person.
+because that work then belongs to the named task's person. So does a tool
+that reads another task's records, such as its execution digest.
 """
 
 from __future__ import annotations
@@ -213,22 +214,25 @@ def objective_access(
     return _denied("resource_owner_required", person, RESOURCE_OBJECTIVE, objective_id, action)
 
 
-def named_task_access(*, person_id: str | None, owner_id: str | None, task_id: str) -> OwnershipDecision:
-    """Whether a task may name another task as the source of new work or records.
+def named_task_access(
+    *, person_id: str | None, owner_id: str | None, task_id: str, action: str = PRIVATE_UPDATE
+) -> OwnershipDecision:
+    """Whether a task may name another task, to read it (``PRIVATE_READ``) or as a source of work.
 
     An Objective made from a task belongs to that task's person, and a task
     continuing an Objective works for its source task's person, so a task may
-    name only a task that works for the same person. As in
-    ``conversation_continuation``, work for no person may name only a task
-    for no person: a missing person and a person differ in both directions.
-    ``owner_id`` is the named task's person, recorded at admission.
+    name only a task that works for the same person; reading a task's records
+    follows the same rule. As in ``conversation_continuation``, work for no
+    person may name only a task for no person: a missing person and a person
+    differ in both directions. ``owner_id`` is the named task's person,
+    recorded at admission.
     """
 
     person = str(person_id or "").strip() or None
     owner = str(owner_id or "").strip() or None
     if person == owner:
         return OwnershipDecision(True, "same_person_task" if person else "no_person_task")
-    return _denied("same_person_task_required", person, RESOURCE_TASK, task_id, PRIVATE_UPDATE)
+    return _denied("same_person_task_required", person, RESOURCE_TASK, task_id, action)
 
 
 def system_work_schedule_access(

@@ -243,7 +243,8 @@ Universal Agents keeps different kinds of work separate:
   (`access_control/ownership.py`, `objective_access`): a task reaches its
   person's and the team's Objectives, and only work for no person or for an
   administrator changes the team's. A task names another task as a source of
-  work only when both work for the same person (`named_task_access`).
+  work, or reads its execution digest, only when both work for the same
+  person (`named_task_access`).
 - A manager schedule or `ScheduledMessage` creates agent work later. A model
   interprets that work when it runs.
 - An execution job runs one immutable Python or Rust revision on a one-shot,

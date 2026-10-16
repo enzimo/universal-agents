@@ -515,7 +515,7 @@ def test_a_task_without_a_verified_identity_reaches_no_objective(_people_and_obj
         assert _listed(include_closed=True) == set()
         refused = json.loads(objectives(action="update_progress", objective_id=made["team"].objective_id, progress_summary="?"))
     assert refused["error"] == _NO_OBJECTIVE
-    assert "event=objective_task_identity_unverified" in caplog.text
+    assert "event=task_identity_unverified" in caplog.text
 
 
 def test_a_task_names_only_its_own_persons_tasks_as_a_source(_people_and_objectives) -> None:
