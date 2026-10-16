@@ -134,9 +134,7 @@ keep the Windows disk reserve check enabled between maintenance windows.
 The September 2026 local validation passed 3,321 fast-profile tests on Python
 3.12, all 54 live NATS tests, live PostgreSQL validation, both documentation
 image stages, and amd64/arm64 Docker smoke builds. The desktop project also
-built native installers on all three hosts. See the
-[shared validation record](https://github.com/enzimo/universal-agents-desktop/blob/main/docs/validation/local-ci-2026-09-11.md)
-for evidence, fixes, and storage measurements. The activated runners and
+built native installers on all three hosts. The activated runners and
 GitHub verification are recorded below.
 
 ## Activated runners
