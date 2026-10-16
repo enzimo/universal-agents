@@ -5,12 +5,14 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_records import ReportedWorkIdentity
 from custom_agents.schedule_store import ScheduleStore
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import AfterActionReport, Task
 from custom_messages.enums import AfterActionReportReviewStatus, ExecutionPlanItemStatus, MessageMetaType, ProgressState, TaskHistoryImportance, TaskHistoryType
 from custom_tools.providers.agent_management import get_runtime_pressure
@@ -31,6 +33,9 @@ from custom_tools.providers.objectives import (
     update_execution_unknown,
 )
 from custom_tools.runtime_context import set_agent_ref
+from storage.config import resolve_storage_settings
+from tests.broker_access_support import context_signer
+from tests.change_approval_support import use_signed_contexts
 
 # These tasks carry no signed context, so the reports describe work for nobody
 # and the fake agent's tools (no verified person) see exactly those.
@@ -1189,3 +1194,89 @@ def test_get_execution_digest_reports_inactive_for_plan_only_task():
     assert digest_result["active"] is False
     assert digest_result["digest"]["plan_summary"] == "Do the obvious thing and finish quickly."
     assert "## Execution Digest" in digest_result["markdown"]
+
+
+def _signed_task(manager: TaskManager, task_id: str, person_id: str | None, *, signed: bool = True) -> Task:
+    """A task working for ``person_id`` (None: for no person), with a gateway-signed context."""
+
+    task = Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement=f"Work of {task_id}.")
+    gateway_context = (
+        GatewayContext(
+            session_key=f"session_{task_id}",
+            canonical_user_id=person_id,
+            task_context=context_signer().issue(
+                team_id="team_1", person_id=person_id, person_roles=("member",) if person_id else ()
+            ),
+        )
+        if signed
+        else None
+    )
+    assert manager.add_task(
+        task,
+        MessageHeader(from_agent_id="user", agent_signature=""),
+        MessageMeta(from_agent_name="user", conversation_id=f"conv_{task_id}", gateway_context=gateway_context),
+        owner_person_id=person_id,
+    )
+    return task
+
+
+@pytest.fixture
+def _people_tasks(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """Tasks of two people and of system work, each with a digest of its own; one of B's is archived."""
+
+    use_signed_contexts(monkeypatch)
+    settings = resolve_storage_settings(
+        {"backend": "sqlite", "sqlite": {"path": "runtime/task_history.db"}}, base_dir=str(tmp_path)
+    )
+    manager = TaskManager(db_path=settings.sqlite_path, storage_settings=settings)
+    manager.set_owner_identity(agent_id="manager_agent", agent_name="Manager", team_id="team_1")
+    agent = _FakeAgent(manager, agent_id="manager_agent", name="Manager", named_agent_type="TeamArchitect")
+    agent.team_id = "team_1"
+    agent.authorization_config = {"enabled": False}
+    set_agent_ref(agent)
+    tasks = {
+        "a": _signed_task(manager, "task_a", "usr_a"),
+        "a_other": _signed_task(manager, "task_a_other", "usr_a"),
+        "b": _signed_task(manager, "task_b", "usr_b"),
+        "b_done": _signed_task(manager, "task_b_done", "usr_b"),
+        "system": _signed_task(manager, "task_system", None),
+        "system_other": _signed_task(manager, "task_system_other", None),
+        "unsigned": _signed_task(manager, "task_unsigned", None, signed=False),
+    }
+    for name, task in tasks.items():
+        assert manager.set_task_plan(task.task_id, f"The private plan of {name}.") is not None
+    manager._save_completed_task(tasks["b_done"].task_id, "completed")
+    assert manager.get_task_info(tasks["b_done"].task_id) is None
+    return manager, tasks
+
+
+def _digest_as(manager: TaskManager, acting: Task, task: Task) -> dict:
+    manager.task_state.current_in_progress_task_id = acting.task_id
+    return json.loads(get_execution_digest(task_id=task.task_id))
+
+
+def test_a_persons_task_reads_only_that_persons_task_digests(_people_tasks, caplog) -> None:
+    manager, tasks = _people_tasks
+
+    own = _digest_as(manager, tasks["a"], tasks["a_other"])
+    assert own["digest"]["plan_summary"] == "The private plan of a_other."
+    for other in ("b", "b_done", "system"):
+        with caplog.at_level("INFO", logger="access_control.ownership"):
+            refused = _digest_as(manager, tasks["a"], tasks[other])
+        # Live or archived, another person's task reads as one that does not exist.
+        assert refused == {"error": f"Task {tasks[other].task_id} was not found among this person's tasks."}
+        assert f"resource_id={tasks[other].task_id} action=private.read" in caplog.text
+    assert _digest_as(manager, tasks["b"], tasks["b_done"])["digest"]["plan_summary"] == "The private plan of b_done."
+
+
+def test_work_for_no_person_reads_only_digests_of_work_for_no_person(_people_tasks, caplog) -> None:
+    manager, tasks = _people_tasks
+
+    assert _digest_as(manager, tasks["system"], tasks["system_other"])["digest"] is not None
+    assert "error" in _digest_as(manager, tasks["system"], tasks["a"])
+    # A task without a verified identity reads its own digest, and no other.
+    assert _digest_as(manager, tasks["unsigned"], tasks["unsigned"])["digest"] is not None
+    with caplog.at_level("WARNING", logger="custom_tools.providers._runtime"):
+        refused = _digest_as(manager, tasks["unsigned"], tasks["system"])
+    assert "error" in refused and "digest" not in refused
+    assert "event=task_identity_unverified" in caplog.text

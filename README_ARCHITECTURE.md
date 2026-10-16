@@ -243,7 +243,10 @@ Universal Agents keeps different kinds of work separate:
   (`access_control/ownership.py`, `objective_access`): a task reaches its
   person's and the team's Objectives, and only work for no person or for an
   administrator changes the team's. A task names another task as a source of
-  work only when both work for the same person (`named_task_access`).
+  work, or reads its execution digest, only when both work for the same
+  person (`named_task_access`).
+  Reading the current task's own digest needs no signed identity; using it
+  as a source of new work still requires verification.
   Creation checks the source's existing Objective and Plan, and refuses to
   reuse a Plan already owned by an Objective even for an administrator.
   `spawn_task` creates separate work with its own Plan. Applying a work-profile
