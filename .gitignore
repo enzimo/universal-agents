@@ -94,3 +94,6 @@ team_requirements.txt
 :memory:-shm
 :memory:-wal
 _TXIHS~I
+
+# Lists of real values to search for stay outside Git (see CONTRIBUTING.md).
+LOCAL-ONLY*

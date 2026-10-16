@@ -1,0 +1,5 @@
+#!/bin/sh
+# Refuses pushes whose new commits contain personal details anywhere: identity,
+# message or any added line, including lines a later commit deleted. Catches
+# commits made before the hooks were enabled or with --no-verify.
+exec python3 scripts/check_personal_details.py --pushed

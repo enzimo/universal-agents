@@ -1,0 +1,5 @@
+#!/bin/sh
+# Refuses commits that add personal details to staged files or that use a
+# commit identity not listed in .personal-details-allowlist.
+# Enable once per clone: git config core.hooksPath .githooks
+exec python3 scripts/check_personal_details.py --staged

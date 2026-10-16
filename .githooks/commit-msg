@@ -1,0 +1,3 @@
+#!/bin/sh
+# Refuses commit messages that contain personal details.
+exec python3 scripts/check_personal_details.py --message "$1"
