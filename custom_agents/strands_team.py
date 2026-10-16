@@ -764,10 +764,6 @@ def create_strands_agent(config: dict):
                 "max_queued_top_level_tasks",
                 AGENT_DEFAULTS.max_queued_top_level_tasks.value,
             ),
-            max_concurrent_top_level_tasks=config.get(
-                "max_concurrent_top_level_tasks",
-                AGENT_DEFAULTS.max_concurrent_top_level_tasks.value,
-            ),
             queue_warning_threshold=config.get(
                 "task_queue_warning_threshold",
                 AGENT_DEFAULTS.task_queue_warning_threshold.value,

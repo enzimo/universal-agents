@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field, JsonValue, ValidationError
 
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
+    SECTION_UPGRADES,
     ExportSource,
     ImportContext,
     PlannedRecord,
@@ -87,7 +88,8 @@ class SettingsSection:
     name: ClassVar[str] = "settings"
     # 3: gateway.users.new_people_use_team_model_keys left the configuration.
     # 4: agent.knowledge (the knowledge base's limits and blocked patterns) joined it.
-    schema_version: ClassVar[int] = 4
+    # 5: agent.max_concurrent_top_level_tasks was removed; values above 1 never had an effect.
+    schema_version: ClassVar[int] = 5
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -662,3 +664,11 @@ __all__ = [
     "changed_settings",
     "planned_config",
 ]
+
+
+# V5 removes agent.max_concurrent_top_level_tasks. V4 records (v0.9.2 to v0.9.4) keep
+# the same shape, so the step passes them on unchanged: a carried record for
+# the removed setting is then refused and listed by the import
+# (``_kept_by_loader``: "this version has no such setting"), never dropped
+# silently.
+SECTION_UPGRADES[(SettingsSection.name, 4)] = lambda records: records

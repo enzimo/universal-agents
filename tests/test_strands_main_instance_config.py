@@ -390,6 +390,50 @@ voice: {{}}
         GatewayInstanceConfig.load(config_path)
 
 
+def test_a_leftover_concurrency_setting_loads_and_the_next_save_drops_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """agent.max_concurrent_top_level_tasks was removed without a refusing check.
+
+    Onboarding wrote it into every instance_config.yaml. Values above 1 never
+    had an effect, so startup ignores the leftover line and the next save of
+    the file leaves it out.
+    """
+
+    _clear_runtime_config_env(monkeypatch)
+    config_path = _make_config(tmp_path).save()
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    saved["agent"]["max_concurrent_top_level_tasks"] = 4
+    config_path.write_text(dump_instance_config_yaml(saved), encoding="utf-8")
+
+    loaded = GatewayInstanceConfig.load(config_path)
+
+    assert "max_concurrent_top_level_tasks" not in loaded.to_yaml_dict()["agent"]
+    runtime_config = _build_runtime_config_from_instance_config(loaded)
+    assert runtime_config.get("agent.max_concurrent_top_level_tasks") is None
+    loaded.save()
+    resaved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert "max_concurrent_top_level_tasks" not in resaved["agent"]
+
+
+@pytest.mark.parametrize("filename", ["instance_config.yaml", "config.yaml"])
+def test_onboarding_import_reports_the_concurrency_setting_as_removed(filename: str) -> None:
+    from assistant_gateway.onboarding_web.settings_import import (
+        REASON_REMOVED,
+        read_onboarding_import,
+    )
+
+    imported = read_onboarding_import(
+        filename,
+        "agent:\n  default_team_id: team_old\n  max_concurrent_top_level_tasks: 1\n",
+    )
+
+    skipped = [(item.path, item.reason) for item in imported.skipped]
+    assert ("agent.max_concurrent_top_level_tasks", REASON_REMOVED) in skipped
+    # Without the removed-settings entry the agent section was reported as partly imported.
+    assert not [path for path, _reason in skipped if path == "agent"]
+
+
 def test_manager_discovers_team_instance_config_env(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -372,11 +372,6 @@
         "knowledge": {
           "$ref": "#/$defs/KnowledgeSettings"
         },
-        "max_concurrent_top_level_tasks": {
-          "default": 1,
-          "title": "Max Concurrent Top Level Tasks",
-          "type": "integer"
-        },
         "max_deferred_messages": {
           "default": 100,
           "minimum": 1,
@@ -668,18 +663,6 @@
           ],
           "default": null,
           "title": "Inner Loop Context"
-        },
-        "max_concurrent_top_level_tasks": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Max Concurrent Top Level Tasks"
         },
         "max_deferred_messages": {
           "anyOf": [
