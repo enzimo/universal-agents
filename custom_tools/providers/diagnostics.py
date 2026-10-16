@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, TypedDict
 
 from strands import tool
 
+from access_control.ownership import PRIVATE_READ
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_agents.token_estimation import count_message_tokens, count_text_tokens
 from custom_messages.contracts.envelope_v1 import CommsMessage
@@ -25,6 +26,7 @@ from custom_messages.enums import (
     TaskHistoryImportance,
 )
 from custom_tools.provider_contract import ToolProvider
+from custom_tools.providers._runtime import _named_task_refusal
 from custom_tools.runtime_context import (
     get_agent_ref,
 )
@@ -968,7 +970,8 @@ def get_execution_digest(task_id: str = "") -> str:
     """
     Retrieve the pinned durable execution digest for a task.
 
-    If task_id is omitted, the current in-progress task is used.
+    If task_id is omitted, the current in-progress task is used. Another task
+    is shown only when it works for the same person as the current one.
     """
     agent = get_agent_ref()
     if agent is None:
@@ -979,6 +982,13 @@ def get_execution_digest(task_id: str = "") -> str:
         return json.dumps(
             {"error": "No task_id provided and no task currently in progress"}
         )
+    # A task may inspect its own digest without a signed identity. Keep that
+    # read-only exception here: using even the current task as a source of
+    # new work still requires identity verification in _named_task_refusal.
+    if resolved_task_id != agent.task_manager.current_task_id:
+        refusal = _named_task_refusal(agent, resolved_task_id, action=PRIVATE_READ)
+        if refusal is not None:
+            return json.dumps({"error": refusal})
 
     digest = agent.task_manager.operations_runtime.run_sync(
         agent.task_manager.get_execution_digest, resolved_task_id
