@@ -5,6 +5,7 @@
 - Separate liveness, progress, and correctness
 - Review objective health
 - Choose objective dispositions
+- Work blocked or currently unachievable branches
 - Detect unproductive loops
 - Recover and resume
 
@@ -80,6 +81,48 @@ paused or blocked state.
 Cascade the disposition to plans, tasks, schedules, waits, delegations,
 forecasts, risks, and communication. Prevent indefinite deferment by assigning
 a review trigger.
+
+## Work Blocked or Currently Unachievable Branches
+
+Do not infer objective-wide blockage from one branch. Recompute the actionable
+frontier and continue independent work when it still creates accepted value,
+reduces a material unknown or risk, or helps unblock another route safely.
+Declare the whole objective blocked only when no safe useful action or bounded
+wait remains inside current authority and bounds.
+
+For a blocked branch:
+
+1. Reconcile actual state and partial effects.
+2. Name the exact blocker and classify it as a dependency, missing authority or
+   decision, capability gap, unavailable evidence, resource bound, unsafe side
+   effect, technical failure, or invalidated assumption.
+3. Identify the blocker owner, condition needed to proceed, affected work,
+   independent work, and review or retry trigger.
+4. Attempt only bounded unblocking work with an expected evidence delta.
+5. Generate a bounded set of alternative routes when they could preserve the
+   original intended effect.
+6. Compare each route with the accepted outcome gap, evidence, constraints,
+   risk, resource bounds, and effects on sibling work.
+7. Escalate the exact decision when the useful change exceeds local authority.
+
+Distinguish a blocked branch, which retains a credible route behind a specific
+obstacle, from a currently unachievable branch, for which no credible route is
+known inside current authority, capability, evidence, time, or resource bounds.
+Record the latter assessment, supporting evidence, and the condition or review
+point that could make it actionable. Do not repeatedly revisit it without that
+trigger.
+
+Permit local recovery and method changes inside the assigned Task or subplan.
+Require higher-order review for cross-subplan effects. Request human or other
+designated authority before weakening accepted criteria, changing the intended
+outcome, accepting material new risk, exceeding agreed resources, or abandoning
+a required result. Present a decision-ready recommendation and continue safe,
+reversible work that remains useful across plausible decisions.
+
+Treat an alternative as valid only when it provides an accepted similar effect,
+not merely a different deliverable. Stop searching when the comparison bound is
+reached, no candidate preserves the effect, or a higher-order decision is the
+only useful next step.
 
 ## Detect Unproductive Loops
 
