@@ -33,7 +33,7 @@ from runtime_settings.instance_layout import PERSON_RESEARCH_DIRNAME
 
 NO_ACTIVE_TASK = "no_active_task"
 SLUG_MAX_LEN = 48
-# A changed task id's folder name: a readable start, "-", then this many hex
+# Every task id's folder name: a readable start, "-", then this many hex
 # characters of the id's SHA-256, within SLUG_MAX_LEN in total.
 TASK_FOLDER_DIGEST_LEN = 12
 TASK_FOLDER_READABLE_LEN = SLUG_MAX_LEN - 1 - TASK_FOLDER_DIGEST_LEN
@@ -47,26 +47,14 @@ def safe_slug(value: str, *, fallback: str = "artifact", max_len: int = SLUG_MAX
 
 
 def task_folder_name(task_id: str) -> str:
-    """The name of one task's folder in ``research/``, a different one for each task id.
+    """A stable, readable folder name, at most 48 characters, for a task id.
 
-    A task id that is already a safe name (lowercase letters, digits, ``.``,
-    ``_`` and ``-``, at most 48 characters) is used as it is, so ordinary
-    tasks such as ``task_id_<hex>`` and their subtasks a few levels down keep
-    the folder names they always had.
-
-    Any other id would be shortened or changed by ``safe_slug``, and two ids
-    could then give the same name: subtask ids grow as ``<parent>_sub_<n>``
-    (``custom_agents.delegation_runtime``) and pass 48 characters a few levels
-    down, and ``Report-A`` and ``report-a`` both become ``report-a``. Such an id
-    gets its first 35 slug characters (still readable), ``-`` and the first 12
-    hex characters of the SHA-256 of the full id: 48 characters at most, the
-    same name every time for one task, and a shared name for two ids only if
-    48 bits of their hashes match.
+    Every id gets up to 35 slug characters, "-" and 12 hex characters of its
+    SHA-256. The digest distinguishes ids shortened or changed by slugging.
+    Hashing safe ids too prevents one from matching another id's generated
+    folder name, such as ``Report-A`` and ``report-a-a4ff557d33e9``.
     """
 
-    slug = safe_slug(task_id)
-    if slug == task_id:
-        return slug
     readable = safe_slug(task_id, max_len=TASK_FOLDER_READABLE_LEN).rstrip("-._")
     # surrogatepass: an id decoded from JSON may hold a lone surrogate.
     digest = hashlib.sha256(task_id.encode("utf-8", errors="surrogatepass")).hexdigest()

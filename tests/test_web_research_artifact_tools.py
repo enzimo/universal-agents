@@ -52,7 +52,9 @@ def _task_research_dir(layout: InstanceLayout) -> Path:
     Work for no person keeps them in ``workspaces/agents/research``.
     """
 
-    return layout.person_research_dir(None) / "task_web_test"
+    from custom_tools.research_identity import task_folder_name
+
+    return layout.person_research_dir(None) / task_folder_name("task_web_test")
 
 
 def _payload(result):
@@ -297,13 +299,42 @@ def test_two_brave_searches_in_the_same_second_keep_their_own_files(layout, monk
         assert manifest["request"]["offset"] == offset
 
 
-def test_ordinary_task_ids_keep_their_folder_name():
+def test_task_id_matching_another_tasks_folder_keeps_research_separate(layout, monkeypatch):
+    from custom_tools import web_research_artifact_tools as tools
+    from custom_tools.research_identity import task_folder_name
+
+    agent = _FakeAgent(layout)
+    agent.task_manager = _FakeTaskManager()
+    set_agent_ref(agent)
+    monkeypatch.setattr(tools, "_now_stamp", lambda: FIXED_STAMP)
+    _brave_answers(monkeypatch, tools, "first-task", "second-task")
+    task_ids = ("Report-A", task_folder_name("Report-A"))
+    assert task_ids[0] != task_ids[1]
+
+    results = []
+    for task_id in task_ids:
+        agent.task_manager.current_task_id = task_id
+        results.append(_payload(tools.brave_web_search_artifact("agent frameworks")))
+
+    assert Path(results[0]["artifact_dir"]).parent != Path(results[1]["artifact_dir"]).parent
+    for result, task_id, title in zip(results, task_ids, ("first-task", "second-task"), strict=True):
+        manifest = json.loads(Path(result["files"]["manifest"]).read_text(encoding="utf-8"))
+        normalized = json.loads(Path(result["files"]["normalized_json"]).read_text(encoding="utf-8"))
+        assert manifest["task_id"] == task_id
+        assert [item["title"] for item in normalized] == [title]
+
+
+def test_ordinary_task_ids_also_get_stable_digest_folder_names():
     from custom_tools.research_identity import NO_ACTIVE_TASK, task_folder_name
 
-    for task_id in ("task_web_test", "task_id_0123456789ab", "task_id_0123456789ab_sub_1", NO_ACTIVE_TASK):
-        assert task_folder_name(task_id) == task_id
-    # Exactly 48 safe characters is still ordinary.
-    assert task_folder_name("t" * 48) == "t" * 48
+    for task_id in ("task_web_test", "task_id_0123456789ab", "task_id_0123456789ab_sub_1", NO_ACTIVE_TASK, "t" * 48):
+        name = task_folder_name(task_id)
+        readable, _, digest = name.rpartition("-")
+        assert name != task_id
+        assert readable == task_id[:35].rstrip("-._")
+        assert len(name) <= 48
+        assert len(digest) == 12 and int(digest, 16) >= 0
+        assert task_folder_name(task_id) == name
 
 
 def test_long_task_ids_that_share_a_beginning_get_different_folders():
@@ -331,9 +362,30 @@ def test_task_ids_that_differ_only_in_case_or_punctuation_get_different_folders(
 
     names = [task_folder_name(task_id) for task_id in ("report-a", "Report-A", "report a", "report-a_")]
 
-    assert names[0] == "report-a"
     assert len(set(names)) == len(names)
-    assert all(name.startswith("report-a-") for name in names[1:])
+    assert all(name.startswith("report-a-") for name in names)
+
+
+@pytest.mark.parametrize("task_id", ["task_web_test", "task_id_0123456789ab" + "_sub_1" * 6])
+def test_saved_artifacts_remain_readable_after_task_folder_names_change(layout, task_id):
+    from custom_tools import web_research_artifact_tools as tools
+    from custom_tools.research_identity import safe_slug
+
+    agent = _FakeAgent(layout)
+    agent.task_manager = _FakeTaskManager()
+    agent.task_manager.current_task_id = task_id
+    set_agent_ref(agent)
+    old_task_folder = layout.person_research_dir(None) / safe_slug(task_id)
+    old_file = old_task_folder / "saved-result" / "page.md"
+    old_file.parent.mkdir(parents=True)
+    old_file.write_text("Saved before the naming change", encoding="utf-8")
+
+    new_dir, _artifact_id, _identity = tools._create_artifact_dir("search", "new result")
+
+    assert new_dir.parent != old_task_folder
+    inspected = _payload(tools.web_artifact_inspect(str(old_file), action="head"))
+    assert inspected["status"] == "success"
+    assert inspected["text"] == "Saved before the naming change"
 
 
 def test_a_long_task_id_puts_research_files_in_its_own_folder(tmp_path):
