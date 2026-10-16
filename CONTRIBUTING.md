@@ -176,6 +176,18 @@ version numbers. The `external` and `full` profiles use short tracebacks and do
 not replay captured provider output. This prevents credential-bearing client
 arguments from appearing in broad test failure reports.
 
+The knowledge base privacy scenarios call the configured model many times, so
+they require `RUN_LIVE_KNOWLEDGE_PRIVACY=1`. The external and full profiles
+collect `tests/test_live_knowledge_privacy_scenarios.py`, but it skips without
+that opt-in. Set `UA_LIVE_CONFIG` and `TEAM_NATS_LIVE_ENV` (the file holding
+the model key) and use `-m "live and external"`. The module docstring lists
+their settings; results go to `test_results/knowledge_privacy/`. The suite
+uses each agent type's resolved memory and knowledge settings and tool-call
+limit, including overrides, and refuses a run if A's planted facts did not
+reach its prompt. Cross-person checks decode tool JSON before matching and
+detect distinctive private paraphrases; category words from the request,
+such as "salary", do not make a safe refusal a leak.
+
 ## Cognitive complexity
 
 Cognitive complexity is an advisory review signal for how difficult a function
