@@ -972,7 +972,6 @@ def run_with_args(args: argparse.Namespace) -> None:
                 'result_transformer': agent_result_transformer,
                 'memory_graph_enabled': agent_runtime_settings.get('memory_graph_enabled', False),
                 'max_queued_top_level_tasks': agent_runtime_settings['max_queued_top_level_tasks'],
-                'max_concurrent_top_level_tasks': agent_runtime_settings['max_concurrent_top_level_tasks'],
                 'task_queue_warning_threshold': agent_runtime_settings.get('task_queue_warning_threshold'),
                 'subtask_timeout_seconds': agent_runtime_settings.get('subtask_timeout_seconds'),
                 'subtask_watchdog_interval_seconds': agent_runtime_settings.get('subtask_watchdog_interval_seconds'),

@@ -566,8 +566,15 @@ knowledge base), plus task history:
   state and are not transferred, because pending reviews are not transferred.
   The team transfer `knowledge` section carries redirects from version 2.
   People use it from the Web Chat Knowledge page (see "Knowledge page" below).
-  Rationale and the storage benchmark: architecture
-  repository, memory and context architecture.
+  Live privacy scenarios (`tests/test_live_knowledge_privacy_scenarios.py`,
+  opt-in with `RUN_LIVE_KNOWLEDGE_PRIVACY=1`) run real agents and the curator
+  with the configured model and check that a person's planted private details
+  never reach published team pages or another person's model prompt, answers
+  or tool calls. They require completed reviews and successful scenario tool
+  calls, so an idle model or unfinished review cannot count as a privacy pass.
+  Their model-free check of published team content is
+  `tests/knowledge_privacy_checks.py`. Rationale and the storage benchmark:
+  architecture repository, memory and context architecture.
 
 Before a model call, the runtime assembles context from the current request,
 system and role instructions, task state, conversation history, relevant
@@ -673,6 +680,14 @@ exception, because agents must read a skill's files and run its scripts; they
 are never writable, and new or changed skills go through reviewed installation.
 Startup refuses an instance still in the old single-`workspace/` layout and
 prints the move commands rather than moving files itself.
+
+Web research tools save files under `research/<task folder>/<result folder>/`
+in the task's workspace. Every task folder combines a readable prefix with a
+digest of the full task id. Hashing all ids prevents a short, unchanged id
+from matching another task's generated folder name. Each call adds a random
+suffix to its result folder so repeated or parallel searches keep separate
+files. New writes use these names; saved paths remain readable because
+inspection checks the person's research root rather than rebuilding names.
 
 Agents' code can create links in the folders it writes, and it runs at the
 same time as trusted code, so a tool that checks a path and then opens it by

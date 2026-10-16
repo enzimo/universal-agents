@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import base64
 from concurrent.futures import ThreadPoolExecutor
+import errno
 import io
 import json
 import os
@@ -37,6 +38,7 @@ from custom_agents.xai_oauth_auth import (
     validate_xai_url,
     xai_oauth_status,
 )
+from file_locking import FileLockUnavailable
 
 
 def _jwt(*, exp_offset_seconds: int = 3600) -> str:
@@ -249,6 +251,66 @@ def test_owned_store_refreshes_once_under_concurrent_resolution(
         json.loads(store_path.read_text(encoding="utf-8"))["tokens"]["access_token"]
     }
     assert json.loads(store_path.read_text(encoding="utf-8"))["tokens"]["refresh_token"] == "new-refresh"
+
+
+def _refuse_file_locks(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(_descriptor: int, _operation: int) -> None:
+        raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+
+    monkeypatch.setattr("file_locking.fcntl.flock", refuse)
+
+
+def test_lock_failure_stops_refresh_and_status_reports_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A rotating refresh token is never spent without the store's lock."""
+
+    store_path = save_xai_oauth_device_tokens(
+        _authorization(),
+        {"access_token": _jwt(exp_offset_seconds=-10), "refresh_token": "old-refresh"},
+        {"auth_store_path": str(tmp_path / "auth.json")},
+    )
+    original = store_path.read_text(encoding="utf-8")
+
+    def fail_refresh(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the refresh must not run without the store's lock")
+
+    monkeypatch.setattr("custom_agents.xai_oauth_auth.refresh_xai_oauth_tokens", fail_refresh)
+    _refuse_file_locks(monkeypatch)
+    settings = {"auth_store_path": str(store_path), "refresh_skew_seconds": 120}
+
+    with pytest.raises(XAIOAuthError) as raised:
+        resolve_xai_oauth_credentials(settings)
+    status = xai_oauth_status(settings)
+
+    assert raised.value.code == "xai_oauth_auth_store_lock_unavailable"
+    assert raised.value.relogin_required is False
+    assert isinstance(raised.value.__cause__, FileLockUnavailable)
+    assert f"{store_path}.lock" in str(raised.value)
+    assert "supports file locks" in str(raised.value)
+    assert status["authenticated"] is False
+    assert status["error_code"] == "xai_oauth_auth_store_lock_unavailable"
+    assert status["relogin_required"] is False
+    assert store_path.read_text(encoding="utf-8") == original
+
+
+def test_device_tokens_are_not_saved_when_the_store_cannot_be_locked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "instance" / "auth" / "xai.json"
+    _refuse_file_locks(monkeypatch)
+
+    with pytest.raises(XAIOAuthError) as raised:
+        save_xai_oauth_device_tokens(
+            _authorization(),
+            {"access_token": "opaque-access-token", "refresh_token": "opaque-refresh-token"},
+            {"auth_store_path": str(store_path)},
+        )
+
+    assert raised.value.code == "xai_oauth_auth_store_lock_unavailable"
+    assert not store_path.exists()
 
 
 @pytest.mark.parametrize(

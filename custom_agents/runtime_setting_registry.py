@@ -743,17 +743,6 @@ _DEFINITIONS = [
         summary="Maximum queued top-level tasks.",
     ),
     _setting(
-        "agent.max_concurrent_top_level_tasks",
-        "int",
-        SettingPersistenceTarget.INSTANCE_CONFIG,
-        SettingTargetScope.TEAM,
-        TEAM_ONLY,
-        restart_scope=RESTART_SCOPE_MANAGER,
-        minimum=1,
-        maximum=128,
-        summary="Maximum concurrent top-level tasks.",
-    ),
-    _setting(
         "agent.task_queue_warning_threshold",
         "int",
         SettingPersistenceTarget.INSTANCE_CONFIG,

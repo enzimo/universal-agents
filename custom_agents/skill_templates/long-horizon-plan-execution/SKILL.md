@@ -37,6 +37,12 @@ Use the smallest coordination shape that preserves control:
 - Keep objective ownership, living strategy, and bounded execution in separate
   lifecycles. Let a task end without discarding a still-valid objective or plan,
   and replace failed execution with a newly bounded task.
+- Match each agent's planning view to its level. Give an objective or plan owner
+  whole-route tradeoffs, a subplan owner its parent contribution and interfaces,
+  and a task owner its bounded result and local freedom. Give every owner the
+  authority and escalation boundary needed at that level.
+- Treat a subplan as an owned coordination branch inside a Plan, not as a new
+  runtime lifecycle primitive unless the executing platform defines one.
 - Delegate only when specialization, independent review, parallel discovery,
   isolation, or capacity creates more value than coordination cost.
 - Avoid adding procedural artifacts that do not change a decision, preserve
@@ -92,6 +98,14 @@ entire plan is known. Stop before material domain action when a missing or
 unresolved procedure could change safety, legality, authority, correctness, or
 acceptance.
 
+When the final definition of done is incomplete, record the best current
+version. Mark each success criterion as accepted or provisional, define its
+evidence or named evaluator, and assign a discovery or review point for every
+material provisional criterion. Use bounded Tasks to improve the measurement,
+resolve uncertainty, or produce an accepted outcome contribution. Do not
+silently weaken or remove an accepted criterion; route material changes through
+the designated human or other acceptance authority.
+
 ## Shape the Team and Living Plan
 
 Plan backward from acceptance evidence:
@@ -100,17 +114,61 @@ Plan backward from acceptance evidence:
 2. Define evidence-bearing milestones and decision gates.
 3. Map dependencies, risks, unknowns, procedure requirements, and integration
    boundaries.
-4. Decompose only the near-term committed horizon into bounded owned tasks.
-5. Leave later work at forecast or discovery level until evidence supports
+4. Define the evidence-bearing change that counts as progress for each
+   material objective, Plan, subplan, and task.
+5. Decompose only the near-term committed horizon into bounded owned tasks.
+6. Leave later work at forecast or discovery level until evidence supports
    detail.
-6. Assign one accountable owner to every task, decision, shared artifact, and
+7. Assign one accountable owner to every task, decision, shared artifact, and
    integration boundary.
-7. Define deliverable, completion evidence, budget, checkpoint, and
+8. Define deliverable, completion evidence, budget, checkpoint, and
    escalation conditions for every delegation.
 
 Treat the plan as a hypothesis. Add, split, reorder, replace, defer, or drop
 items when evidence changes the best route. Stop stale downstream work when a
 goal, procedure, assumption, or dependency changes.
+
+Refine subgoals and Tasks as evidence improves. Split work that needs different
+owners, dependencies, evidence, or failure handling; merge distinctions that no
+longer help; and replace hypotheses that evidence invalidates. Preserve each
+item's link to the parent outcome gap and do not expand the accepted objective
+merely because adjacent work becomes visible.
+
+## Maintain the Actionable Frontier
+
+Classify every material Plan branch independently as actionable now,
+conditional, blocked, currently unachievable within agreed bounds, or completed
+or superseded. Treat "currently unachievable" as a time- and bounds-relative
+assessment with evidence and a review trigger, not as proof of permanent
+impossibility.
+
+Keep the actionable frontier visible: execute useful branches whose entry
+conditions are satisfied while working or waiting on blocked branches. Do not
+mark the whole objective blocked while independent work can still advance an
+accepted criterion, reduce a material unknown or risk, or help unblock a path.
+Do not manufacture low-value activity merely to keep the objective active.
+
+For each objective, Plan, subplan, and task, define progress as a
+decision-relevant evidence delta toward its local result and parent
+contribution. Record the baseline, expected change, evidence source, useful
+partial result, no-delta checkpoint, dependencies, and blocker escalation path.
+Use a progress vector across criteria, deliverables, uncertainty, risk,
+dependencies, and verification instead of a fabricated percentage.
+
+When a branch is blocked, identify the exact limiting condition, owner,
+unblocking condition, affected work, independent work, and review trigger.
+Try bounded unblocking actions and compare alternative routes against the
+original intended effect, constraints, risks, and acceptance evidence. Reject
+an alternative that merely produces a different output without preserving the
+accepted effect.
+
+Replan only within delegated authority. Permit a task owner to change its local
+method and a subplan owner to revise work inside accepted interfaces and bounds.
+Route cross-subplan changes through the Plan owner. Send changes to accepted
+outcomes, success criteria, material risk, resource bounds, or required results
+to the designated higher-order agent or human as a decision-ready proposal.
+Continue safe reversible work while awaiting that decision when it remains
+useful across plausible answers.
 
 ## Compare Alternatives Selectively
 
@@ -273,6 +331,8 @@ Before terminal delivery:
 
 - Reconcile active work, partial effects, unresolved critical unknowns, and
   stale evidence.
+- Distinguish accepted success criteria from provisional criteria that still
+  require measurement or an acceptance decision.
 - Confirm the governing procedure set and approved deviations used.
 - Distinguish complete, partial, blocked, failed, cancelled, deferred, and
   abandoned states accurately.
@@ -284,6 +344,15 @@ Before terminal delivery:
 
 Do not claim completion because all planned activities ran. Claim it only when
 the outcome and required evidence satisfy the current goal contract.
+
+For an evolving definition of done, involve the human or designated acceptance
+authority at material criteria changes and at closure. Present the current
+accepted outcome, criteria changes, satisfied evidence, unmet or provisional
+criteria, limitations, residual risks, and recommended disposition. If
+acceptance is withheld, continue with a bounded Task, revise the contract,
+deliver an authorized partial result, defer with a wake condition, or abandon
+within lifecycle authority. Do not substitute more activity for an acceptance
+decision.
 
 ## Preserve Coordination and Authority Boundaries
 

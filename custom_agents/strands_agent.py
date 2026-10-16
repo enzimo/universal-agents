@@ -2478,7 +2478,6 @@ class UniversalAgent(BaseModel):
             "top_level_queue_depth": self.task_manager.get_runnable_top_level_queue_depth(),
             "waiting_top_level_task_count": self.task_manager.get_waiting_top_level_task_count(),
             "max_queued_top_level_tasks": self.task_manager.get_max_queued_top_level_tasks(),
-            "max_concurrent_top_level_tasks": self.task_manager.get_max_concurrent_top_level_tasks(),
             "deferred_message_count": len(self.deferred_inbox),
         }
 
