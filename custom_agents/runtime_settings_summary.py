@@ -68,7 +68,6 @@ SETTING_WORDS = {
     "agent.debug.context_dump.enabled": "context dumps",
     "agent.debug.context_dump.mode": "the context dump mode",
     "agent.max_tool_calls_per_task": "the tool call limit per task",
-    "agent.max_concurrent_top_level_tasks": "the number of tasks run at once",
 }
 # Values longer than this are named ("update SOUL.md"), not quoted.
 MAX_QUOTED_VALUE_CHARS = 80

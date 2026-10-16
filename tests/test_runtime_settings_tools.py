@@ -1534,6 +1534,61 @@ def test_runtime_settings_reject_missing_change_path_with_clear_error(
     )
 
 
+REMOVED_CONCURRENCY_SETTING = "agent.max_concurrent_top_level_tasks"
+
+
+def test_the_removed_concurrency_setting_is_not_offered_and_a_change_is_refused(tmp_path: Path) -> None:
+    options = json.loads(list_runtime_settings_options._tool_func())
+    assert REMOVED_CONCURRENCY_SETTING not in {item["path"] for item in options["agent_controllable"]}
+
+    config_path = _write_config(tmp_path)
+    set_agent_ref(_fake_agent(config_path))
+    try:
+        result = json.loads(
+            plan_runtime_setting_change._tool_func(
+                path=REMOVED_CONCURRENCY_SETTING, value=4, reason="Run four tasks at once."
+            )
+        )
+    finally:
+        _agent_ctx.set(None)
+
+    assert result["error"] == f"Runtime setting {REMOVED_CONCURRENCY_SETTING!r} is not agent-controllable."
+
+
+def test_a_plan_staged_before_the_concurrency_setting_was_removed_is_refused_without_a_write(
+    tmp_path: Path,
+) -> None:
+    """Plans are kept up to a day, so one staged before an upgrade can still be applied after it."""
+
+    from custom_agents.governance.authorized_operations import model_digest
+    from custom_agents.runtime_settings_service import RuntimeSettingsChangePlan
+
+    config_path = _write_config(tmp_path)
+    set_agent_ref(_fake_agent(config_path))
+    try:
+        staged = json.loads(
+            plan_runtime_setting_change._tool_func(
+                path="agent.max_queued_top_level_tasks", value=40, reason="Before the upgrade."
+            )
+        )
+        # Rewrite it as the earlier version staged it: same shape, the removed path, a valid digest.
+        plan_path = Path(staged["plan_path"])
+        plan = RuntimeSettingsChangePlan.model_validate_json(plan_path.read_text(encoding="utf-8"))
+        plan.changes[0].path = plan.changes[0].actual_path = REMOVED_CONCURRENCY_SETTING
+        plan.plan_digest = model_digest(plan)
+        plan_path.chmod(0o644)
+        plan_path.write_text(plan.model_dump_json(), encoding="utf-8")
+        before = config_path.read_bytes()
+
+        result = json.loads(_apply_settings_change(plan.change_id, confirmed=True))
+    finally:
+        _agent_ctx.set(None)
+
+    assert result["reason_code"] == "refused"
+    assert "max_concurrent_top_level_tasks" in result["error"]
+    assert config_path.read_bytes() == before
+
+
 def test_runtime_settings_plan_is_scoped_hashed_expiring_and_source_bound(
     tmp_path: Path,
 ) -> None:

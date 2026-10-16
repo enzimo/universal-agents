@@ -148,6 +148,42 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
     ).heartbeat.interval_seconds
 
 
+def test_a_version_4_export_with_the_removed_concurrency_setting_refuses_only_that_setting(
+    tmp_path: Path,
+) -> None:
+    """Version 5 removed agent.max_concurrent_top_level_tasks; its conversion step keeps the record so the import lists it."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    class ExportedAsVersion4(SettingsSection):
+        schema_version = 4
+
+        def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:
+            records = [
+                SettingV1(path=("heartbeat", "enabled"), value=False),
+                SettingV1(path=("agent", "max_concurrent_top_level_tasks"), value=4),
+                SettingV1(path=("agent", "max_queued_top_level_tasks"), value=22),
+            ]
+            return SectionExport(records=[record.model_dump(mode="json") for record in records])
+
+    path, _config = _old_instance(tmp_path)
+    out = _export(tmp_path, path, ExportedAsVersion4())
+    target = tmp_path / "new"
+
+    plan = _import(out, target, dry_run=False)
+
+    outcomes = {record.key: record for record in plan.records}
+    assert outcomes["agent.max_concurrent_top_level_tasks"].outcome is RecordOutcome.REFUSED
+    assert outcomes["agent.max_concurrent_top_level_tasks"].reason == "this version has no such setting"
+    assert outcomes["heartbeat.enabled"].outcome is RecordOutcome.IMPORT
+    assert outcomes["agent.max_queued_top_level_tasks"].outcome is RecordOutcome.IMPORT
+    imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
+    assert imported.heartbeat.enabled is False
+    assert imported.agent.max_queued_top_level_tasks == 22
+    saved = yaml.safe_load((target / "instance_config.yaml").read_text())
+    assert "max_concurrent_top_level_tasks" not in saved["agent"]
+
+
 def test_a_path_outside_the_instance_that_this_host_lacks_needs_attention(tmp_path: Path) -> None:
     class Crafted(SettingsSection):
         def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:

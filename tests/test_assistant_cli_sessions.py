@@ -2980,7 +2980,6 @@ def test_load_base_onboarding_template_copies_agent_runtime_defaults_and_overrid
         "agent:\n"
         "  memory_graph_enabled: true\n"
         "  max_queued_top_level_tasks: 22\n"
-        "  max_concurrent_top_level_tasks: 1\n"
         "  task_queue_warning_threshold: 9\n"
         "  subtask_timeout_seconds: 2400\n"
         "  subtask_watchdog_interval_seconds: 20\n"
@@ -3019,7 +3018,6 @@ def test_load_base_onboarding_template_copies_agent_runtime_defaults_and_overrid
 
     assert template.agent.memory_graph_enabled is True
     assert template.agent.max_queued_top_level_tasks == 22
-    assert template.agent.max_concurrent_top_level_tasks == 1
     assert template.agent.task_queue_warning_threshold == 9
     assert template.agent.subtask_timeout_seconds == 2400
     assert template.agent.subtask_watchdog_interval_seconds == 20
@@ -3603,7 +3601,6 @@ def test_onboard_base_config_maps_gateway_and_agent_runtime_settings(
         "  default_request_timezone: America/New_York\n"
         "  memory_graph_enabled: true\n"
         "  max_queued_top_level_tasks: 22\n"
-        "  max_concurrent_top_level_tasks: 1\n"
         "  task_queue_warning_threshold: 9\n"
         "  subtask_timeout_seconds: 2400\n"
         "  subtask_watchdog_interval_seconds: 20\n"
@@ -3814,7 +3811,6 @@ def test_onboard_base_config_maps_gateway_and_agent_runtime_settings(
     assert "agent_default" not in raw_saved
     assert config.agent.memory_graph_enabled is True
     assert config.agent.max_queued_top_level_tasks == 22
-    assert config.agent.max_concurrent_top_level_tasks == 1
     assert config.agent.task_queue_warning_threshold == 9
     assert config.agent.subtask_timeout_seconds == 2400
     assert config.agent.subtask_watchdog_interval_seconds == 20

@@ -125,15 +125,15 @@ def _objective_view(agent: "UniversalAgent") -> Optional[ObjectiveView]:
 def _objective_in_view(agent: "UniversalAgent", objective_id: str, *, action: str) -> bool:
     """Whether the active task may read or change (``action``) one Objective.
 
-    An id this team lead has no Objective for passes, so the caller keeps its
-    own not-found handling; there is nothing to reveal.
+    Missing and inaccessible Objectives both fail here, so callers cannot
+    distinguish another person's record from an unknown id.
     """
 
     objective = agent.task_manager.operations_runtime.run_sync(
         agent.task_manager.get_objective, objective_id
     )
     if objective is None:
-        return True
+        return False
     try:
         person = _task_person(agent)
     except _UnverifiedTask:
@@ -210,14 +210,14 @@ def _named_task_refusal(
     """Why the active task may not name ``task_id``, or None.
 
     For tools that take a task id from the model, to read that task
-    (``action=PRIVATE_READ``) or use it as a source of work. The current task
-    is always allowed. Another task must work for the same person
-    (``ownership.named_task_access``); its person is the one recorded at
-    admission, read from the archive once the task has finished.
+    (``action=PRIVATE_READ``) or use it as a source of work. Even the current
+    task must have a verified identity. Another task must
+    work for the same person (``ownership.named_task_access``); its person
+    is recorded at admission, read from the archive once it has finished.
     """
 
     task_id = str(task_id or "").strip()
-    if not task_id or task_id == agent.task_manager.current_task_id:
+    if not task_id:
         return None
     try:
         person = _task_person(agent)

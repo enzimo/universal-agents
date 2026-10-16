@@ -48,10 +48,45 @@ For a missing sign-in, account link or team sign-in app, TeamLead calls
 `set_up_tools` at once, without asking the person first. Trusted code asks for
 missing access, opens every page in the person's chat (routed to the
 configured gateway even when a worker needed the account), shows one workflow
-page for two or more things, and pauses the task until the pages end instead
-of treating tool approval as a set-up account. An expired page is offered
-again by itself, up to three pages per tool and kind; a closed page or a
-denial ends the setup, and the call returns per tool whether it is ready.
+page for two or more things (each page shows on its step, and trusted code
+marks the step from the page result), and pauses the task until the pages end
+instead of treating tool approval as a set-up account. An expired page is
+offered again by itself, up to three pages per tool and kind; a closed page or
+a denial ends the setup, and the call returns per tool whether it is ready.
+
+A published access workflow belongs to its source Task and is a view over its
+access requests. Staging its changes or closing the local execution plan does
+not finish that workflow. Follow `runtime-operations-workflows`, and read every
+request's current status with `get_access_workflow` when the same task resumes.
+Approval permits only the exact change; it does not prove execution. Report
+each step with `update_access_workflow`: mark it running before asking for what
+it needs, complete only after verifying its results, or failed with a concrete
+recovery action. If an older source task has already ended, read its workflow
+from the follow-up task (only the source task can update it) and, when the user
+requests continuation, plan only the remaining work. Keep completed results and
+check uncertain external effects before another attempt.
+
+Each workflow step names the kinds of change (`change_kinds`) and the tools
+with a level (`tool_access`) it needs; requests made while it runs are shown on
+it. Correct a step that names the wrong kind or tool with
+`revise_access_workflow_step` before any request is linked to it, keeping the
+workflow and finished work. A request no running step expects is still decided
+in the Inbox and listed as not on a step.
+
+With authorization on, ask for independent staged changes together with
+`request_access_workflow_approvals` (one pause for all of them), then apply each
+approved change with `apply_change`, and check every outcome before reporting.
+When the lead itself lacks a tool a worker needs, it calls `request_access` with
+`hand_on=true`; the worker's task then gets it from the lead's access when it
+needs it (access follows the work: workers keep no access of their own). Never
+ask again for anything a person denied: the denial closes its workflow step.
+
+Link the `review_url` the workflow tools return (`/workflows/<id>`) for live
+progress. Never use a documentation address as the workflow link. Built-in
+procedural guidance is served at
+`/docs/skills/runtime-operations-workflows?source=bundled` on the trusted
+internal website base URL; link other documentation pages only when a
+documentation listing confirms them, never by guessing from a skill name.
 
 ## Select Task, Plan, or Objective
 
@@ -85,6 +120,23 @@ Treat these lifecycles independently after promotion:
 Supply semantic titles, objectives, rationale, evidence needs, and recovery
 intent. Leave runtime-owned task, plan, step, conversation, correlation, and
 routing identifiers to the runtime.
+
+Keep Objective-linked heartbeat work under the heartbeat launcher's person.
+Use a schedule owned by the Objective's person for private recurring work;
+the shared heartbeat skips an Objective its launcher cannot change. Treat
+linked heartbeat items as part of that Objective's ownership when reading or
+changing them. Recheck current authority before applying a saved work-profile
+proposal, and never use task promotion to take over an existing team Plan.
+Use `creation_mode="spawn_task"` for separate Objective work when the source
+task already shares an Objective's Plan.
+
+The Objective tools reach two kinds of Objectives: the team's (they have no
+owner) and those of the person the current task works for, never another
+person's. Every task reads the team's Objectives; only work for no person or
+for an administrator changes them. Name another task (`task_id`,
+`source_task_id`) only when it works for the same person. An Objective, Plan,
+or task outside this view gives the same reply as a missing one; do not retry
+with invented owner, task, Plan, or Objective identifiers.
 
 ## Use solution variation only when it helps
 
@@ -277,7 +329,9 @@ response as proof of progress.
 Use runtime retry and delivery recovery before model-level repetition. Record a
 recovery-aware plan action when leaving the happy path. Start isolated recovery
 with a compact failure snapshot when context contamination or pressure makes
-inline recovery unhealthy.
+inline recovery unhealthy. Treat a save or recovery error as a failure, not as
+confirmation that a milestone or result was recorded; keep useful evidence and
+report the failed operation.
 
 Do not forge manager-control messages, manipulate hidden identifiers, or use
 shared persisted state as an inter-agent communication channel.
@@ -289,15 +343,30 @@ authority. Let the access service's decisions and mandatory local guards
 control protected actions. Keep access, invocation, schedule, settings,
 credentials, provisioning, and skill lifecycle authorities distinct.
 
-Ask for access with `request_access` only after a call is refused with
-`access_denied`, using the `tool_id`, `operation`, and `level` it names. Resume
-from the returned decision without widening it.
+Read the `reason` and `next_step` of an `access_denied` result first. If a
+block stops the call, asking cannot help; tell the person you work for. If the
+access check could not run (`reason_code` `access_decision_failed`, or a reason
+that says so), report the blocker and follow any operator step the result
+names; a new permission request cannot repair the check. Resume dependent work
+only after the check works again. For a confirmed lack of permission, ask with
+`request_access` using the `tool_id` (or folder) and `level` the refusal names;
+access is to a whole tool, never to one operation. Resume from the returned
+decision without widening it.
 
-When a worker asks with `request_access`, the runtime hands the access down at
-once if TeamArchitect holds it and may hand it on without asking. Otherwise the
-worker's task waits for a person in the Inbox and resumes with the decision.
-Keep the parent waiting for its child result and record the access dependency;
-do not restart the task as a new assignment.
+When a worker asks with `request_access` outside a scheduled job's run, the
+runtime hands the access down at once if TeamArchitect holds it and may hand it
+on without asking. Otherwise the worker's task waits for a person in the Inbox
+and resumes with the decision; a grant is usable on the worker's next model
+call, without a restart. Keep the parent waiting for its child result and
+record the access dependency; do not restart the task as a new assignment.
+
+An agent may recur in the task hierarchy: TeamArchitect can delegate a job whose
+specialist needs a protected setup step from TeamArchitect. Keep that lineage
+intact. TeamArchitect never approves access requests itself; a request its access
+does not cover goes to a person in the Inbox. A missing requester route is a task
+failure, not an access decision. Inspect the saved task before retrying; do not
+ask for the same access again or copy a decision to another task merely because
+delivery failed.
 
 After an `access_denied` result and before calling `request_access`, write a
 provisional Objective checkpoint, because the call may pause the source task at
@@ -331,13 +400,19 @@ configure its automatic worker policy with `configure_scheduled_worker`. Use
 `requirements_json` when creating the job. Keep known-blocked jobs as inactive
 drafts. Declare each requirement as a tool catalog id and one of its operations
 (`find_tools` lists them); mark branch-dependent needs conditional and leave
-`runtime_discovery` enabled for open-ended work.
+`runtime_discovery` enabled for open-ended work. To change them, call
+`configure_scheduled_worker` with the current revision and the complete new
+`requirements_json`; it replaces the saved list whether automatic startup is on
+or off. Confirm the result's `saved_requirements` and `summary` show the change.
 
-Use `prepare_scheduled_job_access` to check requirements (`missing_access` lists
-tools the worker type or the owner does not hold yet) and
+Use `prepare_scheduled_job_access` to check requirements and
 `authorize_scheduled_job_access(schedule_id, expected_revision)` to give the
-worker type what TeamLead may hand on; the rest is listed for a person to give.
-Recheck readiness before activating the draft.
+schedule itself what TeamLead may hand on (every agent in its runs uses it, and
+only there); its `ask_a_person` list names what a person must give.
+`prepare_scheduled_job_access` reports under `missing_access` the tools the worker
+type or the schedule's owner does not hold yet. Recheck readiness before
+activating the draft. Changes to schedules the runtime manages return
+`approval_required` and are applied with `apply_change` after a person approves.
 Use the returned policy revision for edits. Convert exact agent-ID targets only
 with explicit `convert_exact_target=true`; let live claims finish under their
 prior revision. Keep protected Objective and infrastructure schedules on their
@@ -350,21 +425,48 @@ and a terminal task result. A worker may retire between runs; retain the schedul
 policy so the controller can cover the next occurrence. Do not publish a second
 copy of a scheduled payload to NATS.
 
-When a scheduled run is refused with `access_denied`, the worker calls
-`request_access` with the `tool_id`, `operation`, and `level` it names. If
-TeamLead may hand the access on, it arrives at once; otherwise the run waits for
-a person in the Inbox. Ask with the default `lifetime="until_revoked"` for access
-every run needs; `task` or `one_time` access ends with the run. For a tool the
-catalog lacks or missing credentials, use `manager_escalation` with the schedule
-and the tool ID. Wait through the existing task workflow and verify the actual
-operation after repair. Never treat a review message as access.
+For a scheduled job's `access_denied` result, apply the checks in
+**Preserve Authorization** first. If permission is missing, the worker calls
+`request_access` with the `tool_id` and `level` it names. TeamLead does not hand
+access down during a scheduled job's run: a person decides in the Inbox while
+the run waits, and "Keep for later tasks" gives it to the schedule. Give the
+schedule what every run needs beforehand with `authorize_scheduled_job_access`.
+Ask with the default `lifetime="until_revoked"` for access every run needs;
+`task` or `one_time` access ends with the run. For a tool the catalog lacks or
+a missing sign-in or account, the worker uses `manager_escalation` naming the
+schedule and the tool ID; then use `propose_access_change` or `set_up_tools`.
+Wait through the existing task workflow and verify the actual operation after
+repair. Never treat a review message as access.
 
 Change shared rules through `agent.schedule_workers.defaults.<rule>` for the
 team or `agent.schedule_worker_rules.<rule>` with agent-type scope. As TeamLead,
 use `inspect_scheduled_worker` to check custom specialist eligibility, including
-on unbound drafts. Add a missing registered type through the bounded
-`agent.schedule_workers.eligible_agent_types` setting, preserving existing entries,
-then prepare access and configure the policy. Read the scheduled-worker repair
+on unbound drafts. Check `eligibility.allowed_by_default_policy` before changing
+eligibility: specialist types shipped with Universal Agents have local startup
+permission by default. Preserve existing disables and operator denies. For a
+team-written type that lacks permission, add the registered type through the
+bounded `agent.schedule_workers.eligible_agent_types` setting, preserving existing
+entries, then prepare access and configure the policy. Keep startup permission
+separate from tool access. When a team-written definition changes, the schedule
+pauses with `agent_definition_changed_review_required`; show the owner
+`definition.changes` from the inspection and re-save with `suggested_refresh` after
+the owner agrees. Code releases never pause a schedule.
+
+Check `worker_configuration_supported` before changing a timer. Run new and
+upgraded system memory-review timers through the local scheduler with MemReviewAgent;
+do not send the scheduled payload over NATS. For old TeamArchitect-targeted memory
+timers, direct the operator to the offline `scripts/upgrade_local_schedules.py`
+procedure instead of creating a replacement timer. Preserve queued review jobs;
+they alone do not block the upgrade. Use the preview's exact IDs to resolve claimed
+jobs, including expired claims with uncertain outcomes, and saved unfinished worker
+tasks. Require stopped team runtimes and completed old NATS deliveries before apply.
+Do not delete records or mark reviews complete to clear an upgrade check. Keep
+system-schedule edits on their staged approval path and verify actual review
+jobs and results.
+Check `list_my_access`, then ask for
+missing access with `request_access` (`hand_on=true` for what workers will
+use; a scheduled job's own access comes from `authorize_scheduled_job_access`);
+respect denied requests. Read the scheduled-worker repair
 reference in `runtime-operations-workflows` for tuning and completion checks.
 Keep explicit operator denies, the kill switch, quotas, leases and timing
 ceilings outside these edits.
@@ -380,6 +482,62 @@ and resolve the schedule's existing authenticated review separately. Do not infe
 invalid tasks from the count alone or delete runtime database rows.
 Treat a control timeout as an unconfirmed outcome. Refresh Tasks or run `/stop`
 before retrying removal; do not infer disconnection or repeat a purge automatically.
+
+For a task queue safety notice, inspect the named task's recorded dependency.
+The runtime removes invalid queue entries while preserving tasks and pending access requests,
+and pauses a final review that has no recorded reason to wait. Resolve genuine
+dependencies through their normal workflows. Do not resend the original request,
+duplicate a scheduled occurrence, or delete database rows to bypass the wait.
+
+For a stuck-task notice after host sleep, allow the runtime's one-minute
+heartbeat refresh window (`event=liveness_monitor_paused`). Inspect task history
+and current state before reporting progress: a cleared warning establishes only
+that its reported condition ended. Distinguish automatic system maintenance,
+which works for no person and tells administrators, from a person's request.
+Do not resend work or start a replacement merely because of a historical notice.
+
+Recurring timer runs may share conversation history without being follow-up
+requests. A successful no-change check may finish quietly
+(`suppress_outbound_dispatch=true` on its `task_response`); explicit follow-ups
+and delegated subtasks must still return results. When a quiet finish is not
+allowed, the runtime sends the reply normally and records why, with the task,
+conversation, schedule and follow-up IDs.
+
+The Inbox lists access requests waiting for a person and notices that need no
+decision. Do not ask again while a request waits; respect decided outcomes and
+check `list_my_access` for current access. Scheduled and recovery requests may
+have no chat conversation; they resume the waiting task when a person decides.
+
+For abandoned expired review claims, preview the offline upgrade with
+`--retire-expired-review-claims`. Apply only after stopping all team runtimes,
+finishing old broker deliveries, and taking a full backup. The option preserves
+content and marks the records inactive with an unknown outcome; it does not replay
+or delete them. Keep live claims and saved unfinished or unsupported workers as
+blockers. Let InternalImprovementAgent inspect cleanup metadata and archive exact
+IDs in its maintenance runs; the cleanup tools are its fixed duties as a built-in
+system agent, and those runs work for no person. If a cleanup call is still
+refused (for example by an administrator's block), it reports the refusal to
+TeamArchitect rather than asking again. Purge only archived content after
+retention. Preserve recurring memory schedules.
+
+### Inspect schedules and reviews without large inventories
+
+- Use `get_schedule_telemetry()` for counts. Request `include_schedules=true`
+  only when timing/claim metadata is needed; use `schedule_id` for one timer.
+- Use `list_scheduled_jobs(limit=20, offset=0)` for summary pages and follow
+  `next_offset`. Supply `schedule_id` to read one schedule's full details in
+  bounded excerpts. Pass `detail.next_offset` as `details_offset` for the next
+  excerpt, keeping `detail.sha256` unchanged; restart if it changes.
+- Read supplied review IDs with `get_memory_review_job(review_job_id=...)`.
+  Follow its `detail.next_offset` as `offset`, checking the same digest. Use
+  `list_pending_memory_review_jobs` only for pending metadata for the current
+  team, worker type and person (review tools show only jobs made for the
+  person the task works for). Follow `next_offset`; never treat one page as
+  all work.
+- Restart pending-job pagination after job mutations. Do not create a Python
+  environment or open raw database files to read ordinary inspection results.
+  Treat reads as evidence only; preserve claim ownership and exact permission
+  checks before processing work or changing schedules.
 
 ### Inspecting and managing the current user's queue
 

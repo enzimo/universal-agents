@@ -5,10 +5,10 @@ the previous release (v0.9.2) wrote into a transfer file and this version still
 reads. ``access``, ``settings``, ``knowledge`` and ``schedules`` were exported
 from a small team by the v0.9.2 tag's own stores, services and exporters (fake
 values); this version reads ``schedules`` (version 3) through its version 4
-step. ``control``, ``operator_secrets`` and ``broker_credentials`` are
-v0.8.5's documents: their formats did not change since (one frozen fingerprint
-each in ``section-contracts.json``), so they are also v0.9.2's format. They
-stay frozen, independently of this release's exporters. Each must read,
+step and ``settings`` (version 4) through its version 5 step. ``control``,
+``operator_secrets`` and ``broker_credentials`` are v0.8.5's documents: their
+formats did not change since (one frozen fingerprint each in
+``section-contracts.json``), so they are also v0.9.2's format. They stay frozen, independently of this release's exporters. Each must read,
 through its conversion step when its section changed since
 (``SECTION_UPGRADES``), and validate with this version's record models. When a
 release ships, replace the fixture with that release's documents and delete
@@ -139,7 +139,7 @@ def test_an_unsupported_export_is_refused_before_anything_is_written(
     source_sections, expected_problem = {
         "0.8.5": (
             (SettingsAsV085(), PeopleSection(), AccessAsV085()),
-            "This file's settings section is version 3, but this version of Universal Agents reads version 4 only.",
+            "This file's settings section is version 3, but this version of Universal Agents reads versions 4 and 5.",
         ),
         "0.9.0": (
             (SettingsSection(), PeopleSection(), AccessSection(), KnowledgeAsV090()),

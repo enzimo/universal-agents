@@ -8,11 +8,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Awaitable, Callable, Optional
-from custom_agents.access_runtime import verified_meta_person_id
+from access_control.ownership import PRIVATE_UPDATE, objective_access
+from custom_agents.access_runtime import resolve_meta_identity, verified_meta_person_id
 from custom_agents.knowledge_curation_runtime import prepare_knowledge_curation_schedule
 from custom_agents.schedule_permits import maybe_renew_schedule_permits, sign_system_run
 from custom_agents.scheduled_run_contexts import ScheduledRun, sign_scheduled_run
-from custom_agents.task_context_runtime import inactive_owner, run_owner
+from custom_agents.task_context_runtime import inactive_owner, run_owner, scheduled_owner_roles
 from custom_agents.schedule_context_refresh import refresh_schedule_gateway_context
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 
@@ -745,6 +746,37 @@ def _heartbeat_item_meta(agent: Any, scheduled_message: ScheduledMessage, item: 
     return internal_meta
 
 
+async def _heartbeat_objective_allowed(
+    agent: Any, scheduled_message: ScheduledMessage, item: Any, *, person_id: Optional[str], roles: tuple[str, ...]
+) -> bool:
+    """A shared launcher never hands one person's Objective to another person.
+
+    A heartbeat joins and changes its Objective and Plan at admission, so it
+    needs change authority before any conversation or run state is written.
+    Use the same current, vouched roles the scheduler will sign.
+    """
+
+    if not item.objective_id:
+        return True
+    objective = await agent.task_manager.operations_runtime.run(
+        agent.task_manager.get_objective, item.objective_id
+    )
+    if objective is not None and objective_access(
+        person_id=person_id,
+        owner_id=objective.owner_canonical_user_id,
+        objective_id=objective.objective_id,
+        action=PRIVATE_UPDATE,
+        roles=roles,
+    ).allowed:
+        return True
+    agent._logger.warning(
+        "Skipped a heartbeat item because its launcher cannot change the linked Objective. "
+        "event=heartbeat_objective_access_refused schedule_id=%s heartbeat_item_id=%s objective_id=%s person_id=%s",
+        scheduled_message.schedule_id, item.heartbeat_item_id, item.objective_id, person_id,
+    )
+    return False
+
+
 async def _prepared_heartbeat_run(
     agent: Any, scheduled_message: ScheduledMessage, item: Any, store: HeartbeatStore
 ) -> Optional[_HeartbeatRun]:
@@ -782,6 +814,15 @@ async def _prepared_heartbeat_run(
     owner = await asyncio.to_thread(run_owner, agent, internal_meta)
     if inactive_owner(owner, schedule_id=item.heartbeat_item_id):
         return None
+    if item.objective_id:
+        roles = scheduled_owner_roles(
+            internal_meta.gateway_context, owner, schedule_id=item.heartbeat_item_id,
+            system_managed=is_system_managed_schedule(scheduled_message),
+        ) if owner is not None else ()
+        if not await _heartbeat_objective_allowed(
+            agent, scheduled_message, item, person_id=_person_id(owner), roles=roles,
+        ):
+            return None
     conversation_id = await agent.task_manager.operations_runtime.run(
         partial(item_conversation_for_run, store, getattr(agent, "_conversation_store", None)),
         item,
@@ -827,6 +868,21 @@ async def _signed_heartbeat_runs(
         )
         if not await sign_scheduled_run(agent, run.meta, signing):
             return None
+        if item.objective_id:
+            # A manager reply or live permit check may carry newer roles than
+            # preparation saw. Decide once more from the actual signed identity.
+            identity = await asyncio.to_thread(resolve_meta_identity, agent, run.meta)
+            if identity is None:
+                agent._logger.warning(
+                    "Skipped a linked heartbeat item without a verified run identity. "
+                    "event=heartbeat_objective_identity_unverified heartbeat_item_id=%s objective_id=%s",
+                    item.heartbeat_item_id, item.objective_id,
+                )
+                continue
+            if not await _heartbeat_objective_allowed(
+                agent, scheduled_message, item, person_id=identity.person_id, roles=identity.person_roles,
+            ):
+                continue
         runs.append(run)
     return runs
 
