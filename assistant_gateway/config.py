@@ -595,7 +595,6 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "agent.worker_pools.progress_notices.interval_minutes": "At most one progress note per interval, and only when the counts changed.",
     "agent.schedule_maintenance.internal_improvement_review_interval_seconds": "InternalImprovement review cadence in seconds; each worker startup ensures one shared team schedule, the stale-schedule check runs before each review, and non-positive disables installation.",
     "agent.max_queued_top_level_tasks": "Maximum admitted top-level tasks tracked at once.",
-    "agent.max_concurrent_top_level_tasks": "Top-level execution parallelism per agent. Keep at 1 unless audited for higher concurrency.",
     "agent.task_queue_warning_threshold": "Warn when pending top-level task count reaches this threshold.",
     "agent.subtask_timeout_seconds": "Local timeout for delegated subtasks and unanswered TaskQuery waits.",
     "agent.subtask_watchdog_interval_seconds": "Watchdog scan interval for overdue subtasks and TaskQuery waits.",

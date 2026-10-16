@@ -82,7 +82,6 @@ LOGGER = logging.getLogger(__name__)
 AGENT_RUNTIME_TEMPLATE_KEYS = {
     "memory_graph_enabled",
     "max_queued_top_level_tasks",
-    "max_concurrent_top_level_tasks",
     "task_queue_warning_threshold",
     "subtask_timeout_seconds",
     "subtask_watchdog_interval_seconds",

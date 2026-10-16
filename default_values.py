@@ -669,11 +669,6 @@ class AgentDefaultValues:
         "Maximum queued top-level tasks retained before new submissions are rejected.",
         onboarding_overridable=False,
     )
-    max_concurrent_top_level_tasks: DefaultValue[int] = default_value(
-        1,
-        "Number of top-level tasks the local agent may execute concurrently.",
-        onboarding_overridable=False,
-    )
     task_queue_warning_threshold: DefaultValue[int] = default_value(
         5,
         "Queued-task count that triggers queue pressure warnings.",
