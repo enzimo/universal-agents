@@ -549,8 +549,10 @@ knowledge base), plus task history:
   Live privacy scenarios (`tests/test_live_knowledge_privacy_scenarios.py`,
   opt-in with `RUN_LIVE_KNOWLEDGE_PRIVACY=1`) run real agents and the curator
   with the configured model and check that a person's planted private details
-  never reach published team pages or another person's work; their
-  model-free check of published team content is
+  never reach published team pages or another person's model prompt, answers
+  or tool calls. They require completed reviews and successful scenario tool
+  calls, so an idle model or unfinished review cannot count as a privacy pass.
+  Their model-free check of published team content is
   `tests/knowledge_privacy_checks.py`. Rationale and the storage benchmark:
   architecture repository, memory and context architecture.
 

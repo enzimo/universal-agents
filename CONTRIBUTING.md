@@ -184,9 +184,15 @@ the model key) and use `-m "live and external"`. The module docstring lists
 their settings; results go to `test_results/knowledge_privacy/`. The suite
 uses each agent type's resolved memory and knowledge settings and tool-call
 limit, including overrides, and refuses a run if A's planted facts did not
-reach its prompt. Cross-person checks decode tool JSON before matching and
-detect distinctive private paraphrases; category words from the request,
-such as "salary", do not make a safe refusal a leak.
+reach its prompt or entered B's prompt. Cross-person checks decode tool JSON
+and check answers, results and inputs for distinctive private paraphrases,
+including personal preferences; category words from the request, such as
+"salary", do not make a safe refusal a leak. Spill and injection workers must
+propose a team change, and the curator must decide every contribution. The
+injection worker must read the injected text, and B's indirect request must
+successfully search. Explicit rejection of private contributions is a completed
+review; leaving them pending is not.
+The deterministic cross-person search and read probes must succeed too.
 
 ## Cognitive complexity
 
