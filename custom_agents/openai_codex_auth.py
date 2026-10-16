@@ -18,11 +18,13 @@ from urllib import request as urllib_request
 from urllib.parse import urlencode
 
 from env_secrets import get_env_with_file_fallback
+from file_locking import FileLockUnavailable, exclusive_file_lock
 from runtime_settings.instance_layout import InstanceLayout
 
 logger = logging.getLogger(__name__)
 
 OPENAI_CODEX_PROVIDER = "openai-codex"
+AUTH_STORE_LOCK_PURPOSE = "OpenAI Codex sign-in store"
 DEFAULT_OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
@@ -542,25 +544,26 @@ def _write_owned_auth_store(path: Path, tokens: Mapping[str, Any], *, source: st
 
 @contextlib.contextmanager
 def _auth_store_lock(path: Path) -> Iterator[None]:
+    """Hold the sign-in store's lock while its tokens are refreshed or replaced.
+
+    Agent processes, the onboarding server and ``assistant_cli.py`` share this
+    store, and a Codex refresh token works only once, so two unlocked refreshes
+    can sign the whole team out. A lock failure therefore stops the work
+    (``file_locking``) and is reported as an ``OpenAICodexAuthError`` that does
+    not ask for a new sign-in, since signing in again cannot fix the folder.
+    """
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    handle = lock_path.open("a+", encoding="utf-8")
-    try:
-        with contextlib.suppress(OSError):
-            lock_path.chmod(0o600)
+    with contextlib.ExitStack() as held:
         try:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        except Exception:
-            logger.debug("OpenAI Codex auth store lock is operating without fcntl.")
+            held.enter_context(exclusive_file_lock(path, purpose=AUTH_STORE_LOCK_PURPOSE))
+        except FileLockUnavailable as exc:
+            raise OpenAICodexAuthError(
+                f"{exc} Signing in again will not help until this is fixed.",
+                code="openai_codex_auth_store_lock_unavailable",
+                relogin_required=False,
+            ) from exc
         yield
-    finally:
-        with contextlib.suppress(Exception):
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
 
 
 def _raise_refresh_http_error(status: int, body: str) -> None:

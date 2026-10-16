@@ -157,6 +157,10 @@ Non-secret settings have matching overrides:
 - The owned store and lock file use owner-only permissions where the platform
   supports POSIX modes. Writes are atomic, and concurrent agents double-check
   expiry under the lock before refreshing.
+- xAI replaces the refresh token on every refresh, so a refresh or a new
+  sign-in never runs without the store's lock (`xai_oauth_auth.json.lock`
+  beside the store). If the lock cannot be taken, the request stops with an
+  error that names the lock file; see Troubleshooting.
 - A configured one-hour proactive refresh window is reduced to two minutes for
   short-lived tokens so a newly issued token is not refreshed immediately.
 - `temperature` and `max_output_tokens` are forwarded when configured.
@@ -171,6 +175,15 @@ Non-secret settings have matching overrides:
 
 Run `xai-oauth-status`, then repeat `xai-oauth-login` for the same config and
 path mapping. Ensure the runtime user can read and update the auth store.
+
+**The sign-in store could not be locked**
+
+The error (code `xai_oauth_auth_store_lock_unavailable`) names the lock file.
+The instance's `auth/` folder must be writable and on a file system that
+supports file locks: a local disk does, some network and synced folders do
+not. Nothing was refreshed or saved, so the stored sign-in is unchanged.
+Signing in again will not help until the folder is fixed; after a failed
+`xai-oauth-login`, sign in again once it is.
 
 **The device code expired**
 

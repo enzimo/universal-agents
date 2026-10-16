@@ -185,6 +185,11 @@ Instance-owned import:
   to the host-mounted directory.
 - Universal Agents can refresh this copied store without racing the desktop
   Codex CLI.
+- A Codex refresh token works only once, so agents, onboarding and
+  `assistant_cli.py` refresh or import this store only while holding its lock
+  (`openai_codex_auth.json.lock` beside it). If the lock cannot be taken, the
+  request stops with an error that names the lock file instead of refreshing
+  unlocked.
 
 Access token:
 
@@ -243,5 +248,10 @@ docker exec ua python assistant_cli.py openai-codex-status --config /data/instan
   `--container-data-root`, or pass a host `--auth-store-path`.
 - Mounted shared auth expires: refresh it with the host Codex CLI, or import
   into the Universal Agents-owned auth store for long-running agents.
+- "The OpenAI Codex sign-in store could not be locked" (code
+  `openai_codex_auth_store_lock_unavailable`): the store's folder must be
+  writable and on a file system that supports file locks; a local disk does,
+  some network and synced folders do not. Nothing was refreshed or imported.
+  Signing in again will not help until the folder is fixed.
 - Windows volume paths fail: use PowerShell `${Variable}` syntax before the
   colon in `-v "${HostRoot}:${InstanceRoot}"`.

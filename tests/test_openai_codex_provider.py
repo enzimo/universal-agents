@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import io
 import json
 import logging
@@ -34,6 +35,7 @@ from custom_agents.strands_model_factory import (
     StrandsModelFactoryConfig,
     build_strands_model,
 )
+from file_locking import FileLockUnavailable
 
 
 def _jwt(*, exp_offset_seconds: int = 3600, account_id: str = "acct_123") -> str:
@@ -231,6 +233,62 @@ def test_owned_auth_store_refreshes_expiring_token(
     assert credentials.api_key == refreshed_token
     saved = json.loads(auth_store.read_text(encoding="utf-8"))
     assert saved["tokens"]["refresh_token"] == "new-refresh"
+
+
+def _refuse_file_locks(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(_descriptor: int, _operation: int) -> None:
+        raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+
+    monkeypatch.setattr("file_locking.fcntl.flock", refuse)
+
+
+def test_lock_failure_stops_refresh_with_a_clear_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A single-use refresh token is never spent without the store's lock."""
+
+    auth_store = tmp_path / "auth.json"
+    original = _codex_auth_payload(_jwt(exp_offset_seconds=10), "old-refresh")
+    auth_store.write_text(original, encoding="utf-8")
+
+    def fail_refresh(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the refresh must not run without the store's lock")
+
+    monkeypatch.setattr(
+        "custom_agents.openai_codex_auth.refresh_openai_codex_tokens", fail_refresh
+    )
+    _refuse_file_locks(monkeypatch)
+
+    with pytest.raises(OpenAICodexAuthError) as raised:
+        resolve_openai_codex_credentials(
+            {"auth_store_path": str(auth_store), "refresh_skew_seconds": 120}
+        )
+
+    assert raised.value.code == "openai_codex_auth_store_lock_unavailable"
+    assert raised.value.relogin_required is False
+    assert isinstance(raised.value.__cause__, FileLockUnavailable)
+    assert f"{auth_store}.lock" in str(raised.value)
+    assert "supports file locks" in str(raised.value)
+    assert auth_store.read_text(encoding="utf-8") == original
+
+
+def test_import_is_refused_when_the_store_cannot_be_locked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    shared_home = tmp_path / "codex-home"
+    shared_home.mkdir()
+    (shared_home / "auth.json").write_text(_codex_auth_payload(_jwt()), encoding="utf-8")
+    target = tmp_path / "instance" / "auth" / "openai_codex_auth.json"
+    _refuse_file_locks(monkeypatch)
+
+    with pytest.raises(OpenAICodexAuthError) as raised:
+        import_shared_codex_auth(
+            codex_home=shared_home,
+            raw_settings={"auth_store_path": str(target)},
+        )
+
+    assert raised.value.code == "openai_codex_auth_store_lock_unavailable"
+    assert not target.exists()
 
 
 def test_refresh_token_reused_is_relogin_required(
