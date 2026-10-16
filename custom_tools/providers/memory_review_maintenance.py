@@ -30,8 +30,9 @@ def maintain_memory_review_jobs(
     """Archive exact expired reviews, or purge archived content after retention.
 
     Access is checked on every call. If the call is refused with access_denied,
-    call request_access once with the tool_id, operation and level it names;
-    do not ask again after a denial. Neither operation completes or retries
+    follow its next_step. Call request_access with the tool_id and level it
+    names only when the next step says to; a block is not lifted by asking.
+    Do not ask again after a denial. Neither operation completes or retries
     reviews, changes facts, nor deletes schedules.
     """
     try:

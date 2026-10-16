@@ -172,7 +172,8 @@ lack it. `authorize_scheduled_job_access` gives the worker type what you may han
 on and lists the rest under `ask_a_person` with the `request_access` call to use.
 When the owner lacks a tool, only a team administrator can give it; tell the
 owner. `list_my_access` shows what you hold and whether you may hand it on. Hand
-on only what the job needs: prefer read or one `operation`. Basic web search,
+on only what the job needs, at the lowest level its requirements need (prefer
+read); access is one grant per tool, never one operation. Basic web search,
 file read and job listing do not cover brokered Gmail or memory changes. Do not
 treat adding eligibility as giving access. Recheck after each repair because
 another requirement may still fail.

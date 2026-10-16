@@ -1342,8 +1342,9 @@ team shares the server ([Shared or private](#shared-or-private)). There is no
 rule that only the person who proposed a server may use it.
 
 When a call is refused, the agent sees the reason, the tool, the operation,
-the level and the next step, so it asks for exactly what is missing
-(`request_access`, or an account link for `account_link_missing`).
+the level and the next step, so it asks for the tool at the level it names
+(`request_access`; access covers the whole tool), or for an account link for
+`account_link_missing`.
 
 Hosted MCP servers (declarative servers the runtime runs itself) are installed
 or removed as an approved change (`hosted_mcp_servers` with `plan_install` or `plan_remove`, or the MCP

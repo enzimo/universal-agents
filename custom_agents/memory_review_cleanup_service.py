@@ -38,7 +38,7 @@ class MemoryReviewCleanupService:
             "jobs": rows,
             "archive_retention_days": self.settings.archive_retention_days,
             "outcome": "unknown_unless_verified",
-            "next_step": "Review these metadata records. Archive exact expired IDs; purge archived content only after retention. If a call is refused with access_denied, ask with request_access. No memory facts are included.",
+            "next_step": "Review these metadata records. Archive exact expired IDs; purge archived content only after retention. If a call is refused with access_denied, follow the refusal's next_step. No memory facts are included.",
         }
 
     def maintain(

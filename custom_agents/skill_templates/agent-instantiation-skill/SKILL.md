@@ -134,9 +134,10 @@ Selection process:
    `brave_web_search_artifact`) and files (`fn:files`: `file_read`,
    `file_write`) are every agent's standard tools; a specialist that also runs
    Python lists `code:python`. Use the concrete operation names when inspecting
-   tools or asking for access. Definition creation does not give access to its
-   default tools. Its tasks get what its work needs from what you may hand on,
-   as in step 4, or its `request_access` goes to a person.
+   tools; ask for access with the catalog tool id (such as `fn:web_research`,
+   `fn:files` or `code:python`) and a level. Definition creation does not give
+   access to its default tools. Its tasks get what its work needs from what you
+   may hand on, as in step 4, or its `request_access` goes to a person.
 8. If no generated type is needed, pick the best `agent_type` from the startup list.
 9. Keep `mcp_profile_names` empty.
 10. Call `instantiate_agent(...)` or instantiate an already approved team template.

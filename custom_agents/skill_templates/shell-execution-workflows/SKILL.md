@@ -117,7 +117,8 @@ Use this skill before calling the Universal Agents `shell` tool.
 - A refused command returns `status: "access_denied"` with `tool_id`
   (`code:shell` for shell commands, `code:python` for managed Python),
   `operation`, `level`, `reason`, and `next_step`. Call `request_access` with
-  that `tool_id`, `operation`, and `level` and a plain reason people will read.
+  that `tool_id` (or `folder`, for a folder refusal) and `level` and a plain
+  reason people will read.
   Ask for the smallest `lifetime` that fits: `one_time` for one command, `task`
   for this task, or the default `until_revoked` when the work recurs. A
   one-time `code:unconfined` grant covers one unconfined command.

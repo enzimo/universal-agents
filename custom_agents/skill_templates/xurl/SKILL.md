@@ -95,8 +95,8 @@ checking status again. On auth failure, the account in use needs repair: a
 person renews their own sign-in with `/link cli:x`, and a team administrator
 repairs the team's account by storing it again through the secure form under
 the same key. When the
-call is refused (`access_denied`), call `request_access` with the `tool_id`,
-`operation`, and `level` it names and a plain reason; retry only when the
+call is refused (`access_denied`), call `request_access` with the `tool_id`
+(normally `cli:x`) and `level` it names and a plain reason; retry only when the
 result says `granted`.
 
 If `auth.status` returns a different username than intended, the wrong account
