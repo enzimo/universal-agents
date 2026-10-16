@@ -244,6 +244,20 @@ Universal Agents keeps different kinds of work separate:
   person's and the team's Objectives, and only work for no person or for an
   administrator changes the team's. A task names another task as a source of
   work only when both work for the same person (`named_task_access`).
+  Creation checks the source's existing Objective and Plan, and refuses to
+  reuse a Plan already owned by an Objective even for an administrator.
+  `spawn_task` creates separate work with its own Plan. Applying a work-profile
+  proposal checks current authority again; it grants no lasting authority.
+  Missing and inaccessible
+  Objective and Plan ids return the same tool result.
+  Linked heartbeat items follow the Objective's reading and changing rules,
+  including edits that do not supply a replacement Objective id. A shared
+  heartbeat launcher keeps its own person's identity and delivery context;
+  before changing conversation or run state, it refuses an item whose Objective
+  that person cannot change. This prevents private Objective and Plan hydration
+  into another person's work without introducing a second signing path.
+  A schedule payload uses only its authorized Objective link; rejecting an
+  inherited link also clears it from the copied task metadata.
 - A manager schedule or `ScheduledMessage` creates agent work later. A model
   interprets that work when it runs.
 - An execution job runs one immutable Python or Rust revision on a one-shot,

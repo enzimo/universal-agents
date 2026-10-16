@@ -86,6 +86,15 @@ Supply semantic titles, objectives, rationale, evidence needs, and recovery
 intent. Leave runtime-owned task, plan, step, conversation, correlation, and
 routing identifiers to the runtime.
 
+Keep Objective-linked heartbeat work under the heartbeat launcher's person.
+Use a schedule owned by the Objective's person for private recurring work;
+the shared heartbeat skips an Objective its launcher cannot change. Treat
+linked heartbeat items as part of that Objective's ownership when reading or
+changing them. Recheck current authority before applying a saved work-profile
+proposal, and never use task promotion to take over an existing team Plan.
+Use `creation_mode="spawn_task"` for separate Objective work when the source
+task already shares an Objective's Plan.
+
 ## Use solution variation only when it helps
 
 `TeamArchitect` may use `start_solution_variation` when several materially

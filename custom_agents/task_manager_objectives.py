@@ -318,6 +318,20 @@ class ObjectiveCoordinator:
     ) -> Optional[str]:
         existing_plan_id = self.operations.get_task_plan_id(task_id)
         if existing_plan_id:
+            existing_plan = self.operations.get_plan(existing_plan_id)
+            if existing_plan is not None and existing_plan.objective_id:
+                # One Plan belongs to one Objective. Even an administrator
+                # must not turn a team Plan into their personal Plan by
+                # promoting a task that already shares it.
+                self._logger.warning(
+                    "Cannot promote a task whose Plan already belongs to an Objective. "
+                    "event=objective_creation_plan_already_owned task_id=%s plan_id=%s objective_id=%s",
+                    task_id, existing_plan_id, existing_plan.objective_id,
+                )
+                raise ValueError(
+                    "This task's Plan already belongs to an Objective. "
+                    "Use creation_mode='spawn_task' to create separate Objective work."
+                )
             self.operations.sync_plan_from_task(task_id, create=True)
             return existing_plan_id
 
