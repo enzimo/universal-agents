@@ -75,6 +75,7 @@ from access_control.requests import ACCESS_PROPOSAL_CHANGE, LEVEL_WORDS, AccessR
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     AccessProposalV1,
+    AccessRequestStatus,
     AccessRequestV1,
     AccountMode,
     ChangeApprovalMode,
@@ -103,7 +104,7 @@ from mcp_control.registry import (
     MCPConnectionStore,
     MCPConnectionTransport,
 )
-from storage.access_repository import AccessStoreConflict, DecisionClaim
+from storage.access_repository import AccessStoreConflict, DecisionClaim, DecisionClaimLost
 
 logger = logging.getLogger(__name__)
 
@@ -649,6 +650,8 @@ class ProposalApplier:
             stored = requests.outcome_stored_despite(exc, request.request_id, reviewer, finished.decided_at_utc)
             if stored is not None:
                 return stored
+            if self._others_may_use_programs(requests, request, exc, programs):
+                programs = []
             self._undo_items(requests, written, programs, installed)
             logger.warning(
                 "An approved proposal could not be applied; nothing changed. event=proposal_apply_failed "
@@ -661,6 +664,33 @@ class ProposalApplier:
             if isinstance(exc, _APPLY_REFUSALS):
                 raise HandDownRefused(f"The proposal could not be applied, so nothing changed: {exc}") from exc
             raise
+
+    @staticmethod
+    def _others_may_use_programs(
+        requests: AccessRequests, request: AccessRequestV1, error: BaseException, programs: list[Any]
+    ) -> bool:
+        """Whether a decision that lost its claim must leave the programs it downloaded in place.
+
+        Its claim ran out and another decision took the request. That
+        decision finds a program already in the workspace with the approved
+        digest and uses it instead of downloading it again, so removing it
+        would break a proposal that is, or is about to be, approved. Programs
+        are kept unless the request was closed (denied or withdrawn); an
+        unused program in ``team/tools`` runs nowhere, because no tool names it.
+        """
+
+        if not programs or not isinstance(error, DecisionClaimLost):
+            return False
+        current = requests.service.store.get_request(request.request_id)
+        if current is not None and current.status in {AccessRequestStatus.DENIED, AccessRequestStatus.WITHDRAWN}:
+            return False
+        logger.warning(
+            "A proposal's decision lost its claim to another decision; the programs it downloaded stay for that "
+            "decision. event=proposal_programs_kept request_id=%s programs=%s",
+            request.request_id,
+            ",".join("/".join(parts) for _root, parts in programs),
+        )
+        return True
 
     def _undo_items(
         self,

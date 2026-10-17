@@ -46,7 +46,8 @@ from strands.interrupt import InterruptException
 
 from access_catalog.catalog import CatalogSource
 from access_control.caller_tokens import CALLER_MANAGER, BrokerCaller
-from access_control.cli_binaries import ProgramRefused, fetch_https, read_within_deadline, workspaces_root
+from access_control import cli_binaries
+from access_control.cli_binaries import ProgramRefused, fetch_https, workspaces_root
 from access_control.decisions import HandDownRefused
 from access_control.proposals import ACCESS_PROPOSAL_KIND, ProposalCompiler, ProposalRefused, proposal_summary
 from access_control.requests import AccessRequests
@@ -300,43 +301,141 @@ def test_downloads_are_https_only() -> None:
         fetch_https("http://dl.gitea.com/tea")
 
 
-def _trickling_server(seconds_per_byte: float, body: bytes):
-    """A server that sends its body one byte at a time: every read gets data, so no socket timeout trips."""
+def _self_signed_certificate(directory: Path) -> tuple[Path, Path]:
+    """A throwaway certificate for 127.0.0.1, its own trust anchor."""
+
+    from datetime import timedelta
+    from ipaddress import ip_address
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(hours=1))
+        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ip_address("127.0.0.1"))]), critical=False)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    cert_path, key_path = directory / "cert.pem", directory / "key.pem"
+    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()
+        )
+    )
+    return cert_path, key_path
+
+
+@pytest.fixture
+def https_server(tmp_path: Path, monkeypatch):
+    """Start local https servers this test trusts: ``https_server(answers)`` serves one answer per connection.
+
+    Each answer is called with the connection's TLS socket and the server's
+    port, after the request was read.
+    """
 
     import socket
+    import ssl
 
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(1)
+    cert, key = _self_signed_certificate(tmp_path)
+    trusted = ssl.create_default_context(cafile=str(cert))
+    monkeypatch.setattr(ssl, "_create_default_https_context", lambda *args, **kwargs: trusted)
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(cert, key)
 
-    def serve() -> None:
-        conn, _address = listener.accept()
-        conn.recv(4096)
-        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n")
-        try:
-            for byte in body:
-                time.sleep(seconds_per_byte)
-                conn.sendall(bytes([byte]))
-        except OSError:
-            pass  # the reader stopped
-        conn.close()
-        listener.close()
+    def start(answers) -> str:
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        port = listener.getsockname()[1]
 
-    threading.Thread(target=serve, daemon=True).start()
-    return f"http://127.0.0.1:{listener.getsockname()[1]}/tea"
+        def serve() -> None:
+            for answer in answers:
+                conn, _address = listener.accept()
+                try:
+                    tls = server_context.wrap_socket(conn, server_side=True)
+                    tls.recv(4096)
+                    answer(tls, port)
+                    tls.close()
+                except OSError:
+                    pass  # the downloader stopped
+            listener.close()
+
+        threading.Thread(target=serve, daemon=True).start()
+        return f"https://127.0.0.1:{port}/hop0"
+
+    return start
 
 
-def test_a_download_that_trickles_in_stops_at_its_total_deadline() -> None:
-    # The socket timeout bounds each read only (2026-10-17 review): this server
-    # never pauses longer than 0.2 seconds, so only a total deadline stops it.
-    url = _trickling_server(0.2, b"x" * 40)
-    with urllib.request.urlopen(url, timeout=1) as response:
-        with pytest.raises(ProgramRefused, match="stopped after 1 seconds in total because it was too slow"):
-            read_within_deadline(response, host="dl.gitea.com", deadline_seconds=1)
+def _slowly(tls, data: bytes, seconds_per_byte: float) -> None:
+    for byte in data:
+        time.sleep(seconds_per_byte)
+        tls.sendall(bytes([byte]))
 
-    quick = _trickling_server(0.0, b"tea program")
-    with urllib.request.urlopen(quick, timeout=1) as response:
-        assert read_within_deadline(response, host="dl.gitea.com", deadline_seconds=5) == b"tea program"
+
+def _redirect_after(seconds: float):
+    def answer(tls, port: int) -> None:
+        time.sleep(seconds)
+        tls.sendall(
+            f"HTTP/1.1 302 Found\r\nLocation: https://127.0.0.1:{port}/next\r\nContent-Length: 0\r\n"
+            "Connection: close\r\n\r\n".encode()
+        )
+
+    return answer
+
+
+def _file(body: bytes):
+    def answer(tls, _port: int) -> None:
+        tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+
+    return answer
+
+
+def _download(url: str) -> tuple[str, float]:
+    started = time.monotonic()
+    try:
+        result = repr(fetch_https(url))
+    except ProgramRefused as exc:
+        result = str(exc)
+    return result, time.monotonic() - started
+
+
+def test_one_deadline_covers_connecting_redirects_headers_and_the_file(https_server, monkeypatch) -> None:
+    # The socket timeout bounds one step only (2026-10-17 review): every step
+    # here answers within it, so only one deadline for the whole download stops it.
+    monkeypatch.setattr(cli_binaries, "DOWNLOAD_DEADLINE_SECONDS", 1)
+    monkeypatch.setattr(cli_binaries, "DOWNLOAD_TIMEOUT_SECONDS", 2)
+    head = b"HTTP/1.1 200 OK\r\nX-Pad: " + b"a" * 20 + b"\r\nContent-Length: 3\r\n\r\ntea"
+
+    cases = {
+        "slow headers": https_server([lambda tls, _port: _slowly(tls, head, 0.1)]),
+        "slow redirects": https_server([_redirect_after(0.6)] * 4 + [_file(b"tea")]),
+        "slow file": https_server([lambda tls, _port: (tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 40\r\n\r\n"), _slowly(tls, b"x" * 40, 0.1))]),
+    }
+    for name, url in cases.items():
+        result, seconds = _download(url)
+        assert "stopped after 1 seconds in total" in result, (name, result)
+        assert seconds < 1.8, (name, seconds)
+
+
+def test_a_download_follows_a_few_https_redirects_and_refuses_more(https_server, monkeypatch) -> None:
+    monkeypatch.setattr(cli_binaries, "DOWNLOAD_DEADLINE_SECONDS", 20)
+
+    assert fetch_https(https_server([_redirect_after(0)] * 2 + [_file(b"tea program")])) == b"tea program"
+    too_many = https_server([_redirect_after(0)] * (cli_binaries.MAX_DOWNLOAD_REDIRECTS + 1) + [_file(b"x")])
+    with pytest.raises(ProgramRefused, match="could not be downloaded"):
+        fetch_https(too_many)
 
 
 def test_each_download_runs_between_two_claim_renewals(world, served, monkeypatch) -> None:  # noqa: F811
@@ -364,6 +463,53 @@ def test_each_download_runs_between_two_claim_renewals(world, served, monkeypatc
     assert program_path(instance).read_bytes() == PROGRAM
 
 
+def test_a_decision_that_lost_its_claim_keeps_a_program_the_winning_approval_uses(world, served) -> None:  # noqa: F811
+    # 2026-10-17 review: the first approval's claim ran out during its second
+    # download and a second approval was stored meanwhile, relying on the
+    # program the first had already installed; the first approval's clean-up
+    # then removed that program.
+    lead, requests, _gate, instance, service = world
+    second_source = SOURCE.replace("/tea/", "/tea2/")
+    served.files["/tea2/0.9.2/tea-0.9.2-linux-amd64"] = PROGRAM
+    tea2 = tea(tool_id="cli:tea2", display_name="Second Gitea CLI")
+    tea2["installed_cli"] = {**tea2["installed_cli"], "binary_path": "team/tools/tea2/tea2", "source_url": second_source}
+    set_agent_ref(lead)
+    context = Context("tooluse-tea-two")
+    with pytest.raises(InterruptException):
+        json.loads(asyncio.run(propose_access_change(
+            title="Add two Gitea CLIs", reason="Triage issues.", tool_context=context, clis=[tea(), tea2],
+            grants=[{"agent_type": "TeamArchitect", "target": {"kind": "tool", "id": "cli:tea"}, "level": "read"}],
+        )))
+    request_id = context.raised[0]["access_request_id"]
+    applier = requests().appliers[ACCESS_PROPOSAL_KIND]
+    first_program = program_path(instance)
+    seen: dict = {}
+
+    def download(url: str) -> bytes:
+        data = served.download(url)
+        if "/tea2/" in url and not seen:
+            seen["first_program_installed"] = first_program.exists()
+            # The second download is slow: the first decision's claim runs out,
+            # and the reviewer approves the card again.
+            with service.store._connect() as conn:
+                conn.execute(
+                    "UPDATE access_request_claims SET claimed_until = '2000-01-01T00:00:00+00:00' WHERE request_id = ?",
+                    (request_id,),
+                )
+                conn.commit()
+            seen["second"] = requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE, kept_item_ids=("grant-0",))
+        return data
+
+    applier.download = download
+    with pytest.raises(HandDownRefused, match="already granted by another decision"):
+        requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE, kept_item_ids=("grant-0",))
+
+    assert seen["first_program_installed"] and seen["second"].status is AccessRequestStatus.GRANTED
+    assert service.store.get_request(request_id).status is AccessRequestStatus.GRANTED
+    assert first_program.read_bytes() == PROGRAM, "the program the approved proposal uses stays"
+    assert (workspaces_root(instance) / "team" / "tools" / "tea2" / "tea2").read_bytes() == PROGRAM
+
+
 def test_a_decision_that_loses_its_claim_during_a_download_installs_nothing(world, served) -> None:  # noqa: F811
     _lead, requests, _gate, instance, service = world
     request, decide = approve(world, tea(), served)
@@ -382,7 +528,7 @@ def test_a_decision_that_loses_its_claim_during_a_download_installs_nothing(worl
         return data
 
     applier.download = taken_over_meanwhile
-    with pytest.raises(HandDownRefused, match="taken over"):
+    with pytest.raises(HandDownRefused, match="another decision took it"):
         decide()
 
     assert not program_path(instance).exists(), "a decision that lost the request writes nothing"

@@ -227,6 +227,33 @@ def test_a_busy_database_while_delivering_removes_the_copy_and_a_later_deny_deli
     assert not any(path.is_file() for path in received.rglob("*"))
 
 
+def test_a_delivery_stored_despite_a_reported_failure_keeps_the_file(
+    world: World, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A PostgreSQL connection can drop after the outcome committed: the
+    # decision stands, so the delivered file must not be removed.
+    import logging
+    import sqlite3
+
+    alice_file(world, "plan.md", "the plan")
+    world.sharing.send("alice", "plan.md", "Bob")
+    [request] = world.service.store.list_requests(TEAM)
+    original = world.service.store.finish_request
+
+    def committed_then_lost(updated, **kwargs):
+        original(updated, **kwargs)
+        raise sqlite3.OperationalError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(world.service.store, "finish_request", committed_then_lost)
+    with caplog.at_level(logging.WARNING, logger="access_control.requests"):
+        decided = world.requests().decide(request.request_id, BOB, AccessReviewChoice.APPROVE)
+
+    assert decided.status is AccessRequestStatus.GRANTED
+    delivered = world.home(BOB) / "received" / person_folder_name("alice") / "plan.md"
+    assert delivered.read_text(encoding="utf-8") == "the plan"
+    assert "event=access_decision_stored_despite_error" in caplog.text
+
+
 def test_a_file_changed_after_sending_is_not_delivered_and_the_team_folder_needs_no_approval(world: World) -> None:
     source = alice_file(world, "draft.md", "first")
     world.sharing.send("alice", "draft.md", "bob")

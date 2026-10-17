@@ -455,3 +455,58 @@ def test_a_grant_plan_reads_through_the_transactions_own_connection_on_postgres(
 
     assert stored.grant_id == "grant_new"
     assert opened == ["connection"], "one connection: the plan borrowed the write transaction's"
+
+
+def test_two_decisions_on_postgres_take_turns_and_the_second_finds_the_request_decided(settings) -> None:
+    first, second = AccessRepository(settings), AccessRepository(settings)
+    first.create_request(_request())
+    inside = threading.Event()
+    outcomes: dict[str, Any] = {}
+
+    def decide_first() -> None:
+        with first.decision_transaction("access_req_pg", at=NOW) as request:
+            inside.set()
+            time.sleep(PAUSE_SECONDS)  # the second decision waits for the write lock meanwhile
+            first.finish_request(request.model_copy(update={"status": AccessRequestStatus.GRANTED}))
+        outcomes["first"] = "granted"
+
+    thread = threading.Thread(target=decide_first)
+    thread.start()
+    assert inside.wait(10)
+    try:
+        with second.decision_transaction("access_req_pg", at=NOW):
+            outcomes["second"] = "decided too"
+    except AccessStoreConflict as exc:
+        outcomes["second"] = str(exc)
+    thread.join()
+
+    assert outcomes["first"] == "granted"
+    assert "already granted" in outcomes["second"]
+
+
+def test_a_decisions_grant_writes_join_its_transaction_on_postgres(settings) -> None:
+    # Without joining, a grant write inside the decision would open a second
+    # connection and wait forever for the advisory lock the decision holds.
+    store = AccessRepository(settings)
+    store.create_request(_request())
+    subject = SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect")
+    grant = GrantV1(
+        grant_id="grant_decided", team_id=TEAM, subject=subject, target=TargetRefV1(kind=TargetKind.TOOL, id="fn:schedules"),
+        level=AccessLevel.READ, granted_by=OWNER, approval_id="access_req_pg", created_at_utc=NOW, for_person_id=PERSON,
+    )
+    done = threading.Event()
+
+    def decide() -> None:
+        with store.decision_transaction("access_req_pg", at=NOW) as request:
+            store.store_planned(grant, lambda: plan_grants([grant], store.for_subjects(TEAM, [subject]), lambda _s: frozenset()))
+            store.finish_request(
+                request.model_copy(update={"status": AccessRequestStatus.GRANTED, "grant_ids": ("grant_decided",)})
+            )
+        done.set()
+
+    thread = threading.Thread(target=decide, daemon=True)
+    thread.start()
+    assert done.wait(10), "the decision's writes waited for its own lock"
+    assert store.get("grant_decided").status.value == "active"
+    assert store.get_request("access_req_pg").status is AccessRequestStatus.GRANTED
+    assert store.grants_without_granted_outcome(TEAM) == []

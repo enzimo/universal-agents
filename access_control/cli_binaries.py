@@ -23,17 +23,20 @@ only.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import io
 import logging
 import os
+import socket
 import tarfile
+import threading
 import time
 import zipfile
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from access_control import safe_open
 from runtime_settings.instance_layout import InstanceLayout
@@ -41,14 +44,18 @@ from runtime_settings.instance_layout import InstanceLayout
 logger = logging.getLogger(__name__)
 
 MAX_PROGRAM_BYTES = 200 * 1024 * 1024
-# How long one read may wait for the server to send anything (the socket
-# timeout). It does not bound the whole download: a server that keeps
-# sending a little never trips it.
+# How long one network step (connecting, one read) may wait for the server.
+# It does not bound a whole download: a server that keeps sending a little
+# never trips it.
 DOWNLOAD_TIMEOUT_SECONDS = 120
-# How long a whole download may take. An approving decision renews its claim
-# on the request before and after each download, so this must stay well under
-# the claim's limit (access_control.requests.DECISION_CLAIM_SECONDS, 600).
+# How long a whole download may take, from connecting to its last byte,
+# redirects, TLS and headers included (``_DownloadDeadline``). An approving
+# decision renews its claim on the request before and after each download, so
+# this must stay well under the claim's limit
+# (access_control.requests.DECISION_CLAIM_SECONDS, 600).
 DOWNLOAD_DEADLINE_SECONDS = 300
+# Redirects a download may follow (all https).
+MAX_DOWNLOAD_REDIRECTS = 5
 _CHUNK = 1024 * 1024
 REASON_DIGEST_MISMATCH = "cli_program_digest_mismatch"
 REASON_PROGRAM_MISSING = "cli_program_missing"
@@ -100,70 +107,136 @@ def workspace_digest(root: Path, parts: tuple[str, ...], *, max_bytes: int = MAX
 
 
 class _HttpsOnlyRedirects(HTTPRedirectHandler):
+    max_redirections = MAX_DOWNLOAD_REDIRECTS
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
         if urlsplit(newurl).scheme != "https":
             raise URLError(f"A redirect left https: {urlsplit(newurl).hostname}")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+class _DownloadDeadline:
+    """One deadline for a whole download, from connecting to its last byte.
+
+    A socket timeout bounds one blocking step only: a server that answers
+    slowly to connecting, TLS, each of several redirects or the headers, or
+    that keeps sending the body a little at a time, never trips it. So a
+    timer shuts down every connection of the download when the deadline
+    passes, which ends whatever step is waiting, and each new connection
+    gets at most the time left. The clock decides; the server cannot extend it.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self.expired = False
+        self._ends = time.monotonic() + seconds
+        self._connections: list[http.client.HTTPConnection] = []
+        self._lock = threading.Lock()
+        self._timer = threading.Timer(seconds, self._expire)
+        self._timer.daemon = True
+
+    def __enter__(self) -> "_DownloadDeadline":
+        self._timer.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._timer.cancel()
+
+    def remaining(self) -> float:
+        return max(0.0, self._ends - time.monotonic())
+
+    def track(self, connection: http.client.HTTPConnection) -> None:
+        with self._lock:
+            if self.expired:
+                raise TimeoutError("the download deadline passed")
+            self._connections.append(connection)
+
+    def _expire(self) -> None:
+        with self._lock:
+            self.expired = True
+            connections = list(self._connections)
+        for connection in connections:
+            sock = getattr(connection, "sock", None)
+            if sock is None:
+                continue
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass  # already closed
+
+
+class _DeadlineHTTPSHandler(HTTPSHandler):
+    """Opens each connection of a download (redirects too) under its deadline."""
+
+    def __init__(self, deadline: _DownloadDeadline) -> None:
+        super().__init__()
+        self._deadline = deadline
+
+    def https_open(self, req: Request) -> Any:
+        deadline = self._deadline
+
+        def connection(host: str, **kwargs: Any) -> http.client.HTTPSConnection:
+            timeout = min(float(kwargs.pop("timeout", None) or DOWNLOAD_TIMEOUT_SECONDS), deadline.remaining())
+            opened = http.client.HTTPSConnection(host, timeout=max(timeout, 0.001), **kwargs)
+            deadline.track(opened)
+            return opened
+
+        # No context given: http.client uses its default, certificate-checking one.
+        return self.do_open(connection, req)
+
+
 def fetch_https(url: str) -> bytes:
-    """Download ``url`` (https only, redirects too), at most ``MAX_PROGRAM_BYTES`` in time."""
+    """Download ``url`` (https only, redirects too), at most ``MAX_PROGRAM_BYTES`` and ``DOWNLOAD_DEADLINE_SECONDS``."""
 
     if urlsplit(url).scheme != "https":
         raise ProgramRefused("A program is downloaded only over https.", reason_code=REASON_DOWNLOAD_FAILED)
-    opener = build_opener(_HttpsOnlyRedirects())
     host = urlsplit(url).hostname or url
-    try:
-        with opener.open(Request(url, headers={"User-Agent": "universal-agents"}), timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
-            data = read_within_deadline(response, host=host)
-    except ProgramRefused:
-        raise
-    except (URLError, OSError, ValueError) as exc:
-        raise ProgramRefused(
-            f"The program could not be downloaded from {host}: {exc}", reason_code=REASON_DOWNLOAD_FAILED
-        ) from exc
+    with _DownloadDeadline(DOWNLOAD_DEADLINE_SECONDS) as deadline:
+        opener = build_opener(_HttpsOnlyRedirects(), _DeadlineHTTPSHandler(deadline))
+        try:
+            with opener.open(Request(url, headers={"User-Agent": "universal-agents"}), timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+                data = _read_body(response, deadline)
+        except ProgramRefused:
+            raise
+        except (URLError, OSError, ValueError, http.client.HTTPException) as exc:
+            if deadline.expired:
+                raise _too_slow(host, deadline) from exc
+            raise ProgramRefused(
+                f"The program could not be downloaded from {host}: {exc}", reason_code=REASON_DOWNLOAD_FAILED
+            ) from exc
+        if deadline.expired:
+            raise _too_slow(host, deadline)  # the shutdown may end a read as if the body were complete
     if len(data) > MAX_PROGRAM_BYTES:
         raise ProgramRefused("The download is larger than the size limit.", reason_code=REASON_DOWNLOAD_FAILED)
     return data
 
 
-def read_within_deadline(
-    response: Any,
-    *,
-    host: str,
-    deadline_seconds: float = DOWNLOAD_DEADLINE_SECONDS,
-    clock: Callable[[], float] = time.monotonic,
-) -> bytes:
-    """Read a download, at most ``MAX_PROGRAM_BYTES + 1`` bytes and ``deadline_seconds`` in total.
+def _read_body(response: Any, deadline: _DownloadDeadline) -> bytes:
+    """At most ``MAX_PROGRAM_BYTES + 1`` bytes; ``read1`` returns what arrived, so the deadline check runs often."""
 
-    Reads with ``read1``, which returns whatever has arrived, so the deadline
-    is checked while a slow server trickles data in.
-    """
-
-    started = clock()
     chunks: list[bytes] = []
     size = 0
-    while size <= MAX_PROGRAM_BYTES:
-        if clock() - started > deadline_seconds:
-            logger.warning(
-                "A program download took too long and was stopped. event=cli_download_deadline host=%s "
-                "seconds=%s bytes=%s",
-                host,
-                deadline_seconds,
-                size,
-            )
-            raise ProgramRefused(
-                f"The download from {host} was stopped after {deadline_seconds:g} seconds in total because it was "
-                "too slow. Put the program into the workspace yourself, or propose a download address that "
-                "answers faster.",
-                reason_code=REASON_DOWNLOAD_FAILED,
-            )
+    while size <= MAX_PROGRAM_BYTES and not deadline.expired:
         chunk = response.read1(min(_CHUNK, MAX_PROGRAM_BYTES + 1 - size))
         if not chunk:
             break
         chunks.append(chunk)
         size += len(chunk)
     return b"".join(chunks)
+
+
+def _too_slow(host: str, deadline: _DownloadDeadline) -> ProgramRefused:
+    logger.warning(
+        "A program download took too long and was stopped. event=cli_download_deadline host=%s seconds=%s",
+        host,
+        deadline.seconds,
+    )
+    return ProgramRefused(
+        f"The download from {host} was stopped after {deadline.seconds:g} seconds in total (connecting, "
+        "redirects and the whole file count) because it was too slow. Put the program into the workspace "
+        "yourself, or propose a download address that answers faster.",
+        reason_code=REASON_DOWNLOAD_FAILED,
+    )
 
 
 def extract_member(data: bytes, member: str) -> bytes:
@@ -263,6 +336,7 @@ __all__ = [
     "DOWNLOAD_DEADLINE_SECONDS",
     "DOWNLOAD_TIMEOUT_SECONDS",
     "Downloader",
+    "MAX_DOWNLOAD_REDIRECTS",
     "MAX_PROGRAM_BYTES",
     "ProgramRefused",
     "REASON_DIGEST_MISMATCH",
@@ -273,7 +347,6 @@ __all__ = [
     "extract_member",
     "fetch_https",
     "install_program",
-    "read_within_deadline",
     "remove_program",
     "workspace_digest",
     "workspaces_root",

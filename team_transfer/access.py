@@ -18,10 +18,13 @@ blocks the whole tool here (``access_control.stale_blocks``) until an
 administrator replaces it.
 
 What stays behind: task and one-time grants (they end with their task),
-revoked, denied and pending grants, access requests and the claims of
-decisions running on them (``AccessRepository.claim_decision``, transient),
-change plans, notices and the audit log (history), and the gateway's copy of
-the people (rebuilt at gateway start). Standard role access is not stored as
+revoked, denied and pending grants, grants that carry the approval id of a
+request that was not granted (an older version could leave one when it
+stopped between a decision's grants and its outcome; logged, see
+``AccessRepository.grants_without_granted_outcome``), access requests and the
+claims of decisions running on them (``AccessRepository.claim_decision``,
+transient), change plans, notices and the audit log (history), and the
+gateway's copy of the people (rebuilt at gateway start). Standard role access is not stored as
 grants; it comes from the release (``access_control.standard_grants``).
 
 One account link per tool and owner is active (a unique index in the access
@@ -183,7 +186,11 @@ class AccessSection:
         records: list[AccessRecordV1] = []
         for folder in store.data_folders(team):
             records.append(_record(AccessKind.DATA_FOLDER, folder.name, folder))
+        undecided = {grant.grant_id: request for grant, request in store.grants_without_granted_outcome(team)}
         for grant in store.list_team(team):
+            if grant.grant_id in undecided:
+                _skip_without_granted_outcome(grant.grant_id, undecided[grant.grant_id])
+                continue
             if _lasting(grant, now):
                 records.append(_record(AccessKind.GRANT, grant.grant_id, grant))
         for link in store.list_links(team):
@@ -266,6 +273,16 @@ class AccessSection:
             len(accepted),
             len(plan) - len(accepted),
         )
+
+
+def _skip_without_granted_outcome(grant_id: str, request: Any) -> None:
+    logger.warning(
+        "A grant whose access request was not granted stays behind. event=team_transfer_grant_without_outcome "
+        "grant_id=%s request_id=%s request_status=%s",
+        grant_id,
+        request.request_id,
+        request.status.value,
+    )
 
 
 def _record(kind: AccessKind, record_id: str, model: Any) -> AccessRecordV1:

@@ -68,7 +68,7 @@ from custom_messages.contracts.access_v2 import (
     TargetRefV1,
 )
 from id_generation import new_id
-from storage.access_repository import AccessRepository, AccessStoreConflict, DecisionClaim
+from storage.access_repository import AccessRepository, AccessStoreConflict
 
 logger = logging.getLogger(__name__)
 
@@ -1024,8 +1024,8 @@ class AccessService:
             self.team_id, folder_id, is_file=target.kind is TargetKind.FILE, owner=folder_owner(folder_id, person_id)
         )
 
-    def grant_by_person(self, person: PersonPrincipal, spec: GrantV1, *, claim: DecisionClaim | None = None) -> GrantV1:
-        """A person gives access they may give (see ``grant_refusal``); ``claim``: as part of deciding a request."""
+    def grant_by_person(self, person: PersonPrincipal, spec: GrantV1) -> GrantV1:
+        """A person gives access they may give (see ``grant_refusal``)."""
 
         refusal = self.grant_refusal(person, spec)
         if refusal:
@@ -1039,7 +1039,7 @@ class AccessService:
                 "created_at_utc": self.clock(),
             }
         )
-        return self._store_grant(GrantV1.model_validate(grant.model_dump()), claim=claim)
+        return self._store_grant(GrantV1.model_validate(grant.model_dump()))
 
     # -- one entry per tool (access_control.grant_entries) -------------------------
 
@@ -1083,19 +1083,18 @@ class AccessService:
 
         return self.plan_grants([spec.model_copy(update={"status": GrantStatus.ACTIVE})]).covered.get(spec.grant_id)
 
-    def _store_grant(self, grant: GrantV1, *, claim: DecisionClaim | None = None) -> GrantV1:
+    def _store_grant(self, grant: GrantV1) -> GrantV1:
         """Store one new grant as one entry: returns the stored grant, or the one that already covers it.
 
         The plan runs inside the store's write transaction
         (``AccessRepository.store_planned``), so a grant stored at the same
         moment by another process is seen: the two never sit side by side in
         one entry, and a tool grant never stays outside its tool set's entry.
-        A grant stored while deciding a request (``claim``) is written only
-        while the decision holds its claim, and the narrower grants it covers
-        end when the decision's outcome is stored.
+        Inside a person's decision (``AccessRepository.decision_transaction``)
+        the whole decision is that transaction.
         """
 
-        stored, plan = self.store.store_planned(grant, lambda: self.plan_grants([grant]), claim=claim)
+        stored, plan = self.store.store_planned(grant, lambda: self.plan_grants([grant]))
         cover = plan.covered.get(grant.grant_id)
         if cover is not None:
             logger.info(
@@ -1109,7 +1108,7 @@ class AccessService:
             )
             return cover
         replaced = plan.replaced_by(grant.grant_id)
-        if replaced and claim is None:
+        if replaced:
             logger.info(
                 "Broader access replaced narrower access. event=grants_replaced grant_id=%s replaced=%s",
                 stored.grant_id,
@@ -1230,7 +1229,6 @@ class AccessService:
         task_id: str | None,
         person_id: str | None = None,
         automatic_only: bool = False,
-        claim: DecisionClaim | None = None,
     ) -> GrantV1:
         """An agent hands on access it holds for ``person_id``'s work; returns the grant (active or pending).
 
@@ -1244,9 +1242,7 @@ class AccessService:
         )
         # A hand-down waiting for approval is not access yet; it joins the
         # entry when approved (approve_pending).
-        if stored.status is GrantStatus.ACTIVE:
-            return self._store_grant(stored, claim=claim)
-        return self.store.create(stored, claim=claim)
+        return self._store_grant(stored) if stored.status is GrantStatus.ACTIVE else self.store.create(stored)
 
     def _prepare_hand_down(
         self,
@@ -1350,8 +1346,8 @@ class AccessService:
             raise HandDownRefused(f"The hand-down must narrow the access it comes from ({detail}).")
         return passing[0]
 
-    def approve_pending(self, person: PersonPrincipal, grant_id: str, *, claim: DecisionClaim | None = None) -> GrantV1:
-        """The target's approver approves a pending hand-down within the rules (``claim``: as in ``_store_grant``)."""
+    def approve_pending(self, person: PersonPrincipal, grant_id: str) -> GrantV1:
+        """The target's approver approves a pending hand-down within the rules."""
 
         grant = self.store.get(grant_id)
         if grant is None or grant.status is not GrantStatus.PENDING:
@@ -1362,7 +1358,7 @@ class AccessService:
         active = grant.model_copy(update={"status": GrantStatus.ACTIVE})
         # Planned inside the store's write transaction, as in _store_grant.
         approved, activated = self.store.approve_pending(
-            grant_id, actor=actor, at=self.clock(), plan=lambda: self.plan_grants([active]), claim=claim
+            grant_id, actor=actor, at=self.clock(), plan=lambda: self.plan_grants([active])
         )
         if not activated:
             # Access already in force covers it: the waiting hand-down was not needed and is denied.

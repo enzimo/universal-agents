@@ -24,11 +24,14 @@ the gateway is where people see and decide them:
   request id on the transcript message and shows a card that reads the
   request (``review``) and decides through the same ``decide``. Other
   channels show the Inbox link.
-- **One decision at a time.** A decision claims the request first
-  (``AccessRequests.decide``), so pressing a button twice, or deciding in
-  chat and on the web card at once, decides once; the second press is told
-  someone is deciding it. Each maintenance pass recovers claims whose
-  decision stopped without finishing (``recover_unfinished_decisions``).
+- **One decision at a time.** A decision stores its grants and its outcome
+  in one transaction (``AccessRequests.decide``), so pressing a button
+  twice, or deciding in chat and on the web card at once, decides once: the
+  second press finds the request decided, or is told someone is deciding it
+  while a proposal or a sent file is being applied. Each maintenance pass
+  ends grants that carry the approval id of a request that was not granted
+  (``end_grants_without_granted_outcome``; only an older version left such
+  grants).
 - **Waking the agent.** After a decision the gateway sends
   ``AccessRequestResolvedV1`` to the requesting agent. When the transport is
   down the message is sent by the next maintenance pass
@@ -1028,17 +1031,18 @@ class GatewayAccessInbox:
     async def run_once(self) -> None:
         requests = self.requests()
         store = requests.service.store
-        # A decision whose process ended keeps its request claimed until the
-        # claim runs out; this ends what it left behind, and the request waits
-        # for a decision again (AccessRepository.recover_unfinished_decisions).
+        # A grant carrying the approval id of a request that was not granted
+        # (only an older version stored grants before their outcome) does not
+        # stay in force (AccessRepository.end_grants_without_granted_outcome).
         # A failure here must not skip the announcements and wake messages.
         try:
             await asyncio.to_thread(
-                store.recover_unfinished_decisions, self._settings.team_id, requests.service.clock()
+                store.end_grants_without_granted_outcome, self._settings.team_id, requests.service.clock()
             )
         except Exception:  # noqa: BLE001 - retried on the next pass
             self._logger.exception(
-                "Could not recover unfinished access decisions. event=access_decision_recovery_failed team_id=%s",
+                "Could not check for grants whose request was not granted. "
+                "event=grants_without_outcome_check_failed team_id=%s",
                 self._settings.team_id,
             )
         for request in await asyncio.to_thread(store.claim_unannounced, self._settings.team_id):

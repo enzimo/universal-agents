@@ -1,17 +1,24 @@
 """Deciding an access request once, and keeping grant records consistent, with real Cedar and SQLite.
 
-Each test reproduces a concurrency defect found in the 2026-10-17 audit on the
-real code: two processes (the gateway and the manager, or two gateway
-threads) share one access store file.
+Each test reproduces a concurrency defect found in the 2026-10-17 audit, or
+in its review, on the real code: two processes (the gateway and the manager,
+or two gateway threads) share one access store file. A person's decision now
+stores its grants and its outcome in one transaction, so:
 
-- A failed approval took nothing back, so a later Deny left access in force.
-- An approval that lost to a withdrawal revoked access that was in force
-  before the request (the team lead's starter-profile grant).
-- Two approvals at once: the loser revoked the winner's grants.
-- A decision whose process ended left its grants and its claim behind.
-- "One entry per tool" was planned outside the write transaction, so two
-  grants stored at once both landed (also a tool grant beside its tool set).
-- Two account links stored at once both stayed active.
+- a decision that fails, or cannot write at all, stores nothing, and a later
+  Deny leaves no access (a failed approval used to leave its grants);
+- a second decision, a withdrawal or another writer waits for the decision
+  and never sees or builds on a grant before its outcome is stored (the loser
+  of two approvals used to revoke the winner's grants, and a person's own
+  grant or a worker's hand-down made in between was lost with the decision);
+- access in force before the decision is replaced only together with the
+  outcome, and a closed request denies its waiting hand-downs.
+
+Also: "one entry per tool" is planned inside the write transaction (two
+grants stored at once both landed, or a tool grant beside its tool set), two
+account links stored at once leave one active, a grant carrying the approval
+id of a request that was not granted (only an older version left such
+grants) is ended, and a change applied at the decision renews its claim.
 """
 
 from __future__ import annotations
@@ -60,7 +67,6 @@ from storage.config import resolve_storage_settings
 from tests.test_access_requests import (
     BINARY,
     LEAD,
-    MEMBER,
     OWNER,
     SCHEDULES,
     TEAM,
@@ -98,6 +104,7 @@ class World:
     manager: AccessRequests
     clock: Clock
     db: Path
+    request_id: str = ""
 
     @property
     def store(self) -> AccessRepository:
@@ -146,143 +153,180 @@ def careful_request(world: World) -> str:
 # -- deciding once ------------------------------------------------------------------------
 
 
-def test_a_failed_approval_takes_back_its_grants_and_a_later_deny_leaves_no_access(world, monkeypatch) -> None:
+def test_a_decision_that_cannot_write_stores_nothing_and_a_later_deny_leaves_no_access(world) -> None:
     request_id = careful_request(world)
-    store = world.store
-    original = store.finish_request
+    other = sqlite3.connect(str(world.db), isolation_level=None)
+    other.execute("BEGIN IMMEDIATE")  # another process holds the write lock past the 2.5 s busy timeout
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            world.gateway.decide(request_id, OWNER, AccessReviewChoice.APPROVE)
+    finally:
+        other.execute("ROLLBACK")
+        other.close()
 
-    def finish_while_another_writer_holds_the_lock(updated, **kwargs):
-        # Another process holds the write lock longer than the 2.5 s busy timeout.
-        other = sqlite3.connect(str(world.db), isolation_level=None)
-        other.execute("BEGIN IMMEDIATE")
-        try:
-            return original(updated, **kwargs)
-        finally:
-            other.execute("ROLLBACK")
-            other.close()
-
-    monkeypatch.setattr(store, "finish_request", finish_while_another_writer_holds_the_lock)
-    with pytest.raises(sqlite3.OperationalError, match="locked"):
-        world.gateway.decide(request_id, OWNER, AccessReviewChoice.APPROVE)
-    monkeypatch.setattr(store, "finish_request", original)
-
-    assert store.get_request(request_id).status is AccessRequestStatus.WAITING
-    assert world.approval_grants(request_id) == [], "the approval's grants were taken back"
-    assert not uses(world.gateway, WORKER, OWNER, CREATE_JOB)
-
+    assert world.store.get_request(request_id).status is AccessRequestStatus.WAITING
+    assert world.approval_grants(request_id) == []
     denied = world.manager.decide(request_id, OWNER, AccessReviewChoice.DENY)
     assert denied.status is AccessRequestStatus.DENIED
     assert not uses(world.gateway, WORKER, OWNER, CREATE_JOB), "a denied request leaves no access"
 
 
-def test_grants_a_failed_approval_could_not_take_back_end_when_its_claim_runs_out(world, monkeypatch, caplog) -> None:
+def test_a_failure_while_storing_the_outcome_stores_none_of_the_decisions_grants(world, monkeypatch) -> None:
     request_id = careful_request(world)
-    service = world.gateway.service
+    [standard] = [grant for grant in world.store.for_subjects(TEAM, [LEAD_SUBJECT]) if grant.target == STANDARD_SET]
 
     def locked(*_args, **_kwargs):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(service.store, "finish_request", locked)
-    monkeypatch.setattr(service, "revoke", locked)
+    def no_undo(*_args, **_kwargs):
+        raise AssertionError("nothing needs taking back: the decision's grants were never stored")
+
+    monkeypatch.setattr(world.store, "finish_request", locked)
+    monkeypatch.setattr(world.gateway.service, "revoke", no_undo)
     with pytest.raises(sqlite3.OperationalError):
-        world.gateway.decide(request_id, OWNER, AccessReviewChoice.APPROVE)
+        world.gateway.decide(request_id, OWNER, AccessReviewChoice.APPROVE_READ)
     monkeypatch.undo()
 
-    left = world.approval_grants(request_id)
-    assert left and uses(world.gateway, WORKER, OWNER, CREATE_JOB), "the undo failed, so the grants are still there"
-    with pytest.raises(HandDownRefused, match="deciding this request right now"):
-        world.manager.decide(request_id, OWNER, AccessReviewChoice.DENY)
-    assert world.store.recover_unfinished_decisions(TEAM, world.clock()) == [], "the claim has not run out yet"
-
-    world.clock.advance(DECISION_CLAIM_SECONDS + 1)
-    with caplog.at_level(logging.WARNING, logger="storage.access_repository"):
-        assert world.store.recover_unfinished_decisions(TEAM, world.clock()) == [request_id]
-    assert "event=access_decision_claim_recovered" in caplog.text
-    assert "event=access_decision_leftovers_ended" in caplog.text
     assert world.approval_grants(request_id) == []
-    assert {world.store.get(grant.grant_id).status for grant in left} == {GrantStatus.REVOKED}
-    assert not uses(world.gateway, WORKER, OWNER, CREATE_JOB)
+    assert world.store.get(standard.grant_id).status is GrantStatus.ACTIVE, "access in force before stays"
     assert world.store.get_request(request_id).status is AccessRequestStatus.WAITING
-    assert world.manager.decide(request_id, OWNER, AccessReviewChoice.DENY).status is AccessRequestStatus.DENIED
+    assert not uses(world.gateway, WORKER, OWNER, CREATE_JOB)
 
 
-def test_a_decision_whose_process_ended_is_taken_over_once_its_claim_runs_out(world) -> None:
-    request_id = careful_request(world)
-    request = world.store.get_request(request_id)
-    # A gateway claimed the request, stored read-and-change for the team lead, then its process ended.
-    now = world.clock()
-    world.store.claim_decision(
-        request_id, claim_id="decision_ended", at=now, until=now + timedelta(seconds=DECISION_CLAIM_SECONDS)
-    )
-    [lead_spec, *_rest] = world.gateway.approval_specs(
-        request,
-        level=AccessLevel.WRITE,
-        lifetime=GrantLifetime.UNTIL_REVOKED,
-        expires_at=None,
-        granted_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
-    )
-    left = world.gateway.service.grant_by_person(OWNER, lead_spec.model_copy(update={"approval_id": request_id}))
+def _while_deciding(world: World, monkeypatch, other, *, fail: bool = False) -> tuple[object, object]:
+    """Decide (approve) with ``other`` running in a second thread while the decision's transaction is open.
 
-    with pytest.raises(HandDownRefused, match="deciding this request right now"):
-        world.manager.decide(request_id, OWNER, AccessReviewChoice.APPROVE_READ)
-    world.clock.advance(DECISION_CLAIM_SECONDS + 1)
-    decided = world.manager.decide(request_id, OWNER, AccessReviewChoice.APPROVE_READ)
+    The decision pauses after storing its grants and before its outcome and
+    gives the other thread up to a second to finish: it reads, then waits for
+    the write lock the decision holds (code that stored grants before the
+    outcome let it finish against the undecided grants). With ``fail`` the
+    decision then fails, so it stores nothing. Returns (the decision's result
+    or error, the other thread's result or error).
+    """
 
-    assert decided.status is AccessRequestStatus.GRANTED
-    assert world.store.get(left.grant_id).status is GrantStatus.REVOKED, "the unfinished decision's grant ended first"
-    assert left.grant_id not in decided.grant_ids
-    assert uses(world.gateway, WORKER, OWNER, READ_JOBS)
-    assert not uses(world.gateway, WORKER, OWNER, CREATE_JOB), "only what this decision approved is in force"
-
-
-def test_an_approval_that_loses_to_a_withdrawal_keeps_the_access_that_was_in_force(world, monkeypatch) -> None:
-    request_id = careful_request(world)
-    [standard] = [grant for grant in world.store.for_subjects(TEAM, [LEAD_SUBJECT]) if grant.target == STANDARD_SET]
+    uses(world.manager, WORKER, OWNER, CREATE_JOB)  # start the manager's evaluator before the window
     store = world.store
     original = store.finish_request
+    outcomes: dict[str, object] = {}
+    started = threading.Event()
 
-    def task_ends_first(updated, **kwargs):
-        # The manager withdraws the request (its task ended) just before the
-        # approval stores its outcome, whatever the store's arguments are.
-        if updated.status is AccessRequestStatus.GRANTED:
-            world.manager.withdraw(request_id, why="The task ended first.")
-        return original(updated, **kwargs)
-
-    monkeypatch.setattr(store, "finish_request", task_ends_first)
-    # Read only: the team lead's part is covered by its standard grant, which this approval did not create.
-    with pytest.raises(HandDownRefused, match="withdrawn|already decided"):
-        world.gateway.decide(request_id, OWNER, AccessReviewChoice.APPROVE_READ)
-
-    assert store.get(standard.grant_id).status is GrantStatus.ACTIVE, "access in force before the request stays"
-    assert store.get_request(request_id).status is AccessRequestStatus.WITHDRAWN
-    assert world.approval_grants(request_id) == []
-
-
-def test_a_second_approval_while_the_first_runs_is_refused_and_the_first_stands(world, monkeypatch) -> None:
-    request_id = careful_request(world)
-    store = world.store
-    original = store.finish_request
-    refusals: list[str] = []
-
-    def second_click(updated, **kwargs):
-        # The same person presses Approve again (or a chat button and the web card at once).
+    def run_other() -> None:
+        started.set()
         try:
-            world.manager.decide(request_id, OWNER, AccessReviewChoice.APPROVE)
-        except HandDownRefused as exc:
-            refusals.append(str(exc))
+            outcomes["other"] = other()
+        except BaseException as exc:  # noqa: BLE001 - returned to the test
+            outcomes["other"] = exc
+
+    thread = threading.Thread(target=run_other)
+
+    def finish_after_other_started(updated, **kwargs):
+        thread.start()
+        assert started.wait(5)
+        thread.join(1.0)  # well under the other side's 2.5 s busy timeout
+        if fail:
+            raise sqlite3.OperationalError("database is locked")
         return original(updated, **kwargs)
 
-    monkeypatch.setattr(store, "finish_request", second_click)
-    decided = world.gateway.decide(request_id, OWNER, AccessReviewChoice.APPROVE)
+    monkeypatch.setattr(store, "finish_request", finish_after_other_started)
+    try:
+        outcomes["decision"] = world.gateway.decide(world.request_id, OWNER, AccessReviewChoice.APPROVE)
+    except BaseException as exc:  # noqa: BLE001 - returned to the test
+        outcomes["decision"] = exc
+    thread.join(10)
+    monkeypatch.undo()
+    return outcomes["decision"], outcomes["other"]
 
-    assert refusals and "deciding this request right now" in refusals[0]
-    assert decided.status is AccessRequestStatus.GRANTED
-    assert {store.get(grant_id).status for grant_id in decided.grant_ids} == {GrantStatus.ACTIVE}
+
+def test_a_second_approval_waits_for_the_first_and_finds_it_decided(world, monkeypatch) -> None:
+    world.request_id = careful_request(world)
+
+    first, second = _while_deciding(
+        world, monkeypatch, lambda: world.manager.decide(world.request_id, OWNER, AccessReviewChoice.APPROVE)
+    )
+
+    assert first.status is AccessRequestStatus.GRANTED
+    assert isinstance(second, HandDownRefused) and "already granted" in str(second)
+    assert {world.store.get(grant_id).status for grant_id in first.grant_ids} == {GrantStatus.ACTIVE}
     assert uses(world.gateway, WORKER, OWNER, CREATE_JOB)
-    assert len(world.approval_grants(request_id)) == len(decided.grant_ids), "the second click stored nothing"
 
 
-def test_a_deny_ends_access_an_unfinished_decision_left_and_a_withdrawal_does_too(world) -> None:
+def test_a_withdrawal_during_a_decision_waits_and_keeps_the_access_in_force(world, monkeypatch) -> None:
+    world.request_id = careful_request(world)
+    [standard] = [grant for grant in world.store.for_subjects(TEAM, [LEAD_SUBJECT]) if grant.target == STANDARD_SET]
+
+    decided, withdrawal = _while_deciding(
+        world, monkeypatch, lambda: world.manager.withdraw(world.request_id, why="The task ended first.")
+    )
+
+    assert decided.status is AccessRequestStatus.GRANTED
+    assert isinstance(withdrawal, HandDownRefused) and "already decided" in str(withdrawal)
+    assert world.store.get(standard.grant_id).status is GrantStatus.ACTIVE
+
+
+def test_a_persons_grant_made_during_a_failing_decision_is_kept(world, monkeypatch) -> None:
+    # Before 2026-10-17 (review): the person's grant was answered "already
+    # covered" by the decision's undecided grant, so nothing was stored, and
+    # the decision then failed and took its grant back.
+    read_grant = _lead_reads_x_and_worker_holds_it(world)
+    world.request_id = ask(world.gateway, target=X_POSTS).request.request_id
+
+    def direct_grant() -> GrantV1:
+        return world.manager.service.grant_by_person(
+            OWNER,
+            GrantV1(
+                grant_id="new",
+                team_id=TEAM,
+                subject=LEAD_SUBJECT,
+                target=X_POSTS,
+                level=AccessLevel.WRITE,
+                delegation_depth=1,
+                for_person_id=OWNER.person_id,
+                granted_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+                created_at_utc=world.clock(),
+            ),
+        )
+
+    failed, direct = _while_deciding(world, monkeypatch, direct_grant, fail=True)
+
+    assert isinstance(failed, sqlite3.OperationalError)
+    assert isinstance(direct, GrantV1) and direct.approval_id is None, "stored, not covered by the undecided grant"
+    assert world.store.get(direct.grant_id).status is GrantStatus.ACTIVE
+    assert world.store.get(read_grant.grant_id).status is GrantStatus.REVOKED, "the person's grant replaced it"
+    assert world.approval_grants(world.request_id) == []
+    assert uses(world.gateway, WORKER, OWNER, "cli:x#auth.status"), "the worker's hand-down moved to it"
+
+
+def test_a_workers_request_during_a_failing_decision_is_not_handed_down_from_the_undecided_grant(
+    world, monkeypatch
+) -> None:
+    # Before 2026-10-17 (review): trusted code handed the request down at once
+    # from the decision's undecided grant, recorded it as granted, and the
+    # decision then failed and cut the hand-down off.
+    _lead_reads_x_and_worker_holds_it(world)
+    world.request_id = ask(world.gateway, target=X_POSTS).request.request_id
+    other_worker = AgentPrincipal("agent-web-2", "WebResearchAgent", "worker", TEAM, work_id="task-2")
+
+    failed, outcome = _while_deciding(
+        world,
+        monkeypatch,
+        lambda: world.manager.submit(
+            requester=other_worker,
+            person=OWNER,
+            target=X_POSTS,
+            level=AccessLevel.WRITE,
+            reason="Post the update",
+            task_id="task-2",
+        ),
+        fail=True,
+    )
+
+    assert isinstance(failed, sqlite3.OperationalError)
+    assert outcome.waiting, "the team lead holds read only, so a person decides"
+    assert outcome.grant is None
+    assert not uses(world.gateway, other_worker, OWNER, "cli:x#post.create", task_id="task-2")
+
+
+def test_grants_an_older_version_left_without_a_granted_outcome_are_ended(world, caplog) -> None:
     request_id = careful_request(world)
     request = world.store.get_request(request_id)
     [lead_spec, *_rest] = world.gateway.approval_specs(
@@ -292,11 +336,40 @@ def test_a_deny_ends_access_an_unfinished_decision_left_and_a_withdrawal_does_to
         expires_at=None,
         granted_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
     )
-    # A grant an earlier, unfinished decision stored (no claim is left: it was released).
+    # An older version stored a decision's grants before its outcome and stopped in between.
     left = world.gateway.service.grant_by_person(OWNER, lead_spec.model_copy(update={"approval_id": request_id}))
-    withdrawn = world.manager.withdraw(request_id, why="The task ended first.")
-    assert withdrawn.status is AccessRequestStatus.WITHDRAWN
-    assert world.store.get(left.grant_id).status is GrantStatus.REVOKED
+    withdrawn = careful_withdrawn_request_with_grant(world)
+
+    assert {grant.grant_id for grant, _request in world.store.grants_without_granted_outcome(TEAM)} == {
+        left.grant_id,
+        withdrawn.grant_id,
+    }
+    with caplog.at_level(logging.WARNING, logger="storage.access_repository"):
+        ended = world.store.end_grants_without_granted_outcome(TEAM, world.clock())
+
+    assert set(ended) >= {left.grant_id, withdrawn.grant_id}
+    assert "event=grant_without_granted_outcome_ended" in caplog.text
+    assert world.store.grants_without_granted_outcome(TEAM) == []
+    assert world.store.end_grants_without_granted_outcome(TEAM, world.clock()) == [], "nothing the next time"
+    granted = world.gateway.decide(request_id, OWNER, AccessReviewChoice.APPROVE)
+    assert world.store.grants_without_granted_outcome(TEAM) == [], "a granted request's grants are in place"
+    assert granted.status is AccessRequestStatus.GRANTED
+
+
+def careful_withdrawn_request_with_grant(world: World) -> GrantV1:
+    """A withdrawn request that an older version still stored a grant for."""
+
+    outcome = ask(world.gateway, target=X_POSTS)
+    request = world.store.get_request(outcome.request.request_id)
+    world.manager.withdraw(request.request_id, why="The task ended first.")
+    [lead_spec, *_rest] = world.gateway.approval_specs(
+        request,
+        level=AccessLevel.WRITE,
+        lifetime=GrantLifetime.UNTIL_REVOKED,
+        expires_at=None,
+        granted_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+    )
+    return world.gateway.service.grant_by_person(OWNER, lead_spec.model_copy(update={"approval_id": request.request_id}))
 
 
 # -- one entry per tool, planned inside the write transaction -------------------------
@@ -543,26 +616,6 @@ def _lead_reads_x_and_worker_holds_it(world: World) -> GrantV1:
     return read_grant
 
 
-def test_an_approval_that_loses_to_a_withdrawal_keeps_narrower_access_it_would_have_replaced(world, monkeypatch) -> None:
-    read_grant = _lead_reads_x_and_worker_holds_it(world)
-    second = ask(world.gateway, target=X_POSTS)  # read-and-change: waits, the team lead holds read only
-    store = world.store
-    original = store.finish_request
-
-    def task_ends_first(updated, **kwargs):
-        if updated.status is AccessRequestStatus.GRANTED:
-            world.manager.withdraw(second.request.request_id, why="The task ended first.")
-        return original(updated, **kwargs)
-
-    monkeypatch.setattr(store, "finish_request", task_ends_first)
-    with pytest.raises(HandDownRefused, match="withdrawn|already decided"):
-        world.gateway.decide(second.request.request_id, OWNER, AccessReviewChoice.APPROVE)
-
-    assert store.get(read_grant.grant_id).status is GrantStatus.ACTIVE, "access in force before the request stays"
-    assert uses(world.gateway, WORKER, OWNER, "cli:x#auth.status"), "and what was handed on from it"
-    assert world.approval_grants(second.request.request_id) == []
-
-
 def test_a_failed_approval_keeps_narrower_access_it_would_have_replaced(world, monkeypatch) -> None:
     read_grant = _lead_reads_x_and_worker_holds_it(world)
     second = ask(world.gateway, target=X_POSTS)
@@ -596,59 +649,7 @@ def test_an_approval_replaces_narrower_access_when_its_outcome_is_stored(world) 
     assert uses(world.gateway, WORKER, OWNER, "cli:x#post.create")
 
 
-# -- grants are written only while the decision holds its claim -----------------------
-
-
-def test_no_grant_is_stored_for_a_request_withdrawn_while_it_is_decided(world, monkeypatch) -> None:
-    apply_starter_profile(world.gateway.service, OWNER, "trusted", lead_agent_type=LEAD)
-    outcome = ask(world.gateway, person=MEMBER, target=X_POSTS)
-    assert outcome.waiting and outcome.request.person_lacks_access
-    request_id = outcome.request.request_id
-    service = world.gateway.service
-    original = service.store.store_planned
-    stored: list[str] = []
-
-    def store_planned(grant, plan, **kwargs):
-        result = original(grant, plan, **kwargs)
-        stored.append(grant.subject.kind.value)
-        if len(stored) == 1:
-            world.manager.withdraw(request_id, why="The task ended first.")  # after the member's own grant
-        return result
-
-    def locked(*_args, **_kwargs):
-        raise sqlite3.OperationalError("database is locked")
-
-    monkeypatch.setattr(service.store, "store_planned", store_planned)
-    monkeypatch.setattr(service, "revoke", locked)  # and taking back fails too
-    with pytest.raises(HandDownRefused, match="withdrawn"):
-        world.gateway.decide(request_id, OWNER, AccessReviewChoice.APPROVE)
-    monkeypatch.undo()
-
-    assert stored == ["user"], "nothing more was stored once the request was withdrawn"
-    assert world.approval_grants(request_id) == [], "the withdrawal ended what was stored before it"
-    assert not uses(world.gateway, WORKER, MEMBER, "cli:x#post.create")
-
-
-def test_recovery_ends_grants_left_for_a_request_that_was_withdrawn(world, caplog) -> None:
-    request_id = careful_request(world)
-    request = world.store.get_request(request_id)
-    [lead_spec, *_rest] = world.gateway.approval_specs(
-        request,
-        level=AccessLevel.WRITE,
-        lifetime=GrantLifetime.UNTIL_REVOKED,
-        expires_at=None,
-        granted_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
-    )
-    world.manager.withdraw(request_id, why="The task ended first.")
-    # A grant an earlier version stored after the withdrawal (its writes did not check the claim).
-    left = world.gateway.service.grant_by_person(OWNER, lead_spec.model_copy(update={"approval_id": request_id}))
-
-    with caplog.at_level(logging.WARNING, logger="storage.access_repository"):
-        assert world.store.recover_unfinished_decisions(TEAM, world.clock()) == [request_id]
-
-    assert world.store.get(left.grant_id).status is GrantStatus.REVOKED
-    assert "event=access_decision_leftovers_ended" in caplog.text
-    assert world.store.recover_unfinished_decisions(TEAM, world.clock()) == [], "nothing is left the next time"
+# -- claims: changes applied at the decision ---------------------------------------------
 
 
 def test_a_renewed_claim_keeps_a_live_decision_from_being_taken_over(world) -> None:
@@ -663,51 +664,32 @@ def test_a_renewed_claim_keeps_a_live_decision_from_being_taken_over(world) -> N
 
     world.clock.advance(120)  # the renewed claim ran out too: now it may be taken over
     assert world.manager.decide(request_id, OWNER, AccessReviewChoice.DENY).status is AccessRequestStatus.DENIED
-    with pytest.raises(DecisionClaimLost, match="closed"):
+    with pytest.raises(DecisionClaimLost, match="already denied by another decision"):
         world.gateway.renew_claim(claim)
 
 
-def test_a_decision_whose_claim_was_taken_over_stores_nothing(world) -> None:
+def test_a_change_whose_claim_was_taken_over_stores_no_outcome(world) -> None:
     request_id = careful_request(world)
-    request = world.store.get_request(request_id)
-    first = DecisionClaim(request_id, "decision_first")
     now = world.clock()
+    first = DecisionClaim(request_id, "decision_first")
     world.store.claim_decision(request_id, claim_id=first.claim_id, at=now, until=now + timedelta(seconds=1))
     world.clock.advance(2)
-    world.store.claim_decision(request_id, claim_id="decision_second", at=world.clock(), until=world.clock() + timedelta(minutes=10))
-    [lead_spec, *_rest] = world.gateway.approval_specs(
-        request,
-        level=AccessLevel.WRITE,
-        lifetime=GrantLifetime.UNTIL_REVOKED,
-        expires_at=None,
-        granted_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+    world.store.claim_decision(
+        request_id, claim_id="decision_second", at=world.clock(), until=world.clock() + timedelta(minutes=10)
     )
+    request = world.store.get_request(request_id)
 
-    with pytest.raises(DecisionClaimLost, match="taken over"):
-        world.gateway.service.grant_by_person(OWNER, lead_spec.model_copy(update={"approval_id": request_id}), claim=first)
-    assert world.approval_grants(request_id) == []
+    with pytest.raises(DecisionClaimLost, match="another decision took it"):
+        world.store.apply_together(
+            TEAM,
+            finish=lambda _plan: request.model_copy(update={"status": AccessRequestStatus.GRANTED}),
+            claim_id=first.claim_id,
+            actor=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+            at=world.clock(),
+        )
+    assert world.store.get_request(request_id).status is AccessRequestStatus.WAITING
     with pytest.raises(DecisionInProgress):
         world.store.claim_decision(request_id, claim_id="decision_third", at=world.clock(), until=world.clock())
-
-
-def test_a_decision_stored_despite_a_reported_failure_stands(world, monkeypatch, caplog) -> None:
-    request_id = careful_request(world)
-    store = world.store
-    original = store.finish_request
-
-    def committed_then_lost(updated, **kwargs):
-        # The connection dropped while the commit's answer was on its way.
-        original(updated, **kwargs)
-        raise sqlite3.OperationalError("server closed the connection unexpectedly")
-
-    monkeypatch.setattr(store, "finish_request", committed_then_lost)
-    with caplog.at_level(logging.WARNING, logger="access_control.requests"):
-        decided = world.gateway.decide(request_id, OWNER, AccessReviewChoice.APPROVE)
-
-    assert decided.status is AccessRequestStatus.GRANTED
-    assert {store.get(grant_id).status for grant_id in decided.grant_ids} == {GrantStatus.ACTIVE}
-    assert uses(world.gateway, WORKER, OWNER, CREATE_JOB)
-    assert "event=access_decision_stored_despite_error" in caplog.text
 
 
 # -- reading inside the write transaction, and the approval id column -----------------

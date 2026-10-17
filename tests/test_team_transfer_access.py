@@ -498,6 +498,72 @@ def test_a_file_with_two_links_for_one_tool_and_owner_refuses_the_older(tmp_path
     assert [link.link_id for link in _target_store(target).list_links(TEAM)] == ["link_github_ana"]
 
 
+@pytest.mark.skipif(not _CEDAR_BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
+def test_a_failed_decision_leaves_nothing_to_export_and_older_leftovers_stay_behind(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    import logging
+    import sqlite3
+
+    from access_catalog.catalog import load_catalog
+    from access_control.cedar import CedarAccessClient
+    from access_control.decisions import AccessService
+    from access_control.entities import AgentPrincipal, PersonPrincipal, agent_role_resolver
+    from access_control.inbox import StoredAccessInbox
+    from access_control.requests import AccessRequests
+    from access_control.starter_profiles import apply_starter_profile
+    from assistant_gateway.config import GatewayInstanceConfig
+    from custom_messages.contracts.access_v2 import AccessReviewChoice
+
+    config_path, _datasets = _old_instance(tmp_path)
+    store = AccessRepository(GatewayInstanceConfig.load(config_path).manager_storage_settings)
+    cedar = CedarAccessClient(binary=str(_CEDAR_BINARY))
+    try:
+        service = AccessService(
+            store=store, catalog=load_catalog(None), cedar=cedar, team_id=TEAM,
+            agent_role_of=agent_role_resolver("TeamArchitect"),
+        )
+        requests = AccessRequests(service=service, inbox=StoredAccessInbox(store), lead_agent_type="TeamArchitect")
+        ana = PersonPrincipal("usr_ana", TEAM, ("owner",))
+        apply_starter_profile(service, ana, "careful", lead_agent_type="TeamArchitect")
+        worker = AgentPrincipal("agent-web", "WebResearchAgent", "worker", TEAM, work_id="task-1")
+
+        def ask() -> str:
+            return requests.submit(
+                requester=worker, person=ana, target=TargetRefV1(kind=TargetKind.TOOL, id="cli:x"),
+                level=AccessLevel.WRITE, reason="Post the update", task_id="task-1",
+            ).request.request_id
+
+        failed_id = ask()
+
+        def busy(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        # A decision that fails while storing its outcome stores none of its grants.
+        monkeypatch.setattr(store, "finish_request", busy)
+        with pytest.raises(sqlite3.OperationalError):
+            requests.decide(failed_id, ana, AccessReviewChoice.APPROVE)
+        monkeypatch.undo()
+        assert [g for g in store.list_team(TEAM) if g.approval_id == failed_id] == []
+
+        # An older version stored a lasting grant before its outcome and stopped in between.
+        older_id = ask()
+        store.create(_grant(
+            "g_left", SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(TEAM, "TeamArchitect")),
+            TargetRefV1(kind=TargetKind.TOOL, id="cli:x"), approval_id=older_id, for_person_id="usr_ana",
+        ))
+    finally:
+        cedar.close()
+
+    with caplog.at_level(logging.WARNING, logger="team_transfer.access"):
+        plan, target = _export_and_import(tmp_path, config_path)
+
+    keys = {r.key for r in plan.records if r.section == "access"}
+    assert "grant/g_left" not in keys, "a grant whose request was not granted stays behind"
+    assert not any(grant.approval_id in {failed_id, older_id} for grant in _target_store(target).list_team(TEAM))
+    assert f"event=team_transfer_grant_without_outcome grant_id=g_left request_id={older_id}" in caplog.text
+
+
 def test_a_later_batch_does_not_guess_what_the_destination_chose() -> None:
     # Only a fresh import knows the starting sharing applies; a later batch
     # without the team's choice for the tool says nothing rather than guess.

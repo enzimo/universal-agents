@@ -183,7 +183,7 @@ def test_a_waiting_request_is_announced_once_where_its_person_can_decide(harness
     assert view["choice_effects"]["deny"] == {"any": "Nothing is given, and WebResearchAgent is told you said no."}
 
 
-def test_a_failed_recovery_of_unfinished_decisions_does_not_skip_announcements(
+def test_a_failed_check_for_grants_without_an_outcome_does_not_skip_announcements(
     harness: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     request = ask(harness)
@@ -192,13 +192,13 @@ def test_a_failed_recovery_of_unfinished_decisions_does_not_skip_announcements(
         raise RuntimeError("database unavailable")
 
     store = harness.inbox.requests().service.store
-    monkeypatch.setattr(type(store), "recover_unfinished_decisions", broken)
+    monkeypatch.setattr(type(store), "end_grants_without_granted_outcome", broken)
     with caplog.at_level(logging.ERROR):
         asyncio.run(harness.inbox.run_once())
 
     [event] = harness.emitted
     assert event.access_request_id == request.request_id
-    assert "event=access_decision_recovery_failed" in caplog.text
+    assert "event=grants_without_outcome_check_failed" in caplog.text
 
 
 def test_a_members_request_goes_to_the_member_when_they_hold_the_access(harness: Harness) -> None:

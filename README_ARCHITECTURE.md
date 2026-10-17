@@ -460,9 +460,10 @@ take their own transaction-level advisory lock in `begin_write`
 wait for each other); other stores lock the rows they change (`SELECT ... FOR
 UPDATE`). An advisory lock key covers the whole PostgreSQL database, so
 instances or teams that share one database in different schemas also wait for
-each other's writes to that store. Reads a write makes before writing (a grant
-plan) borrow the transaction's own connection, so no second connection is
-opened while the lock is held. Moving rows between tables uses `DELETE ... RETURNING` so exactly the
+each other's writes to that store. Reads and writes a thread makes while it
+holds an open write transaction of the access store (a grant plan, a whole
+decision) join that transaction, so no second connection is opened while the
+lock is held. Moving rows between tables uses `DELETE ... RETURNING` so exactly the
 rows deleted are the rows kept elsewhere (a removed person's held records,
 `storage/person_departure_repository.py`). Rationale: the 2026-10-17
 concurrency audit found that on PostgreSQL an approved change could be claimed
@@ -1089,9 +1090,9 @@ for one task). The plan runs after the store's write lock is taken
 two grants stored at once the second sees the first: before 2026-10-17 two
 first calls of one tool in one request could both store a task grant, and a
 tool grant stored with its tool set could stay as a separate entry that
-removing the set left working. While a person decides a request, the grants
-the new ones cover end only when the decision's outcome is stored (see "Each
-request is decided once" below). Removing access removes the whole entry
+removing the set left working. A person's decision stores its grants and its
+outcome in one transaction, so a grant it replaces ends only if the outcome is
+stored (see "Each request is decided once" below). Removing access removes the whole entry
 (`AccessService.revoke_by_person`, `AccessRequests.revoke`, proposals'
 removals). Why: people saw several independent grants for one tool, assumed the
 broadest replaced the others, and removing one could leave another working.
@@ -1171,52 +1172,72 @@ and TeamLead's own requests a box that lets it hand the access on to workers
 without asking. Chat buttons, which have no checkboxes, offer the same choices
 as separate buttons (`assistant_gateway/application/access_reviews.py`).
 
-Each request is decided once (`AccessRequests.decide`). Before a decision
-stores anything it claims the waiting request (`AccessRepository.claim_decision`,
-a short-lived row in `access_request_claims` with an owner and a time limit,
-`DECISION_CLAIM_SECONDS`). Every grant the decision writes, and its outcome, is
-stored only while that claim still holds, so nothing is written for a request
-that was withdrawn or taken over meanwhile. A second decision made at the same
+Each request is decided once (`AccessRequests.decide`). A person's decision
+stores its grants and its outcome in one transaction
+(`AccessRepository.decision_transaction`): it takes the access store's write
+lock, checks that the request still waits, and everything the decision then
+does on the store in that thread joins the transaction, so its authority
+checks see the grants it stored a moment ago. Other writers see none of them
+until the outcome is stored with them. A second decision made at the same
 moment (a double click, a chat button and the web card, two reviewers,
-`assistant_cli access decide`) is told someone is deciding the request. A live
-decision renews its claim before and after each long step (a program
-download, which stops after `DOWNLOAD_DEADLINE_SECONDS` in total), so it never
-loses the claim while it works, and one that lost it stops before writing
-anything else. Narrower grants that were in force before the decision, which
-its new grants cover, end only in the transaction that stores a granted
-outcome, so a decision that fails leaves them, and what was handed on from
-them, as they were. If anything fails before the outcome is stored, only the
-grants this decision created are revoked and the claim is given up, so the
-request waits again; grants already in force that covered the request belong
-to earlier decisions and are never touched. Before undoing, the decision reads
-the request back: a PostgreSQL commit whose answer was lost may have stored
-the outcome, which then stands. When a grant cannot be revoked (the store is
-still unavailable), the claim is kept until it runs out; the gateway's Inbox
-pass (`recover_unfinished_decisions`) or the next decision then ends the grants
-the unfinished decision left behind, found by the request's indexed approval
-id (`access_grants.approval_id`). The same pass ends grants that carry the
-approval id of a denied or withdrawn request. A withdrawal (the task ended,
-or its person left) takes no claim and closes the request even while a
-decision runs, which then fails and takes back what it stored. A denied or
-withdrawn request denies its hand-downs still waiting for approval and ends
-leftover grants in the same transaction as its outcome; only a granted
-outcome keeps the hand-downs it approved in place. Appliers (proposals, file
-deliveries) take back what they wrote on any failure, including a busy or lost
-database, and raise refusals as refusals and other errors as they were.
-Rationale (2026-10-17 concurrency audit and its review): grants and the
-outcome were separate transactions, so a lost race revoked the winner's grants
-and access that was in force before the request, and a failed approval left
-access in force that a later Deny did not remove. The claim is a separate
-transient table rather than a new request status, so readers of waiting
-requests are unchanged and the team transfer, which never carries access
-requests, is unaffected; the approval id column is filled from each grant's
-record (`GrantV1.approval_id`), which is how grants travel, so the transfer
-format does not change either. One transaction for the whole decision was
-rejected: later grants of one approval are checked against earlier ones (the
-person's own grant first), so the checks would need uncommitted grants.
-Postponing replacements was chosen over restoring replaced grants when a
-decision fails: revoked grants stay revoked, and a crashed decision needs no
-replay of its events.
+`assistant_cli access decide`), a withdrawal (the task ended, or its person
+left), or another writer (a person giving access on the Access page, a
+worker's request that trusted code may hand down) waits for the lock and then
+works on what was committed: the second decision finds the request decided.
+A decision that fails, or cannot get the lock, stores nothing, so there is
+nothing to take back and no access in force for a request that still waits;
+replacing narrower access (one entry per tool) happens in the same
+transaction. A denied or withdrawn request denies its hand-downs still
+waiting for approval in the same transaction; only a granted outcome keeps
+the hand-downs it approved in place.
+
+Changes applied at the decision (proposals, file deliveries) also do work
+outside the database: downloads, tool files, MCP records, a copied file. They
+first claim the request (`AccessRepository.claim_decision`, a short-lived row
+in `access_request_claims` with an owner and a time limit,
+`DECISION_CLAIM_SECONDS`), do that work, and store their grants and outcome
+together (`apply_together`, `finish_request`) only while the claim holds; any
+other decision is refused while the claim is current ("Someone is deciding
+this request right now"). The claim is renewed before and after each program
+download, and a download stops after `DOWNLOAD_DEADLINE_SECONDS` measured from
+connecting to its last byte (redirects, TLS and headers included; a timer
+shuts the connection down, because a socket timeout bounds one read only). So
+a claim runs out only when a step stalls past its limit or the process ends;
+then the next decision takes it over, and the stalled decision finds it lost
+at its next renewal or when storing its outcome, and stores nothing. On any
+failure an applier takes back what it wrote, unless the outcome was in fact
+stored (it reads the request back: a lost PostgreSQL commit answer may have
+stored it). A decision that lost its claim leaves the programs it downloaded
+in place unless the request was closed, because the decision that took over
+may already rely on them (an unused program runs nowhere: no tool names it).
+
+A grant that carries the approval id of a request that was not granted is
+never kept in force: none can be written now, but an older version stored a
+decision's grants before its outcome and could leave them behind when it
+stopped in between. The gateway's Inbox pass ends such grants
+(`end_grants_without_granted_outcome`, found by the indexed
+`access_grants.approval_id` column), and the team transfer leaves them behind.
+Existing stores get the `approval_id` column added and filled from each
+grant's record at their first open, in one transaction.
+
+Rationale (2026-10-17 concurrency audit and its two reviews): grants and the
+outcome were separate transactions, so a lost race revoked the winner's
+grants and access in force before the request, a failed approval left access
+in force that a later Deny did not remove, and between the grants and the
+outcome other writers already relied on an undecided grant (a person's own
+grant was answered "already covered", a worker's request was handed down
+from it) and lost that when the decision failed. A first fix with claims,
+undo and postponed replacements still left that window; one transaction
+removes it at the root. It became possible once every read a decision makes
+goes through the store's joined transaction, and the evaluator (Cedar) only
+computes over the data it is given and never waits for the store while
+holding its own lock, so holding the store's lock across a decision cannot
+deadlock; a decision holds it for the time of a few evaluations. The claim is
+a separate transient table rather than a new request status, so readers of
+waiting requests are unchanged and the team transfer, which never carries
+access requests, is unaffected; the approval id column is filled from each
+grant's record (`GrantV1.approval_id`), which is how grants travel, so the
+transfer format does not change either.
 
 When nobody can hand the access on, or a service is missing from the tool
 catalog, TeamLead proposes the whole change with `propose_access_change`
@@ -1246,9 +1267,11 @@ folders, revocations and the request outcome in one transaction
 (`AccessRepository.apply_together`) under the decision's claim; if anything
 fails, including a busy database, the tool files, downloaded programs and MCP
 servers it wrote are taken back, so nothing is half applied. Because the claim
-is held, and renewed around each download, from before the first file is
-written, a second approval of the same proposal is refused before it touches
-anything and can never take back what the first one installed. A tool with no
+is held from before the first file is written and renewed around each
+download, a second approval of the same proposal is refused while the first
+works; if the first stalls past its limit and the second takes over, the
+first keeps the programs the second may rely on (see "Each request is decided
+once"). A tool with no
 grants gives nobody anything, which is why writing its file first is safe. Afterwards the gateway opens the broker's
 account link form for the approver, watches it with the tool setup watcher
 (`GatewayToolSetups.after_proposal_links`), and holds the decision message to

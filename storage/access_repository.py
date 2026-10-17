@@ -16,17 +16,22 @@ fields change, and those live in their own columns so updates are atomic:
   (``_one_active_link_per_owner``);
 - an access grant is stored as one entry per tool (``store_planned``,
   ``access_control.grant_entries``): the caller's plan runs after the write
-  lock is taken, reading through the same connection, so two grants stored
-  at once each see the other;
-- one decision at a time per waiting access request (``claim_decision``): a
-  short-lived claim, with an owner and a time limit, is taken before the
-  decision writes anything; every grant it writes, and its outcome, is
-  stored only while the claim holds, and a live decision renews the claim
-  before long steps (``renew_decision``). Narrower grants that were in force
-  before the decision end only with its granted outcome. A claim that ran
-  out is taken over or recovered (``recover_unfinished_decisions``), ending
-  the grants its unfinished decision left behind (found by the indexed
-  ``approval_id``). Claims are transient and never travel in a team transfer;
+  lock is taken, inside the same transaction, so two grants stored at once
+  each see the other;
+- a person's decision on a waiting request stores its grants and its outcome
+  in one transaction (``decision_transaction``), so no grant is ever in
+  force, or seen by another writer, before its outcome is stored, and a
+  decision that fails stores nothing. Decisions whose work also happens
+  outside the database (a proposal's programs and tool files, a delivered
+  file) first claim the request (``claim_decision``: a short-lived claim with
+  an owner and a time limit, renewed before and after long steps by
+  ``renew_decision``) and store their outcome only while the claim holds;
+  any other decision is refused while such a claim is current. Claims are
+  transient and never travel in a team transfer;
+- a grant that carries the approval id of a request that was not granted
+  (only an older version could leave one) is never kept in force
+  (``end_grants_without_granted_outcome``, found by the indexed
+  ``approval_id``) and never exported;
 - data folders (decision D16) are registered and removed here, one active
   folder per name, and bump the version too, so every process sees a new
   folder on its next use without a restart;
@@ -56,10 +61,11 @@ COMMITTED isolation does not make them take turns, so without the lock two
 processes could both pass a check. The lock key is the access store's own,
 so other stores never wait for it; it covers the whole PostgreSQL database,
 so instances or teams that share one database in different schemas wait for
-each other's access writes. Code holding an open write transaction here
-never opens a second write connection to this store (PostgreSQL would wait
-for the lock forever): plans read through the transaction's own connection
-(``_reading_inside``), which refuses to start another write.
+each other's access writes. While a write transaction of this store is open
+in a thread, every other read or write that thread makes on the store joins
+it (``_joining``): a grant plan and a whole decision read and write through
+the one connection, see their own uncommitted rows, and never open a second
+connection that would wait for the lock the transaction holds.
 """
 
 from __future__ import annotations
@@ -69,7 +75,7 @@ from storage.read_only import repositories_are_read_only
 import json
 import logging
 import sqlite3
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -109,36 +115,35 @@ logger = logging.getLogger(__name__)
 ONE_ACTIVE_LINK_INDEX = "access_account_links_one_active"
 # The index that finds the grants one decision stored (``GrantV1.approval_id``).
 APPROVAL_ID_INDEX = "access_grants_approval"
-# The open write transaction whose connection reads made inside it borrow:
-# (id of the repository, its connection). See ``_reading_inside``.
-_WRITE_IN_PROGRESS: ContextVar[tuple[int, Any] | None] = ContextVar("access_store_write_in_progress", default=None)
+# The open write transaction that this thread's other store operations join:
+# (id of the repository, its connection). See ``_joining``.
+_OPEN_WRITE: ContextVar[tuple[int, Any] | None] = ContextVar("access_store_open_write", default=None)
 
 
 @dataclass(frozen=True)
 class DecisionClaim:
-    """The claim one decision holds on a waiting request (``AccessRepository.claim_decision``).
+    """The claim a decision with work outside the database holds on a waiting request (``claim_decision``).
 
-    Taken before the decision stores anything and passed to every write it
-    makes, which succeeds only while the claim still holds.
+    Taken before that work starts and passed to the write that stores the
+    outcome, which succeeds only while the claim still holds.
     """
 
     request_id: str
     claim_id: str
 
 
-class _ReadInsideWrite:
-    """The open write transaction's connection, lent to reads made inside it (a grant plan).
+class _JoinedWrite:
+    """An operation made while a write transaction is open joins it (see ``AccessRepository._joining``).
 
-    Reading through it sees what the transaction sees and opens no second
-    connection while the store's write lock is held. Starting another write
-    through it is a programming error: in PostgreSQL that write would wait for
-    the lock its own transaction holds.
+    Starting and committing are the open transaction's: ``begin_write`` and
+    ``commit`` do nothing here, and leaving the block neither commits nor
+    closes. An error propagates and rolls the whole transaction back.
     """
 
     def __init__(self, conn: Any) -> None:
         self._conn = conn
 
-    def __enter__(self) -> "_ReadInsideWrite":
+    def __enter__(self) -> "_JoinedWrite":
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -148,7 +153,7 @@ class _ReadInsideWrite:
         return self._conn.execute(sql, params)
 
     def begin_write(self) -> None:
-        raise RuntimeError("A write to the access store was started inside another of its writes; plans may only read.")
+        return None
 
     def commit(self) -> None:
         return None
@@ -340,27 +345,29 @@ class AccessRepository:
         self._one_active_link_per_owner()
 
     def _connect(self) -> Any:
-        lent = _WRITE_IN_PROGRESS.get()
-        if lent is not None and lent[0] == id(self):
-            return _ReadInsideWrite(lent[1])
+        joined = _OPEN_WRITE.get()
+        if joined is not None and joined[0] == id(self):
+            return _JoinedWrite(joined[1])
         if self.settings.postgres_dsn:
             return connect_postgres(self.settings.postgres_dsn, write_lock_key=ACCESS_STORE_WRITE_LOCK_KEY)
         return connect_sqlite(str(self.settings.sqlite_path), row_factory=sqlite3.Row)
 
     @contextmanager
-    def _reading_inside(self, conn: Any) -> Iterator[None]:
-        """Lend ``conn`` (an open write transaction) to this repository's reads while a plan runs.
+    def _joining(self, conn: Any) -> Iterator[None]:
+        """Let this thread's other operations on this store join ``conn``'s open write transaction.
 
-        A plan reads the holder's grants after the write lock is taken; with
-        the lent connection it sees exactly what the transaction sees, and in
-        PostgreSQL it opens no new connection per lookup while the lock is held.
+        A grant plan, or a whole decision, reads and writes through the one
+        connection: it sees its own uncommitted rows, and in PostgreSQL it
+        opens no second connection (one that wrote would wait for the lock
+        this transaction holds). Other threads and processes see nothing
+        until the transaction commits.
         """
 
-        token = _WRITE_IN_PROGRESS.set((id(self), conn))
+        token = _OPEN_WRITE.set((id(self), conn))
         try:
             yield
         finally:
-            _WRITE_IN_PROGRESS.reset(token)
+            _OPEN_WRITE.reset(token)
 
     def _column_exists(self, conn: Any, table: str, column: str) -> bool:
         if self.dialect is POSTGRES:
@@ -419,9 +426,10 @@ class AccessRepository:
 
         Stores written before it existed may hold two active links for one tool
         and owner (two link forms finished at once both saw no earlier link).
-        Only the newest was ever used (``active_link``), so the newest stays
-        and each older one is revoked as replaced by it, with an event in the
-        log and a warning naming both links, before the index is created. Runs
+        Only the one ``active_link`` returned was ever used: the newest, or
+        with the same time the larger link id. It stays and each other one is
+        revoked as replaced by it, with an event in the log and a warning
+        naming both links and the rule, before the index is created. Runs
         once per store: later opens find the index with a read and take no
         write lock.
         """
@@ -458,18 +466,24 @@ class AccessRepository:
                 continue
             actor = SubjectRefV1(kind=SubjectKind.TEAM, id=link.team_id)
             at = datetime.now(timezone.utc)
-            self._mark_link_revoked(conn, link, actor=actor, at=at, replaced_by=kept.link_id, reason="duplicate_active_link")
+            # The rule active_link used to pick the link in use.
+            rule = "newer" if kept.created_at_utc > link.created_at_utc else "same_time_larger_link_id"
+            self._mark_link_revoked(
+                conn, link, actor=actor, at=at, replaced_by=kept.link_id, reason="duplicate_active_link", rule=rule
+            )
             self._bump(conn, link.team_id)
             logger.warning(
-                "Two active account links named the same tool and owner; the older one was revoked and the "
-                "newest, the one in use, stays. event=account_link_duplicate_revoked team_id=%s tool_id=%s "
-                "owner_kind=%s owner_id=%s revoked_link_id=%s kept_link_id=%s",
+                "Two active account links named the same tool and owner; the one in use stays and the other was "
+                "revoked. The one in use is the newer one, or with the same time the one with the larger link id. "
+                "event=account_link_duplicate_revoked team_id=%s tool_id=%s owner_kind=%s owner_id=%s "
+                "revoked_link_id=%s kept_link_id=%s rule=%s",
                 link.team_id,
                 link.tool_id,
                 link.owner_kind.value,
                 link.owner_id,
                 link.link_id,
                 kept.link_id,
+                rule,
             )
 
     # -- reading ---------------------------------------------------------------
@@ -615,58 +629,43 @@ class AccessRepository:
             recorded_at_utc=at,
         )
 
-    def create(self, grant: GrantV1, *, claim: DecisionClaim | None = None) -> GrantV1:
+    def create(self, grant: GrantV1) -> GrantV1:
         """Store a grant as it is: blocks, hand-downs waiting for approval, and records a team transfer imports.
 
         Access in force goes through ``store_planned``, so it joins its entry.
-        ``claim``: the grant belongs to a decision, which must still hold it.
         """
 
         with self._connect() as conn:
             conn.begin_write()
-            if claim is not None:
-                self._require_claim_in(conn, claim)
             self._insert_grant(conn, grant)
             self._bump(conn, grant.team_id)
             conn.commit()
         return grant
 
-    def store_planned(
-        self, grant: GrantV1, plan: Callable[[], PlanT], *, claim: DecisionClaim | None = None
-    ) -> tuple[GrantV1, PlanT]:
+    def store_planned(self, grant: GrantV1, plan: Callable[[], PlanT]) -> tuple[GrantV1, PlanT]:
         """Store an access grant as one entry per tool (``access_control.grant_entries``).
 
         ``plan`` reads the holder's access in force and runs after the write
-        lock is taken, through this transaction's connection, so of two grants
+        lock is taken, inside the transaction (``_joining``), so of two grants
         stored at once the second sees the first: it is covered by it, or
         replaces it, and is never stored beside it (two grants in one entry,
         or a tool grant left outside its tool set's entry). Returns the stored
         grant, or the grant already covering it (nothing is then written),
         with the plan.
-
-        A grant a decision stores (``claim``) is written only while the claim
-        holds, so nothing is stored for a request that was closed or taken
-        over meanwhile. The narrower grants it covers are not ended here: they
-        were in force before the decision and end only when its outcome is
-        stored (``finish_request`` with ``replacements``), so a decision that
-        fails leaves them as they were.
         """
 
         with self._connect() as conn:
             conn.begin_write()
-            if claim is not None:
-                self._require_claim_in(conn, claim)
-            with self._reading_inside(conn):
+            with self._joining(conn):
                 planned = plan()
             cover = planned.covered.get(grant.grant_id)
             if cover is not None:
                 conn.commit()
                 return cover, planned
             self._insert_grant(conn, grant)
-            if claim is None:
-                for old_id, by in planned.replaced.items():
-                    if by == grant.grant_id:
-                        self._replace_in(conn, old_id, grant, at=grant.created_at_utc)
+            for old_id, by in planned.replaced.items():
+                if by == grant.grant_id:
+                    self._replace_in(conn, old_id, grant, at=grant.created_at_utc)
             self._bump(conn, grant.team_id)
             conn.commit()
         return grant, planned
@@ -999,7 +998,7 @@ class AccessRepository:
 
         with self._connect() as conn:
             conn.begin_write()
-            with self._reading_inside(conn):
+            with self._joining(conn):
                 planned = plan() if plan is not None else None
             for folder in data_folders:
                 self._insert_data_folder(conn, folder)
@@ -1019,34 +1018,24 @@ class AccessRepository:
         return planned, finished
 
     def approve_pending(
-        self,
-        grant_id: str,
-        *,
-        actor: SubjectRefV1,
-        at: datetime,
-        plan: Callable[[], PlanT],
-        claim: DecisionClaim | None = None,
+        self, grant_id: str, *, actor: SubjectRefV1, at: datetime, plan: Callable[[], PlanT]
     ) -> tuple[GrantV1, bool]:
         """Approve a hand-down waiting for approval, as one entry per tool (see ``store_planned``).
 
         Returns the approved grant and True, or the grant already covering it
         and False: the waiting hand-down is then not needed and is denied.
-        Raises ``AccessStoreConflict`` when it no longer waits. With
-        ``claim``, as in ``store_planned``: only while the decision holds its
-        claim, and narrower grants end when its outcome is stored.
+        Raises ``AccessStoreConflict`` when it no longer waits.
         """
 
         with self._connect() as conn:
             conn.begin_write()
-            if claim is not None:
-                self._require_claim_in(conn, claim)
             grant = self._pending_in(conn, grant_id)
-            with self._reading_inside(conn):
+            with self._joining(conn):
                 planned = plan()
             cover = planned.covered.get(grant_id)
             status = GrantStatus.DENIED if cover is not None else GrantStatus.ACTIVE
             self._set_pending_status_in(conn, grant, status, actor=actor, at=at)
-            if cover is None and claim is None:
+            if cover is None:
                 for old_id, by in planned.replaced.items():
                     if by == grant_id:
                         self._replace_in(conn, old_id, grant, at=at)
@@ -1902,50 +1891,35 @@ class AccessRepository:
             rows = conn.execute(query + " ORDER BY created_at, request_id", tuple(params)).fetchall()
         return [AccessRequestV1.model_validate_json(row[0]) for row in rows]
 
-    def finish_request(
-        self,
-        updated: AccessRequestV1,
-        *,
-        claim_id: str | None = None,
-        replacements: Callable[[], Mapping[str, str]] | None = None,
-    ) -> AccessRequestV1:
+    def finish_request(self, updated: AccessRequestV1, *, claim_id: str | None = None) -> AccessRequestV1:
         """Record a waiting request's outcome once (raises if it was already decided).
 
-        A person's decision passes its claim (``claim_decision``) and, for an
-        approval, ``replacements``: which narrower grants in force each grant
-        it created now replaces (old id -> new id), planned inside this
-        transaction (see ``store_planned``). A withdrawal passes neither (see
-        ``_finish_in``).
+        Inside ``decision_transaction`` this joins the decision's transaction,
+        so its grants and its outcome are stored together. A decision with
+        work outside the database passes its claim (``claim_decision``); a
+        withdrawal passes none (see ``_finish_in``).
         """
 
         with self._connect() as conn:
             conn.begin_write()
-            self._finish_in(conn, updated, claim_id=claim_id, replacements=replacements)
+            self._finish_in(conn, updated, claim_id=claim_id)
             conn.commit()
         return updated
 
-    def _finish_in(
-        self,
-        conn: Any,
-        updated: AccessRequestV1,
-        *,
-        claim_id: str | None,
-        replacements: Callable[[], Mapping[str, str]] | None = None,
-    ) -> None:
+    def _finish_in(self, conn: Any, updated: AccessRequestV1, *, claim_id: str | None) -> None:
         """Record the outcome inside an open write transaction; a lost race raises and rolls it back.
 
-        - ``claim_id`` is the deciding claim: the outcome is stored only while
-          that claim still holds the request.
-        - A withdrawal (the task ended, or its person left) passes no claim and
-          closes the request even while a decision runs; that decision's next
-          write fails (its claim is gone) and it takes back what it stored.
-        - A granted outcome ends the narrower grants its new grants replace
-          (``replacements``), so access in force before the decision ends only
-          with the decision's outcome.
+        - ``claim_id`` is the deciding claim of a decision with work outside
+          the database: the outcome is stored only while that claim still
+          holds the request.
+        - A withdrawal (the task ended, or its person left) passes no claim
+          and closes the request even while such a decision runs; that
+          decision then fails to store its outcome and takes back its work.
         - When the request stops waiting, its hand-downs still waiting for
-          approval are denied, except those a granted outcome names (approved
-          in place); a denied or withdrawn request ends what an unfinished
-          decision left behind (``_end_unfinished_in``). All in this transaction.
+          approval are denied in this transaction, except those a granted
+          outcome names (approved in place). The outcome of a Deny or a
+          withdrawal is a copy of the waiting request, so its ``grant_ids``
+          still name the hand-downs to deny.
         """
 
         p = self.dialect.bind
@@ -1972,40 +1946,9 @@ class AccessRepository:
         conn.execute(f"DELETE FROM access_request_claims WHERE request_id={p}", (updated.request_id,))
         actor = updated.decided_by or SubjectRefV1(kind=SubjectKind.TEAM, id=updated.team_id)
         at = updated.decided_at_utc or datetime.now(timezone.utc)
-        granted = updated.status is AccessRequestStatus.GRANTED
-        changed = 0
-        if granted and replacements is not None:
-            changed += self._replace_planned_in(conn, replacements, actor=actor, at=at)
-        # The outcome of a Deny or a withdrawal is a copy of the waiting
-        # request, so its grant_ids still name the hand-downs to deny.
-        keep = set(updated.grant_ids) if granted else set()
-        changed += self._deny_waiting_hand_downs_in(conn, waiting, keep=keep, actor=actor, at=at)
-        if updated.status in {AccessRequestStatus.DENIED, AccessRequestStatus.WITHDRAWN}:
-            changed += self._end_unfinished_in(conn, waiting, at=at)
-        if changed:
+        keep = set(updated.grant_ids) if updated.status is AccessRequestStatus.GRANTED else set()
+        if self._deny_waiting_hand_downs_in(conn, waiting, keep=keep, actor=actor, at=at):
             self._bump(conn, updated.team_id)
-
-    def _replace_planned_in(
-        self, conn: Any, replacements: Callable[[], Mapping[str, str]], *, actor: SubjectRefV1, at: datetime
-    ) -> int:
-        """End the narrower grants an approval's new grants replace (old id -> new id), planned in this transaction."""
-
-        p = self.dialect.bind
-        with self._reading_inside(conn):
-            planned = dict(replacements())
-        for old_id, new_grant_id in planned.items():
-            row = conn.execute(f"SELECT * FROM access_grants WHERE grant_id={p}", (new_grant_id,)).fetchone()
-            if row is None:
-                raise AccessStoreConflict(f"Grant {new_grant_id} of this approval is missing; nothing was stored.")
-            self._replace_in(conn, old_id, self._grant_from_row(row), at=at)
-        if planned:
-            logger.info(
-                "An approval's access replaced narrower access that was in force before it. "
-                "event=grants_replaced_at_outcome by=%s replaced=%s",
-                actor.id,
-                ",".join(f"{old}->{new}" for old, new in planned.items()),
-            )
-        return len(planned)
 
     def _waiting_in(self, conn: Any, request_id: str, *, message: str) -> AccessRequestV1:
         """The stored request, which must still wait; ``message`` (with ``{request_id}``) explains a refusal."""
@@ -2029,8 +1972,8 @@ class AccessRepository:
                 conn,
                 claim.request_id,
                 message=(
-                    "Access request {request_id} was closed ({status}) while this decision ran, "
-                    "so nothing this decision stored was kept."
+                    "Access request {request_id} was already {status} by another decision or a withdrawal while "
+                    "this decision ran, so this decision's outcome was not stored."
                 ),
             )
         except AccessStoreConflict as exc:
@@ -2040,8 +1983,8 @@ class AccessRepository:
         ).fetchone()
         if held is None or held[0] != claim.claim_id:
             raise DecisionClaimLost(
-                f"This decision's claim on access request {claim.request_id} ran out and was recovered or taken "
-                "over, so its outcome was not stored and nothing it stored was kept. Decide the request again."
+                f"This decision's claim on access request {claim.request_id} ran out and another decision took "
+                "it, so this decision's outcome was not stored. Look at the request again."
             )
         return waiting
 
@@ -2062,58 +2005,47 @@ class AccessRepository:
             denied += 1
         return denied
 
-    def _end_unfinished_in(self, conn: Any, request: AccessRequestV1, *, at: datetime) -> int:
-        """End access an unfinished decision on ``request`` left behind; returns how many grants ended.
+    # -- one decision at a time ------------------------------------------------------
 
-        While a request waits, and after it was denied or withdrawn, no grant
-        may carry its approval id, and the hand-down it names may not be in
-        force: only a decision that stored grants and then stopped before
-        recording its outcome (a crash, a failure it could not undo) leaves
-        such grants. They end here, with the team as the actor, and a warning
-        names them. Found by the indexed approval id, never by reading every grant.
+    @contextmanager
+    def decision_transaction(self, request_id: str, *, at: datetime) -> Iterator[AccessRequestV1]:
+        """One transaction for a person's decision: its grants and its outcome are stored together.
+
+        Takes the store's write lock, checks that the request still waits and
+        that no decision with work outside the database holds a current claim
+        on it (``DecisionInProgress``), and yields the request. Everything the
+        decision does on this store in this thread joins the transaction
+        (``_joining``): its authority checks and plans see the grants it
+        stored a moment ago, other writers see none of them, and if anything
+        fails nothing was stored. A second decision waits for the lock and
+        then finds the request decided.
         """
 
-        p = self.dialect.bind
-        live = (GrantStatus.ACTIVE.value, GrantStatus.PENDING.value)
-        left = [
-            str(row[0])
-            for row in conn.execute(
-                f"SELECT grant_id FROM access_grants WHERE approval_id={p} AND status IN ({p},{p})",
-                (request.request_id, *live),
-            ).fetchall()
-        ]
-        for grant_id in request.grant_ids:
-            row = conn.execute(f"SELECT status FROM access_grants WHERE grant_id={p}", (grant_id,)).fetchone()
-            if row is not None and row[0] == GrantStatus.ACTIVE.value and grant_id not in left:
-                left.append(grant_id)
-        if not left:
-            return 0
-        team = SubjectRefV1(kind=SubjectKind.TEAM, id=request.team_id)
-        ended: list[str] = []
-        for grant_id in left:
-            if grant_id not in ended:
-                ended += self._revoke_in(conn, grant_id, actor=team, at=at, detail={"unfinished_decision": request.request_id})
-        logger.warning(
-            "An access decision stopped before recording its outcome; the access it left behind was ended. "
-            "event=access_decision_leftovers_ended request_id=%s request_status=%s grant_ids=%s",
-            request.request_id,
-            request.status.value,
-            ",".join(ended),
-        )
-        return len(ended)
+        with self._connect() as conn:
+            conn.begin_write()
+            request = self._waiting_in(conn, request_id, message="That access request was already {status}.")
+            self._refuse_current_claim_in(conn, request_id, at=at)
+            with self._joining(conn):
+                yield request
+            conn.commit()
 
-    # -- one decision at a time (claims) -----------------------------------------
+    def _refuse_current_claim_in(self, conn: Any, request_id: str, *, at: datetime) -> None:
+        p = self.dialect.bind
+        row = conn.execute(
+            f"SELECT claimed_until FROM access_request_claims WHERE request_id={p}", (request_id,)
+        ).fetchone()
+        if row is not None and datetime.fromisoformat(row[0]) > at:
+            raise DecisionInProgress(f"Access request {request_id} is being decided right now.")
 
     def claim_decision(self, request_id: str, *, claim_id: str, at: datetime, until: datetime) -> AccessRequestV1:
-        """Let one decision at a time proceed on a waiting request; returns the request as stored.
+        """Claim a waiting request for a decision with work outside the database; returns the request.
 
         Raises ``AccessStoreConflict`` when the request is missing or no
         longer waits, and ``DecisionInProgress`` while another decision's
         claim is current. A claim past ``claimed_until`` belonged to a
-        decision that stopped without finishing (a process that ended): it is
-        taken over, and the access that decision left behind ends first. A
-        live decision renews its claim before each long step
-        (``renew_decision``), so it never runs out while it works.
+        decision that stopped without finishing (a process that ended) and is
+        taken over. A live decision renews its claim before and after each
+        long step (``renew_decision``).
         """
 
         p = self.dialect.bind
@@ -2133,8 +2065,6 @@ class AccessRepository:
                     row[0],
                     claim_id,
                 )
-            if self._end_unfinished_in(conn, request, at=at):
-                self._bump(conn, request.team_id)
             conn.execute(
                 f"INSERT INTO access_request_claims(request_id, team_id, claim_id, claimed_at, claimed_until) "
                 f"VALUES ({p},{p},{p},{p},{p}) ON CONFLICT(request_id) DO UPDATE SET claim_id=excluded.claim_id, "
@@ -2147,9 +2077,9 @@ class AccessRepository:
     def renew_decision(self, claim: DecisionClaim, *, until: datetime) -> None:
         """Extend a claim this decision still holds to ``until``; raises ``DecisionClaimLost`` when it does not.
 
-        Called before and after each long step (a program download), so a
-        decision that is still working never loses its claim, and one that
-        lost it stops before it changes anything else.
+        Called before and after each long step (a program download): the
+        step gets the claim's whole time limit, and a decision that lost its
+        claim meanwhile stops before it changes anything else.
         """
 
         p = self.dialect.bind
@@ -2163,7 +2093,7 @@ class AccessRepository:
             conn.commit()
 
     def release_decision(self, request_id: str, claim_id: str) -> bool:
-        """Give up a claim this decision still holds (it failed and undid what it stored)."""
+        """Give up a claim this decision still holds (it failed and took back its work)."""
 
         p = self.dialect.bind
         with self._connect() as conn:
@@ -2174,78 +2104,62 @@ class AccessRepository:
             conn.commit()
         return bool(released)
 
-    def recover_unfinished_decisions(self, team_id: str, now: datetime) -> list[str]:
-        """End what decisions that stopped without finishing left behind; returns the request ids.
+    # -- grants without a granted outcome --------------------------------------------
 
-        The gateway's Inbox pass runs this. A claim past its time limit
-        belonged to a decision that stopped (its process ended): the claim
-        ends and the grants it left end, so the request waits again and that
-        access does not stay in force until someone decides it. Grants that
-        carry the approval id of a request that was denied or withdrawn end
-        too (the store refuses such writes since 2026-10-17; this also clears
-        ones left earlier). The usual pass only reads and takes no write lock.
+    def grants_without_granted_outcome(self, team_id: str) -> list[tuple[GrantV1, AccessRequestV1]]:
+        """Grants in force or waiting that carry the approval id of a request that was not granted.
+
+        A decision stores its grants and its outcome together, so this finds
+        none that the current version wrote. An older version stored grants
+        before their outcome and could leave them behind when it stopped in
+        between (a crash, a failure it could not undo). Such grants must not
+        stay in force (``end_grants_without_granted_outcome``) or travel in a
+        team transfer (``team_transfer.access``).
         """
 
-        if not self._expired_claims(team_id, now) and not self._closed_request_leftovers(team_id):
-            return []
         p = self.dialect.bind
-        recovered: list[str] = []
+        rows = self._read_rows(
+            "SELECT g.*, r.payload_json AS request_json FROM access_grants g "
+            "JOIN access_requests r ON r.request_id = g.approval_id "
+            f"WHERE g.team_id={p} AND g.status IN ({p},{p}) AND r.status <> {p}",
+            (team_id, GrantStatus.ACTIVE.value, GrantStatus.PENDING.value, AccessRequestStatus.GRANTED.value),
+        )
+        return [(self._grant_from_row(row), AccessRequestV1.model_validate_json(row["request_json"])) for row in rows]
+
+    def end_grants_without_granted_outcome(self, team_id: str, now: datetime) -> list[str]:
+        """End the grants ``grants_without_granted_outcome`` finds (and what was handed down from them).
+
+        The gateway's Inbox pass runs this; the usual pass only reads and
+        takes no write lock. Each ended grant is logged with its request.
+        """
+
+        if not self.grants_without_granted_outcome(team_id):
+            return []
+        team = SubjectRefV1(kind=SubjectKind.TEAM, id=team_id)
+        ended: list[str] = []
         with self._connect() as conn:
             conn.begin_write()
-            changed = 0
-            for request_id, claim_id in self._expired_claims(team_id, now, conn=conn):
-                stored = conn.execute(
-                    f"SELECT status, payload_json FROM access_requests WHERE request_id={p}", (request_id,)
-                ).fetchone()
-                if stored is not None and stored[0] == AccessRequestStatus.WAITING.value:
-                    changed += self._end_unfinished_in(conn, AccessRequestV1.model_validate_json(stored[1]), at=now)
-                conn.execute(f"DELETE FROM access_request_claims WHERE request_id={p}", (request_id,))
-                recovered.append(request_id)
-                logger.warning(
-                    "A decision's claim on an access request ran out before it finished; the request waits "
-                    "again. event=access_decision_claim_recovered request_id=%s claim_id=%s",
-                    request_id,
-                    claim_id,
+            with self._joining(conn):
+                found = self.grants_without_granted_outcome(team_id)
+            for grant, request in found:
+                if grant.grant_id in ended:
+                    continue
+                ended += self._revoke_in(
+                    conn, grant.grant_id, actor=team, at=now, detail={"approval_not_granted": request.request_id}
                 )
-            for request in self._closed_request_leftovers(team_id, conn=conn):
-                changed += self._end_unfinished_in(conn, request, at=now)
-                recovered.append(request.request_id)
-            if changed:
+                logger.warning(
+                    "A grant carried the approval id of an access request that was not granted; it was ended. "
+                    "event=grant_without_granted_outcome_ended grant_id=%s request_id=%s request_status=%s",
+                    grant.grant_id,
+                    request.request_id,
+                    request.status.value,
+                )
+            if ended:
                 self._bump(conn, team_id)
             conn.commit()
-        return recovered
+        return ended
 
-    def _expired_claims(self, team_id: str, now: datetime, *, conn: Any | None = None) -> list[tuple[str, str]]:
-        """(request id, claim id) of the team's claims past their time limit."""
-
-        query = (
-            "SELECT request_id, claim_id, claimed_until FROM access_request_claims "
-            f"WHERE team_id={self.dialect.bind}"
-        )
-        rows = self._read_rows(query, (team_id,), conn)
-        # By position: a PostgreSQL row iterates over its column names.
-        return [(str(row[0]), str(row[1])) for row in rows if datetime.fromisoformat(row[2]) <= now]
-
-    def _closed_request_leftovers(self, team_id: str, *, conn: Any | None = None) -> list[AccessRequestV1]:
-        """Denied or withdrawn requests that still have grants in force carrying their approval id."""
-
-        p = self.dialect.bind
-        query = (
-            "SELECT DISTINCT r.payload_json FROM access_grants g JOIN access_requests r ON r.request_id = g.approval_id "
-            f"WHERE g.team_id={p} AND g.status IN ({p},{p}) AND r.status IN ({p},{p})"
-        )
-        params = (
-            team_id,
-            GrantStatus.ACTIVE.value,
-            GrantStatus.PENDING.value,
-            AccessRequestStatus.DENIED.value,
-            AccessRequestStatus.WITHDRAWN.value,
-        )
-        return [AccessRequestV1.model_validate_json(row[0]) for row in self._read_rows(query, params, conn)]
-
-    def _read_rows(self, query: str, params: tuple[Any, ...], conn: Any | None) -> list[Any]:
-        if conn is not None:
-            return list(conn.execute(query, params).fetchall())
+    def _read_rows(self, query: str, params: tuple[Any, ...]) -> list[Any]:
         with self._connect() as reader:
             return list(reader.execute(query, params).fetchall())
 
