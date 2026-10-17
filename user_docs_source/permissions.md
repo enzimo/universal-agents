@@ -206,7 +206,10 @@ and the next step:
    messages, when its owner can decide it. Decide in the Inbox
    ([The review card](#the-review-card)) or with the buttons in Telegram and
    Discord ([Decide requests in chat](#decide-requests-in-chat)). The task
-   continues with the decision.
+   continues with the decision. A request is decided once: if you press a
+   button twice, or decide in chat and in the Inbox at the same moment, the
+   second one is told someone is deciding it. If a decision cannot be saved,
+   nothing it gave is kept and the request waits for a decision again.
 
 Workers ask the same way. A worker's request goes to the person directly;
 TeamLead does not pass the question along in its own conversation. When you

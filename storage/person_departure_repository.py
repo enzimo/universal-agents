@@ -296,13 +296,22 @@ class PersonDepartureRepository:
         sets.append(_RecordSet("objectives", "owner_canonical_user_id", person))
         return sets
 
-    def _select(self, conn: Any, record_set: _RecordSet) -> list[dict[str, Any]]:
-        where, params = record_set.where(self.dialect.bind)
-        return [dict(row) for row in conn.execute(f"SELECT * FROM {record_set.table} WHERE {where}", params).fetchall()]
-
     def _delete(self, conn: Any, record_set: _RecordSet) -> int:
         where, params = record_set.where(self.dialect.bind)
         return int(conn.execute(f"DELETE FROM {record_set.table} WHERE {where}", params).rowcount or 0)
+
+    def _take(self, conn: Any, record_set: _RecordSet) -> list[dict[str, Any]]:
+        """Delete the set's rows and return exactly the rows deleted (``DELETE ... RETURNING``).
+
+        One statement, so every row that leaves the table is the row that is
+        held: under PostgreSQL's READ COMMITTED isolation a SELECT and a later
+        DELETE see different rows, and a row another process committed in
+        between would be deleted without being held.
+        """
+
+        where, params = record_set.where(self.dialect.bind)
+        rows = conn.execute(f"DELETE FROM {record_set.table} WHERE {where} RETURNING *", params).fetchall()
+        return [dict(row) for row in rows]
 
     # -- deleting, holding, restoring ------------------------------------------------------
 
@@ -344,7 +353,8 @@ class PersonDepartureRepository:
             for record_set in self._held_record_sets(conn, person_id):
                 if not self._table_exists(conn, record_set.table):
                     continue
-                for row in self._select(conn, record_set):
+                taken = self._take(conn, record_set)
+                for row in taken:
                     conn.execute(
                         "INSERT INTO person_held_rows (held_row_id, team_id, person_id, position, source_table, "
                         f"row_json, held_at) VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p})",
@@ -359,7 +369,7 @@ class PersonDepartureRepository:
                         ),
                     )
                     position += 1
-                moved += self._delete(conn, record_set)
+                moved += len(taken)
             conn.commit()
         return moved
 
@@ -390,14 +400,17 @@ class PersonDepartureRepository:
         restored = 0
         with self._connect() as conn:
             conn.begin_write()
+            # Deleted and returned in one statement (see ``_take``), so a row
+            # held meanwhile is never deleted without being restored.
             rows = conn.execute(
-                f"SELECT source_table, row_json FROM person_held_rows WHERE team_id={p} AND person_id={p} ORDER BY position",
+                f"DELETE FROM person_held_rows WHERE team_id={p} AND person_id={p} "
+                "RETURNING position, source_table, row_json",
                 (team_id, person_id),
             ).fetchall()
             columns_by_table: dict[str, set[str]] = {}
-            for source_table, row_json in rows:
-                restored += self._restore_row(conn, source_table, json.loads(row_json), columns_by_table, person_id)
-            conn.execute(f"DELETE FROM person_held_rows WHERE team_id={p} AND person_id={p}", (team_id, person_id))
+            # By position: a PostgreSQL row iterates over its column names.
+            for row in sorted(rows, key=lambda row: int(row[0])):
+                restored += self._restore_row(conn, str(row[1]), json.loads(row[2]), columns_by_table, person_id)
             conn.commit()
         return restored
 

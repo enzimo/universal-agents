@@ -24,6 +24,11 @@ the gateway is where people see and decide them:
   request id on the transcript message and shows a card that reads the
   request (``review``) and decides through the same ``decide``. Other
   channels show the Inbox link.
+- **One decision at a time.** A decision claims the request first
+  (``AccessRequests.decide``), so pressing a button twice, or deciding in
+  chat and on the web card at once, decides once; the second press is told
+  someone is deciding it. Each maintenance pass recovers claims whose
+  decision stopped without finishing (``recover_expired_claims``).
 - **Waking the agent.** After a decision the gateway sends
   ``AccessRequestResolvedV1`` to the requesting agent. When the transport is
   down the message is sent by the next maintenance pass
@@ -1023,6 +1028,10 @@ class GatewayAccessInbox:
     async def run_once(self) -> None:
         requests = self.requests()
         store = requests.service.store
+        # A decision whose process ended keeps its request claimed until the
+        # claim runs out; this ends what it left behind, and the request waits
+        # for a decision again (AccessRepository.recover_expired_claims).
+        await asyncio.to_thread(store.recover_expired_claims, self._settings.team_id, requests.service.clock())
         for request in await asyncio.to_thread(store.claim_unannounced, self._settings.team_id):
             try:
                 await self.announce(request)

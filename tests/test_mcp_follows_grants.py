@@ -361,6 +361,41 @@ async def test_one_call_proposes_and_one_review_installs_the_server_and_its_use(
     assert len(world.mcp_store().list_records()) == 1, "the resumed call did not record another connection"
 
 
+@pytest.mark.asyncio
+async def test_a_second_approval_while_the_first_applies_is_refused_and_the_server_stays_installed(
+    world, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Before decisions claimed requests, a second approval that read the
+    # server as pending put it back to pending when it lost the race.
+    set_agent_ref(world.lead)
+    context = Context("tooluse-propose-mcp-twice")
+    with pytest.raises(InterruptException):
+        await propose(context)
+    request_id = context.raised[0]["access_request_id"]
+    [pending] = world.mcp_store().list_records()
+    store = world.service.store
+    original = store.apply_together
+    refusals: list[str] = []
+
+    def second_approval(*args: Any, **kwargs: Any) -> Any:
+        # The first approval has installed the server and is about to store its outcome.
+        assert world.mcp_store().require(pending.connection_id).lifecycle is MCPConnectionLifecycle.ACTIVE
+        try:
+            world.requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE_ALL)
+        except HandDownRefused as exc:
+            refusals.append(str(exc))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "apply_together", second_approval)
+    decided = world.requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE_ALL)
+
+    assert refusals and "deciding this request right now" in refusals[0]
+    assert decided.status is AccessRequestStatus.GRANTED
+    assert world.mcp_store().require(pending.connection_id).lifecycle is MCPConnectionLifecycle.ACTIVE
+    [grant] = world.grants()
+    assert decided.grant_ids == (grant.grant_id,)
+
+
 def refusal(result: dict[str, Any]) -> dict[str, Any]:
     """The refusal the model reads in a failed MCP tool result."""
 

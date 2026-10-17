@@ -35,7 +35,7 @@ from access_control import safe_open
 from access_control.decisions import HandDownRefused
 from access_control.entities import PersonPrincipal
 from access_control.folders import FOLDER_ROOT_TEAM, FOLDER_ROOT_USERS, normalize_folder_id
-from access_control.requests import FILE_DELIVERY_CHANGE, AccessRequests
+from access_control.requests import FILE_DELIVERY_CHANGE, AccessRequests, DecisionClaim
 from access_control.sensitive_paths import sensitive_reason
 from access_control.safe_open import UnsafePath
 from custom_messages.contracts.access_v2 import (
@@ -351,8 +351,10 @@ class GatewayFileSharing:
 
     # -- applying an approved delivery (AccessRequests.appliers) -------------------------
 
-    def apply(self, request: AccessRequestV1, reviewer: PersonPrincipal, finished: AccessRequestV1) -> AccessRequestV1:
-        """Copy the approved file into the recipient's received/ folder, then record the outcome."""
+    def apply(
+        self, request: AccessRequestV1, reviewer: PersonPrincipal, finished: AccessRequestV1, claim: DecisionClaim
+    ) -> AccessRequestV1:
+        """Copy the approved file into the recipient's received/ folder, then record the outcome under ``claim``."""
 
         assert request.change is not None
         requests = self._requests()
@@ -371,7 +373,7 @@ class GatewayFileSharing:
         name = self._write_new(folder, item.parts[-1], data)
         applied = finished.model_copy(update={"applied_at_utc": requests.service.clock()})
         try:
-            requests.service.store.finish_request(applied)
+            requests.service.store.finish_request(applied, claim_id=claim.claim_id)
         except AccessStoreConflict as exc:
             self._discard(folder + (name,))
             raise HandDownRefused(str(exc)) from exc

@@ -173,14 +173,15 @@ class GatewayMCPControls:
                 raise PermissionError(refusal)
         # One entry per tool (access_control.grant_entries): nothing new where
         # an agent type already holds the server.
-        plan = service.plan_grants(list(grants))
-        service.store.apply_together(
+        planned = list(grants)
+        plan, _outcome = service.store.apply_together(
             service.team_id,
-            grants=plan.new,
-            replaced=plan.replaced,
+            # Planned inside the store's write transaction.
+            plan=lambda: service.plan_grants(planned),
             actor=SubjectRefV1(kind=SubjectKind.USER, id=person_id),
             at=now,
         )
+        assert plan is not None
         grants = plan.new + list(plan.covered.values())
         logger.warning(
             "An administrator let agents use an installed MCP server for everyone's work. "

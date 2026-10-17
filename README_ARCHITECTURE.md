@@ -451,6 +451,20 @@ conversations, memory, authorization records, gateway sessions, and execution
 attempts. Agents still coordinate through NATS rather than polling one
 another's tables.
 
+A store whose writes read before they write takes turns between writers on
+both backends. In SQLite every write starts with `BEGIN IMMEDIATE`. In
+PostgreSQL the default READ COMMITTED isolation lets two transactions read the
+same rows before either writes, so the access store and the knowledge store
+take their own transaction-level advisory lock in `begin_write`
+(`storage/postgres_connection.py`, one key per store, so unrelated stores never
+wait for each other); other stores lock the rows they change (`SELECT ... FOR
+UPDATE`). Moving rows between tables uses `DELETE ... RETURNING` so exactly the
+rows deleted are the rows kept elsewhere (a removed person's held records,
+`storage/person_departure_repository.py`). Rationale: the 2026-10-17
+concurrency audit found that on PostgreSQL an approved change could be claimed
+twice, two edits to one person's model settings lost one, and holding a
+person's records could delete a row written meanwhile without holding it.
+
 An Objective change that a tool call or a person's command asked for is
 reported as not saved when the write fails (`ObjectiveSaveFailed` in
 `custom_agents/task_manager_objectives.py`), so the caller never gets back a
@@ -1066,7 +1080,12 @@ grant moves to the new one (`AccessRepository._replace_in`, a `grant_moved`
 event), so replacing never cuts off a worker; this relaxes "grants are
 immutable" for `parent_grant_id` only. A grant an existing one covers is not
 stored. Grants neither covers stay side by side (lasting access plus a step-up
-for one task). Removing access removes the whole entry
+for one task). The plan runs after the store's write lock is taken
+(`AccessRepository.store_planned`, `approve_pending`, `apply_together`), so of
+two grants stored at once the second sees the first: before 2026-10-17 two
+first calls of one tool in one request could both store a task grant, and a
+tool grant stored with its tool set could stay as a separate entry that
+removing the set left working. Removing access removes the whole entry
 (`AccessService.revoke_by_person`, `AccessRequests.revoke`, proposals'
 removals). Why: people saw several independent grants for one tool, assumed the
 broadest replaced the others, and removing one could leave another working.
@@ -1146,6 +1165,33 @@ and TeamLead's own requests a box that lets it hand the access on to workers
 without asking. Chat buttons, which have no checkboxes, offer the same choices
 as separate buttons (`assistant_gateway/application/access_reviews.py`).
 
+Each request is decided once (`AccessRequests.decide`). Before a decision
+stores anything it claims the waiting request (`AccessRepository.claim_decision`,
+a short-lived row in `access_request_claims` with an owner and a time limit,
+`DECISION_CLAIM_SECONDS`), and its outcome is stored only while that claim
+still holds (`finish_request`, `apply_together`). A second decision made at the
+same moment (a double click, a chat button and the web card, two reviewers,
+`assistant_cli access decide`) is told someone is deciding the request. If
+anything fails before the outcome is stored, only the grants this decision
+created are revoked and the claim is given up, so the request waits again;
+grants already in force that covered the request belong to earlier decisions
+and are never touched. When a grant cannot be revoked (the store is still
+unavailable), the claim is kept until it runs out; the gateway's Inbox pass
+(`recover_expired_claims`) or the next decision then ends the grants the
+unfinished decision left behind, found by the request's approval id. A
+withdrawal (the task ended, or its person left) takes no claim and closes the
+request even while a decision runs, which then fails and takes back what it
+stored; a denied or withdrawn request ends leftover grants and denies its
+waiting hand-downs in the same transaction. Rationale (2026-10-17 concurrency
+audit): grants and the outcome were separate transactions, so a lost race
+revoked the winner's grants and access that was in force before the request,
+and a failed approval left access in force that a later Deny did not remove.
+The claim is a separate transient table rather than a new request status, so
+readers of waiting requests are unchanged and the team transfer, which never
+carries access requests, is unaffected. One transaction for the whole decision
+was rejected: later grants of one approval are checked against earlier ones
+(the person's own grant first), so the checks would need uncommitted grants.
+
 When nobody can hand the access on, or a service is missing from the tool
 catalog, TeamLead proposes the whole change with `propose_access_change`
 (`custom_tools/providers/access_proposals.py`, catalog `fn:access_proposals`):
@@ -1171,8 +1217,11 @@ plan, compares its digest with the one reviewed, writes any new tool file to
 `control/access/tools/` from the typed item (`access_catalog/instance_tools.py`,
 only `http:*` tools), reloads the catalog, and stores grants, blocks, data
 folders, revocations and the request outcome in one transaction
-(`AccessRepository.apply_together`); if that fails the tool files are removed,
-so nothing is half applied. A tool with no grants gives nobody anything, which
+(`AccessRepository.apply_together`) under the decision's claim; if that fails
+the tool files are removed, so nothing is half applied. Because the claim is
+held from before the first file is written, a second approval of the same
+proposal is refused before it touches anything and can never take back tool
+files, programs or an MCP server the first one installed. A tool with no grants gives nobody anything, which
 is why writing its file first is safe. Afterwards the gateway opens the broker's
 account link form for the approver, watches it with the tool setup watcher
 (`GatewayToolSetups.after_proposal_links`), and holds the decision message to
@@ -1383,7 +1432,13 @@ person types, through the broker's own store path (`collect_credential`, in the
 team's collection for a team link and the person's for their own), and links it
 in the same submission, so one form finishes the job. A new credential gets a
 key made from the tool and owner and a number when that key is taken, so it
-never replaces a stored credential. The form's **Used by** line is read by the
+never replaces a stored credential. One link per tool and owner is active:
+creating one reads and revokes the earlier link in the same transaction, and a
+partial unique index refuses a second active link. A store that held two from
+before the index (two forms finished at once) keeps the newest, the one in use,
+and revokes the older at the first start, logging
+`event=account_link_duplicate_revoked`; otherwise unlinking the newest would
+have put the older credential back in use. The form's **Used by** line is read by the
 broker from the grant store it already holds (agent-side grants in force that
 reach the tool for the owner's work). It is shown for information only, and the
 access service still decides every call. The broker reads it itself rather than
@@ -2379,8 +2434,10 @@ inspect | review | import | import-credentials | finish-import`; guide:
   new gateway key. Later batches require its receipt and the exact same signed
   export. Imported identities are skipped and existing destination records
   kept. Account links match by team, owner and tool, since a newer link has a
-  new ID; all active destination chat bindings, including removed people's,
-  participate in collision checks through a separate read-only identity query.
+  new ID; a file holding two for one tool and owner (from a store before the
+  one-active-link index) has the older refused with the newer named. All
+  active destination chat bindings, including removed people's, participate in
+  collision checks through a separate read-only identity query.
   Noncredential batches hold an import lock and the supervisor's run lock;
   broker batches hold the import lock while the runtime runs. The process config
   loader checks the unfinished marker for every entry point. Failed later

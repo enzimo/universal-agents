@@ -67,9 +67,10 @@ from access_control.proposal_clis import cli_rows, install_programs, remove_prog
 from access_control.decisions import HandDownRefused
 from access_control.entities import PersonPrincipal, agent_type_id
 from access_control.folders import FOLDER_ROOT_USERS, FolderIdError, grantable_folder_id
+from access_control.grant_entries import GrantPlan
 from access_control.mcp_servers import default_proposal_grants
 from access_control.people import is_administrator
-from access_control.requests import ACCESS_PROPOSAL_CHANGE, LEVEL_WORDS, AccessRequests
+from access_control.requests import ACCESS_PROPOSAL_CHANGE, LEVEL_WORDS, AccessRequests, DecisionClaim
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     AccessProposalV1,
@@ -563,7 +564,17 @@ class ProposalApplier:
             raise HandDownRefused("The proposal does not match what was reviewed; TeamLead must propose it again.")
         return proposal
 
-    def apply(self, request: AccessRequestV1, reviewer: PersonPrincipal, finished: AccessRequestV1) -> AccessRequestV1:
+    def apply(
+        self, request: AccessRequestV1, reviewer: PersonPrincipal, finished: AccessRequestV1, claim: DecisionClaim
+    ) -> AccessRequestV1:
+        """Apply an approved proposal under the decision's claim (``AccessRequests.decide``).
+
+        The claim is held from before the first file is written until the
+        outcome is stored, so a second approval of the same proposal is
+        refused before it touches anything: it can never take back tool
+        files, programs or an MCP server the first approval installed.
+        """
+
         requests = self.requests()
         proposal = self.stored_proposal(requests, request)
         if proposal.installs and not is_administrator(reviewer.roles):
@@ -575,7 +586,7 @@ class ProposalApplier:
             compiled = self.compiler(requests).compile(proposal, person=person, task_id=request.work_id)
         except ProposalRefused as exc:
             raise HandDownRefused(f"The proposal no longer applies: {exc}") from exc
-        applied = self._apply_items(requests, request, reviewer, finished, compiled)
+        applied = self._apply_items(requests, request, reviewer, finished, compiled, claim)
         if proposal.account_links:
             self.account_links[request.request_id] = list(proposal.account_links)
         logger.warning(
@@ -598,6 +609,7 @@ class ProposalApplier:
         reviewer: PersonPrincipal,
         finished: AccessRequestV1,
         compiled: CompiledProposal,
+        claim: DecisionClaim,
     ) -> AccessRequestV1:
         """Write tool files and install MCP servers, then store the rest together; undo all on failure."""
 
@@ -610,7 +622,7 @@ class ProposalApplier:
                 written.append(write_instance_tool(self.instance_root, tool))
             self._install_servers(compiled.proposal, request, reviewer, installed, now=requests.service.clock())
             requests.service.catalog = self.catalogs.current()
-            return self._store(requests, request, reviewer, finished, compiled)
+            return self._store(requests, request, reviewer, finished, compiled, claim)
         except (HandDownRefused, CatalogError, AccessStoreConflict, PermissionError, ValueError) as exc:
             for path in written:
                 remove_instance_tool(path)
@@ -686,6 +698,7 @@ class ProposalApplier:
         reviewer: PersonPrincipal,
         finished: AccessRequestV1,
         compiled: CompiledProposal,
+        claim: DecisionClaim,
     ) -> AccessRequestV1:
         service = requests.service
         now = service.clock()
@@ -707,19 +720,26 @@ class ProposalApplier:
                 if not service.may_revoke(reviewer, held):
                     raise HandDownRefused(f"You cannot remove {held.grant_id}.")
                 revoke_ids.append(held.grant_id)
-        plan = service.plan_grants(grants, ending=revoke_ids)
-        given = [grant.grant_id for grant in plan.new] + [cover.grant_id for cover in plan.covered.values()]
-        applied = finished.model_copy(update={"grant_ids": tuple(dict.fromkeys(given)), "applied_at_utc": now})
-        service.store.apply_together(
+        ending = tuple(dict.fromkeys(revoke_ids))
+
+        def outcome(plan: GrantPlan | None) -> AccessRequestV1:
+            assert plan is not None
+            given = [grant.grant_id for grant in plan.new] + [cover.grant_id for cover in plan.covered.values()]
+            return finished.model_copy(update={"grant_ids": tuple(dict.fromkeys(given)), "applied_at_utc": now})
+
+        # Planned inside the store's write transaction (one entry per tool),
+        # and stored with the outcome under the decision's claim.
+        _plan, applied = service.store.apply_together(
             service.team_id,
-            grants=plan.new,
-            replaced=plan.replaced,
+            plan=lambda: service.plan_grants(grants, ending=ending),
             data_folders=folders,
-            revoke_ids=tuple(dict.fromkeys(revoke_ids)),
-            finished_request=applied,
+            revoke_ids=ending,
+            finish=outcome,
+            claim_id=claim.claim_id,
             actor=SubjectRefV1(kind=SubjectKind.USER, id=reviewer.person_id),
             at=now,
         )
+        assert applied is not None
         return applied
 
     def _all_grants(
