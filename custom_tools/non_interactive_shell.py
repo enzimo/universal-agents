@@ -11,6 +11,7 @@ service through ``custom_agents.code_access``.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -893,8 +894,14 @@ def _execute_commands(
         cancel_event = threading.Event()
         ordered_results: list[Dict[str, Any] | None] = [None] * len(commands)
         with ThreadPoolExecutor() as executor:
+            # Pool threads do not inherit context variables, and the agent of
+            # this call (custom_tools.runtime_context) is one. Without it each
+            # command ran with code_access_without_agent: internet always on,
+            # no person folder. So each command runs in its own copy of this
+            # thread's context (a context cannot be entered by two threads).
             futures = {
                 executor.submit(
+                    contextvars.copy_context().run,
                     execute_one,
                     command,
                     work_dir,

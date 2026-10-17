@@ -180,6 +180,55 @@ def test_the_network_is_open_by_default_and_closed_by_a_block_on_internet_access
     assert_closed()
 
 
+@requires_network_landlock
+def test_parallel_commands_get_the_same_access_as_sequential_ones(world, listener, monkeypatch) -> None:
+    """shell(parallel=true) runs commands in pool threads, which do not inherit context
+    variables. They used to run without the agent: internet on despite a person's block
+    and no person folder. Each parallel command must get the access a sequential one gets."""
+
+    from custom_messages.contracts.access_v2 import SubjectKind, SubjectRefV1
+    from custom_tools import non_interactive_shell
+
+    access_runtime.runtime_requests(world.agent).block(
+        OWNER,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=WORKER_SUBJECT[1]),
+        target=TargetRefV1(kind=TargetKind.TOOL, id=INTERNET_TOOL_ID),
+        reason="No downloads for this worker",
+    )
+    # The loopback policy refuses a literal 127.0.0.1 in a command, so the target
+    # travels in the environment the shell passes on.
+    monkeypatch.setenv("T_HOST", "127.0.0.1")
+    monkeypatch.setenv("T_PORT", str(listener))
+    planned: list = []
+    run_in_sandbox = non_interactive_shell._run_in_sandbox
+
+    def recording(cmd_str, plan, grants, **options):
+        planned.append(grants)
+        return run_in_sandbox(cmd_str, plan, grants, **options)
+
+    monkeypatch.setattr(non_interactive_shell, "_run_in_sandbox", recording)
+    home = current_workspace_scope(world.agent).home
+    home.mkdir(parents=True, exist_ok=True)
+
+    def run(parallel: bool) -> list[dict]:
+        return non_interactive_shell._execute_commands(
+            [CONNECT, "pwd"], parallel=parallel, ignore_errors=True, work_dir=str(home), timeout=30
+        )
+
+    sequential = run(parallel=False)
+    sequential_access = list(planned)
+    planned.clear()
+    parallel = run(parallel=True)
+
+    for results in (sequential, parallel):
+        connect, pwd = results
+        assert connect["status"] == "error" and "connected" not in connect["output"], connect
+        assert pwd["status"] == "success" and pwd["output"].strip() == str(home), pwd
+    assert len(sequential_access) == 2 and planned == sequential_access
+    assert all(access.network is False for access in planned)
+    assert all(home in access.read_write for access in planned)
+
+
 def test_a_folder_with_a_blocked_subfolder_stays_out_of_the_sandbox(world) -> None:
     finance = world.layout.team_dir / "finance"
     finance.mkdir()
