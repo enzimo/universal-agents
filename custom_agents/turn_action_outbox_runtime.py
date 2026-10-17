@@ -11,7 +11,11 @@ from typing import Any, Dict, Optional
 from pydantic import ValidationError
 from default_values import AGENT_DEFAULTS
 
-from custom_agents.delegated_work_runtime import record_check_back, record_publication
+from custom_agents.delegated_work_runtime import (
+    record_check_back,
+    record_publication,
+    record_publish_sequence,
+)
 from custom_agents.conversation_delivery_states import (
     DELIVERY_STATE_NOTIFICATION_QUEUED,
     DELIVERY_STATE_SUPPRESSED,
@@ -964,6 +968,33 @@ async def _schedule_turn_action_recovery(
     raise exc
 
 
+async def _record_delegation_before_publish(
+    self: Any, content: Any, meta: MessageMeta, named_agent_type: Optional[str]
+) -> None:
+    """Record a delegated task as queued before it is published.
+
+    A free worker can take the task and its claim can be handled before the
+    publish call returns (``delegated_work_runtime.record_publication``).
+    """
+    if not (
+        isinstance(content, Task)
+        and content.task_type == MessageMetaType.REQUEST
+        and content.parent_task_id
+    ):
+        return
+    await self.task_manager.operations_runtime.run(
+        partial(
+            record_publication,
+            self,
+            subtask_id=content.task_id,
+            parent_task_id=content.parent_task_id,
+            named_agent_type=named_agent_type,
+            target_agent_name=getattr(meta, "to_agent_name", None),
+            publish_sequence=None,
+        )
+    )
+
+
 async def _execute_turn_action_record(
     self,
     *,
@@ -1507,6 +1538,7 @@ async def _execute_turn_action_record(
                     "Delegated task was not published because its worker type is not "
                     "registered."
                 )
+        await _record_delegation_before_publish(self, content, meta, delegated_target_type)
         out_env = MessageEnvelope(msg_content=content, msg_meta=meta, msg_header=header)
         publish_sequence = await self.team_comms.send_message(
             message=out_env, routing_key=routing_key
@@ -1554,16 +1586,13 @@ async def _execute_turn_action_record(
                 datetime.now(timezone.utc).isoformat(),
             )
         # The task waits in its worker type's shared queue until a free worker
-        # takes it (ADR-019); record it so its claim, moves and ending are
-        # tracked and a stop can withdraw it while no worker holds it.
+        # takes it (ADR-019); its record (written before publishing) gets the
+        # stream sequence so a stop can withdraw it while no worker holds it.
         await self.task_manager.operations_runtime.run(
             partial(
-                record_publication,
+                record_publish_sequence,
                 self,
                 subtask_id=content.task_id,
-                parent_task_id=content.parent_task_id,
-                named_agent_type=delegated_target_type,
-                target_agent_name=getattr(meta, "to_agent_name", None),
                 publish_sequence=publish_sequence,
             )
         )

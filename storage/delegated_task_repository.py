@@ -177,7 +177,17 @@ class DelegatedTaskRepository:
         target_agent_name: Optional[str],
         publish_sequence: Optional[int],
     ) -> DelegatedTaskRecordV1:
-        """Record a publication; a task sent out again keeps its worker history."""
+        """Record a task before it is published; the first record wins.
+
+        The requester writes this before publishing, and fills in the stream
+        sequence afterwards (``set_publish_sequence``), because a fast worker's
+        claim can arrive before the publish call returns. Writing the record
+        after publishing reset a claimed record to "queued" with no holder
+        (2026-10-17): its stop was then never sent and the watchdog stopped
+        checking the worker. An existing record (an outbox retry of the same
+        delegation, or a record the claim handler created) keeps its status,
+        holder and worker history.
+        """
 
         now = _now()
         with self._connect() as conn:
@@ -199,15 +209,31 @@ class DelegatedTaskRepository:
             else:
                 record = current.model_copy(
                     update={
-                        "status": DELEGATED_QUEUED,
-                        "named_agent_type": named_agent_type or current.named_agent_type,
-                        "publish_sequence": publish_sequence,
-                        "holder_agent_id": None,
-                        "holder_agent_name": None,
-                        "claimed_at_utc": None,
+                        "named_agent_type": current.named_agent_type or named_agent_type,
+                        "publish_sequence": publish_sequence or current.publish_sequence,
                         "updated_at_utc": now,
                     }
                 )
+            self._write(conn, record)
+            conn.commit()
+            return record
+
+    def set_publish_sequence(
+        self, *, team_id: str, task_id: str, publish_sequence: Optional[int]
+    ) -> Optional[DelegatedTaskRecordV1]:
+        """Store the stream sequence a publish returned; nothing else changes."""
+
+        if publish_sequence is None:
+            return None
+        with self._connect() as conn:
+            conn.begin_write()
+            current = self._read(conn, team_id, task_id)
+            if current is None:
+                conn.commit()
+                return None
+            record = current.model_copy(
+                update={"publish_sequence": publish_sequence, "updated_at_utc": _now()}
+            )
             self._write(conn, record)
             conn.commit()
             return record
@@ -253,16 +279,31 @@ class DelegatedTaskRepository:
             return ClaimOutcome(record=record, moved=moved)
 
     def mark_requeued(
-        self, *, team_id: str, task_id: str, publish_sequence: Optional[int]
+        self,
+        *,
+        team_id: str,
+        task_id: str,
+        publish_sequence: Optional[int],
+        from_holder_agent_id: str,
     ) -> Optional[DelegatedTaskRecordV1]:
-        """A task went back to the queue (its worker handed it back)."""
+        """A task goes back to the queue because ``from_holder_agent_id`` handed it back.
+
+        Returns the requeued record, or None when nothing changed: the record
+        is gone or closed, or another worker already claimed the re-sent task
+        (a fast claim, or a retried handback whose task was already re-sent).
+        A claim recorded since must never be turned back into "queued".
+        """
 
         with self._connect() as conn:
             conn.begin_write()
             current = self._read(conn, team_id, task_id)
-            if current is None or current.status not in OPEN_DELEGATED_STATUSES:
+            if (
+                current is None
+                or current.status not in OPEN_DELEGATED_STATUSES
+                or current.holder_agent_id not in {None, from_holder_agent_id}
+            ):
                 conn.commit()
-                return current
+                return None
             record = current.model_copy(
                 update={
                     "status": DELEGATED_QUEUED,

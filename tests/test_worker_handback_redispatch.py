@@ -236,6 +236,58 @@ async def test_lead_subtask_goes_back_to_waiting_for_pickup(lead):
     assert (queued.status, queued.holder_agent_id, queued.publish_sequence) == ("queued", None, 101)
 
 
+@pytest.mark.asyncio
+async def test_a_claim_during_the_redispatch_survives_and_a_retry_keeps_it(lead):
+    """Regression (2026-10-17): the lead requeued its subtask after publishing the
+    re-sent task, so a claim from the new worker that arrived first was turned back
+    into "queued" with no holder; a retried handback did the same later."""
+
+    manager = lead.task_manager
+    manager.add_task(
+        Task(task_id="parent", task_type=MessageMetaType.REQUEST), MessageHeader(), MessageMeta(),
+        owner_person_id=None,
+    )
+    manager.add_subtask(
+        "parent",
+        Task(task_id="child", parent_task_id="parent", task_type=MessageMetaType.REQUEST),
+        MessageHeader(to_routing_path="team_WebResearchAgent"),
+        MessageMeta(to_named_agent_type=WORKER_TYPE),
+    )
+    record_publication(
+        lead, subtask_id="child", parent_task_id="parent", named_agent_type=WORKER_TYPE,
+        target_agent_name=None, publish_sequence=7,
+    )
+    claims = delegated_tasks(lead)
+    claims.record_claim(
+        team_id="team", task_id="child", worker_agent_id="worker_1", worker_agent_name="worker_1",
+        claimed_at=datetime.now(timezone.utc),
+    )
+    comms = lead.team_comms
+    real_send = comms.send_message
+
+    async def send_and_get_claimed(*, message, routing_key):
+        sequence = await real_send(message=message, routing_key=routing_key)
+        # worker_2 takes the re-sent task and its claim is handled before publish returns.
+        claims.record_claim(
+            team_id="team", task_id="child", worker_agent_id="worker_2", worker_agent_name="worker_2",
+            claimed_at=datetime.now(timezone.utc),
+        )
+        return sequence
+
+    comms.send_message = send_and_get_claimed
+    handback = _handback("child", parent_task_id="parent")
+    await _receive(lead, handback)
+    record = claims.get("team", "child")
+    assert (record.status, record.holder_agent_id) == ("running", "worker_2")
+
+    # The handback is processed again (its first attempt could not settle).
+    comms.send_message = real_send
+    repository = WorkerHandbackRepository(manager.storage_settings)
+    await runtime._process_handback(lead, repository, handback)
+    record = claims.get("team", "child")
+    assert (record.status, record.holder_agent_id) == ("running", "worker_2")
+
+
 def test_interruptions_count_only_interrupted_handbacks(lead, tmp_path):
     repository = WorkerHandbackRepository(lead.task_manager.storage_settings)
     repository.record(_handback(launch_id="launch_1"))

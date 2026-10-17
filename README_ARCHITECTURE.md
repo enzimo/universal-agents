@@ -166,7 +166,12 @@ each. They run in parallel on as many workers as the team allows:
   to the requester, which records the holder (`storage/delegated_task_repository.py`)
   and checks only that worker. Tasks still in a queue are neither probed nor timed
   out. Stops go to the holding worker; a task no worker took yet is withdrawn
-  from the stream.
+  from the stream. The requester writes the task's record before publishing it
+  and adds the stream sequence afterwards, because a free worker's claim can
+  arrive before the publish call returns; writing it afterwards turned such a
+  claim back into "waiting" with no holder, so stops withdrew nothing and never
+  reached the worker (fixed 2026-10-17). A record that has a holder never goes
+  back to "waiting" except through a handback by that holder.
 - **Worker pool controller** (`custom_agents/worker_pool_controller.py`, trusted
   code in the team host loop). For each worker type it reads waiting tasks, idle
   workers asking and the oldest wait from NATS, plus running, starting and
@@ -407,7 +412,9 @@ original reply route so the result reaches the original requester:
   task's first turn: which actions the interrupted run already sent, and to
   check them before repeating anything.
 - For a subtask the lead delegated itself, its record returns to "waiting in the
-  queue", so it is not probed until a worker takes it.
+  queue" before the task is sent again, so it is not probed until a worker takes
+  it. A claim recorded since (the new worker's, or one seen by a retried
+  handback) is never undone.
 - The worker that accepts a rerun takes over its occurrence receipt, fenced on
   the previous owner, so the schedule execution scope and completion follow the
   run. If the schedule ran again while the rerun was in flight, the worker

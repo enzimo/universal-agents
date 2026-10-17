@@ -474,6 +474,36 @@ def test_delegation_outbox_publishes_to_the_type_queue_and_records_it_as_waiting
     assert records[0].phase == "complete"
 
 
+def test_a_claim_that_beats_the_publish_call_keeps_its_worker(tmp_path) -> None:
+    """Regression (2026-10-17): the outbox wrote the delegated record after the
+    publish call returned. A free worker's claim handled in between was reset to
+    "queued" with no holder, so stops withdrew nothing and never reached the
+    worker. The record is now written before publishing."""
+    from custom_agents.delegated_work_runtime import delegated_tasks
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent._probe_live_named_agent_type = AsyncMock()
+    seen_before_publish = []
+
+    async def publish_then_claim(*, message, routing_key):
+        task_id = message.msg_content.task_id
+        seen_before_publish.append(delegated_tasks(agent).get(str(agent.team_id), task_id))
+        delegated_tasks(agent).record_claim(
+            team_id=str(agent.team_id), task_id=task_id, worker_agent_id="worker_9",
+            worker_agent_name="worker-9", claimed_at=datetime.now(timezone.utc),
+        )
+        return 42
+
+    agent.team_comms.send_message = publish_then_claim
+    result = _delegate(agent, manager, parent, named_type="WebResearchAgent")
+
+    assert seen_before_publish[0] is not None and seen_before_publish[0].status == "queued"
+    record = delegated_tasks(agent).get(str(agent.team_id), result.task_id)
+    assert (record.status, record.holder_agent_id, record.publish_sequence) == ("running", "worker_9", 42)
+
+
 def _delegate(agent, manager, parent, *, named_type, agent_name=None):
     decision = StructuredAgentTurnDecision(
         actions=[

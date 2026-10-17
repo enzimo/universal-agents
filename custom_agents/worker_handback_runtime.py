@@ -10,7 +10,8 @@ queue for the worker's agent type so a free worker of the type takes it
 (ADR-019); the worker pool controller starts a worker if none is free. The
 original reply route is kept, so the result still reaches the original
 requester. For a task the lead delegated itself, its subtask record goes back
-to "waiting in the queue", so it is not probed until a worker claims it.
+to "waiting in the queue" before the task is sent again, so it is not probed
+until a worker claims it and that claim is never overwritten.
 
 Processing runs right after receipt and on every lead scheduler pass, so a
 publish failure or a lead restart only delays the re-dispatch.
@@ -189,10 +190,19 @@ async def _process_handback(
     interruptions = await agent.task_manager.operations_runtime.run(
         repository.interruption_count, agent.team_id, task_id
     )
-    sequence = await _publish_redispatch(agent, handback, interruptions)
-    await agent.task_manager.operations_runtime.run(
-        partial(_reset_lead_subtask, agent, sequence), task_id
+    # Requeue before publishing, as delegated tasks are recorded before they
+    # are published: the worker that takes the re-sent task may claim it
+    # before the publish call returns, and that claim must stay recorded.
+    requeued = await agent.task_manager.operations_runtime.run(
+        partial(_requeue_lead_subtask, agent, handback.worker_agent_id), task_id
     )
+    sequence = await _publish_redispatch(agent, handback, interruptions)
+    if requeued:
+        from custom_agents.delegated_work_runtime import record_publish_sequence
+
+        await agent.task_manager.operations_runtime.run(
+            partial(record_publish_sequence, agent, subtask_id=task_id, publish_sequence=sequence)
+        )
     await _settle(agent, repository, handback, HANDBACK_STATUS_REDISPATCHED)
 
 
@@ -347,27 +357,43 @@ async def _publish_redispatch(
     return sequence
 
 
-def _reset_lead_subtask(agent: Any, sequence: int | None, task_id: str) -> None:
-    """Put a lead-delegated subtask back to "waiting in the queue".
+def _requeue_lead_subtask(agent: Any, from_worker_agent_id: str, task_id: str) -> bool:
+    """Put a lead-delegated subtask back to "waiting in the queue"; True if it did.
 
-    A fresh ACCEPTED timestamp restarts the subtask's timing, and its delegated
-    record returns to queued with the new message's sequence, so it is not
-    probed until a worker claims it and a stop withdraws the new message.
+    Its delegated record returns to queued (the new message's sequence follows
+    after publishing), so it is not probed until a worker claims it and a stop
+    withdraws the new message, and a fresh ACCEPTED timestamp restarts its
+    timing. Nothing changes once another worker claimed the re-sent task: a
+    retried handback (its first attempt published but could not settle) must
+    not turn that claim back into "queued", which lost its stops (2026-10-17).
     """
 
     task_manager = agent.task_manager
     if task_manager.get_parent_task_id(task_id) is None:
-        return
+        return False
     info = task_manager.get_task_info(task_id)
     if info is None or task_manager.is_terminal_state(info.state):
-        return
-    now = datetime.now(timezone.utc)
-    task_manager.update_main_task_state(task_id, ProgressState.ACCEPTED, now.isoformat())
+        return False
     from custom_agents.delegated_work_runtime import delegated_tasks
 
-    delegated_tasks(agent).mark_requeued(
-        team_id=str(agent.team_id), task_id=task_id, publish_sequence=sequence
+    requeued = delegated_tasks(agent).mark_requeued(
+        team_id=str(agent.team_id),
+        task_id=task_id,
+        publish_sequence=None,
+        from_holder_agent_id=from_worker_agent_id,
     )
+    if requeued is None:
+        agent._logger.info(
+            "A returned task already has a new worker; its record stays as it is. "
+            "event=worker_handback_requeue_skipped agent_id=%s task_id=%s from_worker_agent_id=%s",
+            agent.id,
+            task_id,
+            from_worker_agent_id,
+        )
+        return False
+    now = datetime.now(timezone.utc)
+    task_manager.update_main_task_state(task_id, ProgressState.ACCEPTED, now.isoformat())
+    return True
 
 
 async def _settle(

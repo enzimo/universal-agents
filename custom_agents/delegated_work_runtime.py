@@ -91,7 +91,14 @@ def record_publication(
     target_agent_name: Optional[str],
     publish_sequence: Optional[int],
 ) -> DelegatedTaskRecordV1:
-    """Record that a delegated task was published. Runs on the task lane."""
+    """Record a delegated task before it is published. Runs on the task lane.
+
+    The publish call returns after the stream stored the task, and a free
+    worker may already have taken it and sent its claim by then; the record
+    must exist first so that claim is never overwritten (see
+    ``DelegatedTaskRepository.record_published``). ``record_publish_sequence``
+    adds the stream sequence afterwards.
+    """
 
     manager = agent.task_manager
     root = manager.resolve_root_task_id(parent_task_id) or parent_task_id
@@ -104,6 +111,14 @@ def record_publication(
         named_agent_type=named_agent_type,
         target_agent_name=target_agent_name,
         publish_sequence=publish_sequence,
+    )
+
+
+def record_publish_sequence(agent: Any, *, subtask_id: str, publish_sequence: Optional[int]) -> None:
+    """Store the stream sequence of a published delegated task (to withdraw it). Task lane."""
+
+    delegated_tasks(agent).set_publish_sequence(
+        team_id=str(agent.team_id), task_id=subtask_id, publish_sequence=publish_sequence
     )
 
 
@@ -563,6 +578,7 @@ __all__ = [
     "max_retries_after_worker_loss",
     "record_check_back",
     "record_publication",
+    "record_publish_sequence",
     "register_delegated_task_endings",
     "report_held_delegated_tasks",
     "send_task_claim",

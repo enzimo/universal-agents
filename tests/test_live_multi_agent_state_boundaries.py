@@ -3003,7 +3003,10 @@ async def test_live_delegated_task_waits_in_its_queue_until_a_worker_starts() ->
                 def records():
                     return delegated_tasks(manager).list_for_root(team_id, root_task_id)
 
-                await _wait_for(lambda: bool(records()), timeout=5)
+                # Recorded before publishing; the stream sequence follows the publish.
+                await _wait_for(
+                    lambda: bool(records()) and bool(records()[0].publish_sequence), timeout=5
+                )
                 (queued,) = records()
                 assert (queued.status, queued.holder_agent_id) == ("queued", None)
                 assert queued.publish_sequence
