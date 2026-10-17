@@ -12,26 +12,32 @@ from runtime_hosting.blocking_io import BlockingIOLane
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
-# True while an operation runs. An operation that asks the lane for another
-# operation would wait for itself forever: the lane runs one operation at a
-# time and the outer one holds it. The flag turns that hang into an error.
-_INSIDE_OPERATION: ContextVar[bool] = ContextVar("task_operation_running", default=False)
+# The lane whose operation is running, if any. An operation that asks its own
+# lane for another operation would wait for itself forever: the lane runs one
+# operation at a time and the outer one holds it. ``run_sync`` turns that hang
+# into an error. Another manager's lane in the same process is not affected.
+_RUNNING_LANE: ContextVar["TaskOperationRuntime | None"] = ContextVar(
+    "task_operation_lane", default=None
+)
 
 
 class NestedTaskOperation(RuntimeError):
-    """A task operation asked the lane for another operation while it ran."""
+    """A task operation asked its own lane for another operation while it ran."""
 
 
 def _detached_operation(
-    operation: Callable[..., _T], args: tuple[Any, ...], kwargs: dict[str, Any]
+    lane: "TaskOperationRuntime",
+    operation: Callable[..., _T],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
 ) -> _T:
     # Requests and returned records are data. A caller must use another operation
     # to change owned task state, rather than retaining a live TaskInfo reference.
-    token = _INSIDE_OPERATION.set(True)
+    token = _RUNNING_LANE.set(lane)
     try:
         result = operation(*deepcopy(args), **deepcopy(kwargs))
     finally:
-        _INSIDE_OPERATION.reset(token)
+        _RUNNING_LANE.reset(token)
     return deepcopy(result)
 
 
@@ -54,14 +60,14 @@ class TaskOperationRuntime:
         asking the lane again raises ``NestedTaskOperation``, before the loop
         starts too, so tests find the call that would hang a running manager.
         """
-        if _INSIDE_OPERATION.get():
+        if self.inside_operation():
             raise NestedTaskOperation(
                 f"{getattr(operation, '__qualname__', operation)!s} was submitted from "
                 "inside a running task operation; call it directly instead."
             )
         loop = self.loop
         if loop is None or not loop.is_running():
-            return _detached_operation(operation, args, kwargs)
+            return _detached_operation(self, operation, args, kwargs)
         try:
             current = asyncio.get_running_loop()
         except RuntimeError:
@@ -80,4 +86,9 @@ class TaskOperationRuntime:
         if self.loop is not None and self.loop is not loop and self.loop.is_running():
             raise RuntimeError("Task operations must use one owning event loop.")
         self.loop = loop
-        return await self._io.run(_detached_operation, operation, args, kwargs)
+        return await self._io.run(_detached_operation, self, operation, args, kwargs)
+
+    def inside_operation(self) -> bool:
+        """Whether the calling code runs inside one of this lane's operations."""
+
+        return _RUNNING_LANE.get() is self

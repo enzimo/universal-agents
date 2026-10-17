@@ -898,14 +898,12 @@ def test_removal_deletes_the_persons_records_inside_one_task_operation(
     the person's Objective could save it back after the deletion, leaving a
     removed person's Objective without its plan.
     """
-    from custom_agents import task_operation_runtime
-
     ids = _give_work(world, MIA)
     inside: list[bool] = []
     delete = PersonDepartureRepository.delete_person_records
 
     def delete_and_note(self, person_id: str):
-        inside.append(task_operation_runtime._INSIDE_OPERATION.get())
+        inside.append(world.tasks.operations_runtime.inside_operation())
         return delete(self, person_id)
 
     monkeypatch.setattr(PersonDepartureRepository, "delete_person_records", delete_and_note)

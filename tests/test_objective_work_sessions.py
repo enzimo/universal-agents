@@ -14,7 +14,6 @@ from custom_agents.objective_work_config import load_objective_work_execution_co
 from custom_agents.sdk.strands.turn import (
     _finalize_objective_work_invocation,
 )
-from custom_agents import task_operation_runtime
 from custom_agents.manager_control_runtime import CommandPerson, _apply_objective_control
 from custom_agents.scheduled_runtime import enqueue_fired_scheduled_task
 from custom_agents.schedule_store import ScheduleStore
@@ -1364,7 +1363,7 @@ def test_a_fired_work_session_opens_inside_one_task_operation(tmp_path: Path) ->
     start_session = manager.objective_work_coordinator.start_session
 
     def start_and_note(*args, **kwargs):
-        inside.append(task_operation_runtime._INSIDE_OPERATION.get())
+        inside.append(manager.operations_runtime.inside_operation())
         return start_session(*args, **kwargs)
 
     manager.objective_work_coordinator.start_session = start_and_note

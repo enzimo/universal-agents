@@ -45,3 +45,14 @@ def test_a_tool_thread_still_joins_the_running_lane() -> None:
         return await asyncio.to_thread(runtime.run_sync, lambda: 4)
 
     assert asyncio.run(main()) == 4
+
+
+def test_an_operation_may_use_another_managers_lane() -> None:
+    """Only a submission to the lane that is running the operation would wait for itself."""
+    own, other = TaskOperationRuntime(), TaskOperationRuntime()
+
+    def outer() -> tuple[bool, bool, int]:
+        return own.inside_operation(), other.inside_operation(), other.run_sync(lambda: 5)
+
+    assert own.run_sync(outer) == (True, False, 5)
+    assert own.inside_operation() is False

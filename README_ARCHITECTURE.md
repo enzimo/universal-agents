@@ -474,8 +474,8 @@ stored in between. Until 2026-10-17 this happened: a person's pause or resume
 erased the work-session policy's own event every time, and the team lead's
 status tool could erase a progress update or a schedule linked by a parallel
 tool call. A static test keeps every other module from saving Objective
-records, and the lane refuses an operation submitted from inside another one
-(`NestedTaskOperation`) instead of waiting for itself.
+records, and a lane refuses an operation submitted from inside one of its own
+operations (`NestedTaskOperation`) instead of waiting for itself.
 
 A lifecycle change (`custom_agents/objective_lifecycle.py`) is one such
 operation for both a person's Runtime controls and the team lead's
