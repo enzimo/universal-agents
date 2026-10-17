@@ -17,6 +17,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -49,6 +50,10 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         task_manager=tasks,
         paused=False,
         is_executing=True,  # queue the run instead of starting a model turn
+        # The wake-up reaches a mock drain, so the run stays queued for the test.
+        _should_exit=asyncio.Event(),
+        _pending_work_task=None,
+        _continue_pending_work=AsyncMock(),
         _conversation_store=None,
         _ensure_request_timezone=lambda meta, top_level_request: meta,
         _logger=logging.getLogger("test.manager"),

@@ -841,6 +841,10 @@ def test_aar_batch_review_schedule_queues_hydrated_manager_task(tmp_path: Path):
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        # The wake-up reaches a mock drain, so the run stays queued for the test.
+        _should_exit=asyncio.Event(),
+        _pending_work_task=None,
+        _continue_pending_work=AsyncMock(),
         _conversation_store=None,
         _ensure_request_timezone=lambda meta, top_level_request: meta,
         _logger=SimpleNamespace(
@@ -1012,6 +1016,10 @@ def test_fired_scheduled_task_carries_objective_link(tmp_path: Path):
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        # The wake-up reaches a mock drain, so the run stays queued for the test.
+        _should_exit=asyncio.Event(),
+        _pending_work_task=None,
+        _continue_pending_work=AsyncMock(),
         _conversation_store=None,
         _ensure_request_timezone=lambda meta, top_level_request: meta,
         _logger=SimpleNamespace(
@@ -1085,6 +1093,10 @@ def test_gateway_cron_schedule_fire_keeps_stored_conversation_id(tmp_path: Path)
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        # The wake-up reaches a mock drain, so the run stays queued for the test.
+        _should_exit=asyncio.Event(),
+        _pending_work_task=None,
+        _continue_pending_work=AsyncMock(),
         _conversation_store=conversation_store,
         _ensure_request_timezone=lambda meta, top_level_request: meta,
         _logger=SimpleNamespace(
@@ -1176,6 +1188,10 @@ def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: 
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        # The wake-up reaches a mock drain, so the run stays queued for the test.
+        _should_exit=asyncio.Event(),
+        _pending_work_task=None,
+        _continue_pending_work=AsyncMock(),
         _conversation_store=ConversationStore(db_path=db_path, artifacts_dir=Path(db_path).parent / "conversation_artifacts"),
         _ensure_request_timezone=lambda meta, top_level_request: meta,
         _logger=SimpleNamespace(
@@ -1274,6 +1290,10 @@ def test_recurring_fired_schedule_keeps_history_without_followup_delivery_obliga
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        # The wake-up reaches a mock drain, so the run stays queued for the test.
+        _should_exit=asyncio.Event(),
+        _pending_work_task=None,
+        _continue_pending_work=AsyncMock(),
         _conversation_store=conversation_store,
         _ensure_request_timezone=lambda meta, top_level_request: meta,
         _logger=SimpleNamespace(

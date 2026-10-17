@@ -23,6 +23,7 @@ from custom_agents.orphaned_subtasks import (
     register_parent_end_stops,
     stop_report_for_ended_parent,
 )
+from custom_agents.pending_work_runtime import close_pending_work
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.control_v1 import ControlInstruction
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
@@ -60,6 +61,10 @@ def lead(tmp_path):
         team_comms=SimpleNamespace(send_message=AsyncMock(), delete_work_message=AsyncMock(return_value=True)),
         named_agent_type_queue_map={"WebResearchAgent": "team_WebResearchAgent"},
         _logger=logging.getLogger("orphaned-subtasks-test"),
+        _should_exit=asyncio.Event(),
+        _owned_tasks=set(),
+        _pending_work_task=None,
+        _pending_work_timers=set(),
     )
     agent._request_subtask_stop = partial(request_subtask_stop, agent)
     # The child was published to the shared queue and taken by worker-3.
@@ -142,3 +147,33 @@ async def test_a_report_for_a_parent_never_seen_is_only_logged(lead):
         lead, parent_task_id="unknown", child_task_id="unknown-child", msg_header=MessageHeader(from_agent_id="worker-7")
     )
     assert not sent and not stops(lead)
+
+
+@pytest.mark.asyncio
+async def test_stop_sends_are_owned_and_stopped_at_shutdown(lead):
+    """The barrier is saved before the sends, so shutdown may stop them."""
+    sending = asyncio.Event()
+
+    async def slow_send(**_kwargs):
+        sending.set()
+        await asyncio.Event().wait()
+
+    lead.team_comms.send_message = AsyncMock(side_effect=slow_send)
+    lead.task_manager.fail_task("root", "The model call failed.", now())
+    await asyncio.wait_for(sending.wait(), 5)
+    assert len(lead._owned_tasks) == 1
+
+    await close_pending_work(lead)
+    assert lead._owned_tasks == set()
+    assert lead.task_manager.is_execution_cancelled("child")
+
+
+@pytest.mark.asyncio
+async def test_no_stop_send_starts_once_the_agent_is_stopping(lead, caplog):
+    lead._should_exit.set()
+    with caplog.at_level(logging.WARNING):
+        assert lead.task_manager.fail_task("root", "The model call failed.", now())
+        await settle()
+    assert lead.task_manager.is_execution_cancelled("child")  # the barrier is still saved
+    assert not stops(lead)
+    assert "event=owned_task_refused" in caplog.text and "parent-end-stops:root" in caplog.text

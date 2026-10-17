@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import random
 from functools import partial
 from datetime import datetime, timedelta, timezone
@@ -12,6 +11,7 @@ from pydantic import ValidationError
 from default_values import AGENT_DEFAULTS
 
 from custom_agents.delegated_work_runtime import record_check_back, record_publication
+from custom_agents.pending_work_runtime import wake_pending_work_after
 from custom_agents.conversation_delivery_states import (
     DELIVERY_STATE_NOTIFICATION_QUEUED,
     DELIVERY_STATE_SUPPRESSED,
@@ -686,12 +686,6 @@ def _turn_action_retry_delay_seconds(self, attempt_count: int) -> float:
     return delay
 
 
-async def _wake_turn_action_retry_after(self, delay_seconds: float) -> None:
-    await asyncio.sleep(max(0.0, delay_seconds))
-    if not self.paused and not self.is_executing:
-        await self._continue_pending_work()
-
-
 async def _schedule_turn_action_recovery(
     self,
     *,
@@ -770,12 +764,9 @@ async def _schedule_turn_action_recovery(
             ProgressState.RETRYING,
             now_ts,
         )
-        try:
-            asyncio.get_running_loop().create_task(
-                self._wake_turn_action_retry_after(retry_delay)
-            )
-        except RuntimeError:
-            pass
+        # The retry is saved above; a timer wakes the retained drain at the
+        # retry time, and shutdown cancels the timer.
+        wake_pending_work_after(self, retry_delay)
         raise TurnActionRecoveryScheduled(
             f"Runtime action {action_id} scheduled automatic retry after {type(exc).__name__}: {exc}"
         ) from exc

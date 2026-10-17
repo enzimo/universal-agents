@@ -1570,6 +1570,54 @@ def test_publish_timeout_schedules_automatic_retry_without_model_reentry(
     agent._strands_agent.assert_not_called()
 
 
+def test_a_failed_publish_wakes_the_retained_drain_at_its_retry_time(tmp_path) -> None:
+    """The retry wake-up is a timer the agent owns, not a task shutdown cannot see."""
+    from custom_agents.strands_agent import TurnActionRecoveryScheduled
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(
+        tmp_path,
+        task_manager=manager,
+        turn_action_outbox={
+            "max_auto_attempts": 3,
+            "initial_retry_delay_seconds": 0.05,
+            "max_retry_delay_seconds": 0.05,
+            "retry_jitter_ratio": 0.0,
+        },
+    )
+    agent.team_comms.send_message = AsyncMock(side_effect=TimeoutError("broker publish timed out"))
+    object.__setattr__(agent, "_continue_pending_work", AsyncMock())
+    decision = StructuredAgentTurnDecision(
+        actions=[
+            DelegateTaskAction(
+                task=StructuredTaskPayload(
+                    task_type=MessageMetaType.REQUEST,
+                    problem_statement="Research flights.",
+                ),
+                target_named_agent_type="WebResearchAgent",
+                requester_type=RequesterType.AGENT_REQUESTER,
+            )
+        ]
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(TurnActionRecoveryScheduled):
+            await agent._execute_turn_decision_outbox(
+                decision=decision,
+                incoming_content=parent,
+                incoming_header=manager.get_task_info(parent.task_id).header,
+                incoming_meta=manager.get_task_info(parent.task_id).meta,
+            )
+        assert len(agent._pending_work_timers) == 1
+        await asyncio.sleep(0.2)
+        await asyncio.wait_for(agent._pending_work_task, 5)
+        agent._continue_pending_work.assert_awaited()
+        assert agent._pending_work_timers == set()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("publish_failures", [1, 2])
 def test_publish_retry_reuses_delegated_subtask_side_effect(tmp_path, publish_failures) -> None:
     manager = _make_task_manager(tmp_path)

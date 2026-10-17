@@ -6,6 +6,7 @@ import logging
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
@@ -517,6 +518,10 @@ def test_protected_schedule_fire_opens_session_and_resumes_plan(tmp_path: Path) 
         task_manager=manager,
         paused=False,
         is_executing=True,
+        # The wake-up reaches a mock drain, so the run stays queued for the test.
+        _should_exit=asyncio.Event(),
+        _pending_work_task=None,
+        _continue_pending_work=AsyncMock(),
         _conversation_store=None,
         _ensure_request_timezone=lambda meta, top_level_request: meta,
         _logger=logging.getLogger("test.objective.work.schedule"),

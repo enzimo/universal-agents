@@ -89,6 +89,8 @@ def make_agent(
         _interrupted_turn_sessions={},
         paused=False,
         is_executing=False,
+        _should_exit=asyncio.Event(),
+        _pending_work_task=None,
         _continue_pending_work=AsyncMock(),
         # Limits come from the instance configuration in production; the
         # defaults apply here unless a test loads a configuration.

@@ -60,22 +60,31 @@ async def _send_control_instruction_payload(
 def _run_agent_coroutine(
     agent: "UniversalAgent", coroutine: Any, *, timeout: float = 15.0
 ) -> None:
-    """Schedule an agent coroutine from either the agent loop or a sync tool worker thread."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        runtime_loop = getattr(agent, "_runtime_loop", None)
-        if runtime_loop is not None and runtime_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(coroutine, runtime_loop)
-            future.result(timeout=timeout)
-            return
-        asyncio.run(coroutine)
-        return
+    """Run an agent coroutine from a sync tool's worker thread and wait for it.
 
-    if loop.is_running():
-        asyncio.create_task(coroutine)
+    Strands runs sync tools in a worker thread, so a send has finished, or
+    failed, before the tool reports it. On the event loop thread the send could
+    only be left running unowned, where shutdown does not wait for it, so that
+    call is refused.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
     else:
-        loop.run_until_complete(coroutine)
+        coroutine.close()
+        logger.error(
+            "An agent tool was called on the event loop thread; it must run in a worker thread. "
+            "event=agent_tool_loop_thread_refused agent_id=%s",
+            getattr(agent, "id", None),
+        )
+        raise RuntimeError("Agent tools run in a worker thread; this call came from the event loop.")
+    runtime_loop = getattr(agent, "_runtime_loop", None)
+    if runtime_loop is not None and runtime_loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(coroutine, runtime_loop)
+        future.result(timeout=timeout)
+        return
+    asyncio.run(coroutine)
 
 
 def _require_manager_tool(agent: "UniversalAgent", tool_name: str) -> Optional[str]:

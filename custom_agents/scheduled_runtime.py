@@ -50,6 +50,7 @@ from custom_agents.stuck_schedules import report_stuck_schedules
 from custom_agents.stuck_tasks import report_stuck_tasks
 from custom_agents.liveness_observation import MAX_SCHEDULER_SLEEP_SECONDS, observe_liveness
 from custom_agents.dead_letter_watch import report_dead_letters
+from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.access_request_runtime import resume_decided_access_waits
 from custom_agents.orphaned_work_takeover import take_over_orphaned_work
 from custom_agents.turn_failure_runtime import release_orphaned_slot_when_idle
@@ -955,7 +956,6 @@ async def enqueue_heartbeat_items(
     agent: Any,
     scheduled_message: ScheduledMessage,
     *,
-    create_task_fn: Callable[[Awaitable[Any]], Any] = asyncio.create_task,
     claim_token: Optional[str] = None,
 ) -> bool:
     """Start every enabled item of a heartbeat schedule; False starts none and leaves it to retry."""
@@ -996,8 +996,8 @@ async def enqueue_heartbeat_items(
         )
         accepted_any = accepted or accepted_any
 
-    if accepted_any and not agent.paused and not agent.is_executing:
-        create_task_fn(agent._continue_pending_work())
+    if accepted_any:
+        schedule_pending_work(agent)
     return True
 
 
@@ -1005,8 +1005,6 @@ async def enqueue_provider_overload_retry(
     agent: Any,
     schedule_id: str,
     scheduled_message: ScheduledMessage,
-    *,
-    create_task_fn: Callable[[Awaitable[Any]], Any] = asyncio.create_task,
 ) -> bool:
     task_id = getattr(scheduled_message.payload, "task_id", None)
     if not task_id:
@@ -1082,8 +1080,7 @@ async def enqueue_provider_overload_retry(
             schedule_id,
         )
         return False
-    if not agent.paused and not agent.is_executing:
-        create_task_fn(agent._continue_pending_work())
+    schedule_pending_work(agent)
     return True
 
 
@@ -1297,7 +1294,6 @@ async def _enqueue_runtime_schedule(
     agent: Any,
     schedule_id: str,
     scheduled_message: ScheduledMessage,
-    create_task_fn: Callable[[Awaitable[Any]], Any],
 ) -> Optional[bool]:
     """Fires of the runtime's own schedule kinds, which have their own paths; None for any other schedule.
 
@@ -1311,9 +1307,7 @@ async def _enqueue_runtime_schedule(
     if kind is SystemScheduleKind.ISOLATED_RECOVERY_CHECKPOINT:
         return await enqueue_isolated_recovery_checkpoint(agent, schedule_id, scheduled_message)
     if kind is SystemScheduleKind.PROVIDER_OVERLOAD_RETRY:
-        return await enqueue_provider_overload_retry(
-            agent, schedule_id, scheduled_message, create_task_fn=create_task_fn
-        )
+        return await enqueue_provider_overload_retry(agent, schedule_id, scheduled_message)
     return None
 
 
@@ -1428,7 +1422,6 @@ async def _queue_fired_task(
     meta: MessageMeta,
     *,
     schedule_admission: ScheduleOccurrenceV1 | None,
-    create_task_fn: Callable[[Awaitable[Any]], Any],
 ) -> bool:
     """Store the run as a task and start pending work; False leaves the schedule pending to retry.
 
@@ -1480,8 +1473,7 @@ async def _queue_fired_task(
             "objective_id": scheduled_message.objective_id,
         },
     )
-    if not agent.paused and not agent.is_executing:
-        create_task_fn(agent._continue_pending_work())
+    schedule_pending_work(agent)
     return True
 
 
@@ -1522,7 +1514,6 @@ async def _enqueue_owner_run(
     owner: Any,
     is_aar_review_schedule: bool,
     schedule_admission: ScheduleOccurrenceV1 | None,
-    create_task_fn: Callable[[Awaitable[Any]], Any],
     claim_token: Optional[str] = None,
 ) -> bool:
     """A schedule's run as a task that works for its owner.
@@ -1587,7 +1578,6 @@ async def _enqueue_owner_run(
         internal_header,
         internal_meta,
         schedule_admission=schedule_admission,
-        create_task_fn=create_task_fn,
     )
 
 
@@ -1596,7 +1586,6 @@ async def enqueue_fired_scheduled_task(
     schedule_id: str,
     scheduled_message: ScheduledMessage,
     *,
-    create_task_fn: Callable[[Awaitable[Any]], Any] = asyncio.create_task,
     from_runtime_mailbox: bool = False,
     schedule_admission: ScheduleOccurrenceV1 | None = None,
     claim_token: Optional[str] = None,
@@ -1624,19 +1613,14 @@ async def enqueue_fired_scheduled_task(
     ):
         return True
     if is_heartbeat_launcher(scheduled_message):
-        return await enqueue_heartbeat_items(
-            agent,
-            scheduled_message,
-            create_task_fn=create_task_fn,
-            claim_token=claim_token,
-        )
+        return await enqueue_heartbeat_items(agent, scheduled_message, claim_token=claim_token)
     prepared = await _prepare_system_timer(agent, schedule_id, scheduled_message)
     if prepared is None:
         # The table's preparer found nothing to do (knowledge curation); the
         # occurrence is done without a run.
         return True
     scheduled_message = prepared
-    handled = await _enqueue_runtime_schedule(agent, schedule_id, scheduled_message, create_task_fn)
+    handled = await _enqueue_runtime_schedule(agent, schedule_id, scheduled_message)
     if handled is not None:
         return handled
     is_aar_review_schedule = str(scheduled_message.schedule_name or "").startswith(
@@ -1668,7 +1652,6 @@ async def enqueue_fired_scheduled_task(
         owner=owner,
         is_aar_review_schedule=is_aar_review_schedule,
         schedule_admission=schedule_admission,
-        create_task_fn=create_task_fn,
         claim_token=claim_token,
     )
 

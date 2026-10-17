@@ -42,6 +42,7 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import Any
 
+from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.task_human_interaction_blockers import (
     ACCESS_REQUEST_BLOCKER,
     clear_human_interaction_blocker,
@@ -181,13 +182,11 @@ async def handle_access_request_resolved(
     await _resume_without_live_turn(agent, request)
 
 
-async def _resume_without_live_turn(
-    agent: Any, request: AccessRequestV1, *, continue_now: bool = True
-) -> None:
+async def _resume_without_live_turn(agent: Any, request: AccessRequestV1) -> None:
     """After a restart the paused turn is gone; resume the task from a directive.
 
-    ``continue_now=False`` (the scheduler pass) queues the work without running
-    it inline, so a resumed turn never holds up the scheduler loop.
+    The work is queued for the retained drain, so a resumed turn never holds up
+    the decision's message handler or the scheduler loop.
     """
 
     manager = agent.task_manager
@@ -234,12 +233,7 @@ async def _resume_without_live_turn(
     )
     await run(manager.update_main_task_state, task_id, ProgressState.ACCEPTED, datetime.now(timezone.utc).isoformat())
     await run(manager.enqueue_task, task_id, front=True)
-    if not continue_now:
-        from custom_agents.pending_work_runtime import schedule_pending_work
-
-        schedule_pending_work(agent)
-    elif not agent.paused and not agent.is_executing:
-        await agent._continue_pending_work()
+    schedule_pending_work(agent)
 
 
 # How often an agent looks for decided requests whose notice never arrived.
@@ -326,7 +320,7 @@ async def _resume_if_decided(agent: Any, task_id: str, request_ids: list[str]) -
         agent.id,
         ",".join(request_ids),
     )
-    await _resume_without_live_turn(agent, requests[-1], continue_now=False)
+    await _resume_without_live_turn(agent, requests[-1])
     return 1
 
 

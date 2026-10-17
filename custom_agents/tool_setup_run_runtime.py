@@ -526,8 +526,7 @@ async def _resume(agent: Any, run: ToolSetupRunV1, header: Any, meta: Any) -> No
     await _history(agent, run.task_id, "Tool setup ended; the task resumes.", {"event": "tool_setup_run_resume", "run_id": run.run_id})
     await run_ops(manager.update_main_task_state, run.task_id, ProgressState.ACCEPTED, datetime.now(timezone.utc).isoformat())
     await run_ops(manager.enqueue_task, run.task_id, front=True)
-    if not agent.paused and not agent.is_executing:
-        await agent._continue_pending_work()
+    schedule_pending_work(agent)
 
 
 def outcome_for(agent: Any, run: ToolSetupRunV1) -> dict[str, Any]:

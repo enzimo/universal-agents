@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -203,17 +204,18 @@ def _fire(agent: SimpleNamespace, schedule: ScheduledMessage) -> tuple[bool, obj
     """One fire of the schedule as the scheduler admits it; the queued run, if any."""
 
     before = {info.task.task_id for info in agent.task_manager.list_task_infos()}
-    accepted = asyncio.run(
-        _enqueue_owner_run(
-            agent,
-            schedule.schedule_id,
-            schedule,
-            owner=run_owner(agent, schedule.payload_meta),
-            is_aar_review_schedule=False,
-            schedule_admission=None,
-            create_task_fn=lambda coroutine: coroutine.close(),
+    # The queued run is inspected here, not started.
+    with patch("custom_agents.scheduled_runtime.schedule_pending_work"):
+        accepted = asyncio.run(
+            _enqueue_owner_run(
+                agent,
+                schedule.schedule_id,
+                schedule,
+                owner=run_owner(agent, schedule.payload_meta),
+                is_aar_review_schedule=False,
+                schedule_admission=None,
+            )
         )
-    )
     queued = [info for info in agent.task_manager.list_task_infos() if info.task.task_id not in before]
     assert len(queued) <= 1
     return accepted, (queued[0] if queued else None)

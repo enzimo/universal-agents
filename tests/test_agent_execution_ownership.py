@@ -51,6 +51,7 @@ class RuntimeHost(SimpleNamespace):
     process_llm_interaction = UniversalAgent.process_llm_interaction
     _resume_parent_task_if_ready = UniversalAgent._resume_parent_task_if_ready
     _check_and_process_next_task = UniversalAgent._check_and_process_next_task
+    _can_continue_pending_work = UniversalAgent._can_continue_pending_work
 
 
 @pytest.fixture
@@ -89,6 +90,7 @@ def host(tmp_path, monkeypatch):
         named_agent_type="TeamArchitect",
         task_manager=manager,
         paused=False,
+        _should_exit=asyncio.Event(),
         _execution_gate=AgentExecutionGate(),
         _active_execution_task_id=None,
         _logger=logging.getLogger(__name__),
