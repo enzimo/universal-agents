@@ -46,8 +46,10 @@ the gap: with an unproven run and a recreated container, a crashed startup
 agent's identity names the old host, so nothing replaced it, no notice went
 out, and schedule coalescing folded every new fire into its dead run. Falling
 back to the heartbeat is safe because a previous owner that is in fact still
-running cannot save the work again (``RuntimeCustodyLost``,
-``custom_agents.custody_loss``).
+running cannot save the work again: its task saves are refused once its task
+row moved, and a deferred message leaves its deferred row only in the same
+transaction as the task save that records its handling (``RuntimeCustodyLost``,
+``custom_agents.custody_loss``, ``deferred_message_runtime.DeferredHandoff``).
 
 Assumption: every agent process of a team is a child of one supervisor run on
 one host (``runtime_hosting.process_run``; the run lock refuses a second
@@ -55,8 +57,11 @@ runtime for the instance folder). A process from another run counts as gone
 whatever host it names, so agent processes of another runtime sharing the
 database would be judged gone at once; that deployment is not supported.
 
-Each observer logs an owner's decision when it first makes it and whenever it
-changes (``event=owner_liveness_decided``), not on every pass.
+Each observer logs an owner's decision, per asking purpose, when it first
+makes it and whenever it changes (``event=owner_liveness_decided``), not on
+every pass. The record behind that is bounded: each pass or call keeps only the
+owners it decided about (``retain_decisions``), so owners whose saved work or
+status row is gone drop out.
 
 It depends only on stores and settings, so every runtime module may import it.
 """
@@ -269,12 +274,13 @@ def _observer_memory(agent: Any, name: str, empty: Callable[[], Any]) -> Any:
 
 def _note_decision(agent: Any, decision: OwnerLiveness, purpose: LivenessPurpose) -> None:
     """Log an owner's decision the first time and whenever it changes, not on every pass."""
-    memory: dict[str, tuple[Any, ...]] = _observer_memory(agent, "_liveness_decisions", dict)
+    memory: dict[tuple[LivenessPurpose, str], tuple[Any, ...]] = _observer_memory(agent, "_liveness_decisions", dict)
+    key = (purpose, decision.owner_agent_id)
     current = (decision.evidence, decision.unchecked_process)
-    previous = memory.get(decision.owner_agent_id)
+    previous = memory.get(key)
     if previous == current:
         return
-    memory[decision.owner_agent_id] = current
+    memory[key] = current
     last_seen = None if decision.status is None else decision.status.last_seen_at
     if decision.unchecked_process and (previous is None or previous[1] != decision.unchecked_process):
         agent._logger.warning(
@@ -300,6 +306,14 @@ def _note_decision(agent: Any, decision: OwnerLiveness, purpose: LivenessPurpose
     )
 
 
+def retain_decisions(agent: Any, purpose: LivenessPurpose, owner_agent_ids: Iterable[str]) -> None:
+    """Forget this purpose's decisions about owners the latest pass or call did not see."""
+    memory: dict[tuple[LivenessPurpose, str], tuple[Any, ...]] = _observer_memory(agent, "_liveness_decisions", dict)
+    seen = set(owner_agent_ids)
+    for key in [key for key in memory if key[0] is purpose and key[1] not in seen]:
+        del memory[key]
+
+
 def owner_liveness(
     agent: Any,
     owner_agent_id: str,
@@ -321,13 +335,10 @@ async def gone_owner_ids(
 ) -> list[str]:
     """The owners among these that are gone, never this agent."""
     moment = datetime.now(timezone.utc)
-    return [
-        owner_agent_id
-        for owner_agent_id in dict.fromkeys(owner_agent_ids)
-        if owner_agent_id
-        and owner_agent_id != agent.id
-        and owner_liveness(agent, owner_agent_id, purpose=purpose, now=moment).gone
-    ]
+    decided = [owner for owner in dict.fromkeys(owner_agent_ids) if owner and owner != agent.id]
+    gone = [owner for owner in decided if owner_liveness(agent, owner, purpose=purpose, now=moment).gone]
+    retain_decisions(agent, purpose, decided)
+    return gone
 
 
 def prune_departed_agent_rows(agent: Any, now: datetime | None = None) -> int:
@@ -345,6 +356,7 @@ def prune_departed_agent_rows(agent: Any, now: datetime | None = None) -> int:
     gone_after = owner_gone_after(agent)
     store = _state_store(agent)
     removed = 0
+    decided: list[str] = []
     for status in store.query({"team_id": agent.team_id}):
         agent_id = status.self_id
         if not agent_id or agent_id == agent.id:
@@ -355,9 +367,9 @@ def prune_departed_agent_rows(agent: Any, now: datetime | None = None) -> int:
         decision = owner_liveness(
             agent, agent_id, purpose=LivenessPurpose.STATUS_ROW_PRUNE, now=moment, status=status
         )
+        decided.append(agent_id)
         if not decision.gone or not store.remove_unseen(agent_id, status.last_seen_at):
             continue
-        _observer_memory(agent, "_liveness_decisions", dict).pop(agent_id, None)
         removed += 1
         agent._logger.info(
             "Removed the status row of an agent that is gone. event=agent_status_row_pruned "
@@ -367,6 +379,7 @@ def prune_departed_agent_rows(agent: Any, now: datetime | None = None) -> int:
             decision.evidence.value,
             status.last_seen_at,
         )
+    retain_decisions(agent, LivenessPurpose.STATUS_ROW_PRUNE, decided)
     return removed
 
 

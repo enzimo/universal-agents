@@ -42,7 +42,7 @@ from typing import Any, Iterable
 
 from access_control.identity import IdentityRejected
 from custom_agents.instance_delivery_context import configured_owner_route
-from custom_agents.agent_liveness import LivenessPurpose, owner_liveness, parse_utc
+from custom_agents.agent_liveness import LivenessPurpose, owner_liveness, parse_utc, retain_decisions
 from custom_agents.liveness_observation import heartbeat_checks_deferred
 from custom_agents.stuck_work import (
     ChatRoute,
@@ -292,6 +292,8 @@ class StuckTasks:
     def _owners_gone(self, owners: list[OwnerWork], held: dict[str, HeldTask], now: datetime, add: Any) -> set[str]:
         """Report the work of owners that are gone; return the live owners' ids."""
         live = set()
+        # Forget decisions about owners whose saved work is gone (agent_liveness).
+        retain_decisions(self.agent, LivenessPurpose.STUCK_TASK_NOTICE, [owner.owner_agent_id for owner in owners])
         for owner in owners:
             gone_since = self.owner_gone_since(owner, now)
             if gone_since is None:

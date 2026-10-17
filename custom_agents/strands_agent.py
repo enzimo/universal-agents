@@ -1188,9 +1188,9 @@ class UniversalAgent(BaseModel):
     # Saved work this agent released after another agent took it over
     # (custom_agents.custody_loss); set when the agent connects.
     _custody_release: Any = PrivateAttr(default=None)
-    # This agent's last liveness decision per owner, so each change is logged
-    # once, and senders whose clocks run ahead (agent_liveness).
-    _liveness_decisions: Dict[str, Any] = PrivateAttr(default_factory=dict)
+    # This agent's last liveness decision per purpose and owner, so each change
+    # is logged once, and senders whose clocks run ahead (agent_liveness).
+    _liveness_decisions: Dict[Any, Any] = PrivateAttr(default_factory=dict)
     _status_clock_ahead: set[str] = PrivateAttr(default_factory=set)
     _active_execution_task_id: Optional[str] = PrivateAttr(default=None)
     _stop_reasons_by_task_id: Dict[str, str] = PrivateAttr(default_factory=dict)

@@ -12,7 +12,13 @@ from custom_agents.task_runtime_state import ObjectiveRuntimeState
 from custom_agents.task_runtime_state import PlanRuntimeState
 from custom_agents.task_runtime_state import TaskRuntimeState
 import logging
-from storage.runtime_state_repository import RuntimeCustodyLost, RuntimeRecoveryConflict, RuntimeStateRepository
+from custom_agents.deferred_message_runtime import DeferredHandoff, pending_deferred_handoff
+from storage.runtime_state_repository import (
+    CustodyStore,
+    RuntimeCustodyLost,
+    RuntimeRecoveryConflict,
+    RuntimeStateRepository,
+)
 from custom_agents.task_runtime_state import WorkflowRuntimeState
 
 import json
@@ -119,31 +125,47 @@ class RuntimeSnapshotCoordinator:
                 raise ValueError("Schedule admission requires durable runtime identity")
             return
 
+        # The deferred message this dispatch is handling, if its handling is not
+        # saved yet: it leaves the deferred row in this same save.
+        handoff = pending_deferred_handoff()
         try:
-            if not self.task_state.tasks:
-                self.runtime_state_store.clear_task_runtime(self.identity.owner_agent_id)
-                self._holds_custody = False
-                self._saved_task_ids = frozenset()
-                return
+            self._write_runtime_state(schedule_admission, handoff)
+        except Exception as error:
+            self._note_failed_save(error, handoff)
+            raise
 
-            runtime_state_json = json.dumps(self._export_runtime_state())
-            self.runtime_state_store.save_task_runtime(
-                owner_agent_id=self.identity.owner_agent_id,
-                owner_agent_name=self.identity.owner_agent_name,
-                team_id=self.identity.team_id,
-                owner_named_agent_type=self.identity.owner_named_agent_type,
-                runtime_state_json=runtime_state_json,
-                expect_existing=self._holds_custody,
-                **({"schedule_admission": schedule_admission} if schedule_admission is not None else {}),
-            )
-            self._holds_custody = True
-            self._saved_task_ids = frozenset(self.task_state.tasks)
-        except RuntimeCustodyLost as lost:
-            self._release_lost_custody(lost)
-            raise
-        except Exception as e:
-            self._logger.error(f"Failed to persist active runtime state: {e}")
-            raise
+    def _write_runtime_state(
+        self, schedule_admission: "ScheduleOccurrenceV1 | None", handoff: Optional[DeferredHandoff]
+    ) -> None:
+        if not self.task_state.tasks:
+            self.runtime_state_store.clear_task_runtime(self.identity.owner_agent_id)
+            self._holds_custody = False
+            self._saved_task_ids = frozenset()
+            return
+        self.runtime_state_store.save_task_runtime(
+            owner_agent_id=self.identity.owner_agent_id,
+            owner_agent_name=self.identity.owner_agent_name,
+            team_id=self.identity.team_id,
+            owner_named_agent_type=self.identity.owner_named_agent_type,
+            runtime_state_json=json.dumps(self._export_runtime_state()),
+            expect_existing=self._holds_custody,
+            deferred_handoff=None if handoff is None else handoff.message_id,
+            **({"schedule_admission": schedule_admission} if schedule_admission is not None else {}),
+        )
+        self._holds_custody = True
+        self._saved_task_ids = frozenset(self.task_state.tasks)
+        if handoff is not None:
+            handoff.committed = True
+
+    def _note_failed_save(self, error: Exception, handoff: Optional[DeferredHandoff]) -> None:
+        if handoff is not None:
+            handoff.failure = error
+        if not isinstance(error, RuntimeCustodyLost):
+            self._logger.error(f"Failed to persist active runtime state: {error}")
+        elif error.store is CustodyStore.TASK_RUNTIME:
+            self._release_lost_custody(error)
+        # A refused deferred row leaves this agent's task row and tasks alone;
+        # the inbox drops its messages (deferred_message_runtime).
 
     def persist_task_history(self, task_id: str) -> None:
         if not self.identity.owner_agent_id:

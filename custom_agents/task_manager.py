@@ -100,7 +100,7 @@ from default_values import STORAGE_DEFAULTS
 from id_generation import new_id
 from storage.after_action_report_repository import create_after_action_report_repository
 from storage.config import StorageSettings, resolve_storage_settings
-from storage.runtime_state_repository import RuntimeCustodyLost
+from storage.runtime_state_repository import CustodyStore, RuntimeCustodyLost
 from storage.durable_owner_scope_repository import (
     create_durable_owner_scope_repository,
 )
@@ -128,6 +128,11 @@ def _create_objective_work_runtime(
     )
     return config, repository
 
+
+
+def _task_row_taken_over(error: BaseException) -> bool:
+    """Whether a save failed because another agent took this agent's task row over."""
+    return isinstance(error, RuntimeCustodyLost) and error.store is CustodyStore.TASK_RUNTIME
 
 class TaskManager(
     TaskManagerRuntimeControlMixin,
@@ -2920,12 +2925,17 @@ class TaskManager(
             # Establish durable custody before history/Plan/Objective side effects.
             # A failed initial admission must not become an in-memory duplicate.
             self._persist_runtime_state(schedule_admission=schedule_admission)
-        except RuntimeCustodyLost:
-            # Another agent took this agent's saved work over: the snapshot
-            # coordinator already dropped every task from memory, this one
-            # included. The delivery is retried and admitted as a new task.
-            raise
-        except Exception:
+        except Exception as error:
+            if _task_row_taken_over(error):
+                # Another agent took this agent's task row over: the snapshot
+                # coordinator already dropped every task from memory, this one
+                # included. A NATS delivery is not acknowledged and comes back as
+                # a new admission. A deferred message stays in this agent's own
+                # deferred row and is admitted again from it; if that row was
+                # taken over too, its new owner runs it (deferred_message_runtime).
+                raise
+            # Any other failure, a refused deferred row included, leaves the
+            # other tasks in memory: undo this admission only.
             del self.task_state.tasks[task.task_id]
             self.task_state.task_queue.remove(task.task_id)
             del self.task_state.task_to_taskquery_list[task.task_id]
@@ -3249,10 +3259,10 @@ class TaskManager(
             # Subtasks have their own admission boundary before history or
             # Plan/Objective side effects can describe them as accepted work.
             self._persist_runtime_state()
-        except RuntimeCustodyLost:
-            # The snapshot coordinator already dropped every task, the parent too.
-            raise
-        except Exception:
+        except Exception as error:
+            if _task_row_taken_over(error):
+                # The snapshot coordinator already dropped every task, the parent too.
+                raise
             self.task_state.tasks.pop(subtask.task_id)
             self.task_state.subtask_to_parent_map.pop(subtask.task_id)
             siblings.remove(task_info)

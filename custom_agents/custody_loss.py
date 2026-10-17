@@ -14,7 +14,9 @@ How a refusal is handled:
    deferred inbox (``deferred_message_runtime``) gets a save refused. In the same
    step, under the task lane or the inbox lock, it drops the taken-over tasks or
    messages from memory, so nothing in this agent can start or save them again,
-   and calls the listener installed here.
+   and calls the listener installed here. A deferred message cannot run twice
+   either: it leaves the deferred row only in the same transaction as the task
+   save that records its handling, and only while this agent holds that row.
 2. The listener runs on the storage thread and moves to the agent's event loop.
 3. If a turn of released work is running, it is stopped. The stop is marked as
    a transfer (``control_runtime.consume_handback_interrupt``), so the task gets

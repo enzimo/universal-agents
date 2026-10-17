@@ -630,12 +630,21 @@ Runtime snapshots and idempotent admission let processes recover queued work,
 waiting subtasks, deferred messages, and recent in-flight Tasks. Outboxes record
 ordered actions before external effects. Execution attempts and worker starts
 use leases and fencing, so a stale holder cannot commit after another takes
-over. Saved runtime snapshots move only from an agent that counts as gone, in
-one transaction that deletes its row; a previous owner that is still running
-finds its row gone at its next save, which is refused
-(`RuntimeCustodyLost`). It then drops that work from memory without replying
-and keeps running (`custom_agents.custody_loss`), so one task never has two
-owners. Repairs and fallback paths are logged rather than hidden.
+over. Saved runtime snapshots and deferred messages move only from an agent
+that counts as gone, in one transaction that deletes its row. A previous owner
+that is still running finds its row gone at its next save, which is refused
+(`RuntimeCustodyLost`) before anything is written; it then drops that work from
+memory without replying and keeps running (`custom_agents.custody_loss`). A
+deferred message leaves the deferred row in the same transaction as the first
+task save its handling makes, and only while the agent still holds that row
+(`deferred_message_runtime.DeferredHandoff`); when its handling saves nothing,
+a checked removal follows. So the saved effects of a task or deferred message
+are written by one agent only, and a crash keeps the message either in the
+deferred row or, through its effect, in the task row. What is not covered: work
+a previous owner does before its first save after the takeover (a model turn in
+progress until it is stopped) and handling that saves nothing (such as a reply
+about a task it no longer holds) may still happen on both agents. Repairs and
+fallback paths are logged rather than hidden.
 
 Transport contracts, workflow records, and snapshot codecs have separate owners.
 Shared subsystem configuration lives in `runtime_settings/`; the gateway composes

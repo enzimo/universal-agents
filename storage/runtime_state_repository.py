@@ -120,6 +120,7 @@ class RuntimeStateRepository(Protocol):
         runtime_state_json: str,
         expect_existing: bool,
         schedule_admission: ScheduleOccurrenceV1 | None = None,
+        deferred_handoff: Optional[str] = None,
     ) -> None: ...
 
     def clear_task_runtime(self, owner_agent_id: str) -> None: ...
@@ -145,6 +146,23 @@ class RuntimeStateRepository(Protocol):
     ) -> None: ...
 
     def clear_deferred_messages(self, owner_agent_id: str) -> None: ...
+
+    def add_deferred_message(
+        self,
+        *,
+        owner_agent_id: str,
+        owner_agent_name: Optional[str],
+        team_id: Optional[str],
+        owner_named_agent_type: Optional[str],
+        message_id: str,
+        envelope_json: str,
+        first: bool,
+        expect_existing: bool,
+    ) -> None: ...
+
+    def remove_deferred_messages(
+        self, *, owner_agent_id: str, message_ids: Sequence[str], expect_existing: bool,
+    ) -> None: ...
 
     def get_deferred_messages_team_id(self, owner_agent_id: str) -> Optional[str]: ...
 
@@ -187,6 +205,10 @@ class _RelationalRuntimeStateRepository:
 
     def _begin_recovery(self, conn: Any) -> None:
         """Start the locking transaction (each backend overrides this)."""
+        raise NotImplementedError
+
+    def _connect(self) -> Any:
+        """Open a connection (each backend overrides this)."""
         raise NotImplementedError
 
 
@@ -365,6 +387,7 @@ class _RelationalRuntimeStateRepository:
         self, *, owner_agent_id: str, owner_agent_name: Optional[str], team_id: Optional[str],
         owner_named_agent_type: Optional[str], runtime_state_json: str, expect_existing: bool,
         schedule_admission: ScheduleOccurrenceV1 | None = None,
+        deferred_handoff: Optional[str] = None,
     ) -> None:
         """Save an owner's whole snapshot; ``expect_existing`` when it already saved one.
 
@@ -372,6 +395,14 @@ class _RelationalRuntimeStateRepository:
         took the work over meanwhile, the row is gone and the save is refused
         with ``RuntimeCustodyLost`` before any record, terminal outcome or
         schedule admission is written.
+
+        ``deferred_handoff`` names a message of this owner's deferred row whose
+        handling this save records (``deferred_message_runtime.DeferredHandoff``).
+        It leaves the deferred row in this same transaction, and only while this
+        owner still holds that row; otherwise nothing is written
+        (``RuntimeCustodyLost`` for the deferred store). So a deferred message
+        moves into the task row exactly once, even if another agent takes the
+        deferred row over at the same moment or the process stops right after.
         """
         parts = split_snapshot(decode_runtime_snapshot(runtime_state_json))
         if schedule_admission is not None and (
@@ -393,6 +424,8 @@ class _RelationalRuntimeStateRepository:
                     raise RuntimeCustodyLost(owner_agent_id, CustodyStore.TASK_RUNTIME)
                 if previous is not None:
                     parse_storage_header(previous[0])
+                if deferred_handoff is not None:
+                    self._take_deferred_message(conn, owner_agent_id, deferred_handoff)
                 conn.execute(
                     f"""INSERT INTO active_task_runtime
                         (owner_agent_id, owner_agent_name, team_id, owner_named_agent_type, runtime_state_json, updated_at)
@@ -608,6 +641,110 @@ class _RelationalRuntimeStateRepository:
             raise
         except Exception:
             self._logger.exception("Failed to persist deferred messages", extra={"owner_agent_id": owner_agent_id})
+            raise
+
+    def _locked_deferred_messages(self, conn: Any, owner_agent_id: str) -> Optional[list[Any]]:
+        """The owner's deferred messages, locked for this transaction; None without a row."""
+        row = conn.execute(
+            f"SELECT messages_json FROM agent_deferred_messages WHERE owner_agent_id = {self._dialect.bind}{self._recovery_lock_clause}",
+            (owner_agent_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        messages = json.loads(row[0])
+        if not isinstance(messages, list):
+            raise ValueError("Deferred snapshot must contain a message list.")
+        return messages
+
+    def _write_deferred_messages(self, conn: Any, owner_agent_id: str, messages: list[Any]) -> None:
+        conn.execute(
+            f"UPDATE agent_deferred_messages SET messages_json = {self._dialect.bind}, updated_at = {self._dialect.bind} WHERE owner_agent_id = {self._dialect.bind}",
+            (json.dumps(messages), datetime.now(timezone.utc).isoformat(), owner_agent_id),
+        )
+
+    def _take_deferred_message(self, conn: Any, owner_agent_id: str, message_id: str) -> None:
+        """Remove one message from the owner's deferred row inside the caller's transaction.
+
+        The row must still be this owner's. It is kept even when it empties: the
+        inbox removes it with its own checked write, so a message admitted in
+        between still finds the row.
+        """
+        messages = self._locked_deferred_messages(conn, owner_agent_id)
+        if messages is None:
+            raise RuntimeCustodyLost(owner_agent_id, CustodyStore.DEFERRED_MESSAGES)
+        remaining = [item for item in messages if _deferred_message_id(item) != message_id]
+        if len(remaining) != len(messages):
+            self._write_deferred_messages(conn, owner_agent_id, remaining)
+
+    def add_deferred_message(
+        self,
+        *,
+        owner_agent_id: str,
+        owner_agent_name: Optional[str],
+        team_id: Optional[str],
+        owner_named_agent_type: Optional[str],
+        message_id: str,
+        envelope_json: str,
+        first: bool,
+        expect_existing: bool,
+    ) -> None:
+        """Add one message to the owner's deferred row (at the front when ``first``).
+
+        Writes change only the named messages, never the whole list from memory,
+        so a message another save has just taken out (a hand-off) cannot come
+        back. With ``expect_existing`` the row must still be this owner's.
+        """
+        envelope = json.loads(envelope_json)
+        try:
+            with self._connect() as conn:
+                self._begin_recovery(conn)
+                messages = self._locked_deferred_messages(conn, owner_agent_id)
+                if messages is None and expect_existing:
+                    raise RuntimeCustodyLost(owner_agent_id, CustodyStore.DEFERRED_MESSAGES)
+                if messages is None:
+                    conn.execute(
+                        f"""INSERT INTO agent_deferred_messages
+                            (owner_agent_id, owner_agent_name, team_id, owner_named_agent_type, messages_json, updated_at)
+                        VALUES ({", ".join([self._dialect.bind] * 6)})""",
+                        (owner_agent_id, owner_agent_name, team_id, owner_named_agent_type,
+                         json.dumps([envelope]), datetime.now(timezone.utc).isoformat()),
+                    )
+                elif all(_deferred_message_id(item) != message_id for item in messages):
+                    self._write_deferred_messages(
+                        conn, owner_agent_id, [envelope, *messages] if first else [*messages, envelope]
+                    )
+                conn.commit()
+        except RuntimeCustodyLost as lost:
+            self._log_custody_refused(lost)
+            raise
+        except Exception:
+            self._logger.exception("Failed to persist a deferred message", extra={"owner_agent_id": owner_agent_id})
+            raise
+
+    def remove_deferred_messages(
+        self, *, owner_agent_id: str, message_ids: Sequence[str], expect_existing: bool,
+    ) -> None:
+        """Remove the named messages from the owner's deferred row; delete the row once it is empty."""
+        drop = set(message_ids)
+        bind = self._dialect.bind
+        try:
+            with self._connect() as conn:
+                self._begin_recovery(conn)
+                messages = self._locked_deferred_messages(conn, owner_agent_id)
+                if messages is None and expect_existing:
+                    raise RuntimeCustodyLost(owner_agent_id, CustodyStore.DEFERRED_MESSAGES)
+                if messages is not None:
+                    remaining = [item for item in messages if _deferred_message_id(item) not in drop]
+                    if remaining:
+                        self._write_deferred_messages(conn, owner_agent_id, remaining)
+                    else:
+                        conn.execute(f"DELETE FROM agent_deferred_messages WHERE owner_agent_id = {bind}", (owner_agent_id,))
+                conn.commit()
+        except RuntimeCustodyLost as lost:
+            self._log_custody_refused(lost)
+            raise
+        except Exception:
+            self._logger.exception("Failed to remove deferred messages", extra={"owner_agent_id": owner_agent_id})
             raise
 
     def clear_deferred_messages(self, owner_agent_id: str) -> None:
@@ -923,3 +1060,9 @@ def create_runtime_state_repository(
     raise NotImplementedError(
         f"RuntimeStateRepository has no implementation for backend {storage_settings.backend!r}."
     )
+
+
+def _deferred_message_id(item: Any) -> Optional[str]:
+    """The message id of one stored deferred envelope."""
+    header = item.get("msg_header") if isinstance(item, dict) else None
+    return header.get("message_id") if isinstance(header, dict) else None

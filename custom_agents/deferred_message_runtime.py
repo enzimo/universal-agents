@@ -7,7 +7,8 @@ import json
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Sequence
+from contextvars import ContextVar
+from typing import Any, Awaitable, Callable, Optional, Sequence
 
 from custom_messages.contracts.access_v2 import AccessRequestResolvedV1
 from custom_messages.contracts.control_v1 import (
@@ -29,6 +30,7 @@ from custom_messages.enums import MessageMetaType
 from custom_messages.skill_catalog import ManagedSkillCatalogChangedV1
 from custom_messages.contracts.worker_handback_v1 import WorkerTaskHandbackV1
 from storage.runtime_state_repository import (
+    CustodyStore,
     DeferredMessageSnapshotRow,
     RuntimeCustodyLost,
     RuntimeStateRepository,
@@ -39,6 +41,38 @@ from runtime_hosting.blocking_io import BlockingIOLane
 
 class DeferredInboxFull(RuntimeError):
     """Admission has not taken custody; the broker must retain the delivery."""
+
+
+@dataclass
+class DeferredHandoff:
+    """One deferred message being dispatched, and whether its handling was saved.
+
+    While the inbox dispatches a message it sets ``_CURRENT_HANDOFF`` in the
+    dispatching context. The storage lane runs each save in a copy of the
+    caller's context (``BlockingIOLane``), so the first full task save of that
+    dispatch sees it and takes the message out of the deferred row in the same
+    transaction (``RuntimeStateRepository.save_task_runtime``,
+    ``deferred_handoff``). Unrelated saves of other handlers run in other
+    contexts and never carry it.
+    """
+
+    message_id: str
+    committed: bool = False
+    failure: Optional[BaseException] = None
+    closed: bool = False
+
+    @property
+    def pending(self) -> bool:
+        return not (self.committed or self.closed or self.failure is not None)
+
+
+_CURRENT_HANDOFF: ContextVar[Optional[DeferredHandoff]] = ContextVar("deferred_handoff", default=None)
+
+
+def pending_deferred_handoff() -> Optional[DeferredHandoff]:
+    """The deferred message the current dispatch has not yet saved, if any."""
+    handoff = _CURRENT_HANDOFF.get()
+    return handoff if handoff is not None and handoff.pending else None
 
 
 @dataclass(frozen=True)
@@ -56,10 +90,14 @@ class DeferredMessageInbox:
     The repository must commit or raise. Local queue changes become visible only
     after persistence succeeds; the inbox never receives an agent host object.
 
-    Like the task snapshot, the inbox remembers whether it holds a saved row.
-    When a save finds that row gone (``RuntimeCustodyLost``: another agent took
-    these messages over), the inbox forgets its messages and tells
-    ``on_custody_lost`` (``custom_agents.custody_loss``).
+    Like the task snapshot, the inbox remembers whether it holds a saved row,
+    and its writes name messages (add, remove) instead of rewriting the list.
+    A message leaves the row when its handling is saved: in the same
+    transaction as the first task save of its dispatch (``DeferredHandoff``),
+    or, when the dispatch saved nothing, by a checked removal afterwards. When
+    a write finds the row gone (``RuntimeCustodyLost``: another agent took these
+    messages over), the inbox forgets every message, never retries them here,
+    and tells ``on_custody_lost`` (``custom_agents.custody_loss``).
     """
 
     owner: DeferredInboxOwner
@@ -101,21 +139,6 @@ class DeferredMessageInbox:
             updated_at=None,
         )
 
-    def _write_snapshot(self, row: DeferredMessageSnapshotRow) -> None:
-        if row.messages_json != "[]":
-            self.repository.save_deferred_messages(
-                owner_agent_id=row.owner_agent_id,
-                owner_agent_name=row.owner_agent_name,
-                team_id=row.team_id,
-                owner_named_agent_type=row.owner_named_agent_type,
-                messages_json=row.messages_json,
-                expect_existing=self._holds_row,
-            )
-            self._holds_row = True
-        else:
-            self.repository.clear_deferred_messages(row.owner_agent_id)
-            self._holds_row = False
-
     def _adopt(self, messages: Sequence[MessageEnvelope]) -> None:
         self._messages = deque(messages)
         self._check_backlog()
@@ -125,29 +148,44 @@ class DeferredMessageInbox:
         self._holds_row = True
         self._adopt(messages)
 
-    async def _commit(self, messages: Sequence[MessageEnvelope]) -> None:
+    async def _write(self, operation: Callable[..., None], remaining: Sequence[MessageEnvelope], **kwargs: Any) -> None:
+        """Run one checked write of this owner's row, then show its result in memory."""
+
+        def adopt(_: object) -> None:
+            self._holds_row = bool(remaining)
+            self._adopt(remaining)
+
         try:
             await self._io.run(
-                self._write_snapshot,
-                self._snapshot(messages),
-                committed=lambda _: self._adopt(messages),
+                operation,
+                owner_agent_id=self.owner.agent_id,
+                expect_existing=self._holds_row,
+                committed=adopt,
+                **kwargs,
             )
         except RuntimeCustodyLost as lost:
             self._release_lost_custody(lost)
             raise
 
+    async def _remove(self, message_ids: set[str]) -> None:
+        remaining = [item for item in self._messages if item.msg_header.message_id not in message_ids]
+        await self._write(self.repository.remove_deferred_messages, remaining, message_ids=sorted(message_ids))
+
     def _release_lost_custody(self, lost: RuntimeCustodyLost) -> None:
         """Forget every message: its saved row now belongs to another agent."""
-        released = len(self._messages)
+        message_ids = [item.msg_header.message_id for item in self._messages]
+        released = len(message_ids)
         self._messages = deque()
         self._holds_row = False
         self._check_backlog()
         self.logger.warning(
-            "Another agent took this agent's deferred messages over; dropped them from memory. "
-            "event=runtime_custody_lost owner_agent_id=%s store=%s deferred_count=%s",
+            "Another agent took this agent's deferred messages over; dropped them from memory "
+            "and will not run them here. event=runtime_custody_lost agent_id=%s "
+            "owner_agent_id=%s store=%s message_ids=%s",
+            self.owner.agent_id,
             lost.owner_agent_id,
             lost.store.value,
-            released,
+            message_ids,
         )
         if self.on_custody_lost is None:
             return
@@ -175,27 +213,27 @@ class DeferredMessageInbox:
             raise DeferredInboxFull(
                 f"Agent {self.owner.agent_id} deferred inbox is full ({self.capacity})."
             )
-        candidate = list(self._messages)
-        if is_priority_deferred_message(envelope):
-            candidate.insert(0, envelope)
-        else:
-            candidate.append(envelope)
-        await self._commit(candidate)
+        first = is_priority_deferred_message(envelope)
+        candidate = [envelope, *self._messages] if first else [*self._messages, envelope]
+        await self._write(
+            self.repository.add_deferred_message,
+            candidate,
+            owner_agent_name=self.owner.agent_name,
+            team_id=self.owner.team_id,
+            owner_named_agent_type=self.owner.named_agent_type,
+            message_id=message_id,
+            envelope_json=json.dumps(envelope.model_dump(mode="json")),
+            first=first,
+        )
 
     async def clear(self) -> None:
         async with self._mutation_lock:
-            await self._commit([])
+            await self._remove({item.msg_header.message_id for item in self._messages})
 
     async def remove_messages(self, message_ids: set[str]) -> None:
         """Durably drop messages whose custody moved elsewhere."""
         async with self._mutation_lock:
-            await self._commit(
-                [
-                    item
-                    for item in self._messages
-                    if item.msg_header.message_id not in message_ids
-                ]
-            )
+            await self._remove(set(message_ids))
 
     async def stored_team_id(self) -> str | None:
         return await self._io.run(
@@ -325,30 +363,65 @@ class DeferredMessageInbox:
         dispatch: Callable[[MessageEnvelope], Awaitable[None]],
         available: Callable[[], bool],
     ) -> bool:
-        """Keep failed/cancelled work and end the pass without a tight retry loop."""
+        """Dispatch messages in order; each leaves the row once its handling is saved.
+
+        Keep failed or cancelled work and end the pass without a tight retry
+        loop. If the row turns out to belong to another agent, every message is
+        dropped here and the pass ends (``RuntimeCustodyLost``).
+        """
         while self._messages and available():
             envelope = self._messages[0]
+            message_id = envelope.msg_header.message_id
+            handoff = DeferredHandoff(message_id)
+            token = _CURRENT_HANDOFF.set(handoff)
+            error: Optional[BaseException] = None
             try:
                 await dispatch(envelope)
-                # Dispatch can await while another admission changes the queue.
-                # Remove only this message from the latest committed contents.
-                async with self._mutation_lock:
-                    remaining = [
-                        item
-                        for item in self._messages
-                        if item.msg_header.message_id != envelope.msg_header.message_id
-                    ]
-                    await self._commit(remaining)
-            except Exception:
-                self.logger.exception(
-                    "Deferred dispatch did not complete; retaining durable work",
-                    extra={
-                        "event": "deferred_dispatch_retained",
-                        "agent_id": self.owner.agent_id,
-                        "message_id": envelope.msg_header.message_id,
-                    },
-                )
+            except Exception as exc:
+                error = exc
+            finally:
+                _CURRENT_HANDOFF.reset(token)
+            if not await self._settle_dispatched(envelope, handoff, error):
                 return False
+        return True
+
+    async def _settle_dispatched(
+        self, envelope: MessageEnvelope, handoff: DeferredHandoff, error: Optional[BaseException]
+    ) -> bool:
+        """Remove a dispatched message unless it must stay; True to continue the pass."""
+        message_id = envelope.msg_header.message_id
+        lost = handoff.failure if isinstance(handoff.failure, RuntimeCustodyLost) else error
+        if isinstance(lost, RuntimeCustodyLost) and lost.store is CustodyStore.DEFERRED_MESSAGES:
+            # The task save that would have taken this message refused: the row is gone.
+            handoff.closed = True
+            self._release_lost_custody(lost)
+            return False
+        if not handoff.committed and (error is not None or handoff.failure is not None):
+            # Nothing of its handling was saved here; the message stays in the row.
+            handoff.closed = True
+            self.logger.warning(
+                "Deferred dispatch did not complete; retaining durable work",
+                extra={"event": "deferred_dispatch_retained", "agent_id": self.owner.agent_id,
+                       "message_id": message_id},
+                exc_info=error or handoff.failure,
+            )
+            return False
+        # Saved with its handling (the row may still list it if that save came
+        # later in a child task), or its handling saved nothing: remove it now.
+        handoff.closed = True
+        try:
+            async with self._mutation_lock:
+                await self._remove({message_id})
+        except RuntimeCustodyLost:
+            return False
+        if error is not None:
+            self.logger.warning(
+                "Deferred dispatch failed after its handling was saved; the message is done here",
+                extra={"event": "deferred_dispatch_failed_after_save", "agent_id": self.owner.agent_id,
+                       "message_id": message_id},
+                exc_info=error,
+            )
+            return False
         return True
 
     def _check_backlog(self) -> None:

@@ -225,3 +225,55 @@ def test_a_history_write_without_a_row_reports_custody_lost(recovery_store):
             owner_agent_id=owners[0], task=task, task_plan_links={},
             task_objective_links={}, plan_objective_links={},
         )
+
+
+def test_a_deferred_hand_off_and_a_deferred_takeover_serialize(recovery_store):
+    """The task save that takes a deferred message races a takeover of the deferred row.
+
+    Exactly one wins: either the message moved into the old owner's task row and
+    the takeover's transfer is refused, or the takeover holds the message and
+    the old owner's save wrote nothing.
+    """
+    repo, config, owners = recovery_store
+    envelope = {"msg_header": {"message_id": "m1"}, "msg_content": {"task_id": "m1"}}
+    repo.add_deferred_message(
+        owner_agent_id=owners[0], owner_agent_name="Original", team_id="recovery_tests",
+        owner_named_agent_type="Worker", message_id="m1", envelope_json=json.dumps(envelope),
+        first=False, expect_existing=False,
+    )
+    sources = repo.load_deferred_messages_by_owner(owners[0])
+    barrier = Barrier(2)
+
+    def hand_off():
+        contender = create_runtime_state_repository(resolve_storage_settings(config))
+        barrier.wait()
+        try:
+            contender.save_task_runtime(
+                owner_agent_id=owners[0], owner_agent_name="Original", team_id="recovery_tests",
+                owner_named_agent_type="Worker", runtime_state_json=snapshot_json("m1"),
+                expect_existing=False, deferred_handoff="m1",
+            )
+        except RuntimeCustodyLost:
+            return "refused"
+        return "moved"
+
+    def take_over():
+        contender = create_runtime_state_repository(resolve_storage_settings(config))
+        barrier.wait()
+        try:
+            contender.commit_deferred_messages_recovery(
+                sources=sources, replacement=replace(sources[0], owner_agent_id=owners[1])
+            )
+        except RuntimeRecoveryConflict:
+            return "conflict"
+        return "took_over"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        moved = executor.submit(hand_off)
+        taken = executor.submit(take_over)
+        outcome = (moved.result(timeout=30), taken.result(timeout=30))
+    assert outcome in {("moved", "conflict"), ("refused", "took_over")}
+    in_task_row = len(repo.load_task_runtime_by_owner(owners[0])) == 1
+    taken_rows = repo.load_deferred_messages_by_owner(owners[1])
+    in_new_deferred = bool(taken_rows) and "m1" in taken_rows[0].messages_json
+    assert in_task_row != in_new_deferred

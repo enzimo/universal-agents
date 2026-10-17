@@ -11,6 +11,7 @@ and it keeps taking new work.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from functools import partial
 from datetime import datetime, timezone
@@ -21,7 +22,12 @@ import pytest
 
 from custom_agents.control_runtime import _interrupt_active_execution, consume_handback_interrupt
 from custom_agents.custody_loss import custody_moved, install_custody_listeners
-from custom_agents.deferred_message_runtime import DeferredInboxOwner, DeferredMessageInbox
+from custom_agents.deferred_message_runtime import (
+    _CURRENT_HANDOFF,
+    DeferredHandoff,
+    DeferredInboxOwner,
+    DeferredMessageInbox,
+)
 from custom_agents.task_manager import TaskManager
 from custom_agents.turn_failure_runtime import fail_task_after_turn_error
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -287,3 +293,166 @@ def test_only_a_refused_task_snapshot_save_counts_as_moved_custody():
                 raise RuntimeError("turn failed") from lost
         except RuntimeError as wrapped:
             assert custody_moved(agent, "work", wrapped) is moved
+
+
+# -- review 2026-10-17 (F1): deferred messages move into the task row once -----------
+
+
+def deferred_ids(repository, owner):
+    return [
+        item["msg_content"]["task_id"]
+        for row in repository.load_deferred_messages_by_owner(owner)
+        for item in json.loads(row.messages_json)
+    ]
+
+
+async def taken_over_deferred(tmp_path, ids, *, old_had_task):
+    """The old owner defers ``ids``; a new agent takes its task row and deferred row over."""
+    old = manager(tmp_path, OLD)
+    if old_had_task:
+        admit(old, "running")
+    old_inbox = inbox_for(OLD, old)
+    for task_id in ids:
+        await old_inbox.admit(_envelope(task_id))
+    new = manager(tmp_path, NEW)
+    if old_had_task:
+        new.restore_runtime_state_for_owner_ids([OLD])
+    new_inbox = inbox_for(NEW, new)
+    assert await new_inbox.restore_owners([OLD])
+    return old, old_inbox, new, new_inbox
+
+
+def dispatcher(task_manager, runs):
+    async def dispatch(envelope):
+        admit(task_manager, envelope.msg_content.task_id)
+        runs.append(envelope.msg_content.task_id)
+
+    return dispatch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [["m1"], ["m1", "m2"]])
+@pytest.mark.parametrize("old_noticed_first", [False, True])
+async def test_a_deferred_message_never_runs_twice_across_a_takeover(tmp_path, ids, old_noticed_first, caplog):
+    """The reviewer's probe: every variant ran ``m1`` on both agents before the fix."""
+    old, old_inbox, new, new_inbox = await taken_over_deferred(tmp_path, ids, old_had_task=old_noticed_first)
+    if old_noticed_first:
+        old.set_custody_lost_listener(lambda task_ids: None)
+        with pytest.raises(RuntimeCustodyLost):
+            old.update_main_task_state("running", ProgressState.IN_PROGRESS, now())
+    old_runs, new_runs = [], []
+    with caplog.at_level(logging.WARNING):
+        assert await old_inbox.drain(dispatch=dispatcher(old, old_runs), available=lambda: True) is False
+    assert await new_inbox.drain(dispatch=dispatcher(new, new_runs), available=lambda: True) is True
+    assert old_runs == [] and new_runs == ids
+    # The refusal dropped the whole inbox, is not retried here, and is logged with the ids.
+    assert len(old_inbox) == 0 and old_inbox._holds_row is False
+    assert "event=runtime_custody_lost" in caplog.text and "store=deferred_messages" in caplog.text
+    assert await old_inbox.drain(dispatch=dispatcher(old, old_runs), available=lambda: True) is True
+    assert old_runs == []
+
+
+@pytest.mark.asyncio
+async def test_the_hand_off_and_a_takeover_never_both_win(tmp_path):
+    """A takeover read the row before the old owner's hand-off committed: its transfer is refused."""
+    old = manager(tmp_path, OLD)
+    old_inbox = inbox_for(OLD, old)
+    await old_inbox.admit(_envelope("m1"))
+    stale_rows = old.runtime_state_store.load_deferred_messages_by_owner(OLD)
+    runs: list[str] = []
+    assert await old_inbox.drain(dispatch=dispatcher(old, runs), available=lambda: True) is True
+    new = manager(tmp_path, NEW)
+    with pytest.raises(RuntimeRecoveryConflict):
+        await inbox_for(NEW, new).restore_rows(stale_rows)
+    assert runs == ["m1"] and holders(old) == {OLD: ["m1"]}
+    assert deferred_ids(old.runtime_state_store, OLD) == []
+
+
+@pytest.mark.asyncio
+async def test_a_crash_before_the_hand_off_keeps_the_message(tmp_path):
+    old = manager(tmp_path, OLD)
+    old_inbox = inbox_for(OLD, old)
+    await old_inbox.admit(_envelope("m1"))
+
+    async def stops_before_saving(envelope):
+        raise RuntimeError("process stopping")
+
+    assert await old_inbox.drain(dispatch=stops_before_saving, available=lambda: True) is False
+    assert deferred_ids(old.runtime_state_store, OLD) == ["m1"]
+    new = manager(tmp_path, NEW)
+    new_inbox = inbox_for(NEW, new)
+    assert await new_inbox.restore_owners([OLD])
+    runs: list[str] = []
+    assert await new_inbox.drain(dispatch=dispatcher(new, runs), available=lambda: True) is True
+    assert runs == ["m1"]
+
+
+@pytest.mark.asyncio
+async def test_a_crash_right_after_the_hand_off_leaves_the_message_in_the_task_row_only(tmp_path):
+    """The process stops after the save that took the message, before the inbox removed it."""
+    old = manager(tmp_path, OLD)
+    old_inbox = inbox_for(OLD, old)
+    envelope = _envelope("m1")
+    await old_inbox.admit(envelope)
+    handoff = DeferredHandoff(envelope.msg_header.message_id)
+    token = _CURRENT_HANDOFF.set(handoff)
+    try:
+        admit(old, "m1")
+    finally:
+        _CURRENT_HANDOFF.reset(token)
+    assert handoff.committed
+    # Nothing else runs in the old process. Its replacement takes both rows over.
+    new = manager(tmp_path, NEW)
+    new.restore_runtime_state_for_owner_ids([OLD])
+    new_inbox = inbox_for(NEW, new)
+    await new_inbox.restore_owners([OLD])
+    assert [info.task.task_id for info in new.list_task_infos()] == ["m1"]
+    assert len(new_inbox) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_message_admitted_during_a_dispatch_does_not_bring_the_handed_off_one_back(tmp_path):
+    old = manager(tmp_path, OLD)
+    old_inbox = inbox_for(OLD, old)
+    await old_inbox.admit(_envelope("m1"))
+
+    dispatched: list[str] = []
+
+    async def admits_another_meanwhile(envelope):
+        admit(old, envelope.msg_content.task_id)  # takes m1 out of the row
+        await old_inbox.admit(_envelope("m2"))  # writes while memory still lists m1
+        dispatched.append(envelope.msg_content.task_id)
+
+    assert await old_inbox.drain(dispatch=admits_another_meanwhile, available=lambda: not dispatched) is True
+    assert dispatched == ["m1"]
+    assert deferred_ids(old.runtime_state_store, OLD) == ["m2"]
+    assert [item.msg_content.task_id for item in old_inbox.messages] == ["m2"]
+
+
+@pytest.mark.asyncio
+async def test_a_task_row_takeover_keeps_the_message_in_this_agents_deferred_row(tmp_path):
+    """Only the task row moved: the message is still this agent's and is admitted once, later."""
+    old = manager(tmp_path, OLD)
+    admit(old, "running")
+    old_inbox = inbox_for(OLD, old)
+    await old_inbox.admit(_envelope("m1"))
+    new = manager(tmp_path, NEW)
+    new.restore_runtime_state_for_owner_ids([OLD])
+    runs: list[str] = []
+    assert await old_inbox.drain(dispatch=dispatcher(old, runs), available=lambda: True) is False
+    assert runs == [] and deferred_ids(old.runtime_state_store, OLD) == ["m1"] and len(old_inbox) == 1
+    assert await old_inbox.drain(dispatch=dispatcher(old, runs), available=lambda: True) is True
+    assert runs == ["m1"] and holders(old) == {NEW: ["running"], OLD: ["m1"]}
+    assert deferred_ids(old.runtime_state_store, OLD) == []
+
+
+@pytest.mark.asyncio
+async def test_emptying_the_inbox_is_a_checked_delete(tmp_path):
+    old = manager(tmp_path, OLD)
+    old_inbox = inbox_for(OLD, old)
+    await old_inbox.admit(_envelope("m1"))
+    assert await inbox_for(NEW, old).restore_owners([OLD])
+    with pytest.raises(RuntimeCustodyLost):
+        await old_inbox.clear()
+    assert len(old_inbox) == 0 and old_inbox._holds_row is False
+    assert deferred_ids(old.runtime_state_store, NEW) == ["m1"]

@@ -47,6 +47,7 @@ class RuntimeStateStore:
         runtime_state_json: str,
         expect_existing: bool,
         schedule_admission: ScheduleOccurrenceV1 | None = None,
+        deferred_handoff: Optional[str] = None,
     ) -> None:
         self._repository.save_task_runtime(
             owner_agent_id=owner_agent_id,
@@ -56,6 +57,7 @@ class RuntimeStateStore:
             runtime_state_json=runtime_state_json,
             expect_existing=expect_existing,
             schedule_admission=schedule_admission,
+            deferred_handoff=deferred_handoff,
         )
 
     def save_task_runtime_task(
@@ -119,6 +121,36 @@ class RuntimeStateStore:
 
     def clear_deferred_messages(self, owner_agent_id: str) -> None:
         self._repository.clear_deferred_messages(owner_agent_id)
+
+    def add_deferred_message(
+        self,
+        *,
+        owner_agent_id: str,
+        owner_agent_name: Optional[str],
+        team_id: Optional[str],
+        owner_named_agent_type: Optional[str],
+        message_id: str,
+        envelope_json: str,
+        first: bool,
+        expect_existing: bool,
+    ) -> None:
+        self._repository.add_deferred_message(
+            owner_agent_id=owner_agent_id,
+            owner_agent_name=owner_agent_name,
+            team_id=team_id,
+            owner_named_agent_type=owner_named_agent_type,
+            message_id=message_id,
+            envelope_json=envelope_json,
+            first=first,
+            expect_existing=expect_existing,
+        )
+
+    def remove_deferred_messages(
+        self, *, owner_agent_id: str, message_ids: Sequence[str], expect_existing: bool,
+    ) -> None:
+        self._repository.remove_deferred_messages(
+            owner_agent_id=owner_agent_id, message_ids=message_ids, expect_existing=expect_existing,
+        )
 
     def get_deferred_messages_team_id(self, owner_agent_id: str) -> Optional[str]:
         return self._repository.get_deferred_messages_team_id(owner_agent_id)

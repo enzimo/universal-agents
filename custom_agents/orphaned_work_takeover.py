@@ -26,7 +26,7 @@ from typing import Any
 
 from custom_messages.contracts.runtime_snapshot_v3 import decode_runtime_snapshot
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
-from custom_agents.agent_liveness import LivenessPurpose, latest_launch, owner_liveness
+from custom_agents.agent_liveness import LivenessPurpose, latest_launch, owner_liveness, retain_decisions
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,7 @@ def _orphaned_owners(agent: Any, now: datetime) -> list[dict[str, Any]]:
     """Dead owners of the team that hold unfinished work (storage lane)."""
 
     found = []
+    decided: list[str] = []
     for row in agent.task_manager.runtime_state_store.peek_task_runtime_by_team(agent.team_id):
         agent_type = row.owner_named_agent_type
         if row.owner_agent_id == agent.id or not agent_type or agent_type == TEAM_ARCHITECT_AGENT_TYPE:
@@ -71,6 +72,7 @@ def _orphaned_owners(agent: Any, now: datetime) -> list[dict[str, Any]]:
         unfinished = _unfinished_tasks(row)
         if not unfinished:
             continue
+        decided.append(row.owner_agent_id)
         if not owner_liveness(agent, row.owner_agent_id, purpose=LivenessPurpose.REPLACEMENT_PASS, now=now).gone:
             continue
         found.append(
@@ -81,6 +83,8 @@ def _orphaned_owners(agent: Any, now: datetime) -> list[dict[str, Any]]:
                 "tasks": len(unfinished),
             }
         )
+    # Owners with no unfinished work left are not decided again: forget them.
+    retain_decisions(agent, LivenessPurpose.REPLACEMENT_PASS, decided)
     return found
 
 

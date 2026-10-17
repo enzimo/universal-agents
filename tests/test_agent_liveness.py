@@ -176,14 +176,19 @@ async def test_an_unchecked_process_falls_back_to_the_heartbeat(team, live_proce
     report(team, STARTUP, seen_ago=GONE_AFTER + timedelta(seconds=1), identity=elsewhere)
     caplog.clear()
     with caplog.at_level(logging.INFO):
+        assert owner_liveness(team, STARTUP, purpose=TEST).gone
         assert _orphaned_owners(team, datetime.now(timezone.utc))
         assert stuck_since(team, STARTUP) is not None
         assert await gone_owner_ids(team, [STARTUP], purpose=LivenessPurpose.SCHEDULE_COALESCING) == [STARTUP]
-        assert await take_over_orphaned_work(team, clock=1.0) == 1
-    # Still unknown, so not reported again; the move to a stale heartbeat is logged once.
-    assert "event=owner_liveness_unknown" not in caplog.text
-    assert caplog.text.count("event=owner_liveness_decided") == 1
+    # The first decision path saw the change to a stale heartbeat, and did not
+    # report the unknown process again; each other path reports it once.
     assert "evidence=heartbeat_stale previous_evidence=heartbeat_fresh" in caplog.text
+    assert caplog.text.count("event=owner_liveness_unknown") == 3
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert await take_over_orphaned_work(team, clock=1.0) == 1
+        assert stuck_since(team, STARTUP) is not None
+    assert "event=owner_liveness" not in caplog.text  # unchanged decisions are not logged again
     assert prune_departed_agent_rows(team) == 1
 
 
@@ -506,3 +511,26 @@ def test_process_identity_is_not_shown_to_models_or_people(team, monkeypatch):
     for where, text in outputs.items():
         assert STARTUP in text, where
         assert "process_identity" not in text, where
+
+
+@pytest.mark.asyncio
+async def test_decision_records_keep_only_owners_still_seen(team):
+    """The per-owner record behind change-only logging must not grow for good (review F2)."""
+    held_work(team, owner="owner_a", signed=True)
+    report(team, "owner_a", seen_ago=GONE_AFTER * 2)
+    now = datetime.now(timezone.utc)
+    assert _orphaned_owners(team, now)
+    memory = team._liveness_decisions
+    assert (LivenessPurpose.REPLACEMENT_PASS, "owner_a") in memory
+    team.task_manager.runtime_state_store.clear_task_runtime("owner_a")  # its saved work is gone
+    _orphaned_owners(team, now)
+    assert (LivenessPurpose.REPLACEMENT_PASS, "owner_a") not in memory
+
+    await gone_owner_ids(team, ["owner_b"], purpose=TEST)
+    await gone_owner_ids(team, ["owner_c"], purpose=TEST)
+    assert {key for key in memory if key[0] is TEST} == {(TEST, "owner_c")}
+
+    assert prune_departed_agent_rows(team) == 1  # owner_a's silent row
+    assert (LivenessPurpose.STATUS_ROW_PRUNE, "owner_a") in memory
+    prune_departed_agent_rows(team)
+    assert (LivenessPurpose.STATUS_ROW_PRUNE, "owner_a") not in memory
