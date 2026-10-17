@@ -507,7 +507,7 @@ def test_a_failed_decision_leaves_nothing_to_export_and_older_leftovers_stay_beh
 
     from access_catalog.catalog import load_catalog
     from access_control.cedar import CedarAccessClient
-    from access_control.decisions import AccessService
+    from access_control.decisions import AccessService, HandDownRefused
     from access_control.entities import AgentPrincipal, PersonPrincipal, agent_role_resolver
     from access_control.inbox import StoredAccessInbox
     from access_control.requests import AccessRequests
@@ -541,7 +541,7 @@ def test_a_failed_decision_leaves_nothing_to_export_and_older_leftovers_stay_beh
 
         # A decision that fails while storing its outcome stores none of its grants.
         monkeypatch.setattr(store, "finish_request", busy)
-        with pytest.raises(sqlite3.OperationalError):
+        with pytest.raises(HandDownRefused, match="couldn't be saved because the access store was busy"):
             requests.decide(failed_id, ana, AccessReviewChoice.APPROVE)
         monkeypatch.undo()
         assert [g for g in store.list_team(TEAM) if g.approval_id == failed_id] == []

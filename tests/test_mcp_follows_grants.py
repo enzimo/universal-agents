@@ -422,7 +422,7 @@ async def test_a_busy_database_while_applying_leaves_the_server_pending_and_a_la
         return original(*args, **kwargs)
 
     monkeypatch.setattr(store, "apply_together", busy_once)
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(HandDownRefused, match="couldn't be saved because the access store was busy"):
         world.requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE_ALL)
 
     assert world.mcp_store().require(pending.connection_id).lifecycle is MCPConnectionLifecycle.PENDING

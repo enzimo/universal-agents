@@ -1177,8 +1177,12 @@ stores its grants and its outcome in one transaction
 (`AccessRepository.decision_transaction`): it takes the access store's write
 lock, checks that the request still waits, and everything the decision then
 does on the store in that thread joins the transaction, so its authority
-checks see the grants it stored a moment ago. Other writers see none of them
-until the outcome is stored with them. A second decision made at the same
+checks see the grants it stored a moment ago. Only the thread that opened the
+transaction joins it: work handed to another thread, even with a copied
+context (`asyncio.to_thread`), opens its own connection and sees only what was
+committed. Other writers see none of the decision's grants until the outcome
+is stored with them, and log lines about what the decision replaced are
+written only after it commits (`AccessRepository.after_commit`). A second decision made at the same
 moment (a double click, a chat button and the web card, two reviewers,
 `assistant_cli access decide`), a withdrawal (the task ended, or its person
 left), or another writer (a person giving access on the Access page, a
@@ -1187,7 +1191,11 @@ works on what was committed: the second decision finds the request decided.
 A decision that fails, or cannot get the lock, stores nothing, so there is
 nothing to take back and no access in force for a request that still waits;
 replacing narrower access (one entry per tool) happens in the same
-transaction. A denied or withdrawn request denies its hand-downs still
+transaction. When the database was busy or could not be reached, the person
+is told so in plain words ("Nothing was changed; try again") and the failure
+is logged as `event=access_decision_failed` with the request and the
+reviewer; it first reads the request back, because a lost PostgreSQL commit
+answer may hide an outcome that was stored. A denied or withdrawn request denies its hand-downs still
 waiting for approval in the same transaction; only a granted outcome keeps
 the hand-downs it approved in place.
 
@@ -1201,7 +1209,9 @@ other decision is refused while the claim is current ("Someone is deciding
 this request right now"). The claim is renewed before and after each program
 download, and a download stops after `DOWNLOAD_DEADLINE_SECONDS` measured from
 connecting to its last byte (redirects, TLS and headers included; a timer
-shuts the connection down, because a socket timeout bounds one read only). So
+shuts the connection down, because a socket timeout bounds one read only, and
+the deadline is checked again after each host name lookup, which nothing can
+interrupt, so a slow lookup overruns by its own length at most). So
 a claim runs out only when a step stalls past its limit or the process ends;
 then the next decision takes it over, and the stalled decision finds it lost
 at its next renewal or when storing its outcome, and stores nothing. On any
@@ -1216,7 +1226,10 @@ never kept in force: none can be written now, but an older version stored a
 decision's grants before its outcome and could leave them behind when it
 stopped in between. The gateway's Inbox pass ends such grants
 (`end_grants_without_granted_outcome`, found by the indexed
-`access_grants.approval_id` column), and the team transfer leaves them behind.
+`access_grants.approval_id` column), a decision ends those carrying its own
+request's id before it writes anything (so a decision made before the first
+Inbox pass cannot make one permanent), and the team transfer leaves them
+behind.
 Existing stores get the `approval_id` column added and filled from each
 grant's record at their first open, in one transaction.
 

@@ -123,7 +123,11 @@ class _DownloadDeadline:
     that keeps sending the body a little at a time, never trips it. So a
     timer shuts down every connection of the download when the deadline
     passes, which ends whatever step is waiting, and each new connection
-    gets at most the time left. The clock decides; the server cannot extend it.
+    step gets at most the time left. A name lookup cannot be interrupted and
+    has no socket yet, so the deadline is checked again right after it and
+    after the connection is made (``_DeadlineHTTPSConnection``): a slow
+    lookup on a redirect can overrun by its own length, never by the rest of
+    the download.
     """
 
     def __init__(self, seconds: float) -> None:
@@ -145,10 +149,21 @@ class _DownloadDeadline:
     def remaining(self) -> float:
         return max(0.0, self._ends - time.monotonic())
 
+    def step_timeout(self) -> float:
+        """The socket timeout for the next blocking step: the per-step limit or the time left."""
+
+        return max(min(float(DOWNLOAD_TIMEOUT_SECONDS), self.remaining()), 0.001)
+
+    def check(self) -> None:
+        """Raise when the deadline passed (between steps the timer cannot reach)."""
+
+        if self.expired or self.remaining() <= 0:
+            self.expired = True
+            raise TimeoutError("the download deadline passed")
+
     def track(self, connection: http.client.HTTPConnection) -> None:
         with self._lock:
-            if self.expired:
-                raise TimeoutError("the download deadline passed")
+            self.check()
             self._connections.append(connection)
 
     def _expire(self) -> None:
@@ -158,11 +173,48 @@ class _DownloadDeadline:
         for connection in connections:
             sock = getattr(connection, "sock", None)
             if sock is None:
-                continue
+                continue  # still looking up the host name: checked when the lookup returns
             try:
                 sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass  # already closed
+
+
+class _DeadlineHTTPSConnection(http.client.HTTPSConnection):
+    """An https connection whose connecting steps keep to the download's deadline."""
+
+    def __init__(self, host: str, *, deadline: _DownloadDeadline, **kwargs: Any) -> None:
+        kwargs["timeout"] = deadline.step_timeout()
+        super().__init__(host, **kwargs)
+        self._deadline = deadline
+        self._create_connection = self._connect_within_deadline
+
+    def _connect_within_deadline(self, address: tuple[str, int], timeout: Any = None, source_address: Any = None) -> socket.socket:
+        host, port = address
+        addresses = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)  # cannot be interrupted
+        self._deadline.check()
+        error: OSError | None = None
+        for family, kind, proto, _name, target in addresses:
+            sock = socket.socket(family, kind, proto)
+            try:
+                sock.settimeout(self._deadline.step_timeout())
+                if source_address:
+                    sock.bind(source_address)
+                sock.connect(target)
+                return sock
+            except OSError as exc:
+                sock.close()
+                error = exc
+                self._deadline.check()
+        raise error or OSError(f"no address for {host}")
+
+    def connect(self) -> None:
+        super().connect()  # the TLS handshake waits at most the time left, and the timer can end it
+        try:
+            self._deadline.check()
+        except TimeoutError:
+            self.close()
+            raise
 
 
 class _DeadlineHTTPSHandler(HTTPSHandler):
@@ -176,8 +228,8 @@ class _DeadlineHTTPSHandler(HTTPSHandler):
         deadline = self._deadline
 
         def connection(host: str, **kwargs: Any) -> http.client.HTTPSConnection:
-            timeout = min(float(kwargs.pop("timeout", None) or DOWNLOAD_TIMEOUT_SECONDS), deadline.remaining())
-            opened = http.client.HTTPSConnection(host, timeout=max(timeout, 0.001), **kwargs)
+            kwargs.pop("timeout", None)
+            opened = _DeadlineHTTPSConnection(host, deadline=deadline, **kwargs)
             deadline.track(opened)
             return opened
 

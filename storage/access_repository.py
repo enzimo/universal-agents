@@ -65,7 +65,8 @@ each other's access writes. While a write transaction of this store is open
 in a thread, every other read or write that thread makes on the store joins
 it (``_joining``): a grant plan and a whole decision read and write through
 the one connection, see their own uncommitted rows, and never open a second
-connection that would wait for the lock the transaction holds.
+connection that would wait for the lock the transaction holds. Only the
+owning thread joins: work handed to another thread opens its own connection.
 """
 
 from __future__ import annotations
@@ -75,6 +76,7 @@ from storage.read_only import repositories_are_read_only
 import json
 import logging
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -115,9 +117,23 @@ logger = logging.getLogger(__name__)
 ONE_ACTIVE_LINK_INDEX = "access_account_links_one_active"
 # The index that finds the grants one decision stored (``GrantV1.approval_id``).
 APPROVAL_ID_INDEX = "access_grants_approval"
-# The open write transaction that this thread's other store operations join:
-# (id of the repository, its connection). See ``_joining``.
-_OPEN_WRITE: ContextVar[tuple[int, Any] | None] = ContextVar("access_store_open_write", default=None)
+# The open write transaction that the owning thread's other store operations
+# join (see ``_joining``). A context variable travels with copied contexts
+# (``asyncio.to_thread``), so the owner's thread id is part of the record.
+_OPEN_WRITE: ContextVar["_OpenWrite | None"] = ContextVar("access_store_open_write", default=None)
+
+
+@dataclass
+class _OpenWrite:
+    """A write transaction a thread has open: whose, where, and what to do once it commits."""
+
+    repository_id: int
+    thread_id: int
+    conn: Any
+    after_commit: list[Callable[[], None]]
+
+    def joins(self, repository: object) -> bool:
+        return self.repository_id == id(repository) and self.thread_id == threading.get_ident()
 
 
 @dataclass(frozen=True)
@@ -203,6 +219,18 @@ class DecisionInProgress(AccessStoreConflict):
 
 class DecisionClaimLost(AccessStoreConflict):
     """The decision no longer holds its claim: the request was closed, or the claim ran out and was taken."""
+
+
+def store_unavailable(error: BaseException) -> bool:
+    """Whether ``error`` came from the database (busy, locked, connection lost), not from an access rule."""
+
+    if isinstance(error, sqlite3.Error):
+        return True
+    try:
+        import psycopg
+    except ImportError:  # pragma: no cover - psycopg ships with the runtime
+        return False
+    return isinstance(error, psycopg.Error)
 
 
 def _utc(value: datetime | None) -> str | None:
@@ -346,28 +374,46 @@ class AccessRepository:
 
     def _connect(self) -> Any:
         joined = _OPEN_WRITE.get()
-        if joined is not None and joined[0] == id(self):
-            return _JoinedWrite(joined[1])
+        if joined is not None and joined.joins(self):
+            return _JoinedWrite(joined.conn)
         if self.settings.postgres_dsn:
             return connect_postgres(self.settings.postgres_dsn, write_lock_key=ACCESS_STORE_WRITE_LOCK_KEY)
         return connect_sqlite(str(self.settings.sqlite_path), row_factory=sqlite3.Row)
 
     @contextmanager
-    def _joining(self, conn: Any) -> Iterator[None]:
+    def _joining(self, conn: Any) -> Iterator[_OpenWrite]:
         """Let this thread's other operations on this store join ``conn``'s open write transaction.
 
         A grant plan, or a whole decision, reads and writes through the one
         connection: it sees its own uncommitted rows, and in PostgreSQL it
         opens no second connection (one that wrote would wait for the lock
-        this transaction holds). Other threads and processes see nothing
-        until the transaction commits.
+        this transaction holds). Only the thread that opened the transaction
+        joins it: work handed to another thread, even with a copied context
+        (``asyncio.to_thread``), opens its own connection, sees only what was
+        committed, and waits for the lock to write. Other threads and
+        processes see nothing until the transaction commits.
         """
 
-        token = _OPEN_WRITE.set((id(self), conn))
+        opened = _OpenWrite(id(self), threading.get_ident(), conn, [])
+        token = _OPEN_WRITE.set(opened)
         try:
-            yield
+            yield opened
         finally:
             _OPEN_WRITE.reset(token)
+
+    def after_commit(self, action: Callable[[], None]) -> None:
+        """Run ``action`` once this thread's open decision transaction commits, or now when none is open.
+
+        For what must only happen when the change is stored, such as a log
+        line saying narrower access was replaced: a decision that rolls back
+        runs none of them.
+        """
+
+        joined = _OPEN_WRITE.get()
+        if joined is not None and joined.joins(self):
+            joined.after_commit.append(action)
+            return
+        action()
 
     def _column_exists(self, conn: Any, table: str, column: str) -> bool:
         if self.dialect is POSTGRES:
@@ -2025,9 +2071,46 @@ class AccessRepository:
             conn.begin_write()
             request = self._waiting_in(conn, request_id, message="That access request was already {status}.")
             self._refuse_current_claim_in(conn, request_id, at=at)
-            with self._joining(conn):
+            self._end_older_leftovers_in(conn, request, at=at)
+            with self._joining(conn) as opened:
                 yield request
             conn.commit()
+        for action in opened.after_commit:
+            action()
+
+    def _end_older_leftovers_in(self, conn: Any, request: AccessRequestV1, *, at: datetime) -> None:
+        """End grants carrying this waiting request's approval id before the decision writes any.
+
+        This version stores a decision's grants with its outcome, so a grant
+        carrying the id of a request that still waits was left by an older
+        version that stopped between them. A decision made before the
+        gateway's Inbox pass ended it (``end_grants_without_granted_outcome``)
+        would otherwise make it permanent; ending it here, by the indexed
+        approval id, keeps only what this decision gives.
+        """
+
+        p = self.dialect.bind
+        rows = conn.execute(
+            f"SELECT grant_id FROM access_grants WHERE approval_id={p} AND status IN ({p},{p})",
+            (request.request_id, GrantStatus.ACTIVE.value, GrantStatus.PENDING.value),
+        ).fetchall()
+        if not rows:
+            return
+        team = SubjectRefV1(kind=SubjectKind.TEAM, id=request.team_id)
+        ended: list[str] = []
+        for row in rows:
+            if str(row[0]) not in ended:
+                ended += self._revoke_in(
+                    conn, str(row[0]), actor=team, at=at, detail={"approval_not_granted": request.request_id}
+                )
+        self._bump(conn, request.team_id)
+        logger.warning(
+            "A waiting access request had grants an older version left; they were ended before the decision. "
+            "event=grant_without_granted_outcome_ended request_id=%s request_status=%s grant_ids=%s",
+            request.request_id,
+            request.status.value,
+            ",".join(ended),
+        )
 
     def _refuse_current_claim_in(self, conn: Any, request_id: str, *, at: datetime) -> None:
         p = self.dialect.bind

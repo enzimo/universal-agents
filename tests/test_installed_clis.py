@@ -301,8 +301,12 @@ def test_downloads_are_https_only() -> None:
         fetch_https("http://dl.gitea.com/tea")
 
 
+# A host name whose lookup the tests make slow (it resolves to 127.0.0.1).
+SLOW_HOST = "slowdns.test"
+
+
 def _self_signed_certificate(directory: Path) -> tuple[Path, Path]:
-    """A throwaway certificate for 127.0.0.1, its own trust anchor."""
+    """A throwaway certificate for 127.0.0.1 and ``SLOW_HOST``, its own trust anchor."""
 
     from datetime import timedelta
     from ipaddress import ip_address
@@ -323,7 +327,9 @@ def _self_signed_certificate(directory: Path) -> tuple[Path, Path]:
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - timedelta(minutes=1))
         .not_valid_after(now + timedelta(hours=1))
-        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ip_address("127.0.0.1"))]), critical=False)
+        .add_extension(
+            x509.SubjectAlternativeName([x509.IPAddress(ip_address("127.0.0.1")), x509.DNSName(SLOW_HOST)]), critical=False
+        )
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .sign(key, hashes.SHA256())
     )
@@ -427,6 +433,41 @@ def test_one_deadline_covers_connecting_redirects_headers_and_the_file(https_ser
         result, seconds = _download(url)
         assert "stopped after 1 seconds in total" in result, (name, result)
         assert seconds < 1.8, (name, seconds)
+
+
+def test_a_slow_name_lookup_on_a_redirect_cannot_carry_the_download_past_its_deadline(https_server, monkeypatch) -> None:
+    # 2026-10-17 (third review): the timer could not reach a connection still
+    # looking up its host (it has no socket yet), so the rest of the download
+    # ran on. The deadline is now checked when the lookup returns.
+    import socket
+    from urllib.parse import urlsplit
+
+    monkeypatch.setattr(cli_binaries, "DOWNLOAD_DEADLINE_SECONDS", 1)
+    monkeypatch.setattr(cli_binaries, "DOWNLOAD_TIMEOUT_SECONDS", 2)
+    head = b"HTTP/1.1 200 OK\r\nX-Pad: " + b"a" * 30 + b"\r\nContent-Length: 3\r\n\r\ntea"
+    trickling = urlsplit(https_server([lambda tls, _port: _slowly(tls, head, 0.1)])).port
+
+    def redirect_to_slow_host(tls, _port: int) -> None:
+        time.sleep(0.7)
+        tls.sendall(
+            f"HTTP/1.1 302 Found\r\nLocation: https://{SLOW_HOST}:{trickling}/tea\r\nContent-Length: 0\r\n"
+            "Connection: close\r\n\r\n".encode()
+        )
+
+    first = https_server([redirect_to_slow_host])
+    lookup = socket.getaddrinfo
+
+    def slow_lookup(host, *args, **kwargs):
+        if host == SLOW_HOST:
+            time.sleep(0.5)  # the deadline passes during the lookup
+            host = "127.0.0.1"
+        return lookup(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", slow_lookup)
+    result, seconds = _download(first)
+
+    assert "stopped after 1 seconds in total" in result, result
+    assert seconds < 1.8, "overran by the lookup at most, not by the trickled headers"
 
 
 def test_a_download_follows_a_few_https_redirects_and_refuses_more(https_server, monkeypatch) -> None:

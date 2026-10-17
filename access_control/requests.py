@@ -75,7 +75,7 @@ from custom_messages.contracts.access_v2 import (
     TargetRefV1,
 )
 from id_generation import new_id
-from storage.access_repository import AccessStoreConflict, DecisionClaim, DecisionInProgress
+from storage.access_repository import AccessStoreConflict, DecisionClaim, DecisionInProgress, store_unavailable
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,10 @@ BLOCKABLE_TARGETS = frozenset(
 # (``access_control.cli_binaries``). A decision whose process ended keeps the
 # request claimed until then; the next decision takes it over.
 DECISION_CLAIM_SECONDS = 600
+DECISION_NOT_SAVED = (
+    "The decision couldn't be saved because the access store was busy or could not be reached. Nothing was "
+    "changed; try again."
+)
 DECIDING_NOW = (
     "Someone is deciding this request right now; its card shows the outcome when they finish. If that decision "
     f"stopped (for example the gateway restarted), the request can be decided again within "
@@ -879,7 +883,36 @@ class AccessRequests:
             raise HandDownRefused(DECIDING_NOW) from exc
         except AccessStoreConflict as exc:
             raise HandDownRefused(str(exc)) from exc
+        except Exception as exc:
+            # A lost PostgreSQL commit answer may hide an outcome that was stored.
+            stored = None
+            if store_unavailable(exc):
+                stored = self.outcome_stored_despite(exc, request_id, decided.reviewer, decided.at)
+            if stored is None:
+                self._not_saved(exc, request_id, decided.reviewer)
+                raise
+            finished = stored
         return finished
+
+    @staticmethod
+    def _not_saved(error: Exception, request_id: str, reviewer: PersonPrincipal) -> None:
+        """Log a decision that failed for a reason other than an access rule (call inside ``except``).
+
+        A busy or unreachable database is raised to the person as a plain
+        refusal they can act on (the gateway shows refusals); anything else
+        returns, and the caller raises it again as it was.
+        """
+
+        logger.error(
+            "An access decision could not be saved; nothing was changed. event=access_decision_failed "
+            "request_id=%s by=%s error_type=%s error=%s",
+            request_id,
+            reviewer.person_id,
+            type(error).__name__,
+            error,
+        )
+        if store_unavailable(error):
+            raise HandDownRefused(DECISION_NOT_SAVED) from error
 
     def _outcome(self, request: AccessRequestV1, decided: "Decided") -> AccessRequestV1:
         """The decided request; an approved access request's grants are stored on the way."""
@@ -992,6 +1025,8 @@ class AccessRequests:
             self._release(claim, decided.reviewer, exc)
             if isinstance(exc, AccessStoreConflict):
                 raise HandDownRefused(str(exc)) from exc
+            if isinstance(exc, Exception) and not isinstance(exc, HandDownRefused):
+                self._not_saved(exc, request_id, decided.reviewer)
             raise
         assert request.change is not None
         logger.info(

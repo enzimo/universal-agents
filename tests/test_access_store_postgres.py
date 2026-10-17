@@ -510,3 +510,29 @@ def test_a_decisions_grant_writes_join_its_transaction_on_postgres(settings) -> 
     assert store.get("grant_decided").status.value == "active"
     assert store.get_request("access_req_pg").status is AccessRequestStatus.GRANTED
     assert store.grants_without_granted_outcome(TEAM) == []
+
+
+def test_work_handed_to_another_thread_does_not_join_a_decision_on_postgres(settings) -> None:
+    # asyncio.to_thread copies the context; before 2026-10-17 (third review)
+    # the other thread joined the decision's connection and read its
+    # uncommitted grant.
+    import asyncio
+
+    store = AccessRepository(settings)
+    store.create_request(_request())
+    subject = SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect")
+    grant = GrantV1(
+        grant_id="grant_undecided", team_id=TEAM, subject=subject, target=TargetRefV1(kind=TargetKind.TOOL, id="fn:schedules"),
+        level=AccessLevel.READ, granted_by=OWNER, approval_id="access_req_pg", created_at_utc=NOW, for_person_id=PERSON,
+    )
+
+    async def read_elsewhere() -> Any:
+        return await asyncio.to_thread(store.get, "grant_undecided")
+
+    with store.decision_transaction("access_req_pg", at=NOW) as request:
+        store.store_planned(grant, lambda: plan_grants([grant], store.for_subjects(TEAM, [subject]), lambda _s: frozenset()))
+        assert store.get("grant_undecided") is not None, "the deciding thread sees its own grant"
+        assert asyncio.run(read_elsewhere()) is None, "another thread sees only what was committed"
+        store.finish_request(request.model_copy(update={"status": AccessRequestStatus.GRANTED, "grant_ids": ("grant_undecided",)}))
+
+    assert asyncio.run(read_elsewhere()).status.value == "active"

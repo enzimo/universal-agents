@@ -216,7 +216,7 @@ def test_a_busy_database_while_delivering_removes_the_copy_and_a_later_deny_deli
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(world.service.store, "finish_request", locked)
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(HandDownRefused, match="couldn't be saved because the access store was busy"):
         world.requests().decide(request.request_id, BOB, AccessReviewChoice.APPROVE)
     monkeypatch.undo()
 

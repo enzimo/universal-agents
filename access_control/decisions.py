@@ -1096,23 +1096,28 @@ class AccessService:
 
         stored, plan = self.store.store_planned(grant, lambda: self.plan_grants([grant]))
         cover = plan.covered.get(grant.grant_id)
+        # Logged once stored: inside a decision that rolls back, nothing was.
         if cover is not None:
-            logger.info(
-                "Access already covered; nothing new stored. event=grant_already_covered subject=%s:%s "
-                "target=%s level=%s covered_by=%s",
-                grant.subject.kind.value,
-                grant.subject.id,
-                grant.target.id,
-                grant.level.value,
-                cover.grant_id,
+            self.store.after_commit(
+                lambda: logger.info(
+                    "Access already covered; nothing new stored. event=grant_already_covered subject=%s:%s "
+                    "target=%s level=%s covered_by=%s",
+                    grant.subject.kind.value,
+                    grant.subject.id,
+                    grant.target.id,
+                    grant.level.value,
+                    cover.grant_id,
+                )
             )
             return cover
         replaced = plan.replaced_by(grant.grant_id)
         if replaced:
-            logger.info(
-                "Broader access replaced narrower access. event=grants_replaced grant_id=%s replaced=%s",
-                stored.grant_id,
-                ",".join(replaced),
+            self.store.after_commit(
+                lambda: logger.info(
+                    "Broader access replaced narrower access. event=grants_replaced grant_id=%s replaced=%s",
+                    stored.grant_id,
+                    ",".join(replaced),
+                )
             )
         return stored
 
@@ -1362,10 +1367,13 @@ class AccessService:
         )
         if not activated:
             # Access already in force covers it: the waiting hand-down was not needed and is denied.
-            logger.info(
-                "An approved hand-down was already covered. event=grant_already_covered grant_id=%s covered_by=%s",
-                grant_id,
-                approved.grant_id,
+            self.store.after_commit(
+                lambda: logger.info(
+                    "An approved hand-down was already covered. event=grant_already_covered grant_id=%s "
+                    "covered_by=%s",
+                    grant_id,
+                    approved.grant_id,
+                )
             )
         return approved
 

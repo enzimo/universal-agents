@@ -23,6 +23,7 @@ grants) is ended, and a change applied at the decision renews its claim.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 import threading
@@ -158,7 +159,7 @@ def test_a_decision_that_cannot_write_stores_nothing_and_a_later_deny_leaves_no_
     other = sqlite3.connect(str(world.db), isolation_level=None)
     other.execute("BEGIN IMMEDIATE")  # another process holds the write lock past the 2.5 s busy timeout
     try:
-        with pytest.raises(sqlite3.OperationalError, match="locked"):
+        with pytest.raises(HandDownRefused, match="couldn't be saved because the access store was busy"):
             world.gateway.decide(request_id, OWNER, AccessReviewChoice.APPROVE)
     finally:
         other.execute("ROLLBACK")
@@ -183,7 +184,7 @@ def test_a_failure_while_storing_the_outcome_stores_none_of_the_decisions_grants
 
     monkeypatch.setattr(world.store, "finish_request", locked)
     monkeypatch.setattr(world.gateway.service, "revoke", no_undo)
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(HandDownRefused, match="couldn't be saved because the access store was busy"):
         world.gateway.decide(request_id, OWNER, AccessReviewChoice.APPROVE_READ)
     monkeypatch.undo()
 
@@ -288,7 +289,7 @@ def test_a_persons_grant_made_during_a_failing_decision_is_kept(world, monkeypat
 
     failed, direct = _while_deciding(world, monkeypatch, direct_grant, fail=True)
 
-    assert isinstance(failed, sqlite3.OperationalError)
+    assert isinstance(failed, HandDownRefused) and "couldn't be saved" in str(failed)
     assert isinstance(direct, GrantV1) and direct.approval_id is None, "stored, not covered by the undecided grant"
     assert world.store.get(direct.grant_id).status is GrantStatus.ACTIVE
     assert world.store.get(read_grant.grant_id).status is GrantStatus.REVOKED, "the person's grant replaced it"
@@ -320,7 +321,7 @@ def test_a_workers_request_during_a_failing_decision_is_not_handed_down_from_the
         fail=True,
     )
 
-    assert isinstance(failed, sqlite3.OperationalError)
+    assert isinstance(failed, HandDownRefused) and "couldn't be saved" in str(failed)
     assert outcome.waiting, "the team lead holds read only, so a person decides"
     assert outcome.grant is None
     assert not uses(world.gateway, other_worker, OWNER, "cli:x#post.create", task_id="task-2")
@@ -354,6 +355,88 @@ def test_grants_an_older_version_left_without_a_granted_outcome_are_ended(world,
     granted = world.gateway.decide(request_id, OWNER, AccessReviewChoice.APPROVE)
     assert world.store.grants_without_granted_outcome(TEAM) == [], "a granted request's grants are in place"
     assert granted.status is AccessRequestStatus.GRANTED
+
+
+def test_work_handed_to_another_thread_does_not_join_the_decisions_transaction(world, monkeypatch) -> None:
+    # 2026-10-17 (third review): asyncio.to_thread copies the context, so the
+    # other thread used the decision's connection (SQLite refused it from
+    # another thread; PostgreSQL let it read the undecided grant).
+    request_id = careful_request(world)
+    store = world.store
+    original = store.store_planned
+    seen: dict[str, object] = {}
+
+    def store_planned(grant, plan, **kwargs):
+        result = original(grant, plan, **kwargs)
+        if "elsewhere" not in seen:
+            stored = result[0]
+
+            async def elsewhere() -> object:
+                return await asyncio.to_thread(store.get, stored.grant_id)
+
+            seen["grant_id"] = stored.grant_id
+            seen["elsewhere"] = asyncio.run(elsewhere())
+        return result
+
+    monkeypatch.setattr(store, "store_planned", store_planned)
+    decided = world.gateway.decide(request_id, OWNER, AccessReviewChoice.APPROVE)
+
+    assert seen["elsewhere"] is None, "another thread sees only what was committed"
+    assert decided.status is AccessRequestStatus.GRANTED
+    assert store.get(str(seen["grant_id"])).status is GrantStatus.ACTIVE
+
+
+def test_a_rolled_back_decision_logs_no_replacements_and_says_it_was_not_saved(world, monkeypatch, caplog) -> None:
+    read_grant = _lead_reads_x_and_worker_holds_it(world)
+    second = ask(world.gateway, target=X_POSTS)
+
+    def locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(world.store, "finish_request", locked)
+    with caplog.at_level(logging.INFO), pytest.raises(HandDownRefused) as refused:
+        world.gateway.decide(second.request.request_id, OWNER, AccessReviewChoice.APPROVE)
+    monkeypatch.undo()
+
+    assert str(refused.value) == (
+        "The decision couldn't be saved because the access store was busy or could not be reached. Nothing was "
+        "changed; try again."
+    )
+    assert "event=grants_replaced" not in caplog.text, "nothing was replaced: the decision rolled back"
+    assert (
+        f"event=access_decision_failed request_id={second.request.request_id} by={OWNER.person_id} "
+        "error_type=OperationalError error=database is locked"
+    ) in caplog.text
+    assert world.store.get(read_grant.grant_id).status is GrantStatus.ACTIVE
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        world.gateway.decide(second.request.request_id, OWNER, AccessReviewChoice.APPROVE)
+    assert "event=grants_replaced" in caplog.text and read_grant.grant_id in caplog.text, "logged once stored"
+
+
+def test_a_decision_ends_a_lasting_grant_an_older_version_left_for_its_request(world, caplog) -> None:
+    # 2026-10-17 (third review): a task-only approval made before the first
+    # Inbox pass left the older version's lasting grant in force for good.
+    request_id = careful_request(world)
+    request = world.store.get_request(request_id)
+    [lead_spec, *_rest] = world.gateway.approval_specs(
+        request,
+        level=AccessLevel.WRITE,
+        lifetime=GrantLifetime.UNTIL_REVOKED,
+        expires_at=None,
+        granted_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+    )
+    left = world.gateway.service.grant_by_person(OWNER, lead_spec.model_copy(update={"approval_id": request_id}))
+
+    with caplog.at_level(logging.WARNING, logger="storage.access_repository"):
+        decided = world.manager.decide(request_id, OWNER, AccessReviewChoice.APPROVE_TASK)
+
+    assert decided.status is AccessRequestStatus.GRANTED and left.grant_id not in decided.grant_ids
+    assert world.store.get(left.grant_id).status is GrantStatus.REVOKED
+    assert f"event=grant_without_granted_outcome_ended request_id={request_id}" in caplog.text
+    assert left.grant_id in caplog.text
+    assert {world.store.get(grant_id).lifetime for grant_id in decided.grant_ids} == {GrantLifetime.TASK}
 
 
 def careful_withdrawn_request_with_grant(world: World) -> GrantV1:
@@ -624,7 +707,7 @@ def test_a_failed_approval_keeps_narrower_access_it_would_have_replaced(world, m
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(world.store, "finish_request", locked)
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(HandDownRefused, match="couldn't be saved because the access store was busy"):
         world.gateway.decide(second.request.request_id, OWNER, AccessReviewChoice.APPROVE)
     monkeypatch.undo()
 
