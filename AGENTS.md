@@ -154,7 +154,7 @@ For each change, define a verification plan that matches that strategy. Generate
   explanations.
 
 ### Other Guidance
-- Never put personal details in tracked files or commit metadata: no real names, handles, assistant names, emails, chat or account IDs, domains, machine or runner names, host paths, instance IDs, or copied chats, emails and logs. Use the placeholders and rules in `CONTRIBUTING.md` ("Personal details"), and summarize real incidents instead of copying them.
+- Never put personal details in tracked files or commit metadata: no real names, handles, assistant names, emails, chat or account IDs, domains, machine or runner names, host paths, instance IDs, or copied chats, emails and logs. Use the placeholders and rules in `CONTRIBUTING.md` ("Personal details"), and summarize real incidents instead of copying them. Before the first commit in a clone or worktree, run `git config core.hooksPath .githooks` and check that `git config user.name` and `user.email` match an identity in `.personal-details-allowlist`; run `python3 scripts/check_personal_details.py` before every push. If a personal detail was already pushed, stop and tell the user and follow `docs/personal-details-cleanup.md` together with them.
 - Canonical shared workspace skills normally live in the sibling `../ua-skills` repository; check and update them when runtime or operator behavior changes.
 - Use the workspace `.venv` for Python commands whenever it exists
   (`.venv/bin/python`, `.venv/bin/pytest`, etc.); do not infer dependency

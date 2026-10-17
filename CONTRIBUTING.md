@@ -39,18 +39,37 @@ What to do instead:
 - Describe your own machines generically (for example "one Windows host runs
   two Linux runners") and keep their exact names, accounts and paths in the
   host's own notes outside this repository.
-- Commit with your GitHub noreply address
-  (`git config user.email <id>+<login>@users.noreply.github.com`) and turn on
-  GitHub's "Keep my email addresses private" and "Block command line pushes
-  that expose my email" settings.
+- Commit only with an identity listed in `.personal-details-allowlist`: your
+  GitHub noreply address (`<id>+<login>@users.noreply.github.com`) with the
+  matching login as the name. Turn on GitHub's "Keep my email addresses
+  private" and "Block command line pushes that expose my email" settings.
 - Organization and repository names used in real addresses (download links,
   image names, the license holder) are public by design and may stay.
 
-`tests/test_no_personal_details.py` fails when a tracked file contains an email
-address outside the reserved example domains, a phone number outside the
-fictional 555 ranges, or a home folder path with a real account name. It cannot
-recognize names, handles or copied chats without listing them, so those still
-depend on review.
+### Automated checks
+
+`scripts/check_personal_details.py` reports email addresses outside the
+reserved example domains, phone numbers outside the fictional 555 ranges, home
+folder paths with a real account name, and commit identities not listed in
+`.personal-details-allowlist`. It checks tracked files and every commit: the
+identity, the message and every added line, including lines a later commit
+deleted. It needs only Python 3.9+ and Git. It cannot recognize names, handles,
+machine names or copied chats without listing them, so those still depend on
+review.
+
+- Turn on the Git hooks once in every clone:
+  `git config core.hooksPath .githooks`. They check staged files and the
+  commit identity (pre-commit), the commit message (commit-msg), and every
+  commit a push would upload (pre-push).
+- The **Personal details** workflow runs the checker's tests and the full
+  check on every push and pull request. Its log shows where a finding is but
+  not the value.
+- `.personal-details-allowlist` records this project's decisions: `identity:`
+  lines for allowed commit identities, `text:` lines for real values that may
+  appear, and `account:` lines for made-up account names in example paths.
+  Fix a finding instead of adding it there.
+- A detail that was already pushed stays in history after a new commit deletes
+  it. Follow `docs/personal-details-cleanup.md`.
 
 ## Development setup
 

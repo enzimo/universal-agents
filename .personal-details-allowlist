@@ -1,0 +1,21 @@
+# Real values this project allows, read by scripts/check_personal_details.py.
+# See CONTRIBUTING.md, "Personal details".
+#
+# identity: Name <email>
+#   A commit author or committer identity. Use a GitHub noreply address and the
+#   matching login, never a personal email or real name. GitHub's own merge
+#   identity and GitHub apps such as Dependabot are always allowed.
+#   An identity's address may also appear in files.
+#
+# text: value
+#   Another real value that may appear in files, such as an upstream author's
+#   published credit in a license or package manifest.
+#
+# account: name
+#   A made-up account name used in example home folder paths, such as
+#   /home/<name>. Common placeholders (alice, bob, me, exampleuser, YOUR_USER)
+#   are already allowed.
+#
+# Replace the identity below if this project is maintained by another account.
+
+identity: enzimo00 <291572429+enzimo00@users.noreply.github.com>
