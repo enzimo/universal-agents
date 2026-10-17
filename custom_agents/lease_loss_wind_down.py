@@ -60,8 +60,9 @@ WIND_DOWN_POLL_SECONDS = 5.0
 HANDBACK_PUBLISH_RETRY_SECONDS = 5.0
 # Outbox actions that may already have reached another agent or a user.
 _SENT_ACTION_STATUSES = frozenset({"dispatching", "dispatched", "completed"})
-# Outbox states that prove a final answer went out (or was recorded as
-# delivered without a message); "dispatching" alone does not prove it.
+# Outbox states of a final answer that went out (or was recorded as delivered
+# without a message) once the task is in FINALIZING_PLAN; "dispatching" alone
+# does not prove it.
 _FINAL_ANSWER_SENT_STATUSES = frozenset({"dispatched", "completed"})
 _FINAL_ANSWER_SENT_PHASE = "post_publish_finalize"
 _FINAL_ANSWER_ACTION = TaskResponseAction.model_fields["action_type"].default
@@ -282,14 +283,26 @@ def _peek_next_task_id(task_manager: Any) -> Optional[str]:
 
 
 def _final_answer_sent(task_manager: Any, task_id: str) -> bool:
-    """Whether the outbox shows this task's final answer already went out."""
+    """Whether the outbox shows this task's final answer already went out.
 
+    The outbox marks every task_response action dispatched and then
+    completed, also when it held the answer back (a final review, pending
+    delegated work or a manager escalation). Only a real final answer moves
+    the task to FINALIZING_PLAN before it is sent
+    (``_prepare_local_task_finalization_before_dispatch``), and only that path
+    reaches the post-publish phase, which may outlast FINALIZING_PLAN when
+    finishing up fails and is retried. While its after-action report goes out,
+    a sent answer is still at the publish phase, dispatched.
+    """
+
+    info = task_manager.get_task_info(task_id)
+    finalizing = info is not None and info.state == ProgressState.FINALIZING_PLAN
     return any(
         record.source_task_id == task_id
         and record.action_type == _FINAL_ANSWER_ACTION
         and (
-            record.status in _FINAL_ANSWER_SENT_STATUSES
-            or record.phase == _FINAL_ANSWER_SENT_PHASE
+            record.phase == _FINAL_ANSWER_SENT_PHASE
+            or (finalizing and record.status in _FINAL_ANSWER_SENT_STATUSES)
         )
         for record in task_manager.execution_state.turn_action_outbox.values()
     )

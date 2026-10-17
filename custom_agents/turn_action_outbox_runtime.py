@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from default_values import AGENT_DEFAULTS
 
 from custom_agents.delegated_work_runtime import (
+    end_unpublished_delegation,
     record_check_back,
     record_publication,
     record_publish_sequence,
@@ -81,6 +82,10 @@ from reply_routing_trace import (
     compact_gateway_context,
     is_reply_routing_trace_enabled,
 )
+
+
+# The outbox action type of a delegation.
+_DELEGATE_ACTION = DelegateTaskAction.model_fields["action_type"].default
 
 
 class TurnActionRecoveryScheduled(RuntimeError):
@@ -701,6 +706,70 @@ def _turn_action_retry_delay_seconds(self, attempt_count: int) -> float:
     return delay
 
 
+def turn_action_retry_window_seconds(self: Any) -> float:
+    """Longest time the outbox keeps retrying one action automatically.
+
+    Every allowed retry at its longest delay (upper jitter), plus one maximum
+    delay for the attempts themselves. The subtask watchdog waits this long
+    before it stops trusting a delegated record that never got a publish
+    sequence.
+    """
+    attempts = self._turn_action_outbox_int(
+        "max_auto_attempts", AGENT_DEFAULTS.turn_action_outbox.value["max_auto_attempts"]
+    )
+    initial = self._turn_action_outbox_float("initial_retry_delay_seconds", 2.0)
+    maximum = self._turn_action_outbox_float("max_retry_delay_seconds", 60.0)
+    jitter_ratio = self._turn_action_outbox_float("retry_jitter_ratio", 0.15)
+    delays = (min(maximum, initial * (2 ** (attempt - 1))) for attempt in range(1, attempts + 1))
+    return sum(delays) * (1 + jitter_ratio) + maximum
+
+
+async def _end_unpublished_delegation(self: Any, record: Any, exc: Exception) -> None:
+    """End the subtask of a delegation that leaves automatic retry unpublished.
+
+    Called when the action goes to model recovery, isolated recovery or a
+    terminal failure (``delegated_work_runtime.end_unpublished_delegation``).
+    A delegation whose publish already succeeded (status ``dispatched``) is
+    left alone: a worker may hold it.
+    """
+    subtask_id = (record.side_effects or {}).get("delegated_task_id")
+    if record.action_type != _DELEGATE_ACTION or not subtask_id or record.status == "dispatched":
+        return
+    try:
+        ended = await self.task_manager.operations_runtime.run(
+            partial(
+                end_unpublished_delegation,
+                self,
+                subtask_id=str(subtask_id),
+                parent_task_id=record.source_task_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        )
+    except Exception:
+        # The watchdog's never-published check still ends it later.
+        self._logger.exception(
+            "Could not stop a delegated task that was never sent. "
+            "event=delegated_task_end_failed agent_id=%s task_id=%s subtask_id=%s action_id=%s",
+            self.id,
+            record.source_task_id,
+            subtask_id,
+            record.action_id,
+        )
+        return
+    if ended:
+        self._logger.warning(
+            "A delegated task could not be sent to a worker and was stopped. "
+            "event=delegated_task_never_published agent_id=%s task_id=%s subtask_id=%s "
+            "action_id=%s attempts=%s error_type=%s",
+            self.id,
+            record.source_task_id,
+            subtask_id,
+            record.action_id,
+            record.attempt_count,
+            type(exc).__name__,
+        )
+
+
 async def _wake_turn_action_retry_after(self, delay_seconds: float) -> None:
     await asyncio.sleep(max(0.0, delay_seconds))
     if not self.paused and not self.is_executing:
@@ -795,6 +864,9 @@ async def _schedule_turn_action_recovery(
             f"Runtime action {action_id} scheduled automatic retry after {type(exc).__name__}: {exc}"
         ) from exc
 
+    # Automatic retries are over: a delegation that never reached NATS ends
+    # its subtask instead of leaving it "waiting in the queue".
+    await _end_unpublished_delegation(self, record, exc)
     inline_limit = self._turn_action_outbox_int(
         "max_inline_recovery_attempts_per_batch", 2
     )

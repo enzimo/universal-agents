@@ -186,37 +186,39 @@ def transfer_on_recovery(
     Raises ``TaskCustodyConflict`` when an adopted task is held by an agent that
     is neither a source nor the replacement: recovery must not adopt it (the
     caller filters such tasks before building the replacement snapshot, so
-    this only fires when custody changed in between).
+    this only fires when custody changed in between, for example a copy
+    admitted concurrently on PostgreSQL).
     """
 
     bind = dialect.bind
-    owners = {owner for owner in source_owner_ids if owner} | {replacement_agent_id}
+    owners = sorted({owner for owner in source_owner_ids if owner} | {replacement_agent_id})
+    owner_binds = _placeholders(dialect, len(owners))
     adopted = sorted(set(adopted_task_ids))
-    for task_id, row in read_rows(conn, dialect, team_id, adopted).items():
-        if row.holder_agent_id not in owners:
-            raise TaskCustodyConflict(task_id, row.holder_agent_id)
     now = _now()
     for task_id in adopted:
         # Rows from before custody existed are created here, so a recovered
-        # task is protected from its first save on.
-        conn.execute(
+        # task is protected from its first save on. The update applies only to
+        # a row the sources or the replacement hold: an agent that claimed the
+        # task meanwhile (a redelivered copy, concurrently on PostgreSQL) keeps it.
+        written = conn.execute(
             f"INSERT INTO {CUSTODY_TABLE} (team_id, task_id, holder_agent_id, holder_named_agent_type, claimed_at) "
             f"VALUES ({bind}, {bind}, {bind}, {bind}, {bind}) ON CONFLICT (team_id, task_id) DO UPDATE SET "
             "holder_agent_id = excluded.holder_agent_id, holder_named_agent_type = excluded.holder_named_agent_type, "
-            "claimed_at = excluded.claimed_at",
-            (team_id, task_id, replacement_agent_id, replacement_named_agent_type, now),
+            f"claimed_at = excluded.claimed_at WHERE {CUSTODY_TABLE}.holder_agent_id IN ({owner_binds})",
+            (team_id, task_id, replacement_agent_id, replacement_named_agent_type, now, *owners),
         )
+        if written.rowcount != 1:
+            row = read_rows(conn, dialect, team_id, [task_id]).get(task_id)
+            raise TaskCustodyConflict(task_id, row.holder_agent_id if row else "unknown")
     held = conn.execute(
-        f"SELECT task_id FROM {CUSTODY_TABLE} WHERE team_id = {bind} "
-        f"AND holder_agent_id IN ({_placeholders(dialect, len(owners))})",
-        (team_id, *sorted(owners)),
+        f"SELECT task_id FROM {CUSTODY_TABLE} WHERE team_id = {bind} AND holder_agent_id IN ({owner_binds})",
+        (team_id, *owners),
     ).fetchall()
-    release_task_ids = sorted({row[0] for row in held} - set(adopted))
-    for task_id in release_task_ids:
+    for task_id in sorted({row[0] for row in held} - set(adopted)):
         conn.execute(
             f"DELETE FROM {CUSTODY_TABLE} WHERE team_id = {bind} AND task_id = {bind} "
-            f"AND holder_agent_id IN ({_placeholders(dialect, len(owners))})",
-            (team_id, task_id, *sorted(owners)),
+            f"AND holder_agent_id IN ({owner_binds})",
+            (team_id, task_id, *owners),
         )
 
 

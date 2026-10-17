@@ -18,7 +18,7 @@ An agent receiving a task that someone else holds:
   is still finishing other work;
 - takes it over when the holder is gone: if the holder's saved work still has
   the task, the replacement that takes that work over leaves it out
-  (``RuntimeSnapshotCoordinator._held_by_other_agents``), so it runs once.
+  (``RuntimeSnapshotCoordinator._taken_by_other_agents``), so it runs once.
 
 The takeover is a compare-and-set in the admission's save, so a racing
 recovery or a second copy cannot both win; the loser drops its copy.

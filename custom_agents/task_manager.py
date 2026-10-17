@@ -2937,15 +2937,12 @@ class TaskManager(
                     else None
                 ),
             )
-        except TaskCustodyConflict:
+        except Exception as error:
             del self.task_state.tasks[task.task_id]
             self.task_state.task_queue.remove(task.task_id)
             del self.task_state.task_to_taskquery_list[task.task_id]
-            raise
-        except Exception:
-            del self.task_state.tasks[task.task_id]
-            self.task_state.task_queue.remove(task.task_id)
-            del self.task_state.task_to_taskquery_list[task.task_id]
+            if isinstance(error, TaskCustodyConflict):
+                raise  # an expected refusal; the admitting caller logs it
             self._logger.exception(
                 "Initial task admission did not commit",
                 extra={

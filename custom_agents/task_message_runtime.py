@@ -1133,10 +1133,17 @@ async def _custody_for_new_task(
 ) -> Optional[CustodyDecision]:
     """Whether this agent may take a task another agent may hold or finished; None drops it.
 
-    Finished by any agent of the team: a copy delivered again after the first
-    one completed (team-wide since 2026-10-17). Held by a live agent: a copy
-    delivered again while it runs (``custom_agents.task_custody``).
+    Held by a live agent: a copy delivered again while it runs
+    (``custom_agents.task_custody``). Finished by any agent of the team: a copy
+    delivered again after the first one completed (team-wide since
+    2026-10-17). Custody is read first: a holder archives the task before its
+    save releases custody, so a task released between the two reads is found
+    in the archive. Read the other way round, a task finished in between
+    looked free.
     """
+    custody = await check_task_custody(self, task_request.task_id, msg_meta)
+    if not custody.admit:
+        return None
     archived = await self.task_manager.operations_runtime.run(
         self.task_manager.get_task_from_db,
         task_request.task_id,
@@ -1157,8 +1164,7 @@ async def _custody_for_new_task(
             archived.get("owner_agent_id"),
         )
         return None
-    custody = await check_task_custody(self, task_request.task_id, msg_meta)
-    return custody if custody.admit else None
+    return custody
 
 
 async def _handle_task_request(

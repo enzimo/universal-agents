@@ -243,20 +243,63 @@ async def test_wind_down_hands_back_running_and_unstarted_work_then_exits(
 
 
 def test_only_a_sent_final_answer_counts_as_answered(manager):
+    """Regression (2026-10-17 review): the outbox marks a held-back task_response
+    dispatched and completed too; only a task in FINALIZING_PLAN, or an answer that
+    reached the post-publish phase, has really been answered."""
     _add(manager, "t1", ProgressState.IN_PROGRESS)
     outbox = manager.execution_state.turn_action_outbox
     record = TurnActionOutboxRecord(
         action_id="a", batch_id="b", source_task_id="t1", action_index=0,
-        action_type="task_response", payload_json={}, status="dispatching",
+        action_type="task_response", payload_json={}, status="completed", phase="complete",
     )
-    outbox["a"] = record
+    outbox["a"] = record  # held back (final review, pending work, escalation): not sent
+    assert not wind_down._final_answer_sent(manager, "t1")
+    manager.update_main_task_state("t1", ProgressState.FINALIZING_PLAN, NOW())
+    outbox["a"] = record.model_copy(update={"status": "dispatching", "phase": "publish"})
     assert not wind_down._final_answer_sent(manager, "t1")  # publish outcome unknown
-    outbox["a"] = record.model_copy(update={"status": "dispatched"})
-    assert wind_down._final_answer_sent(manager, "t1")
-    outbox["a"] = record.model_copy(update={"status": "retry_scheduled", "phase": "post_publish_finalize"})
+    # Sent; its after-action report is going out, so the phase is still publish.
+    outbox["a"] = record.model_copy(update={"status": "dispatched", "phase": "publish"})
     assert wind_down._final_answer_sent(manager, "t1")
     outbox["a"] = record.model_copy(update={"status": "dispatched", "action_type": "notify_user"})
     assert not wind_down._final_answer_sent(manager, "t1")
+    # Finishing up failed after the answer went out and waits for its retry.
+    manager.update_main_task_state("t1", ProgressState.RETRYING, NOW())
+    outbox["a"] = record.model_copy(update={"status": "retry_scheduled", "phase": "post_publish_finalize"})
+    assert wind_down._final_answer_sent(manager, "t1")
+
+
+@pytest.mark.asyncio
+async def test_a_running_task_whose_answer_was_held_back_is_handed_back(manager, monkeypatch):
+    """A final-review turn runs after the outbox held its first answer back
+    (completed record, nothing sent): the task goes back to the lead."""
+    _add(manager, "reviewing", ProgressState.IN_PROGRESS)
+    manager.execution_state.turn_action_outbox["act"] = TurnActionOutboxRecord(
+        action_id="act", batch_id="b", source_task_id="reviewing", action_index=0,
+        action_type="task_response", payload_json={"answer": "draft"}, status="completed", phase="complete",
+    )
+    agent = _worker(manager, monkeypatch=monkeypatch)
+    finished: list[str] = []
+
+    async def complete_after_dispatch(*, task_id, after_action_report_sent=False):
+        finished.append(task_id)
+        return True
+
+    agent._complete_local_task_finalization_after_dispatch = complete_after_dispatch
+
+    async def review_turn():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await handle_interrupted_turn(agent, task_id="reviewing", task_info=manager.get_task_info("reviewing"))
+            raise
+
+    agent._active_execution_task = asyncio.create_task(review_turn())
+    agent._active_execution_task_id = "reviewing"
+    await asyncio.sleep(0)
+    wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+    await _wait_for_exit(agent)
+    assert finished == []
+    assert [item.handed_back.task_id for item in agent.team_comms.handbacks()] == ["reviewing"]
 
 
 @pytest.mark.asyncio

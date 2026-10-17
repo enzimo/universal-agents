@@ -61,6 +61,20 @@ logger = logging.getLogger(__name__)
 TASK_ALREADY_ENDED_REASON = (
     "The request that delegated this task no longer needs it, so this work was stopped."
 )
+NEVER_PUBLISHED_REASON = (
+    "This delegated task could not be sent to a worker, so it was stopped. "
+    "The request continues without it."
+)
+_OPEN_SUBTASK_STATES = frozenset({
+    ProgressState.ACCEPTED,
+    ProgressState.IN_PROGRESS,
+    ProgressState.WAITING,
+    ProgressState.PAUSED,
+    ProgressState.PARTIAL,
+    ProgressState.RETRYING,
+    ProgressState.UNDEFINED,
+    ProgressState.NOT_STARTED,
+})
 _TERMINAL_TO_STATUS = {
     ProgressState.COMPLETED: DELEGATED_FINISHED,
     ProgressState.FAILED: DELEGATED_FAILED,
@@ -168,6 +182,60 @@ def register_delegated_task_endings(agent: Any) -> None:
 
         agent._delegated_task_end_callback = callback
     agent.task_manager.add_task_terminal_callback(callback)
+
+
+def end_unpublished_delegation(agent: Any, *, subtask_id: str, parent_task_id: str, error: str) -> bool:
+    """Fail a delegated task whose publication was given up; True if it ended here.
+
+    Runs on the task lane when the delegation's outbox action leaves automatic
+    retry (model recovery, isolated recovery or a terminal failure) without
+    having published. Its record was written before publishing, so without
+    this it stayed "queued" for ever: the watchdog does not check queued
+    tasks, and the parent's answer waited on it (2026-10-17). The cancellation
+    record makes a worker refuse the task if the publish did reach NATS after
+    all, and the delegated record is closed as failed. The parent is not
+    resumed here: the outbox recovery that follows runs its next turn.
+    """
+
+    manager = agent.task_manager
+    now = datetime.now(timezone.utc).isoformat()
+    if manager.identity.team_id:
+        manager.record_execution_graph_cancelled(
+            root_task_id=subtask_id,
+            task_ids=[subtask_id],
+            canonical_user_id=None,
+            command_id=f"delegation_not_published:{subtask_id}",
+            reason=NEVER_PUBLISHED_REASON,
+            cancelled_at=now,
+        )
+    if not manager.try_transition_task_state(
+        subtask_id,
+        allowed_from=set(_OPEN_SUBTASK_STATES),
+        to_state=ProgressState.FAILED,
+        timestamp=now,
+        reason=NEVER_PUBLISHED_REASON,
+        source="delegation_not_published",
+    ):
+        return False
+    from custom_messages.records.task_results import TaskResultUpdate
+
+    info = manager.get_task_info(subtask_id)
+    errors = list(getattr(getattr(info, "task", None), "errors", None) or [])
+    manager.update_task_result(subtask_id, TaskResultUpdate(errors=[*errors, NEVER_PUBLISHED_REASON]))
+    manager.bubble_subtask_result(parent_task_id, subtask_id)
+    delegated_tasks(agent).mark_closed(
+        team_id=str(agent.team_id), task_id=subtask_id, status=DELEGATED_FAILED
+    )
+    manager.append_history_entry(
+        parent_task_id,
+        f"Delegated task {subtask_id} could not be sent to a worker and was stopped.",
+        entry_type=TaskHistoryType.SUBTASK_EVENT,
+        importance=TaskHistoryImportance.HIGH,
+        timestamp=now,
+        related_task_id=subtask_id,
+        details={"event": "delegated_task_never_published", "error": error},
+    )
+    return True
 
 
 # -- claims (worker) ---------------------------------------------------------------
@@ -571,8 +639,10 @@ async def stop_delegated_task(
 
 
 __all__ = [
+    "NEVER_PUBLISHED_REASON",
     "TASK_ALREADY_ENDED_REASON",
     "delegated_tasks",
+    "end_unpublished_delegation",
     "fail_after_worker_losses",
     "handle_delegated_task_claimed",
     "max_retries_after_worker_loss",

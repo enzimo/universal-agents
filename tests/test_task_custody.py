@@ -49,7 +49,7 @@ def _snapshot(*task_ids: str, delegated: dict[str, str] | None = None) -> str:
     return canonical_json(snapshot.model_dump(mode="json"))
 
 
-@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.live)])
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=[pytest.mark.live, pytest.mark.postgres])])
 def store(request, tmp_path):
     if request.param == "postgres":
         dsn = os.environ.get("LIVE_TEST_POSTGRES_DSN")
@@ -215,6 +215,39 @@ def test_a_takeover_leaves_out_a_task_another_agent_already_finished(tmp_path, c
     assert any(getattr(r, "reason", None) == "finished_by_another_agent" for r in caplog.records)
 
 
+def _delegate_child(manager: TaskManager, parent: str, child: str) -> None:
+    assert manager.add_subtask(
+        parent,
+        Task(task_id=child, parent_task_id=parent, task_type=MessageMetaType.REQUEST, problem_statement="c"),
+        MessageHeader(from_agent_id=manager.identity.owner_agent_id), MessageMeta(to_named_agent_type="Other"),
+    ) is not None
+
+
+@pytest.mark.parametrize("child_held_by_its_worker", [True, False])
+def test_a_takeover_leaves_out_the_delegations_of_a_parent_it_leaves_out(tmp_path, child_held_by_its_worker):
+    """Regression (2026-10-17 review): A ran P and delegated C; another worker took P
+    over. Recovering A's snapshot left P out but restored A's record of C without its
+    parent, so C looked like a task the replacement runs: recovery failed when C's
+    worker held it, or the replacement claimed C and never ran it."""
+    gone = _manager(tmp_path, "worker_gone")
+    _admit(gone, "P")
+    _delegate_child(gone, "P", "C")
+    if child_held_by_its_worker:
+        assert _admit(_manager(tmp_path, "worker_2"), "C")
+    assert _admit(_manager(tmp_path, "worker_3"), "P", takeover_from="worker_gone")
+    replacement = _manager(tmp_path, "worker_r")
+    restored = replacement.restore_runtime_state_for_owner_ids(["worker_gone"])
+    assert restored["task_count"] == 0
+    assert replacement.get_task_info("C") is None
+    holders = replacement.runtime_state_store.get_task_custody("team", ["P", "C"])
+    assert holders["P"].holder_agent_id == "worker_3"
+    if child_held_by_its_worker:
+        assert holders["C"].holder_agent_id == "worker_2"
+    else:
+        assert "C" not in holders
+    assert replacement.runtime_state_store.load_task_runtime_by_owner("worker_gone") == []
+
+
 # -- admission decision --------------------------------------------------------
 
 
@@ -261,3 +294,90 @@ def test_admission_takes_over_from_a_gone_holder_or_one_that_handed_it_back(tmp_
     # A live launch record keeps the holder alive however old its heartbeat.
     monkeypatch.setattr(task_custody, "owner_gone_by_launch", lambda _a, _h: False)
     assert not task_custody.decide_admission(live, "t1", None).admit
+
+
+@pytest.mark.asyncio
+async def test_a_copy_of_a_task_its_live_holder_finishes_during_admission_is_dropped(tmp_path, monkeypatch):
+    """Regression (2026-10-17 review): admission read the archive before custody. A live
+    holder that archived and released the task right after the archive read made the
+    copy look free. Custody is read first now (a holder archives before it releases),
+    so the copy is dropped while the holder still holds it."""
+    from custom_agents import task_message_runtime
+
+    holder = _manager(tmp_path, "worker_a")
+    task = Task(task_id="t1", parent_task_id="p", task_type=MessageMetaType.REQUEST, problem_statement="w")
+    assert holder.add_task(task, MessageHeader(from_agent_id="r"), MessageMeta(), owner_person_id=None)
+    taker = _manager(tmp_path, "worker_b")
+    monkeypatch.setattr(task_custody, "holder_gone", lambda _agent, _holder, now=None: False)
+    archive_read = taker.get_task_from_db
+
+    def read_then_holder_finishes(task_id, **kwargs):
+        found = archive_read(task_id, **kwargs)
+        holder.complete_task(task_id, _iso())  # archives, then its save releases custody
+        return found
+
+    taker.get_task_from_db = read_then_holder_finishes
+    agent = SimpleNamespace(id="worker_b", team_id="team", task_manager=taker, _logger=logging.getLogger("t"))
+    decision = await task_message_runtime._custody_for_new_task(
+        agent, task, MessageHeader(message_id="m2"), MessageMeta(), "queue"
+    )
+    assert decision is None
+
+
+@pytest.mark.live
+@pytest.mark.postgres
+def test_postgres_recovery_never_overwrites_a_claim_made_meanwhile(monkeypatch):
+    """Regression (2026-10-17 review): recovering a snapshot saved before custody
+    existed (no row) upserted the replacement's row unconditionally. On PostgreSQL a
+    copy admitted concurrently claimed the task first, the upsert overwrote that
+    claim, and both agents held the task. The update now applies only to rows the
+    sources or the replacement hold, and anything else is a recovery conflict."""
+    import threading
+
+    from storage import task_custody_repository as custody
+
+    dsn = os.environ.get("LIVE_TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("LIVE_TEST_POSTGRES_DSN is required for real PostgreSQL custody")
+    config = {"backend": "postgres", "postgres": {"dsn": dsn}}
+    repo = create_runtime_state_repository(resolve_storage_settings(config))
+    other = create_runtime_state_repository(resolve_storage_settings(config))
+    run = uuid4().hex[:8]
+    team, gone, taker, replacement, task = (f"{name}_{run}" for name in ("team", "gone", "taker", "repl", "task"))
+    repo.save_task_runtime(
+        owner_agent_id=gone, owner_agent_name=gone, team_id=None, owner_named_agent_type="Worker",
+        runtime_state_json=_snapshot(task),
+    )
+    sources = repo.load_task_runtime_by_owner(gone)
+    real_now = custody._now
+    armed = {"on": True}
+    admitted: list[str] = []
+
+    def admit_copy() -> None:
+        other.save_task_runtime(
+            owner_agent_id=taker, owner_agent_name=taker, team_id=team, owner_named_agent_type="Worker",
+            runtime_state_json=_snapshot(task),
+        )
+        admitted.append(taker)
+
+    def now_with_a_copy_admitted_first() -> str:
+        if armed["on"]:
+            armed["on"] = False
+            racer = threading.Thread(target=admit_copy)
+            racer.start()
+            racer.join(timeout=10)
+        return real_now()
+
+    monkeypatch.setattr(custody, "_now", now_with_a_copy_admitted_first)
+    try:
+        with pytest.raises(RuntimeRecoveryConflict):
+            repo.commit_task_runtime_recovery(
+                sources=sources, replacement=replace(sources[0], owner_agent_id=replacement, team_id=team)
+            )
+        assert admitted == [taker]
+        assert repo.get_task_custody(team, [task])[task].holder_agent_id == taker
+        assert repo.load_task_runtime_by_owner(replacement) == []
+        assert repo.load_task_runtime_by_owner(gone) != []
+    finally:
+        for owner in (gone, taker, replacement):
+            repo.clear_task_runtime(owner)

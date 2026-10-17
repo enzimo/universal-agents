@@ -34,6 +34,7 @@ CANCELLED = "cancelled"
 DUPLICATE = "duplicate"
 HELD_BY_ANOTHER_AGENT = "held_by_another_agent"
 FINISHED_BY_ANOTHER_AGENT = "finished_by_another_agent"
+PARENT_LEFT_OUT = "parent_left_out"
 
 
 @dataclass(frozen=True)
@@ -90,7 +91,8 @@ def _restore_tasks(
     """Restore task records; return them and, per task, the source index kept.
 
     ``excluded`` maps task ids recovery must not adopt to the reason
-    (cancelled, or held by another agent's custody).
+    (cancelled, or held or finished by another agent). Records of tasks the
+    snapshot delegated are left out with their parent.
     """
     tasks: dict[str, TaskInfo] = {}
     kept_from: dict[str, int] = {}
@@ -110,7 +112,37 @@ def _restore_tasks(
                 restored_runtime_updated_at=source.updated_at,
             )
             kept_from[item.task_id] = index
+    _leave_out_orphaned_delegations(sources, tasks, kept_from, logger)
     return tasks, kept_from
+
+
+def _leave_out_orphaned_delegations(
+    sources: Sequence[SnapshotSource], tasks: dict[str, TaskInfo], kept_from: dict[str, int],
+    logger: logging.Logger,
+) -> None:
+    """Leave out records of delegated tasks whose parent is not restored, transitively.
+
+    A snapshot keeps a record of each task its owner delegated
+    (``subtask_to_parent_map``). Without its parent the record would lose its
+    parent link and look like a task the restoring agent runs itself: it would
+    claim the task's custody (or conflict with the worker that holds it and
+    fail the recovery) and never run it (found 2026-10-17).
+    """
+    changed = True
+    while changed:
+        changed = False
+        for index, source in enumerate(sources):
+            for child, parent in source.snapshot.subtask_to_parent_map.items():
+                if kept_from.get(child) != index or parent in tasks:
+                    continue
+                del tasks[child]
+                del kept_from[child]
+                changed = True
+                logger.warning(
+                    "Snapshot task excluded by recovery policy",
+                    extra={"task_id": child, "source_owner_agent_id": source.owner_agent_id,
+                           "reason": PARENT_LEFT_OUT, "parent_task_id": parent},
+                )
 
 
 def _from_source(kept_from: dict[str, int], index: int) -> set[str]:

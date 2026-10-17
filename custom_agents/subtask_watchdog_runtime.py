@@ -837,9 +837,48 @@ async def _queue_tracking(
         await _warn_untracked_subtask(agent, subtask_info.task.task_id)
         return False, None
     if record.status == DELEGATED_QUEUED and not record.target_agent_name:
+        if _never_published(agent, record):
+            _warn_never_published(agent, record)
+            return False, None
         return True, None
     claimed = record.claimed_at_utc
     return False, claimed.isoformat() if claimed is not None else None
+
+
+def _never_published(agent: Any, record: Any) -> bool:
+    """A queued record that never got a stream sequence after the outbox stopped retrying.
+
+    The requester records a delegated task before publishing it and adds the
+    sequence afterwards. When the outbox gives up publishing it ends the
+    subtask (``delegated_work_runtime.end_unpublished_delegation``); this is
+    the safeguard for a record that outlived that, so it is checked and timed
+    out like untracked work instead of waiting for ever.
+    """
+    if record.publish_sequence is not None:
+        return False
+    from custom_agents.turn_action_outbox_runtime import turn_action_retry_window_seconds
+
+    age_seconds = (datetime.now(timezone.utc) - record.updated_at_utc).total_seconds()
+    return age_seconds > turn_action_retry_window_seconds(agent)
+
+
+def _warn_never_published(agent: Any, record: Any) -> None:
+    key = f"never_published:{record.task_id}"
+    warned = agent._untracked_subtask_warnings
+    if key in warned:
+        return
+    warned.add(key)
+    agent._logger.warning(
+        "A delegated task was recorded but never sent to a worker; it is now checked and "
+        "timed out like untracked work. event=delegated_record_never_published agent_id=%s "
+        "task_id=%s subtask_id=%s record_team_id=%s record_task_id=%s recorded_at=%s",
+        agent.id,
+        record.parent_task_id,
+        record.task_id,
+        record.team_id,
+        record.task_id,
+        record.updated_at_utc.isoformat(),
+    )
 
 
 async def _warn_untracked_subtask(agent: Any, task_id: str) -> None:

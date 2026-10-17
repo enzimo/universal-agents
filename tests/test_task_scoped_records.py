@@ -269,3 +269,30 @@ def test_handback_release_clears_blocker(tmp_path):
     assert get_human_interaction_blocker(worker, "T") is None
     saved = _saved_workflow(worker)
     assert "T" not in saved.task_state.human_interaction_blockers
+
+
+def test_restore_leaves_out_delegations_of_a_parent_it_leaves_out_transitively():
+    """A snapshot's records of delegated tasks go with their parent, grandchildren too,
+    and a record whose parent is missing from every snapshot is left out as well."""
+    from custom_agents.runtime_snapshot_codec import SnapshotSource, restore_snapshot_state
+    from custom_messages.contracts.runtime_snapshot_v3 import RuntimeSnapshotV3, TaskSnapshotRecord
+
+    def record(task_id):
+        return TaskSnapshotRecord(
+            task_id=task_id, state=ProgressState.ACCEPTED,
+            task=Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="w"),
+            header=MessageHeader(message_id=f"m_{task_id}", timestamp="2026-10-17T00:00:00+00:00"),
+            meta=MessageMeta(), owner_person_id=None,
+        )
+
+    snapshot = RuntimeSnapshotV3(
+        schema_version=3,
+        tasks=[record(task_id) for task_id in ("P", "C", "G", "K", "O")],
+        subtask_to_parent_map={"C": "P", "G": "C", "O": "missing"},
+    )
+    restored = restore_snapshot_state(
+        [SnapshotSource("worker_gone", None, snapshot)], cancelled=set(), plans_enabled=False,
+        objectives_enabled=False, logger=logging.getLogger("restore"), taken_elsewhere={"P": "held_by_another_agent"},
+    )
+    assert sorted(restored.task_state.tasks) == ["K"]
+    assert restored.task_state.subtask_to_parent_map == {}

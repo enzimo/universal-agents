@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -248,6 +248,47 @@ async def test_only_tasks_waiting_in_a_shared_queue_skip_the_watchdog(tmp_path, 
     )
     holders = await _delegated_holders(agent)
     assert await _queue_tracking(agent, holders, shared) == (False, claimed_at.isoformat())
+
+
+def _age_record(agent, task_id: str, *, seconds: float) -> None:
+    from custom_agents.delegated_work_runtime import delegated_tasks
+
+    repository = delegated_tasks(agent)
+    record = repository.get("team_t", task_id)
+    aged = record.model_copy(update={"updated_at_utc": datetime.now(timezone.utc) - timedelta(seconds=seconds)})
+    with repository._connect() as conn:
+        repository._write(conn, aged)
+        conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_record_never_published_is_checked_like_untracked_work_after_the_retry_window(
+    tmp_path, monkeypatch, caplog
+):
+    """Safeguard (2026-10-17 review): a queued record that never got a stream sequence
+    after the outbox stopped retrying is probed and timed out, not left waiting."""
+    from custom_agents.subtask_watchdog_runtime import _delegated_holders, _queue_tracking
+    from custom_agents.turn_action_outbox_runtime import turn_action_retry_window_seconds
+
+    agent = _requester(tmp_path, monkeypatch)
+    agent._untracked_subtask_warnings = set()
+    agent._turn_action_outbox_int = lambda key, default: default
+    agent._turn_action_outbox_float = lambda key, default: default
+    window = turn_action_retry_window_seconds(agent)
+    for task_id, sequence in (("never", None), ("fresh", None), ("published", 9)):
+        _publish(agent, task_id, sequence=sequence)
+    _age_record(agent, "never", seconds=window + 5)
+    _age_record(agent, "published", seconds=window + 5)
+    holders = await _delegated_holders(agent)
+    route = "team_t_WebResearchAgent"
+    with caplog.at_level(logging.WARNING):
+        assert await _queue_tracking(agent, holders, _subtask_info("never", route=route)) == (False, None)
+        assert await _queue_tracking(agent, holders, _subtask_info("never", route=route)) == (False, None)
+    assert await _queue_tracking(agent, holders, _subtask_info("fresh", route=route)) == (True, None)
+    assert await _queue_tracking(agent, holders, _subtask_info("published", route=route)) == (True, None)
+    warnings = [r.getMessage() for r in caplog.records if "event=delegated_record_never_published" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "subtask_id=never" in warnings[0] and "task_id=parent_1" in warnings[0]
 
 
 @pytest.mark.asyncio

@@ -85,19 +85,14 @@ class RuntimeSnapshotCoordinator:
                 return
 
             runtime_state_json = json.dumps(self._export_runtime_state())
-            # Only the options in use are passed, so stores without them still work.
-            options: Dict[str, Any] = {}
-            if schedule_admission is not None:
-                options["schedule_admission"] = schedule_admission
-            if custody_takeover is not None:
-                options["custody_takeover"] = custody_takeover
             self.runtime_state_store.save_task_runtime(
                 owner_agent_id=self.identity.owner_agent_id,
                 owner_agent_name=self.identity.owner_agent_name,
                 team_id=self.identity.team_id,
                 owner_named_agent_type=self.identity.owner_named_agent_type,
                 runtime_state_json=runtime_state_json,
-                **options,
+                schedule_admission=schedule_admission,
+                custody_takeover=custody_takeover,
             )
         except Exception as e:
             self._logger.error(f"Failed to persist active runtime state: {e}")

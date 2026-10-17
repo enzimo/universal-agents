@@ -504,6 +504,68 @@ def test_a_claim_that_beats_the_publish_call_keeps_its_worker(tmp_path) -> None:
     assert (record.status, record.holder_agent_id, record.publish_sequence) == ("running", "worker_9", 42)
 
 
+def _subtasks(manager, parent):
+    return [info.task.task_id for info in manager.task_state.task_to_subtask_list.get(parent.task_id, [])]
+
+
+def test_a_delegation_never_sent_is_stopped_when_retries_end(tmp_path, caplog) -> None:
+    """Regression (2026-10-17 review): the record written before publishing stayed
+    "queued" when the publish kept failing and the action went to model recovery; the
+    watchdog never checks queued tasks, so the subtask and the parent's answer waited
+    for ever. Now the subtask fails, its record closes and a worker refuses it."""
+    from custom_agents.delegated_work_runtime import delegated_tasks
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent._probe_live_named_agent_type = AsyncMock()
+    object.__setattr__(agent, "_turn_action_outbox_config", lambda: {"max_auto_attempts": 0})
+    agent.team_comms.send_message = AsyncMock(side_effect=RuntimeError("nats unavailable"))
+
+    from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
+
+    with caplog.at_level(logging.WARNING), pytest.raises(TurnActionRecoveryScheduled):
+        _delegate(agent, manager, parent, named_type="WebResearchAgent")
+
+    (child,) = _subtasks(manager, parent)
+    assert manager.get_task_info(child).state == ProgressState.FAILED
+    assert delegated_tasks(agent).get(str(agent.team_id), child).status == "failed"
+    assert manager.is_execution_cancelled(child)
+    assert not manager.has_pending_subtasks(parent.task_id)
+    assert any("event=delegated_task_never_published" in r.getMessage() for r in caplog.records)
+
+
+def test_a_delegation_still_retrying_or_already_sent_is_left_alone(tmp_path) -> None:
+    from custom_agents.delegated_work_runtime import delegated_tasks
+    from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent._probe_live_named_agent_type = AsyncMock()
+    agent.team_comms.send_message = AsyncMock(side_effect=RuntimeError("nats unavailable"))
+    with pytest.raises(TurnActionRecoveryScheduled):
+        _delegate(agent, manager, parent, named_type="WebResearchAgent")  # automatic retry follows
+    (child,) = _subtasks(manager, parent)
+    assert manager.get_task_info(child).state != ProgressState.FAILED
+    assert delegated_tasks(agent).get(str(agent.team_id), child).status == "queued"
+
+    # Published, then a later step failed: a worker may hold it, so it is not stopped.
+    manager2 = _make_task_manager(tmp_path / "second")
+    parent2 = _add_active_parent_task(manager2)
+    agent2 = _make_agent(tmp_path / "second", task_manager=manager2)
+    agent2._probe_live_named_agent_type = AsyncMock()
+    object.__setattr__(agent2, "_turn_action_outbox_config", lambda: {"max_auto_attempts": 0})
+    with patch(
+        "custom_agents.turn_action_outbox_runtime._notify_user_delegated_work_started",
+        AsyncMock(side_effect=RuntimeError("chat down")),
+    ), pytest.raises(TurnActionRecoveryScheduled):
+        _delegate(agent2, manager2, parent2, named_type="WebResearchAgent")
+    (sent,) = _subtasks(manager2, parent2)
+    assert manager2.get_task_info(sent).state != ProgressState.FAILED
+    assert not manager2.is_execution_cancelled(sent)
+
+
 def _delegate(agent, manager, parent, *, named_type, agent_name=None):
     decision = StructuredAgentTurnDecision(
         actions=[

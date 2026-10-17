@@ -17,12 +17,22 @@ remain in NATS for redelivery. A duplicate already owned by the inbox can still 
 acknowledged. Lowering the limit preserves an existing backlog during recovery,
 logs a warning, and prevents new admission until the backlog falls below the limit.
 
-A task NATS delivers a second time runs once. A copy of a task another agent of
-the team still holds is dropped while that agent runs, with
-`event=task_copy_dropped_held_elsewhere`, and a copy of a task already finished is
-dropped with `event=duplicate_archived_delivery_ignored`. When the holder has
-stopped, the agent that received the copy runs it and logs
-`event=task_custody_takeover`. No setting controls this.
+NATS can deliver a task a second time, for example when the agent that took it
+stopped before acknowledging it. Agents of a team that share one database then
+handle the copy like this:
+
+- While the agent holding the task looks alive, the copy is dropped
+  (`event=task_copy_dropped_held_elsewhere`). If that agent stops later, the
+  replacement that takes over its saved work runs the task.
+- When the holder has stopped, or handed the task back after losing its launch
+  lease, the agent that received the copy runs it (`event=task_custody_takeover`),
+  and a later takeover of the stopped agent's saved work leaves that task out.
+- A copy of a task any agent of the team already finished is dropped
+  (`event=duplicate_archived_delivery_ignored`).
+
+These rules need `agent.same_role_runtime_takeover_enabled` left on (the
+default). With it off, nobody takes over a stopped agent's saved work, so a copy
+dropped while its holder looked alive is not run if that holder stops later.
 
 After upgrading to a release with this check, each agent's first start may log one
 `event=runtime_snapshot_orphans_dropped` warning per saved snapshot. Earlier
