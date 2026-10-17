@@ -9,16 +9,19 @@ what a machine can recognize without a list of real values:
 - email addresses outside the reserved example domains
 - phone numbers outside the fictional 555 ranges
 - home folder paths that name a real account
-- commit author and committer identities other than GitHub's own and the ones
-  listed in `.personal-details-allowlist`
+- commit author and committer email addresses that are not anonymized: only
+  GitHub noreply addresses and service mailboxes such as noreply@... pass
 
 Names, handles and copied chats cannot be recognized without listing them, so
-they still need a reviewer.
+they still need a reviewer. Commit author and committer names are not checked.
 
 Modes:
   (no option)      tracked files, plus every commit reachable from HEAD:
-                   identities, messages and every line the commits added
-  --staged         staged files and the identity the next commit will use
+                   emails, messages and every line the commits added
+  --github-event   tracked files, plus only the commits the current GitHub
+                   Actions event adds (a pull request's commits, or a push's
+                   new commits); a manual or scheduled run reads every commit
+  --staged         staged files and the email the next commit will use
                    (pre-commit hook)
   --message FILE   a commit message (commit-msg hook)
   --pushed         commits a push would upload, read from the pre-push hook's
@@ -30,6 +33,8 @@ Needs only Python 3.9+ and Git, so it works in projects in any language.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import subprocess
 import sys
@@ -37,9 +42,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 RULES = 'See CONTRIBUTING.md, "Personal details".'
-IDENTITY_HINT = (
-    "Commit only with an identity listed in .personal-details-allowlist "
-    "(git config user.name / user.email)."
+EMAIL_HINT = (
+    "Commit with an anonymized email address, such as your GitHub noreply address "
+    "(git config user.email; find it at https://github.com/settings/emails)."
 )
 HISTORY_HINT = (
     "Commits that are not pushed yet can be fixed with git commit --amend or git rebase. "
@@ -114,15 +119,18 @@ LOCK_FILES = frozenset(
     }
 )
 
-# Identities GitHub itself commits with: web merges and edits are committed by
-# "GitHub <noreply@github.com>", and apps such as Dependabot commit as
-# "<name>[bot] <<id>+<name>[bot]@users.noreply.github.com>".
-GITHUB_WEB_IDENTITY = ("GitHub", "noreply@github.com")
-GITHUB_APP_EMAIL = re.compile(r"\d+\+(?P<name>[A-Za-z0-9-]+\[bot\])@users\.noreply\.github\.com")
+# GitHub's noreply addresses hide a person's real address behind their login:
+# "<id>+<login>@users.noreply.github.com", the older "<login>@users.noreply.github.com",
+# and "<id>+<name>[bot]@users.noreply.github.com" for apps such as Dependabot.
+# GitHub itself commits web merges and edits as "GitHub <noreply@github.com>",
+# a service mailbox.
+GITHUB_NOREPLY_EMAIL = re.compile(r"(?:\d+\+)?[A-Za-z0-9-]+(?:\[bot\])?@users\.noreply\.github\.com", re.IGNORECASE)
 # The output of `git var GIT_AUTHOR_IDENT`: "Name <email> 1760000000 +0000".
 GIT_IDENT = re.compile(r"(?P<name>.*) <(?P<email>[^>]*)> \d+ [+-]\d{4}")
 HUNK_START = re.compile(r"@@ -\S+ \+(?P<line>\d+)")
 SCISSORS = "# ------------------------ >8 ------------------------"
+COMMIT_EMAIL = "commit email address"
+ALL_ZEROS = re.compile(r"0+")
 
 
 @dataclass(frozen=True)
@@ -141,19 +149,17 @@ class Finding:
 class Allowlist:
     """Real values the project has decided may appear.
 
-    `identity:` lines name commit identities ("Name <email>"); their addresses
-    may also appear in files. `text:` lines name other values that may appear in
-    files, such as an upstream author's published credit. `account:` lines name
-    made-up account names used in example home folder paths.
+    `text:` lines name values that may appear in files, such as an upstream
+    author's published credit. `account:` lines name made-up account names used
+    in example home folder paths. Commit identities are not listed: any
+    anonymized email passes (see is_anonymized_email).
     """
 
-    identities: frozenset = frozenset()
     values: frozenset = frozenset()
     accounts: frozenset = frozenset()
 
     @classmethod
     def parse(cls, text: str) -> Allowlist:
-        identities = set()
         values = set()
         accounts = set()
         for number, raw in enumerate(text.splitlines(), start=1):
@@ -161,19 +167,20 @@ class Allowlist:
             if not line or line.startswith("#"):
                 continue
             keyword, _, value = (part.strip() for part in line.partition(":"))
-            if keyword == "identity":
-                match = re.fullmatch(r"(?P<name>.+?) <(?P<email>[^>]+)>", value)
-                if match is None:
-                    raise ValueError(f"{ALLOWLIST_FILE}:{number}: expected 'identity: Name <email>'")
-                identities.add((match["name"], match["email"].lower()))
-                values.add(match["email"].lower())
-            elif keyword == "text" and value:
+            if keyword == "text" and value:
                 values.add(value.lower())
             elif keyword == "account" and value:
                 accounts.add(value.lower())
+            elif keyword == "identity":
+                # Fail rather than ignore the line, so a stale list does not
+                # look like it still decides who may commit.
+                raise ValueError(
+                    f"{ALLOWLIST_FILE}:{number}: 'identity:' lines are no longer used; any commit with an "
+                    "anonymized email passes. Remove this line."
+                )
             else:
-                raise ValueError(f"{ALLOWLIST_FILE}:{number}: expected 'identity: ...', 'text: ...' or 'account: ...'")
-        return cls(frozenset(identities), frozenset(values), frozenset(accounts))
+                raise ValueError(f"{ALLOWLIST_FILE}:{number}: expected 'text: ...' or 'account: ...'")
+        return cls(frozenset(values), frozenset(accounts))
 
     @classmethod
     def load(cls, path: Path) -> Allowlist:
@@ -183,9 +190,17 @@ class Allowlist:
         return value.lower() in self.values
 
 
+def is_anonymized_email(address: str) -> bool:
+    """True for addresses that reach no person directly: GitHub noreply addresses and service mailboxes."""
+    local_part, at, domain = address.lower().rpartition("@")
+    if not at or not local_part or not domain:
+        return False
+    return GITHUB_NOREPLY_EMAIL.fullmatch(address) is not None or local_part in SERVICE_LOCAL_PARTS
+
+
 def _is_allowed_email(address: str, allowlist: Allowlist) -> bool:
-    local_part, _, domain = address.lower().rpartition("@")
-    if address.lower() in SHARED_ADDRESSES or local_part in SERVICE_LOCAL_PARTS or allowlist.allows(address):
+    _, _, domain = address.lower().rpartition("@")
+    if address.lower() in SHARED_ADDRESSES or is_anonymized_email(address) or allowlist.allows(address):
         return True
     if any(domain == example or domain.endswith(f".{example}") for example in EXAMPLE_DOMAINS):
         return True
@@ -227,15 +242,6 @@ def personal_details(text: str, allowlist: Allowlist = Allowlist()) -> list[tupl
         if not _is_placeholder_account(match.group(1), allowlist) and not allowlist.allows(match.group(0))
     ]
     return found
-
-
-def identity_allowed(name: str, email: str, allowlist: Allowlist) -> bool:
-    if (name, email.lower()) == GITHUB_WEB_IDENTITY:
-        return True
-    app = GITHUB_APP_EMAIL.fullmatch(email)
-    if app is not None and app["name"] == name:
-        return True
-    return (name, email.lower()) in allowlist.identities
 
 
 def git(repo: Path, *args: str) -> bytes:
@@ -282,14 +288,14 @@ def scan_staged_files(repo: Path, allowlist: Allowlist) -> list[Finding]:
     return findings
 
 
-def scan_next_commit_identity(repo: Path, allowlist: Allowlist) -> list[Finding]:
+def scan_next_commit_email(repo: Path) -> list[Finding]:
     findings = []
     for role, variable in (("author", "GIT_AUTHOR_IDENT"), ("committer", "GIT_COMMITTER_IDENT")):
         ident = git(repo, "var", variable).decode().strip()
         match = GIT_IDENT.fullmatch(ident)
-        name, email = (match["name"], match["email"]) if match else (ident, "")
-        if not identity_allowed(name, email, allowlist):
-            findings.append(Finding(f"next commit {role}", "commit identity", f"{name} <{email}>"))
+        email = match["email"] if match else ident
+        if not is_anonymized_email(email):
+            findings.append(Finding(f"next commit {role}", COMMIT_EMAIL, email))
     return findings
 
 
@@ -303,19 +309,19 @@ def scan_message(text: str, allowlist: Allowlist, where: str = "commit message")
 
 
 def scan_commits(repo: Path, revisions: list[str], allowlist: Allowlist) -> list[Finding]:
-    """Check identities, messages and every added line of the selected commits.
+    """Check emails, messages and every added line of the selected commits.
 
-    A detail that a later commit deleted is still in history, so the whole
-    history is read, not only the latest files.
+    A detail that a later commit deleted is still in history, so every
+    selected commit is read, not only the latest files.
     """
     findings = []
-    log = git(repo, "log", "-z", "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B", *revisions, "--")
+    log = git(repo, "log", "-z", "--format=%H%x1f%ae%x1f%ce%x1f%B", *revisions, "--")
     for record in filter(None, log.decode("utf-8", errors="replace").split("\0")):
-        sha, author, author_email, committer, committer_email, message = record.split("\x1f", 5)
+        sha, author_email, committer_email, message = record.split("\x1f", 3)
         commit = f"commit {sha[:12]}"
-        for role, name, email in (("author", author, author_email), ("committer", committer, committer_email)):
-            if not identity_allowed(name, email, allowlist):
-                findings.append(Finding(f"{commit} {role}", "commit identity", f"{name} <{email}>"))
+        for role, email in (("author", author_email), ("committer", committer_email)):
+            if not is_anonymized_email(email):
+                findings.append(Finding(f"{commit} {role}", COMMIT_EMAIL, email))
         findings += scan_message(message, allowlist, f"{commit} message")
 
     # Merges are compared with their first parent so conflict resolutions are read too.
@@ -370,8 +376,88 @@ def pushed_tips(push_info: str) -> list[str]:
 
 
 def has_commits(repo: Path) -> bool:
-    result = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "HEAD"], cwd=repo, capture_output=True)
+    return is_commit(repo, "HEAD")
+
+
+def is_commit(repo: Path, revision: str) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}"], cwd=repo, capture_output=True
+    )
     return result.returncode == 0
+
+
+@dataclass(frozen=True)
+class EventScope:
+    """Which commits a GitHub Actions event adds.
+
+    `since` is the commit already checked, such as a pull request's base or a
+    push's previous tip; None means every commit, for a manual or scheduled run
+    and for the first push of the default branch. `nothing` is set when the
+    event adds no commits, such as a branch deletion.
+    """
+
+    since: str | None
+    reason: str
+    nothing: bool = False
+
+
+def event_scope(event_name: str, event: dict) -> EventScope:
+    if event_name in ("pull_request", "pull_request_target"):
+        base = (event.get("pull_request") or {}).get("base") or {}
+        if base.get("sha"):
+            return EventScope(base["sha"], "the pull request's base")
+        return EventScope(None, "the pull request event names no base commit")
+    if event_name != "push":
+        return EventScope(None, f"a {event_name or 'manual'} run checks the whole history")
+    if event.get("deleted"):
+        return EventScope(None, "the push deleted a branch or tag", nothing=True)
+    before = event.get("before") or ""
+    if before and not ALL_ZEROS.fullmatch(before):
+        return EventScope(before, "the branch's previous tip")
+    default_branch = (event.get("repository") or {}).get("default_branch")
+    if default_branch and event.get("ref") != f"refs/heads/{default_branch}":
+        # A new branch or tag: its commits that are not on the default branch.
+        return EventScope(f"origin/{default_branch}", "the default branch, for a new branch or tag")
+    return EventScope(None, "the push names no earlier commit, as on the first push of the default branch")
+
+
+def warn(title: str, message: str) -> None:
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::warning title={title}::{message}")
+    else:
+        print(f"Warning: {message}", file=sys.stderr)
+
+
+def scan_github_event(repo: Path, event_name: str, event: dict, allowlist: Allowlist) -> list[Finding]:
+    """Check tracked files and the commits the event adds, falling back to the whole history."""
+    findings = scan_tracked_files(repo, allowlist)
+    if not has_commits(repo):
+        return findings
+    scope = event_scope(event_name, event)
+    if scope.nothing:
+        print(f"Checked tracked files only: {scope.reason}.")
+        return findings
+    if scope.since is None:
+        print(f"Checking every commit: {scope.reason}.")
+        return findings + scan_commits(repo, ["HEAD"], allowlist)
+    if not is_commit(repo, scope.since):
+        # For example after a force push: the replaced tip is no longer fetched.
+        warn(
+            "Checking the whole history",
+            f"{scope.reason} ({scope.since}) is not in this checkout, so every commit is checked instead "
+            "of only the new ones. Fetch the full history (fetch-depth: 0) if this repeats.",
+        )
+        return findings + scan_commits(repo, ["HEAD"], allowlist)
+    print(f"Checking commits added since {scope.reason} ({scope.since}).")
+    return findings + scan_commits(repo, ["HEAD", "--not", scope.since], allowlist)
+
+
+def read_github_event() -> tuple[str, dict]:
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+    if not event_path:
+        return event_name, {}
+    return event_name, json.loads(Path(event_path).read_text(encoding="utf-8"))
 
 
 def report(findings: list[Finding], redact: bool) -> int:
@@ -381,8 +467,8 @@ def report(findings: list[Finding], redact: bool) -> int:
     for finding in findings:
         print(f"  {finding.describe(redact)}", file=sys.stderr)
     print(RULES, file=sys.stderr)
-    if any(finding.kind == "commit identity" for finding in findings):
-        print(IDENTITY_HINT, file=sys.stderr)
+    if any(finding.kind == COMMIT_EMAIL for finding in findings):
+        print(EMAIL_HINT, file=sys.stderr)
     if any(finding.where.startswith("commit ") for finding in findings):
         print(HISTORY_HINT, file=sys.stderr)
     return 1
@@ -391,7 +477,12 @@ def report(findings: list[Finding], redact: bool) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check that the repository carries no personal details.")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--staged", action="store_true", help="check staged files and the next commit's identity")
+    mode.add_argument(
+        "--github-event",
+        action="store_true",
+        help="in GitHub Actions: check tracked files and only the commits the current event adds",
+    )
+    mode.add_argument("--staged", action="store_true", help="check staged files and the next commit's email")
     mode.add_argument("--message", metavar="FILE", type=Path, help="check a commit message file")
     mode.add_argument("--pushed", action="store_true", help="check the commits a push would upload (pre-push input)")
     parser.add_argument(
@@ -402,9 +493,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     repo = Path(git(Path.cwd(), "rev-parse", "--show-toplevel").decode().strip())
-    allowlist = Allowlist.load(repo / ALLOWLIST_FILE)
-    if args.staged:
-        findings = scan_staged_files(repo, allowlist) + scan_next_commit_identity(repo, allowlist)
+    try:
+        allowlist = Allowlist.load(repo / ALLOWLIST_FILE)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 1
+    if args.github_event:
+        event_name, event = read_github_event()
+        findings = scan_github_event(repo, event_name, event, allowlist)
+    elif args.staged:
+        findings = scan_staged_files(repo, allowlist) + scan_next_commit_email(repo)
     elif args.message is not None:
         findings = scan_message(args.message.read_text(encoding="utf-8", errors="replace"), allowlist)
     elif args.pushed:

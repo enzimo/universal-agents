@@ -39,10 +39,13 @@ What to do instead:
 - Describe your own machines generically (for example "one Windows host runs
   two Linux runners") and keep their exact names, accounts and paths in the
   host's own notes outside this repository.
-- Commit only with an identity listed in `.personal-details-allowlist`: your
-  GitHub noreply address (`<id>+<login>@users.noreply.github.com`) with the
-  matching login as the name. Turn on GitHub's "Keep my email addresses
-  private" and "Block command line pushes that expose my email" settings.
+- Commit with an anonymized email: your GitHub noreply address
+  (`<id>+<login>@users.noreply.github.com`, shown at
+  https://github.com/settings/emails). Any contributor may commit; the checks
+  look only at the email, not the name. Use your login rather than your real
+  name as `git config user.name`. Turn on GitHub's "Keep my email addresses
+  private" and "Block command line pushes that expose my email" settings, so
+  merges you make on github.com use the noreply address too.
 - Organization and repository names used in real addresses (download links,
   image names, the license holder) are public by design and may stay.
 
@@ -50,23 +53,26 @@ What to do instead:
 
 `scripts/check_personal_details.py` reports email addresses outside the
 reserved example domains, phone numbers outside the fictional 555 ranges, home
-folder paths with a real account name, and commit identities not listed in
-`.personal-details-allowlist`. It checks tracked files and every commit: the
-identity, the message and every added line, including lines a later commit
-deleted. It needs only Python 3.9+ and Git. It cannot recognize names, handles,
-machine names or copied chats without listing them, so those still depend on
-review.
+folder paths with a real account name, and commit emails that are not
+anonymized (GitHub noreply addresses and service mailboxes such as
+`noreply@github.com` pass; names are not checked). It checks tracked files and
+commits: the email, the message and every added line, including lines a later
+commit deleted. It needs only Python 3.9+ and Git. It cannot recognize names,
+handles, machine names or copied chats without listing them, so those still
+depend on review.
 
 - Turn on the Git hooks once in every clone:
   `git config core.hooksPath .githooks`. They check staged files and the
-  commit identity (pre-commit), the commit message (commit-msg), and every
+  commit email (pre-commit), the commit message (commit-msg), and every
   commit a push would upload (pre-push).
-- The **Personal details** workflow runs the checker's tests and the full
-  check on every push and pull request. Its log shows where a finding is but
-  not the value.
-- `.personal-details-allowlist` records this project's decisions: `identity:`
-  lines for allowed commit identities, `text:` lines for real values that may
-  appear, and `account:` lines for made-up account names in example paths.
+- The **Personal details** workflow runs the checker's tests, then checks
+  tracked files and only the commits each push or pull request adds
+  (`--github-event`). A manual run checks every commit, and so does a run
+  whose starting commit is missing, such as after a force push, with a
+  warning. Its log shows where a finding is but not the value.
+- `.personal-details-allowlist` records this project's decisions: `text:`
+  lines for real values that may appear and `account:` lines for made-up
+  account names in example paths. It does not list who may commit.
   Fix a finding instead of adding it there.
 - A detail that was already pushed stays in history after a new commit deletes
   it. Follow `docs/personal-details-cleanup.md`.
