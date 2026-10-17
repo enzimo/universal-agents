@@ -14,9 +14,12 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 from strands import tool
+from strands.types.tools import ToolContext
 
 from custom_tools import file_access
 from custom_tools.non_interactive_shell import execute_non_interactive_command
+from custom_tools.shell_execution import CancelSignal
+from custom_tools.tool_stop import tracked_tool_call
 from custom_tools.path_policy import (
     contains_protected_runtime_control_reference,
     ensure_allowed_path,
@@ -401,7 +404,14 @@ def _ensure_env_dirs(env_dir: Path) -> None:
         file_access.make_directories(folder)
 
 
-def _create_env(env_name: str, env_dir: Path, *, python_executable: str | None, recreate: bool) -> dict[str, Any]:
+def _create_env(
+    env_name: str,
+    env_dir: Path,
+    *,
+    python_executable: str | None,
+    recreate: bool,
+    stop_event: CancelSignal | None,
+) -> dict[str, Any]:
     if recreate:
         file_access.remove_tree(env_dir)
     _ensure_env_dirs(env_dir)
@@ -413,6 +423,7 @@ def _create_env(env_name: str, env_dir: Path, *, python_executable: str | None, 
             default_work_dir=str(env_dir),
             default_timeout=DEFAULT_CREATE_TIMEOUT_SECONDS,
             code_tool=CODE_PYTHON_TOOL_ID,
+            cancel_event=stop_event,
         )
         manifest["last_create_result"] = _command_result_payload(result)
         if result.get("status") != "success":
@@ -423,7 +434,9 @@ def _create_env(env_name: str, env_dir: Path, *, python_executable: str | None, 
     return {"manifest": manifest, "command_result": manifest.get("last_create_result")}
 
 
-def _install_packages(env_dir: Path, packages: Any, *, timeout: int | None, unconfined: bool) -> dict[str, Any]:
+def _install_packages(
+    env_dir: Path, packages: Any, *, timeout: int | None, unconfined: bool, stop_event: CancelSignal | None
+) -> dict[str, Any]:
     package_args = _normalize_packages(packages)
     if not package_args:
         raise ValueError("install action requires at least one package")
@@ -435,6 +448,7 @@ def _install_packages(env_dir: Path, packages: Any, *, timeout: int | None, unco
         default_timeout=timeout or DEFAULT_INSTALL_TIMEOUT_SECONDS,
         code_tool=CODE_PYTHON_TOOL_ID,
         unconfined=unconfined,
+        cancel_event=stop_event,
     )
     return {"packages": package_args, "command_result": _command_result_payload(result)}
 
@@ -459,6 +473,7 @@ def _run(
     work_dir: str | None,
     timeout: int | None,
     unconfined: bool,
+    stop_event: CancelSignal | None,
 ) -> dict[str, Any]:
     run_work_dir = _resolve_env_path(env_dir, work_dir, default=".", for_write=False)
     inspection = None
@@ -511,6 +526,7 @@ def _run(
         default_timeout=timeout or DEFAULT_RUN_TIMEOUT_SECONDS,
         code_tool=CODE_PYTHON_TOOL_ID,
         unconfined=unconfined,
+        cancel_event=stop_event,
     )
     return {"inspection": inspection, "command_result": _command_result_payload(result)}
 
@@ -540,9 +556,10 @@ def _list_envs() -> dict[str, Any]:
     return {"root": str(root), "envs": envs}
 
 
-@tool
+@tool(context=True)
 def python_env(
     action: str,
+    tool_context: ToolContext,
     env_name: str = DEFAULT_ENV_NAME,
     path: Optional[str] = None,
     content: Optional[str] = None,
@@ -582,6 +599,48 @@ def python_env(
     request_access and say exactly why; with tool_id='code:unconfined' approved,
     `install` and `run` accept unconfined=true to run outside the sandbox.
     """
+    # The call counts as running until its commands end, and they stop when
+    # the task stops (custom_tools.tool_stop).
+    with tracked_tool_call(tool_context, "python_env") as stop_event:
+        return _python_env_action(
+            action,
+            env_name=env_name,
+            path=path,
+            content=content,
+            code=code,
+            command=command,
+            packages=packages,
+            args=args,
+            work_dir=work_dir,
+            timeout=timeout,
+            python_executable=python_executable,
+            recreate=recreate,
+            reason=reason,
+            unconfined=unconfined,
+            stop_event=stop_event,
+        )
+
+
+def _python_env_action(
+    action: str,
+    *,
+    env_name: str,
+    path: Optional[str],
+    content: Optional[str],
+    code: Optional[str],
+    command: Optional[str],
+    packages: Optional[list[str] | str],
+    args: Optional[list[str] | str],
+    work_dir: Optional[str],
+    timeout: Optional[int],
+    python_executable: Optional[str],
+    recreate: bool,
+    reason: Optional[str],
+    unconfined: bool,
+    stop_event: CancelSignal | None,
+) -> dict[str, Any]:
+    """Carry out one python_env action; commands stop when ``stop_event`` is set."""
+
     normalized_action = str(action or "").strip().lower()
     if normalized_action not in {"create", "write_file", "inspect", "install", "run", "list", "delete"}:
         return _tool_result("error", f"Unsupported python_env action: {action}")
@@ -600,21 +659,27 @@ def python_env(
             return _tool_result("success", f"Deleted Python env `{safe_name}`.", payload={"env_name": safe_name})
 
         if normalized_action == "create":
-            payload = _create_env(safe_name, env_dir, python_executable=python_executable, recreate=recreate)
+            payload = _create_env(
+                safe_name, env_dir, python_executable=python_executable, recreate=recreate, stop_event=stop_event
+            )
             command_result = payload.get("command_result") or {}
             status = "success" if not command_result or command_result.get("status") == "success" else "error"
             logger.info("Managed Python env create completed. event=python_env_create env_name=%s status=%s", safe_name, status)
             return _tool_result(status, f"Python env `{safe_name}` create status: {status}.", payload=payload)
 
         if not _exists(env_dir / ".venv"):
-            create_payload = _create_env(safe_name, env_dir, python_executable=python_executable, recreate=False)
+            create_payload = _create_env(
+                safe_name, env_dir, python_executable=python_executable, recreate=False, stop_event=stop_event
+            )
             command_result = create_payload.get("command_result") or {}
             if command_result and command_result.get("status") != "success":
                 return _tool_result("error", f"Failed to create Python env `{safe_name}`.", payload=create_payload)
 
         manifest = _base_manifest(safe_name, env_dir, python_executable=python_executable)
         if normalized_action == "install":
-            payload = _install_packages(env_dir, packages, timeout=timeout, unconfined=bool(unconfined))
+            payload = _install_packages(
+                env_dir, packages, timeout=timeout, unconfined=bool(unconfined), stop_event=stop_event
+            )
         elif normalized_action == "write_file":
             file_content = content if content is not None else code
             if file_content is None:
@@ -641,6 +706,7 @@ def python_env(
                 work_dir=work_dir,
                 timeout=timeout,
                 unconfined=bool(unconfined),
+                stop_event=stop_event,
             )
 
         manifest["last_action"] = normalized_action

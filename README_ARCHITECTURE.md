@@ -370,8 +370,10 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
 2. It returns each task it has not started, and the task it is executing, to the
    TeamLead as a `WorkerTaskHandbackV1` message, one task per message with a
    deterministic handback id. The running turn is interrupted without a
-   cancellation record, so the task can run elsewhere. New requests that still
-   reach the worker go to the TeamLead the same way.
+   cancellation record, so the task can run elsewhere, and its running shell
+   and Python commands end before the handback is sent, so the rerun never
+   overlaps them. New requests that still reach the worker go to the TeamLead
+   the same way.
 3. It keeps tasks that already started and now wait on a person or subtask,
    because replies are addressed to this worker's id. They may finish until
    `agent.schedule_workers.lease_loss_wait_timeout_seconds` (default 30 minutes)
@@ -435,6 +437,11 @@ Known limits of the lease-loss handling:
 - Replies addressed to a worker's id after that worker exits (for example a
   subtask result for a task it failed at the wind-down deadline) are not
   delivered anywhere; the requester already received a failed result.
+- The handback waits at most 10 seconds for the interrupted turn's tool calls.
+  A call the process supervisor cannot end (an HTTP request, OpenShell sandbox
+  creation, a process that left its process group) may still run after the
+  handback; it is logged as `event=tool_work_outlived_turn`, and none of the
+  stopped turn's remaining commands start.
 
 Abandoned memory-review claims become inactive review records after a grace period
 and checks for live or saved work. InternalImprovementAgent reviews their metadata
@@ -649,8 +656,9 @@ the sanitized prompt metadata.
 Runtime snapshots and idempotent admission let processes recover queued work,
 waiting subtasks, deferred messages, and recent in-flight Tasks. Outboxes record
 ordered actions before external effects. Leases and fencing prevent a stale
-worker from committing after another worker takes over. Repairs and fallback
-paths are logged rather than hidden.
+worker from committing after another worker takes over, and a stopped or
+handed-back turn ends its running commands before the task is archived or
+handed back. Repairs and fallback paths are logged rather than hidden.
 
 Transport contracts, workflow records, and snapshot codecs have separate owners.
 Shared subsystem configuration lives in `runtime_settings/`; the gateway composes
@@ -899,7 +907,10 @@ refused rather than run with the network open. Landlock does not cover UDP,
 so internal services such as the local NATS server still require credentials
 that sandboxed code cannot read. Writable folders get every right except making device files;
 links may be made (Python environments need them) because trusted code never
-follows them.
+follows them. `shell(parallel=true)` runs its commands in a thread pool, and
+pool threads do not inherit context variables, so each command runs in a copy
+of the calling thread's context; without it, parallel commands ran as if no
+agent were present, with the network open and without the person's folder.
 
 Running a command outside the sandbox is its own catalog tool,
 `code:unconfined`, so network access never implies host access:
@@ -922,6 +933,30 @@ created on first use with copies of only their folder, `team/` and `agents/`;
 work for no person uses a shared one. The operator's OpenShell policy decides
 the network and anything else there; folder grants and the network rule above
 do not apply.
+
+Commands stop with their task. Strands runs the `shell` and `python_env` tools
+in a worker thread, and cancelling a turn does not stop that thread, so a
+command used to keep running after a person stopped its task, after a
+lease-loss handback while another worker reran the task in the same folders,
+and through shutdown. Each turn now gets a stop signal that Universal Agents
+owns (`custom_tools/tool_stop.py`). The turn passes it to Strands as the
+invocation's `cancel_signal` and to the tools through `invocation_state`.
+Strands' own `agent.cancel_signal` cannot carry the stop: Strands clears it as
+soon as the invocation ends, and a stopped turn ends before a tool thread looks.
+A stop sets the signal before it cancels the turn. The process supervisor then
+ends the command's whole process group (SIGTERM, then SIGKILL a second later)
+and starts none of the turn's remaining commands. The cancelled turn waits up
+to 10 seconds for its running tool calls to end
+(`custom_agents/sdk/strands/turn_tool_stop.py`), so the stop reply, the
+cancellation record, the next queued task, the lease-loss handback and shutdown
+all come after its commands ended. The wait sits in the turn rather than in each
+stop path because the code that runs the turn archives the task and frees the
+execution slot as soon as the turn ends, whoever stopped it. A tool call still
+running after the wait is logged (`event=tool_work_outlived_turn`) and the stop
+goes ahead; it can only be work the supervisor cannot end, such as an HTTP
+request, OpenShell sandbox creation, or a process that left its process group.
+In OpenShell mode the supervisor ends the local `openshell sandbox exec` client;
+whether that ends the command inside the sandbox has not yet been verified.
 
 Who a task works for is signed, not claimed. The gateway signs a task context
 (Ed25519) naming the person and their current team roles when it admits a

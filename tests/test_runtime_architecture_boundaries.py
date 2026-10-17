@@ -840,3 +840,29 @@ def test_only_the_objective_coordinator_saves_objective_records() -> None:
             ):
                 offenders.append(f"{relative}:{node.lineno} {node.attr}")
     assert offenders == []
+
+
+# Strands invocations that may skip invoke_with_tool_stop: the helper itself,
+# and the model-switch check, whose agent has no tools.
+_INVOCATIONS_WITHOUT_TOOL_STOP = {
+    "custom_agents/sdk/strands/turn_tool_stop.py",
+    "custom_agents/runtime_model_switch.py",
+}
+
+
+def test_turns_call_strands_only_through_invoke_with_tool_stop() -> None:
+    """A turn's commands stop with it only when its invocation carries its ToolStop
+    (custom_agents.sdk.strands.turn_tool_stop)."""
+
+    callers = set()
+    for path in sorted((REPO_ROOT / "custom_agents").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"invoke_async", "stream_async"}
+            ):
+                callers.add(path.relative_to(REPO_ROOT).as_posix())
+    assert callers - _INVOCATIONS_WITHOUT_TOOL_STOP == set()
+    assert callers == _INVOCATIONS_WITHOUT_TOOL_STOP

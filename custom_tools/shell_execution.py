@@ -72,6 +72,27 @@ class RtkCommandPlan:
     cancelled: bool = False
 
 
+class CancelSignal(Protocol):
+    """Anything that reports whether a command must stop, such as ``threading.Event``."""
+
+    def is_set(self) -> bool: ...
+
+
+class AnyCancel:
+    """A stop signal that is set as soon as any of its signals is set.
+
+    The parallel shell mode stops a command both when its task stops and when
+    a sibling command fails; this lets one command watch both without either
+    signal setting the other.
+    """
+
+    def __init__(self, *signals: CancelSignal | None) -> None:
+        self._signals = tuple(item for item in signals if item is not None)
+
+    def is_set(self) -> bool:
+        return any(item.is_set() for item in self._signals)
+
+
 class ProcessRunner(Protocol):
     """Structural contract for a replaceable process supervisor."""
 
@@ -79,7 +100,7 @@ class ProcessRunner(Protocol):
         self,
         request: ProcessRequest,
         *,
-        cancel_event: threading.Event | None = None,
+        cancel_event: CancelSignal | None = None,
         on_chunk: Callable[[ProcessStreamChunk], None] | None = None,
     ) -> ProcessResult: ...
 
@@ -136,10 +157,15 @@ def _stop_process_tree(process: subprocess.Popen[bytes], grace_seconds: float) -
 def run_process(
     request: ProcessRequest,
     *,
-    cancel_event: threading.Event | None = None,
+    cancel_event: CancelSignal | None = None,
     on_chunk: Callable[[ProcessStreamChunk], None] | None = None,
 ) -> ProcessResult:
-    """Run a child with closed stdin, streamed pipes, and process-tree cleanup."""
+    """Run a child with closed stdin, streamed pipes, and process-tree cleanup.
+
+    ``cancel_event`` is checked before the child starts, so a command asked to
+    stop before it began never runs, and every 50 ms while it runs, when the
+    whole process group is stopped.
+    """
 
     if not request.argv:
         raise ValueError("Process argv is required")
@@ -147,6 +173,14 @@ def run_process(
         raise ValueError("Process timeout must be greater than zero")
     validate_environment_keys(request.env)
 
+    if cancel_event is not None and cancel_event.is_set():
+        return ProcessResult(
+            exit_code=130,
+            stdout="",
+            stderr="",
+            termination_reason="cancelled",
+            duration_seconds=0.0,
+        )
     started = time.monotonic()
     try:
         process = subprocess.Popen(
@@ -282,7 +316,7 @@ def plan_rtk_command(
     env: Mapping[str, str],
     timeout_seconds: float,
     missing_warning: str,
-    cancel_event: threading.Event | None = None,
+    cancel_event: CancelSignal | None = None,
 ) -> RtkCommandPlan:
     """Choose an RTK rewrite, tracked proxy, or observable raw fallback."""
 
@@ -338,6 +372,8 @@ def plan_rtk_command(
 
 
 __all__ = [
+    "AnyCancel",
+    "CancelSignal",
     "ProcessRequest",
     "ProcessResult",
     "ProcessRunner",

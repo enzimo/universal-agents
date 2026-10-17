@@ -382,6 +382,12 @@ anything until you choose an explicit scope:
 - `/stop all` cancels all current nonterminal work owned by you across sessions
   and conversations.
 
+Stopping work also ends any command an agent is running for it, such as a
+build, a test run or a script. The command is asked to stop and is ended a
+second later if it keeps going, and no further command of that work starts.
+Each agent marks its part of the work as stopped only after its commands have
+ended, which can take a few seconds.
+
 Future schedules remain separate from every stop scope. Pause an Objective or
 use its schedule controls when you also need to prevent later runs.
 The chat receipt summarizes scheduled items and distinct scheduled objectives

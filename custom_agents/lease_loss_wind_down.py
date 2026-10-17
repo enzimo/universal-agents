@@ -9,7 +9,8 @@ refused to start a replacement for the live worker. The wind-down instead:
 1. leaves the shared named-type queue, so no new delegated work arrives;
 2. hands every task it has not started, plus the task it is executing, back to
    the TeamLead in one structured message per task (the running turn is
-   interrupted without a cancellation record so the task can run elsewhere);
+   interrupted without a cancellation record so the task can run elsewhere,
+   and its running commands are stopped before the handback is sent);
 3. keeps tasks that already started and now wait on a person or a subtask,
    because their replies are addressed to this worker; they may finish here
    until ``lease_loss_wait_timeout_seconds`` after the lease was lost, after
@@ -32,6 +33,7 @@ from custom_agents.control_runtime import (
     _interrupt_active_execution,
     request_subtask_stop,
 )
+from custom_agents.sdk.strands.turn_tool_stop import HANDBACK_REASON
 from custom_agents.task_records import TaskInfo
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -277,8 +279,10 @@ async def _hand_back_running_task(
 ) -> None:
     task_id = task_info.task.task_id
     state.interrupting_task_ids.add(task_id)
+    # Returns once the turn's running commands have ended (or the wait for
+    # them was logged), so the rerun on another worker never overlaps them.
     await _interrupt_active_execution(
-        agent, root_task_id=task_id, graph_task_ids={task_id}
+        agent, root_task_id=task_id, graph_task_ids={task_id}, reason=HANDBACK_REASON
     )
     current = await agent.task_manager.operations_runtime.run(
         agent.task_manager.get_task_info, task_id

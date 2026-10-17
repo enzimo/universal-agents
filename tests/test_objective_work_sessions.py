@@ -54,6 +54,7 @@ from custom_tools.providers.objective_work import (
 )
 from custom_tools.providers.objectives import objectives
 from custom_tools.runtime_context import set_agent_ref
+from custom_tools.tool_stop import ToolStop
 from runtime_settings.instance_layout import InstanceLayout
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
@@ -625,6 +626,7 @@ def test_token_boundary_uses_reserved_checkpoint_invocation_and_accounts_split_u
             tool_call_limit_handler=None,
             msg_content=task,
             active_task_id=task.task_id,
+            tool_stop=ToolStop(agent_id="agent", task_id=task.task_id),
         )
     )
 

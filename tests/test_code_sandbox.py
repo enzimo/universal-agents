@@ -195,18 +195,20 @@ def test_operator_extra_paths_are_granted(instance, tmp_path: Path, monkeypatch)
 @requires_landlock
 def test_python_env_runs_inside_the_sandbox(instance) -> None:
     from custom_tools.python_env_tool import python_env
+    from tests.tool_stop_support import tool_context
 
-    created = python_env._tool_func(action="create", env_name="probe")
+    created = python_env._tool_func(tool_context=tool_context(), action="create", env_name="probe")
     assert created["status"] == "success", created
     secret = instance["root"] / "team.env"
     written = python_env._tool_func(
+        tool_context=tool_context(),
         action="write_file",
         env_name="probe",
         path="src/main.py",
         content=f"print(open({_dynamic(secret)}).read())\n",
     )
     assert written["status"] == "success", written
-    ran = python_env._tool_func(action="run", env_name="probe", path="src/main.py")
+    ran = python_env._tool_func(tool_context=tool_context(), action="run", env_name="probe", path="src/main.py")
     payload = json.loads(ran["content"][-1]["text"])
 
     assert payload["command_result"]["status"] == "error"

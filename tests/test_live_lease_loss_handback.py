@@ -5,6 +5,11 @@ live NATS server; only the model is a stand-in. Worker A starts a user task
 whose model call blocks, then loses its launch lease. A must interrupt the run,
 hand the task to the lead and exit; the lead must send it out again; worker B
 must run it with the note about the interrupted run and answer the user once.
+
+In the second run, worker A's model call is a real shell command running in a
+worker thread, the way Strands runs the shell tool. Worker A must end that
+command before it hands the task back, so it is gone before worker B reruns
+the task and never finishes.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ import asyncio
 import tempfile
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -38,6 +44,10 @@ from storage.worker_handback_repository import (
     HANDBACK_STATUS_REDISPATCHED,
     WorkerHandbackRepository,
 )
+from custom_tools.non_interactive_shell import shell
+from custom_tools.runtime_context import set_agent_ref
+from custom_tools.workspace_scope import current_workspace_scope
+from tests.turn_tool_stop_support import kill_if_alive, process_alive
 from tests.test_live_multi_agent_state_boundaries import (
     FakeStrandsAgent,
     _agent,
@@ -72,6 +82,69 @@ class _BlockingModel(FakeStrandsAgent):
             raise
 
 
+class _ShellCommandModel(_BlockingModel):
+    """A model call that runs a real shell command in a worker thread, as Strands runs the tool.
+
+    The command records its process id, ignores SIGTERM (so only the forced
+    kill a second later ends it), sleeps two minutes and would then write a
+    file. The tool call carries the turn's ToolStop from the invocation, as a
+    Strands tool context does.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.agent = None
+        self.work_dir: Path | None = None
+
+    @property
+    def pid_file(self) -> Path:
+        assert self.work_dir is not None
+        return self.work_dir / "worker-a.pid"
+
+    @property
+    def finished_file(self) -> Path:
+        assert self.work_dir is not None
+        return self.work_dir / "worker-a-finished.txt"
+
+    def command_alive(self) -> bool:
+        text = self.pid_file.read_text().strip() if self.pid_file.exists() else ""
+        return text.isdigit() and process_alive(int(text))
+
+    async def invoke_async(self, prompt: str, **kwargs: object):
+        self.invocations.append(prompt)
+        # The runtime sets the agent per agent thread; these agents share one.
+        set_agent_ref(self.agent)
+        context = SimpleNamespace(invocation_state=kwargs["invocation_state"], tool_use={"toolUseId": "worker-a-shell"})
+        command = f"trap '' TERM; echo $$ > {self.pid_file.name}; sleep 120; touch {self.finished_file.name}"
+        call = asyncio.ensure_future(
+            asyncio.to_thread(shell._tool_func, command=command, tool_context=context, work_dir=str(self.work_dir))
+        )
+        try:
+            while not self.command_alive():
+                if call.done():
+                    raise AssertionError(f"The shell command did not start: {call.result()}")
+                await asyncio.sleep(0.05)
+            self.started.set()
+            await call
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        raise AssertionError("The shell command finished instead of being stopped.")
+
+
+class _RerunModel(FakeStrandsAgent):
+    """Worker B's model; records whether worker A's command still ran when B started."""
+
+    def __init__(self, command_alive, *responses) -> None:
+        super().__init__(*responses)
+        self.command_alive = command_alive
+        self.alive_at_rerun: list[bool] = []
+
+    async def invoke_async(self, prompt: str, **kwargs: object):
+        self.alive_at_rerun.append(self.command_alive())
+        return await super().invoke_async(prompt, **kwargs)
+
+
 def _ready_launch(worker) -> AgentLaunchV1:
     """Give a test worker the launch record the lead validates handbacks with."""
 
@@ -94,7 +167,8 @@ def _ready_launch(worker) -> AgentLaunchV1:
     return launch
 
 
-async def test_lost_lease_hands_the_running_task_to_another_worker(monkeypatch) -> None:
+@pytest.mark.parametrize("runs_shell_command", [False, True], ids=["model_call", "shell_command"])
+async def test_lost_lease_hands_the_running_task_to_another_worker(monkeypatch, runs_shell_command) -> None:
     monkeypatch.setattr(wind_down, "WIND_DOWN_POLL_SECONDS", 0.05)
     monkeypatch.setattr(wind_down, "HANDBACK_PUBLISH_RETRY_SECONDS", 0.05)
     monkeypatch.setattr(handback_runtime, "interruption_limit", lambda agent: 3)
@@ -106,12 +180,25 @@ async def test_lost_lease_hands_the_running_task_to_another_worker(monkeypatch) 
         return await real_apply(agent, task_id, meta)
 
     monkeypatch.setattr(task_message_runtime, "apply_redispatch_notice", record_admission)
+    alive_at_handback: list[bool] = []
+    publish_handback = wind_down._publish_handback
+
+    async def record_handback(agent, state, handed_back):
+        if runs_shell_command:
+            alive_at_handback.append(worker_a_llm.command_alive())
+        return await publish_handback(agent, state, handed_back)
+
+    monkeypatch.setattr(wind_down, "_publish_handback", record_handback)
 
     team_id = new_id("team_handback")
     task_id = new_id("handback_task")
     lead_llm = FakeStrandsAgent()
-    worker_a_llm = _BlockingModel()
-    worker_b_llm = FakeStrandsAgent(_task_response("Worker B finished the report."))
+    worker_a_llm = _ShellCommandModel() if runs_shell_command else _BlockingModel()
+    finished = _task_response("Worker B finished the report.")
+    if runs_shell_command:
+        worker_b_llm = _RerunModel(worker_a_llm.command_alive, finished)
+    else:
+        worker_b_llm = FakeStrandsAgent(finished)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -147,6 +234,14 @@ async def test_lost_lease_hands_the_running_task_to_another_worker(monkeypatch) 
                 db_path=db_path,
                 workspace_dir=workspace_dir,
             )
+            if runs_shell_command:
+                # The live request carries no gateway-signed context, which code
+                # needs with authorization on; with it off code runs in the
+                # task's folders (custom_agents.code_access).
+                worker_a.authorization_config = {"enabled": False}
+                worker_a_llm.agent = worker_a
+                worker_a_llm.work_dir = current_workspace_scope(worker_a).home
+                worker_a_llm.work_dir.mkdir(parents=True, exist_ok=True)
             agent_tasks = []
             connection = await _connect_nats(team_id)
             try:
@@ -226,6 +321,15 @@ async def test_lost_lease_hands_the_running_task_to_another_worker(monkeypatch) 
                     task_id
                 ]
                 assert await user_queue.get(timeout=1) is None
+                if runs_shell_command:
+                    # Worker A ended its command before handing the task back.
+                    assert alive_at_handback == [False]
+                    assert worker_b_llm.alive_at_rerun == [False]
+                    assert not worker_a_llm.command_alive()
+                    assert not worker_a_llm.finished_file.exists()
             finally:
+                if runs_shell_command and worker_a_llm.work_dir is not None:
+                    kill_if_alive(worker_a_llm.pid_file)
+                set_agent_ref(None)
                 await _stop_agents(agent_tasks)
                 await connection.close()

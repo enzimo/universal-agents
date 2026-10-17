@@ -337,7 +337,9 @@ async def test_user_stop_cancels_sdk_child_without_cancelling_its_owner(host):
     try:
         await asyncio.wait_for(host.provider.entered.wait(), 2)
         assert host._active_execution_task is not running
-        await _interrupt_active_execution(host, root_task_id="stopped", graph_task_ids={"stopped"})
+        await _interrupt_active_execution(
+            host, root_task_id="stopped", graph_task_ids={"stopped"}, reason="task_stopped"
+        )
         await asyncio.wait_for(running, 2)
         assert not host.is_executing
         assert host._active_execution_task is None
