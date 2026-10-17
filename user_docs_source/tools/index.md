@@ -25,7 +25,8 @@ an agent has the tools its definition lists. File operations stay within the
 task's folders, what was shared with the task's person, and any folders the
 agent was given (see
 [Files and folders](../permissions.md#files-and-folders)). Use the concrete Exa
-operation names in tool filters and access requests; the Python module name
+function names (`exa_search`, `exa_get_contents`) in tool filters; access
+requests name the tool (`fn:web_research`) and a level. The Python module name
 `exa` is not a tool name.
 
 Every agent also has `calculator` in both modes: exact and numeric math with

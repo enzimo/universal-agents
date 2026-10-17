@@ -33,7 +33,7 @@ skipped or failed outcome with
 by another worker. If an outcome is uncertain, ask for review before retrying it.
 Do not send the scheduled task back to TeamArchitect or create a replacement timer.
 If a call is refused with `access_denied`, call `request_access` once with the
-`tool_id`, `operation` and `level` it names and a plain reason; the run waits
+`tool_id` and `level` it names and a plain reason; the run waits
 until TeamLead hands the access on or a person decides. Do not ask again after
 a denial. Starting you automatically for a schedule grants no tool access.
 A run with no eligible jobs should finish quietly with

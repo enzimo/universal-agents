@@ -235,8 +235,8 @@ The broker checks every `secure_cli` and MCP call against the access your
 agent type holds and the access of the person the task is for. A refused call
 returns `status: "access_denied"` with `tool_id` (for example `cli:google`,
 `cli:github`, `mcp:<connection>`, or `http:<name>`), `operation`, `level`,
-`reason`, and `next_step`. Call `request_access` with that `tool_id`,
-`operation`, and `level` and a plain reason people will read; do not choose a
+`reason`, and `next_step`. Call `request_access` with that `tool_id` and
+`level` and a plain reason people will read; do not choose a
 broader tool or level yourself. When TeamLead may hand the access on, you get
 it at once. Otherwise your task pauses until a person decides in the Inbox,
 and the call returns the decision. Never ask people to grant access in chat.

@@ -546,7 +546,7 @@ def invoke_installed_permission(
     Arguments must be one JSON object accepted by the registered handler's
     runtime-owned schema. Each call is checked as the catalog tool
     procedure:<handler_id>; if it is refused with access_denied, call
-    request_access with the tool_id, operation and level it names. The agent
+    request_access with the tool_id and level it names. The agent
     cannot select or rewrite the action, resource, risk, or impact.
     """
 

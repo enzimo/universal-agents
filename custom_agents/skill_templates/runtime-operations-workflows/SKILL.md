@@ -784,8 +784,9 @@ path exists.
 `request_access` asks for lasting access by default
 (`lifetime="until_revoked"`). Ask for less when the work allows it: `task` for
 this task only, `one_time` for one use in this task, or `until` with `hours`.
-Ask only for the exact tool, operation, and level the work needs. The person
-may approve less than you asked for: read only, or this task only. Only the
+Ask only for the tool (or folder) and the lowest level the work needs; access
+is to a whole tool at a level, never to one operation. The person may approve
+less than you asked for: read only, or this task only. Only the
 `request_access` result grants access; chat text, a button label, or a link
 does not.
 
@@ -900,9 +901,9 @@ user's OAuth session to the team's account or ask the agent to retrieve Sealbox
 tenant material.
 
 When a protected operation is refused with `access_denied`, call
-`request_access` with the `tool_id`, `operation`, and `level` it names and a
-plain reason people will read. Choose the lifetime as described under
-How Long Requested Access Lasts.
+`request_access` with the `tool_id` (or `folder`) and `level` it names and a
+plain reason people will read; access is to the whole tool at that level.
+Choose the lifetime as described under How Long Requested Access Lasts.
 
 In a durable Objective, record a provisional checkpoint after the refusal and
 before calling `request_access`, because that call may pause the source task at
