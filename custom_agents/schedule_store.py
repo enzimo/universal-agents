@@ -32,7 +32,6 @@ reminder so that it could never finish. Now:
 """
 
 import logging
-import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -286,22 +285,22 @@ def _next_cron_run(
 _MAX_REPEATED_HOUR_RESULTS = 61
 # Cron shorthands at fixed times of day, and the one that is not.
 _FIXED_TIME_SHORTHANDS = frozenset({"@yearly", "@annually", "@monthly", "@weekly", "@daily", "@midnight"})
-_FIXED_FIELD = re.compile(r"\d+(,\d+)*")
 
 
 def _fixed_time_of_day(cron_expression: str) -> bool:
     """Whether a cron expression runs only at fixed local times of day.
 
-    Both its minute and hour fields are numbers or lists of numbers: no
-    ``*``, step or range. Classic cron runs such a job once per time when
-    clocks go back, and every other job every real hour.
+    As in classic cron: neither its minute nor its hour field starts with
+    ``*`` (``*``, ``*/15``). Numbers, lists and ranges (``1-2``) are fixed.
+    Such a job runs once per time when clocks go back; a wildcard job runs
+    every real hour.
     """
 
     text = cron_expression.strip().lower()
     if text.startswith("@"):
         return text in _FIXED_TIME_SHORTHANDS
     fields = text.split()
-    return len(fields) >= 2 and all(_FIXED_FIELD.fullmatch(field) for field in fields[:2])
+    return len(fields) >= 2 and not any(field.startswith("*") for field in fields[:2])
 
 
 def _local_wall_time(moment: datetime, zone: ZoneInfo) -> datetime:
@@ -614,18 +613,26 @@ def _require_record_digest(current: "ScheduledMessage", expected: Optional[str])
         )
 
 
+# A person set a new run time during what would have been the schedule's last run.
+RETIMED_FINAL_RUN_KEPT = "retimed_final_run_kept"
+
+
 def _after_retimed_run(row: Mapping[str, Any], *, release_claim: bool) -> RowWrite:
     """The advance after a run during which someone set a new next run time.
 
-    The new run time stands; the run that happened still counts, so a counted
-    series loses one run (and finishes when that was its last), and the claim
-    is released.
+    The new run time stands and the claim is released. The run that happened
+    counts against a counted series that has runs left. When it would have
+    been the last run (a one-time reminder moved to tomorrow), the person's
+    latest instruction wins: the schedule stays at the new time with one run
+    left (owner's decision 2026-10-17).
     """
 
     remaining = row.get("remaining_count")
-    if remaining is not None and remaining - 1 <= 0:
-        return RowWrite(delete=True, result=(AdvanceOutcome.FINISHED, _AfterRun(None, None, "last_run")))
     columns: dict[str, Any] = dict(_CLEARED_CLAIM) if release_claim else {}
+    if remaining is not None and remaining - 1 <= 0:
+        columns["remaining_count"] = 1
+        kept = _AfterRun(row.get("next_fire_at"), 1, RETIMED_FINAL_RUN_KEPT)
+        return RowWrite(columns=columns, result=(AdvanceOutcome.DUE_CHANGED, kept))
     if remaining is not None:
         columns["remaining_count"] = remaining - 1
     return RowWrite(columns=columns, result=(AdvanceOutcome.DUE_CHANGED, None))
@@ -977,9 +984,10 @@ class ScheduleStore:
 
         In one write transaction, and only while this agent still holds the
         claim (when given) and the next run time is still ``due_at``, the run
-        that was claimed. An edit that set a new run time during the run wins:
-        the run still counts against a counted series and the claim is
-        released (``_after_retimed_run``). Writes only the run time, the
+        that was claimed. An edit that set a new run time during the run wins
+        and the claim is released: the run counts against a counted series
+        with runs left, and a schedule on its last run stays at the new time
+        with one run left (``_after_retimed_run``). Writes only the run time, the
         remaining count and the claim, so a pause or turn-off made during the
         run stays. The next run is computed from the later of now and
         ``due_at``. The caller logs an outcome that is not ``applied``.
@@ -1014,15 +1022,37 @@ class ScheduleStore:
             )
             return AdvanceOutcome.FAILED
         outcome, after = result
-        self._log_advance(schedule_id, outcome, after)
+        self._log_advance(schedule_id, outcome, after, due_at=due_at, agent_id=claimer_agent_id)
         if outcome is AdvanceOutcome.FINISHED:
             self._end_schedule_access(schedule_id)
         return outcome
 
-    def _log_advance(self, schedule_id: str, outcome: AdvanceOutcome, after: Optional[_AfterRun]) -> None:
-        """Log an advance that applied; the caller logs one that did not (``scheduled_runtime``)."""
+    def _log_advance(
+        self,
+        schedule_id: str,
+        outcome: AdvanceOutcome,
+        after: Optional[_AfterRun],
+        *,
+        due_at: Optional[str],
+        agent_id: Optional[str],
+    ) -> None:
+        """Log an advance that applied, and a re-timed final run that was kept.
 
-        if outcome is AdvanceOutcome.ADVANCED and after is not None:
+        The caller logs every outcome that is not ``applied``
+        (``scheduled_runtime``).
+        """
+
+        if after is not None and after.reason == RETIMED_FINAL_RUN_KEPT:
+            self._logger.info(
+                "A schedule's next run time was changed during what would have been its last run; it stays at "
+                "the new time with one run left. event=schedule_retimed_during_final_run_kept schedule_id=%s "
+                "due_at=%s next_fire_at=%s agent_id=%s",
+                schedule_id,
+                due_at,
+                after.next_fire_at,
+                agent_id,
+            )
+        elif outcome is AdvanceOutcome.ADVANCED and after is not None:
             remaining = "infinite" if after.remaining_count is None else str(after.remaining_count)
             self._logger.info(
                 "Schedule %s updated: next fire at %s, remaining: %s", schedule_id, after.next_fire_at, remaining

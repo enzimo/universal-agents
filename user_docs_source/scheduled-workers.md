@@ -203,13 +203,16 @@ does not wait for a second confirmation.
 
 A change never overwrites a newer one. If the schedule was paused, turned off,
 changed or deleted after your assistant read it, the change is refused and the
-assistant reads the schedule again. The controls on the Schedules page are
-refused the same way when someone changed the schedule after the page showed
-it; a run that only moved its next run time or wrote its notes does not count,
-so a schedule that runs often can still be paused. A run that writes its notes
-never undoes your change. Pausing or turning off a schedule just before a run
-starts stops that run, and pausing it while it runs does not make that run
-happen again when you resume it. A one-time schedule always runs once: asking
+assistant reads the schedule again. The controls on the Schedules page and the
+chat commands (`/pause schedule`, `/resume schedule`, `/disable schedule`,
+`/delete schedule`) are refused the same way when someone changed the schedule
+after you saw it; a run that only moved a repeating schedule's next run time or
+wrote its notes does not count, so a schedule that runs often can still be
+paused. A run that writes its notes never undoes your change. Pausing or
+turning off a schedule just before a run starts stops that run, and pausing it
+while it runs does not make that run happen again when you resume it. If you
+move a schedule's next run while its last run is under way (a reminder moved to
+tomorrow), it keeps the new time. A one-time schedule always runs once: asking
 for more runs needs an interval or a cron time.
 
 The runtime notices and reports; it does not guarantee a repair. Disallowed
@@ -522,9 +525,10 @@ schedule (`cron_timezone`) when it is created:
 
 Daylight saving changes follow the classic cron rule. When clocks go back, the
 times of the repeated hour happen twice: a schedule at fixed times of day (01:30
-in New York, 02:30 in Berlin, or `0,30 1 * * *`) runs once at each of its times
-that night, while an hourly or every-few-minutes schedule (`0 * * * *`,
-`*/30 * * * *`) runs in both copies of the hour, as in every other real hour.
+in New York, 02:30 in Berlin, `0,30 1 * * *` or `0 1-2 * * *`) runs once at each
+of its times that night, while an hourly or every-few-minutes schedule
+(`0 * * * *`, `*/30 * * * *`) runs in both copies of the hour, as in every other
+real hour.
 When clocks go forward, a time in the skipped hour runs at the first time after
 it: a 02:30 schedule runs at 03:00 that day.
 

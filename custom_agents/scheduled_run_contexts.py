@@ -154,6 +154,18 @@ async def sign_scheduled_run(agent: Any, meta: Any, run: ScheduledRun) -> bool:
     ):
         return True
     signed = await _manager_signed_context(agent, meta, run)
+    if signed == ScheduledRunContextRefusal.SCHEDULE_STOPPED:
+        # A person paused, turned off or ended the schedule after it was
+        # claimed: nothing failed, and the run waits for the schedule itself.
+        logger.info(
+            "A claimed schedule was paused, turned off or ended before its run started; the run is skipped "
+            "and the claim released. event=scheduled_run_skipped_schedule_stopped agent_id=%s schedule_id=%s "
+            "scheduled_job_id=%s reason=manager_refused",
+            agent.id,
+            run.schedule.schedule_id,
+            run.scheduled_job_id,
+        )
+        return False
     if isinstance(signed, str):
         logger.warning(
             "A scheduled run was not started because the manager did not sign its task context; the claim is "

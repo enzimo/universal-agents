@@ -292,10 +292,12 @@ or someone changed it meanwhile, and keeps the next run time, count and notes
 unless it set them; turning on and off, pausing and resuming keep the claim,
 and whoever starts or signs a claimed run checks again that the schedule is
 on, not paused and not ended; and the advance after a run applies only while
-its agent holds the claim and the claimed run time still stands. The Schedules
-page binds its controls to the schedule as listed without its next run time
-and run notes (`schedule_listing_digest`), so a schedule that runs often can
-still be paused. Before, saves replaced whole rows with copies read earlier,
+its agent holds the claim and the claimed run time still stands; a schedule
+re-timed during its last run stays at the new time. The Schedules page and the
+chat and CLI schedule commands bind their controls to one digest of the schedule
+as listed (`schedule_listing_digest`): it leaves out a repeating schedule's next
+run time and the run notes' content, which runs change by themselves, so a
+schedule that runs often can still be paused. Before, saves replaced whole rows with copies read earlier,
 which could bring back a deleted schedule, undo a pause, or make a run happen
 twice.
 

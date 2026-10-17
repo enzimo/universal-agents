@@ -40,6 +40,8 @@ from custom_messages.enums import (
     PlanActionType,
     ProgressState,
     RequesterType,
+    ScheduleManagementClass,
+    SystemScheduleKind,
     TaskHistoryImportance,
 )
 from storage.config import resolve_storage_settings
@@ -1385,3 +1387,31 @@ def test_notify_user_records_run_notes_only_on_a_schedule_the_task_may_record(tm
     assert recorded == {"recorded": True, "schedule_id": schedule_id}
     memory = owner._schedule_store.get_scheduled_message(schedule_id).schedule_memory
     assert memory.ledger.total_notifications == 1
+
+
+def test_a_persons_system_timer_records_notes_with_both_tools(tmp_path: Path):
+    """A system timer signed for its owner (such as MemReviewAgent's memory review) works like the person's request."""
+    from custom_tools.providers.communication import _record_schedule_notification_if_active
+
+    agent = _FakeAgent(str(tmp_path / "task_history.db"))
+    set_agent_ref(agent)
+    timer = ScheduledMessage(
+        schedule_id="mem_rev_user_test",
+        schedule_name="memory_review:usermem:test",
+        management_class=ScheduleManagementClass.SYSTEM,
+        system_schedule_kind=SystemScheduleKind.MEMORY_REVIEW_USERMEM,
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Review memory."),
+        payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id="usr_sched_a")),
+        interval_ms=86_400_000,
+        repeat_count=None,
+    )
+    agent._schedule_store.add(timer)
+    agent.task_manager._task_info.meta.gateway_context.scheduled_job_id = timer.schedule_id
+
+    noted = _record_schedule_notification_if_active(agent, message="Memory reviewed.", notification_id="note_timer", reason="")
+    recorded = json.loads(record_scheduled_run(outcome="no_change", state_summary="Nothing to change."))
+
+    assert noted == {"recorded": True, "schedule_id": timer.schedule_id}
+    assert recorded["recorded"] is True
+    memory = agent._schedule_store.get_scheduled_message(timer.schedule_id).schedule_memory
+    assert (memory.ledger.total_notifications, memory.ledger.total_runs) == (1, 1)

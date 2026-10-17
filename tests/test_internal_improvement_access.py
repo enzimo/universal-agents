@@ -480,3 +480,25 @@ async def test_the_team_leads_admission_signs_the_escalation_for_the_owner(tmp_p
         assert (stored.canonical_user_id, context.person_id) == (FIRST_USER, FIRST_USER)
     finally:
         forget_task_context_keys()
+
+
+def test_notify_user_records_notes_exactly_where_record_scheduled_run_does(world) -> None:
+    """A maintenance run (work for no person) records notes on its own schedule with both tools; a worker given
+    work for no person is refused by both (2026-10-17)."""
+    from custom_tools.providers.communication import _record_schedule_notification_if_active
+
+    maintenance = world.agent("InternalImprovementAgent")
+    set_agent_ref(maintenance)
+    noted = _record_schedule_notification_if_active(maintenance, message="Pruned scratch.", notification_id="note_sys", reason="")
+    recorded = json.loads(record_scheduled_run(outcome="no_change", state_summary="Nothing stale."))
+
+    assert noted == {"recorded": True, "schedule_id": world.schedule.schedule_id}
+    assert recorded["recorded"] is True
+    memory = world.schedules.get_scheduled_message(world.schedule.schedule_id).schedule_memory
+    assert memory.ledger.total_notifications == 1
+
+    worker = world.agent("WebResearchAgent", role="worker")
+    set_agent_ref(worker)
+    refused = _record_schedule_notification_if_active(worker, message="Hello", notification_id="note_worker", reason="")
+    assert refused["recorded"] is False
+    assert json.loads(record_scheduled_run(outcome="no_change")).get("recorded") is not True

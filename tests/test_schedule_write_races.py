@@ -400,6 +400,31 @@ def test_a_schedule_that_ran_after_it_was_listed_can_still_be_paused(store):
     assert store.set_paused_until(schedule_id, (_now() + HOUR).isoformat(), expected_record_digest=listed) is True
 
 
+def test_the_listed_digest_covers_a_one_time_run_time_and_the_notes_settings_but_not_the_notes(store):
+    one_time = _schedule(interval_ms=None, repeat_count=1, schedule_memory=ScheduleTaskMemory())
+    store.add(one_time)
+    listed = schedule_record_digest(store.get_scheduled_message(one_time.schedule_id))
+
+    store.edit_schedule_memory(one_time.schedule_id, _add_note)  # notes content: not covered
+    assert schedule_record_digest(store.get_scheduled_message(one_time.schedule_id)) == listed
+
+    def notify_always(memory: ScheduleTaskMemory) -> bool:
+        memory.policy.notify = "always"
+        return True
+
+    store.edit_schedule_memory(one_time.schedule_id, notify_always)  # a notes setting: covered
+    after_policy = schedule_record_digest(store.get_scheduled_message(one_time.schedule_id))
+    assert after_policy != listed
+
+    base = store.get_scheduled_message(one_time.schedule_id)
+    moved = base.model_copy(deep=True)
+    moved.next_fire_at = (_now() + timedelta(days=3)).isoformat()
+    store.update(moved, base=base)  # a one-time run time: covered, runs never move it
+    assert schedule_record_digest(store.get_scheduled_message(one_time.schedule_id)) != after_policy
+    with pytest.raises(ScheduleWriteConflict):
+        store.set_enabled(one_time.schedule_id, False, expected_record_digest=after_policy)
+
+
 def test_two_first_saves_of_one_schedule_never_collide(store):
     schedule = _schedule()
     barrier = Barrier(2)
@@ -467,27 +492,50 @@ def test_a_new_run_time_set_during_a_run_wins_and_the_claim_is_released(store):
     assert row["claimed_by_agent_id"] is None
 
 
-@pytest.mark.parametrize(("repeat_count", "remaining"), [(3, 2), (1, None)])
-def test_a_run_re_timed_during_its_run_still_counts_against_its_series(store, repeat_count, remaining):
-    schedule_id = _due(store, repeat_count=repeat_count)
+def _retime_during_run(store: ScheduleStore, schedule_id: str) -> tuple[dict, str]:
+    """Claim the due run, then let the person move the next run time while it runs; (claim, new time)."""
+
     claimed = _claim(store)
     base = store.get_scheduled_message(schedule_id)
     candidate = base.model_copy(deep=True)
-    candidate.next_fire_at = (_now() + timedelta(days=2)).isoformat()
+    candidate.next_fire_at = (_now() + timedelta(days=1)).isoformat()
     store.update(candidate, base=base)
+    return claimed, candidate.next_fire_at
+
+
+def test_a_run_re_timed_during_its_run_still_counts_while_its_series_has_runs_left(store):
+    schedule_id = _due(store, repeat_count=3)
+    claimed, new_time = _retime_during_run(store, schedule_id)
 
     outcome = store.update_after_fire(
         schedule_id, claim_token=claimed["claim_token"], claimer_agent_id="worker_b", due_at=claimed["next_fire_at"]
     )
 
-    if remaining is None:
-        # That was the series' last run; the schedule is finished.
-        assert outcome is AdvanceOutcome.FINISHED
-        assert store.get_row(schedule_id) is None
+    row = store.get_row(schedule_id)
+    assert outcome is AdvanceOutcome.DUE_CHANGED
+    assert (row["remaining_count"], row["next_fire_at"], row["claimed_by_agent_id"]) == (2, new_time, None)
+
+
+@pytest.mark.parametrize("kind", ["one_time_reminder", "series_on_its_last_run"])
+def test_a_schedule_re_timed_during_its_last_run_stays_at_the_new_time(store, caplog, kind):
+    """The person's latest instruction wins (owner's decision 2026-10-17): a reminder moved to tomorrow stays."""
+    if kind == "one_time_reminder":
+        schedule_id = _due(store, interval_ms=None, repeat_count=1)
     else:
-        assert outcome is AdvanceOutcome.DUE_CHANGED
-        row = store.get_row(schedule_id)
-        assert (row["remaining_count"], row["next_fire_at"]) == (remaining, candidate.next_fire_at)
+        schedule_id = _due(store, repeat_count=3)
+        store._repository.write_locked(schedule_id, lambda _row: RowWrite(columns={"remaining_count": 1}))
+    claimed, new_time = _retime_during_run(store, schedule_id)
+
+    with caplog.at_level(logging.INFO, logger=schedule_store_module.__name__):
+        outcome = store.update_after_fire(
+            schedule_id, claim_token=claimed["claim_token"], claimer_agent_id="worker_b", due_at=claimed["next_fire_at"]
+        )
+
+    row = store.get_row(schedule_id)
+    assert outcome is AdvanceOutcome.DUE_CHANGED
+    assert (row["remaining_count"], row["next_fire_at"], row["claimed_by_agent_id"]) == (1, new_time, None)
+    assert "event=schedule_retimed_during_final_run_kept" in caplog.text
+    assert f"schedule_id={schedule_id}" in caplog.text
 
 
 def test_an_advance_by_an_agent_that_lost_its_claim_is_refused(store):
@@ -703,6 +751,11 @@ def test_wildcard_and_step_schedules_run_every_real_hour_when_clocks_go_back(cro
         ),
         # Weekly on Sunday 01:30: 2026-11-01 is a Sunday.
         ("30 1 * * 0", ["2026-11-01T05:30:00+00:00", "2026-11-08T06:30:00+00:00"]),
+        # An hour range is fixed, as in classic cron: 01:00 once, then 02:00.
+        (
+            "0 1-2 * * *",
+            ["2026-11-01T05:00:00+00:00", "2026-11-01T07:00:00+00:00", "2026-11-02T06:00:00+00:00"],
+        ),
     ],
 )
 def test_fixed_time_schedules_run_once_per_time_when_clocks_go_back(cron, runs):

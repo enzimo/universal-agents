@@ -447,22 +447,33 @@ class ScheduledMessage(BaseModel):
         return self.schedule_id
 
 
-# What runs change by themselves: the next run time and the run notes. A
-# person's controls are bound to the schedule they saw without these, so a
-# schedule that runs often can still be paused from the page that listed it.
+# What runs change by themselves: a repeating schedule's next run time and the
+# content of the run notes (state and ledger). A person's controls are bound to
+# the schedule they saw without these, so a schedule that runs often can still
+# be paused from the page that listed it.
 SCHEDULE_RUN_BOOKKEEPING_FIELDS = frozenset({"next_fire_at", "schedule_memory"})
 
 
 def schedule_listing_digest(schedule: ScheduledMessage) -> str:
     """The digest a person's schedule controls bind to (``expected_record_digest``).
 
-    Covers what the person sees and decides on (the task, timing, controls,
-    owner and routing) and leaves out ``SCHEDULE_RUN_BOOKKEEPING_FIELDS``.
-    The gateway lists schedules with it and the manager's store checks it in
-    the write transaction (``custom_agents.schedule_store``).
+    Covers what the person sees and decides on: the task, timing, controls,
+    owner and routing, the run-notes settings (kind and notification policy)
+    and, for a one-time schedule (no interval or cron), its run time, which
+    runs never move (they delete the schedule). Leaves out a repeating
+    schedule's next run time and the run notes' content. The gateway lists
+    schedules with it and the manager's store checks it in the write
+    transaction (``custom_agents.schedule_store``).
     """
 
-    return contract_sha256(schedule.model_dump(mode="json", exclude=set(SCHEDULE_RUN_BOOKKEEPING_FIELDS)))
+    repeating = schedule.interval_ms is not None or bool(schedule.cron_expression)
+    excluded = set(SCHEDULE_RUN_BOOKKEEPING_FIELDS) if repeating else {"schedule_memory"}
+    document = schedule.model_dump(mode="json", exclude=excluded)
+    # No notes yet reads as the default settings: a run that writes the first
+    # notes does not change what the person saw.
+    memory = schedule.schedule_memory or ScheduleTaskMemory()
+    document["run_notes_settings"] = {"schedule_kind": memory.schedule_kind, "policy": memory.policy.model_dump(mode="json")}
+    return contract_sha256(document)
 
 
 class ScheduleWorkerAssignmentV1(BaseModel):

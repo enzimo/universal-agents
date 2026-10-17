@@ -38,6 +38,7 @@ from custom_messages.contracts.control_v1 import (
     PinnedMemoryCommandPayload,
 )
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
+from custom_messages.transport_codec import decode_envelope, encode_envelope
 from custom_messages.contracts.routing_v1 import (
     GatewayContext,
     MessageHeader,
@@ -1300,3 +1301,113 @@ async def test_objective_deletion_that_was_not_saved_is_not_reported_done(
     assert stored.status == ObjectiveStatus.DELETED
     assert stored.deleted_at is not None
     assert "Future execution is disabled" in stored.deletion_summary
+
+
+class _GatewayToManager:
+    """The gateway's manager commands, delivered to the real manager handler with a gateway-signed context."""
+
+    def __init__(self, agent: SimpleNamespace, comms: _CaptureComms) -> None:
+        self.agent = agent
+        self.comms = comms
+
+    async def request(self, request):
+        person = request.person
+        await handle_manager_schedule_command(
+            self.agent,
+            command=request.command,
+            msg_header=MessageHeader(from_agent_id="gateway", response_routing_key="gateway"),
+            msg_meta=MessageMeta(
+                gateway_context=_signed(
+                    GatewayContext(canonical_user_id=person.canonical_user_id, session_key=request.session.session_key),
+                    team_id=person.team_id,
+                    roles=list(person.roles),
+                )
+            ),
+        )
+        return decode_envelope(encode_envelope(self.comms.messages[-1])).msg_content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["/pause schedule {id} 2030-01-01T00:00:00+00:00", "/disable schedule {id}"])
+async def test_chat_schedule_commands_reach_the_stores_digest_check(tmp_path: Path, command: str) -> None:
+    """Chat and CLI schedule commands hashed the whole record, so the store refused every one (2026-10-17)."""
+    from assistant_gateway.application.commands.context import GatewayActorContext
+    from assistant_gateway.application.commands.manager_control import ManagerControlCommandRequest
+    from assistant_gateway.application.manager_control_command_service import GatewayManagerControlCommandService
+    from assistant_gateway.application.request_context import GatewayCommandPerson
+    from assistant_gateway.application.schedule_management import GatewayScheduleApplication, GatewayScheduleSettings
+    from assistant_gateway.domain.sessions import SessionRecord
+
+    config = _config(tmp_path)
+    agent = _bootstrap_agent(config)
+    comms = _CaptureComms()
+    agent.team_comms = comms
+    store = ScheduleStore(storage_settings=config.manager_storage_settings)
+    agent._ensure_schedule_store = lambda: store
+    agent._scheduler_wake = SimpleNamespace(set=lambda: None)
+    owner, team = config.user.canonical_user_id, config.gateway.team_id
+    schedule = ScheduledMessage(
+        schedule_id="sched_chat_control",
+        management_class=ScheduleManagementClass.USER,
+        claim_team_id=team,
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Check the feed"),
+        payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id=owner, session_key="session_owner")),
+        interval_ms=60_000,
+        repeat_count=None,
+    )
+    store.add(schedule)
+    session = SessionRecord(
+        session_key="session_owner",
+        session_alias=None,
+        conversation_id="conversation_owner",
+        last_task_id=None,
+        manager_agent_id="manager_1",
+        channel_name="telegram",
+        user_id=owner,
+        chat_id="42",
+        thread_id=None,
+        status="active",
+        created_at="2026-10-17T00:00:00+00:00",
+        updated_at="2026-10-17T00:00:00+00:00",
+        owner_canonical_user_id=owner,
+    )
+    schedules = GatewayScheduleApplication(
+        settings=GatewayScheduleSettings(
+            instance_name="manager_control",
+            response_route="gateway",
+            user_display_name="Owner",
+            request_timezone="UTC",
+            default_session_key="session_owner",
+            default_owner_canonical_user_id=owner,
+            manager_unavailable_text="unavailable",
+        ),
+        sessions=SimpleNamespace(resolve_session=lambda **_kwargs: session),
+        request_context=SimpleNamespace(
+            canonical_user_id=lambda route: owner,
+            manager_principal=lambda route: GatewayCommandPerson(canonical_user_id=owner, team_id=team, roles=("member",)),
+            users_enabled=True,
+        ),
+        delivery=SimpleNamespace(remove_scheduled_target=lambda schedule_id: None),
+        manager=SimpleNamespace(manager_id="manager_1"),
+        manager_commands=_GatewayToManager(agent, comms),  # type: ignore[arg-type]
+        id_generator=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    service = GatewayManagerControlCommandService(SimpleNamespace(), schedules=schedules)  # type: ignore[arg-type]
+
+    result = await service.execute(
+        ManagerControlCommandRequest(
+            command=command.format(id=schedule.schedule_id),
+            current_session_key="session_owner",
+            actor=GatewayActorContext(channel_name="telegram", user_id=owner, chat_id="42", canonical_user_id=owner),
+        )
+    )
+
+    saved = store.get_scheduled_message(schedule.schedule_id)
+    response = comms.messages[-1].msg_content
+    assert (response.success, response.message) != (False, SCHEDULE_CHANGED_SINCE_LISTED)
+    if command.startswith("/pause"):
+        assert result.text == f"Schedule {schedule.schedule_id} paused."
+        assert saved.paused_until == "2030-01-01T00:00:00+00:00"
+    else:
+        assert result.text == f"Schedule {schedule.schedule_id} disabled."
+        assert saved.enabled is False

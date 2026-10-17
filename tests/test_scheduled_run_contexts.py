@@ -300,9 +300,14 @@ def test_the_manager_refuses_a_run_paused_after_the_workers_check(world, caplog)
         return await fire(world, claimed)
 
     with caplog.at_level(logging.INFO, logger="custom_agents.scheduled_run_contexts"):
-        deadlines = asyncio.run(scenario())
+        asyncio.run(scenario())
 
-    _assert_not_started_and_released(world, deadlines, caplog, "schedule_stopped")
+    assert queued(world) == [], "no run was started"
+    assert claim_row(world) == (None, None), "the claim was released"
+    [skipped] = [r for r in caplog.records if "event=scheduled_run_skipped_schedule_stopped" in r.getMessage()]
+    assert skipped.levelno == logging.INFO and "retried" not in skipped.getMessage()
+    assert "event=scheduled_run_not_started_unsigned" not in caplog.text
+    assert "reason=schedule_stopped" in caplog.text  # the manager's refusal, logged where it decides
 
 
 class _PausedOnRead:
