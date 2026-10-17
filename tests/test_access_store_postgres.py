@@ -366,3 +366,92 @@ def test_holding_a_person_never_deletes_a_row_it_did_not_hold(settings) -> None:
     assert departures.held_row_count(TEAM, PERSON) == 3
     departures._connect = connect  # type: ignore[method-assign]
     assert departures.restore_person_records(TEAM, PERSON) == 3
+
+
+def test_an_older_store_with_two_active_links_keeps_the_newest_on_postgres(settings, caplog) -> None:
+    import logging
+
+    from storage.access_repository import ONE_ACTIVE_LINK_INDEX
+    from storage.postgres_connection import connect_postgres
+
+    store = AccessRepository(settings)
+
+    def link(link_id: str, at: datetime, kind: LinkOwnerKind = LinkOwnerKind.PERSON, owner: str = PERSON) -> AccountLinkV1:
+        return AccountLinkV1(
+            link_id=link_id, team_id=TEAM, tool_id="cli:x", owner_kind=kind, owner_id=owner,
+            credential_key=f"k_{link_id}", created_by=SubjectRefV1(kind=SubjectKind.USER, id=PERSON), created_at_utc=at,
+        )
+
+    store.create_link(link("link_new", NOW))
+    store.create_link(link("link_team", NOW, LinkOwnerKind.TEAM, TEAM))
+    older = link("link_old", NOW - timedelta(minutes=5))
+    with connect_postgres(settings.postgres_dsn) as conn:  # a store from before the index
+        conn.execute(f"DROP INDEX {ONE_ACTIVE_LINK_INDEX}")
+        conn.execute(
+            "INSERT INTO access_account_links (link_id, team_id, tool_id, owner_kind, owner_id, status, payload_json, "
+            "created_at) VALUES (%s,%s,%s,%s,%s,'active',%s,%s)",
+            ("link_old", TEAM, "cli:x", "person", PERSON, older.model_dump_json(), older.created_at_utc.isoformat()),
+        )
+
+    with caplog.at_level(logging.WARNING, logger="storage.access_repository"):
+        reopened = AccessRepository(settings)
+
+    assert sorted(item.link_id for item in reopened.list_links(TEAM)) == ["link_new", "link_team"]
+    revoked = [(e.grant_id, e.detail.get("reason"), e.detail.get("replaced_by")) for e in reopened.events(TEAM)
+               if e.kind == "account_link_revoked"]
+    assert revoked == [("link_old", "duplicate_active_link", "link_new")]
+    assert "revoked_link_id=link_old" in caplog.text
+    caplog.clear()
+    AccessRepository(settings)
+    assert "account_link_duplicate_revoked" not in caplog.text
+
+
+def test_an_older_store_gets_the_approval_id_column_on_postgres(settings) -> None:
+    from storage.postgres_connection import connect_postgres
+
+    store = AccessRepository(settings)
+    store.create(
+        GrantV1(
+            grant_id="grant_old", team_id=TEAM, subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="fn:schedules"), level=AccessLevel.READ, granted_by=OWNER,
+            approval_id="access_req_old", created_at_utc=NOW, for_person_id=PERSON,
+        )
+    )
+    with connect_postgres(settings.postgres_dsn) as conn:  # a store from before 2026-10-17
+        conn.execute("ALTER TABLE access_grants DROP COLUMN approval_id")
+
+    AccessRepository(settings)
+
+    with connect_postgres(settings.postgres_dsn) as conn:
+        assert [row[0] for row in conn.execute("SELECT approval_id FROM access_grants").fetchall()] == ["access_req_old"]
+        assert conn.execute(
+            "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'access_grants_approval'"
+        ).fetchone()
+
+
+def test_a_grant_plan_reads_through_the_transactions_own_connection_on_postgres(settings, monkeypatch) -> None:
+    import storage.access_repository as access_repository
+
+    store = AccessRepository(settings)
+    subject = SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect")
+    grant = GrantV1(
+        grant_id="grant_new", team_id=TEAM, subject=subject, target=TargetRefV1(kind=TargetKind.TOOL, id="fn:schedules"),
+        level=AccessLevel.READ, granted_by=OWNER, created_at_utc=NOW, for_person_id=PERSON,
+    )
+    connect = access_repository.connect_postgres
+    opened: list[str] = []
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        opened.append("connection")
+        return connect(*args, **kwargs)
+
+    def plan():
+        held = store.for_subjects(TEAM, [subject])  # reads inside the write transaction
+        store.get("grant_missing")
+        return plan_grants([grant], held, lambda _set: frozenset())
+
+    monkeypatch.setattr(access_repository, "connect_postgres", counting)
+    stored, _plan = store.store_planned(grant, plan)
+
+    assert stored.grant_id == "grant_new"
+    assert opened == ["connection"], "one connection: the plan borrowed the write transaction's"

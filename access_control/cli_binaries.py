@@ -27,9 +27,10 @@ import io
 import logging
 import os
 import tarfile
+import time
 import zipfile
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -40,7 +41,14 @@ from runtime_settings.instance_layout import InstanceLayout
 logger = logging.getLogger(__name__)
 
 MAX_PROGRAM_BYTES = 200 * 1024 * 1024
+# How long one read may wait for the server to send anything (the socket
+# timeout). It does not bound the whole download: a server that keeps
+# sending a little never trips it.
 DOWNLOAD_TIMEOUT_SECONDS = 120
+# How long a whole download may take. An approving decision renews its claim
+# on the request before and after each download, so this must stay well under
+# the claim's limit (access_control.requests.DECISION_CLAIM_SECONDS, 600).
+DOWNLOAD_DEADLINE_SECONDS = 300
 _CHUNK = 1024 * 1024
 REASON_DIGEST_MISMATCH = "cli_program_digest_mismatch"
 REASON_PROGRAM_MISSING = "cli_program_missing"
@@ -104,16 +112,58 @@ def fetch_https(url: str) -> bytes:
     if urlsplit(url).scheme != "https":
         raise ProgramRefused("A program is downloaded only over https.", reason_code=REASON_DOWNLOAD_FAILED)
     opener = build_opener(_HttpsOnlyRedirects())
+    host = urlsplit(url).hostname or url
     try:
         with opener.open(Request(url, headers={"User-Agent": "universal-agents"}), timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
-            data = response.read(MAX_PROGRAM_BYTES + 1)
+            data = read_within_deadline(response, host=host)
+    except ProgramRefused:
+        raise
     except (URLError, OSError, ValueError) as exc:
         raise ProgramRefused(
-            f"The program could not be downloaded from {urlsplit(url).hostname}: {exc}", reason_code=REASON_DOWNLOAD_FAILED
+            f"The program could not be downloaded from {host}: {exc}", reason_code=REASON_DOWNLOAD_FAILED
         ) from exc
     if len(data) > MAX_PROGRAM_BYTES:
         raise ProgramRefused("The download is larger than the size limit.", reason_code=REASON_DOWNLOAD_FAILED)
     return data
+
+
+def read_within_deadline(
+    response: Any,
+    *,
+    host: str,
+    deadline_seconds: float = DOWNLOAD_DEADLINE_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+) -> bytes:
+    """Read a download, at most ``MAX_PROGRAM_BYTES + 1`` bytes and ``deadline_seconds`` in total.
+
+    Reads with ``read1``, which returns whatever has arrived, so the deadline
+    is checked while a slow server trickles data in.
+    """
+
+    started = clock()
+    chunks: list[bytes] = []
+    size = 0
+    while size <= MAX_PROGRAM_BYTES:
+        if clock() - started > deadline_seconds:
+            logger.warning(
+                "A program download took too long and was stopped. event=cli_download_deadline host=%s "
+                "seconds=%s bytes=%s",
+                host,
+                deadline_seconds,
+                size,
+            )
+            raise ProgramRefused(
+                f"The download from {host} was stopped after {deadline_seconds:g} seconds in total because it was "
+                "too slow. Put the program into the workspace yourself, or propose a download address that "
+                "answers faster.",
+                reason_code=REASON_DOWNLOAD_FAILED,
+            )
+        chunk = response.read1(min(_CHUNK, MAX_PROGRAM_BYTES + 1 - size))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
 
 
 def extract_member(data: bytes, member: str) -> bytes:
@@ -210,6 +260,7 @@ def checked_copy(root: Path, parts: tuple[str, ...], sha256: str, destination: P
 
 
 __all__ = [
+    "DOWNLOAD_DEADLINE_SECONDS",
     "DOWNLOAD_TIMEOUT_SECONDS",
     "Downloader",
     "MAX_PROGRAM_BYTES",
@@ -222,6 +273,7 @@ __all__ = [
     "extract_member",
     "fetch_https",
     "install_program",
+    "read_within_deadline",
     "remove_program",
     "workspace_digest",
     "workspaces_root",

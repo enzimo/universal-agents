@@ -470,6 +470,34 @@ def test_team_links_this_version_would_not_use_are_refused_or_shown_for_attentio
     assert {"cli:x", "http:exa"} <= imported and "http:github" not in imported
 
 
+def test_a_file_with_two_links_for_one_tool_and_owner_refuses_the_older(tmp_path: Path, monkeypatch) -> None:
+    # A store from before the one-active-link index could export two active
+    # links for one tool and owner; only the newer one was in use.
+    from datetime import timedelta
+
+    config_path, _datasets = _old_instance(tmp_path)
+    export = AccessSection.export
+
+    def exported_by_an_older_store(self, source, files):  # noqa: ANN001 - patched method
+        result = export(self, source, files)
+        older = AccountLinkV1(
+            link_id="link_github_ana_older", team_id=TEAM, tool_id="cli:github", owner_kind=LinkOwnerKind.PERSON,
+            owner_id="usr_ana", credential_key="github_ana_older", created_by=OWNER, created_at_utc=NOW - timedelta(days=1),
+        )
+        result.records.append({"kind": "account_link", "record_id": older.link_id, "document": older.model_dump(mode="json")})
+        return result
+
+    monkeypatch.setattr(AccessSection, "export", exported_by_an_older_store)
+    plan, target = _export_and_import(tmp_path, config_path)
+
+    outcomes = {r.key: r for r in plan.records if r.section == "access"}
+    older = outcomes["account_link/link_github_ana_older"]
+    assert older.outcome is RecordOutcome.REFUSED
+    assert "the newer account link link_github_ana for the same tool and owner replaces it" in older.reason
+    assert outcomes["account_link/link_github_ana"].outcome is RecordOutcome.IMPORT
+    assert [link.link_id for link in _target_store(target).list_links(TEAM)] == ["link_github_ana"]
+
+
 def test_a_later_batch_does_not_guess_what_the_destination_chose() -> None:
     # Only a fresh import knows the starting sharing applies; a later batch
     # without the team's choice for the tool says nothing rather than guess.

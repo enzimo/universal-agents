@@ -396,6 +396,44 @@ async def test_a_second_approval_while_the_first_applies_is_refused_and_the_serv
     assert decided.grant_ids == (grant.grant_id,)
 
 
+@pytest.mark.asyncio
+async def test_a_busy_database_while_applying_leaves_the_server_pending_and_a_later_approval_works(
+    world, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Before 2026-10-17 only refusals were undone: after "database is locked"
+    # the server stayed installed while the request waited, and every later
+    # approval was refused because the server was no longer pending.
+    import sqlite3
+
+    set_agent_ref(world.lead)
+    context = Context("tooluse-propose-mcp-busy")
+    with pytest.raises(InterruptException):
+        await propose(context)
+    request_id = context.raised[0]["access_request_id"]
+    [pending] = world.mcp_store().list_records()
+    store = world.service.store
+    original = store.apply_together
+    failures: list[int] = []
+
+    def busy_once(*args: Any, **kwargs: Any) -> Any:
+        if not failures:
+            failures.append(1)
+            raise sqlite3.OperationalError("database is locked")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "apply_together", busy_once)
+    with pytest.raises(sqlite3.OperationalError):
+        world.requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE_ALL)
+
+    assert world.mcp_store().require(pending.connection_id).lifecycle is MCPConnectionLifecycle.PENDING
+    assert world.service.store.get_request(request_id).status is AccessRequestStatus.WAITING
+    assert world.grants() == []
+
+    decided = world.requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE_ALL)
+    assert decided.status is AccessRequestStatus.GRANTED
+    assert world.mcp_store().require(pending.connection_id).lifecycle is MCPConnectionLifecycle.ACTIVE
+
+
 def refusal(result: dict[str, Any]) -> dict[str, Any]:
     """The refusal the model reads in a failed MCP tool result."""
 

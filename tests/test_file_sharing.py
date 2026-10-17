@@ -201,6 +201,32 @@ def test_sending_waits_for_the_recipient_and_delivers_exactly_what_was_sent(worl
     assert any(notice.kind is AccessNoticeKind.FILE_RECEIVED for notice in world.inbox.notices)
 
 
+def test_a_busy_database_while_delivering_removes_the_copy_and_a_later_deny_delivers_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Before 2026-10-17 the copy was removed only when another decision won;
+    # after a busy-store error it stayed in the recipient's folder.
+    import sqlite3
+
+    alice_file(world, "plan.md", "the plan")
+    world.sharing.send("alice", "plan.md", "Bob")
+    [request] = world.service.store.list_requests(TEAM)
+
+    def locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(world.service.store, "finish_request", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        world.requests().decide(request.request_id, BOB, AccessReviewChoice.APPROVE)
+    monkeypatch.undo()
+
+    received = world.home(BOB) / "received"
+    assert not any(path.is_file() for path in received.rglob("*")), "the copy was removed"
+    assert world.service.store.get_request(request.request_id).status is AccessRequestStatus.WAITING
+    world.requests().decide(request.request_id, BOB, AccessReviewChoice.DENY)
+    assert not any(path.is_file() for path in received.rglob("*"))
+
+
 def test_a_file_changed_after_sending_is_not_delivered_and_the_team_folder_needs_no_approval(world: World) -> None:
     source = alice_file(world, "draft.md", "first")
     world.sharing.send("alice", "draft.md", "bob")

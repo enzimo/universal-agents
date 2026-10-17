@@ -39,6 +39,7 @@ access workflows of ``custom_agents.access_workflows``) watches them through
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Protocol
@@ -75,7 +76,7 @@ from custom_messages.contracts.access_v2 import (
     TargetRefV1,
 )
 from id_generation import new_id
-from storage.access_repository import AccessStoreConflict, DecisionInProgress
+from storage.access_repository import AccessStoreConflict, DecisionClaim, DecisionInProgress
 
 logger = logging.getLogger(__name__)
 
@@ -101,11 +102,13 @@ APPLIED_AT_DECISION = frozenset({FILE_DELIVERY_CHANGE, ACCESS_PROPOSAL_CHANGE})
 BLOCKABLE_TARGETS = frozenset(
     {TargetKind.TOOL_SET, TargetKind.TOOL, TargetKind.OPERATION, TargetKind.FOLDER, TargetKind.FILE}
 )
-# How long one decision may hold a waiting request (``DecisionClaim``) before
-# another may take over. Longer than any decision takes: the slowest, an
-# access proposal, downloads at most two programs with a 120-second timeout
-# each (``access_control.cli_binaries``). A decision whose process ended keeps
-# the request claimed until then; the gateway's Inbox pass recovers it.
+# How long a decision's claim on a waiting request (``DecisionClaim``) lasts
+# before another decision may take over. A live decision renews it before
+# and after each long step (``renew_claim``): the longest, one program
+# download, stops after ``DOWNLOAD_DEADLINE_SECONDS`` (300) in total
+# (``access_control.cli_binaries``), well inside this limit. A decision whose
+# process ended keeps the request claimed until then; the gateway's Inbox
+# pass recovers it.
 DECISION_CLAIM_SECONDS = 600
 SAVED_BEFORE_WORK_IDS = (
     "This request was made before an upgrade, for a task that has ended, so it can only be denied. "
@@ -132,18 +135,6 @@ class AccessInbox(Protocol):
 
     def request_finished(self, request: AccessRequestV1) -> None:
         """Close the request's review and wake the task waiting on it."""
-
-
-@dataclass(frozen=True)
-class DecisionClaim:
-    """The claim one decision holds on a waiting request (``AccessRepository.claim_decision``).
-
-    Taken before the decision stores anything and passed to whatever stores
-    its outcome, which succeeds only while the claim still holds.
-    """
-
-    request_id: str
-    claim_id: str
 
 
 class ChangeApplier(Protocol):
@@ -796,6 +787,7 @@ class AccessRequests:
 
         choice = self._checked_choice(self.waiting_request(request_id), reviewer, choice)
         request, claim = self._claim(request_id)
+        decided_at = self.service.clock()
         created: list[GrantV1] = []
         try:
             finished = self._decide_claimed(
@@ -803,6 +795,7 @@ class AccessRequests:
                 claim,
                 reviewer,
                 choice,
+                decided_at=decided_at,
                 note=note,
                 kept_item_ids=kept_item_ids,
                 keep=keep,
@@ -811,10 +804,13 @@ class AccessRequests:
                 created=created,
             )
         except BaseException as exc:
-            self._abandon(claim, reviewer, created, exc)
-            if isinstance(exc, AccessStoreConflict):
-                raise HandDownRefused(str(exc)) from exc
-            raise
+            stored = self.outcome_stored_despite(exc, request_id, reviewer, decided_at)
+            if stored is None:
+                self._abandon(claim, reviewer, created, exc)
+                if isinstance(exc, AccessStoreConflict):
+                    raise HandDownRefused(str(exc)) from exc
+                raise
+            finished = stored
         self._decided(finished)
         return finished
 
@@ -866,11 +862,65 @@ class AccessRequests:
             )
         except DecisionInProgress as exc:
             raise HandDownRefused(
-                "Someone is deciding this request right now. Look at it again in a moment."
+                "Someone is deciding this request right now; its card shows the outcome when they finish. If "
+                f"that decision stopped (for example the gateway restarted), the request can be decided again "
+                f"within {DECISION_CLAIM_SECONDS // 60} minutes."
             ) from exc
         except AccessStoreConflict as exc:
             raise HandDownRefused(str(exc)) from exc
         return request, claim
+
+    def renew_claim(self, claim: DecisionClaim) -> None:
+        """Extend this decision's claim before or after a long step; raises if the decision lost it.
+
+        A decision that lost its claim (the request was closed, or the claim
+        ran out and another decision took it) must stop before it changes
+        anything else.
+        """
+
+        self.service.store.renew_decision(
+            claim, until=self.service.clock() + timedelta(seconds=DECISION_CLAIM_SECONDS)
+        )
+
+    def outcome_stored_despite(
+        self, error: BaseException, request_id: str, reviewer: PersonPrincipal, decided_at: datetime | None
+    ) -> AccessRequestV1 | None:
+        """The outcome this decision stored although storing it reported ``error``, or None.
+
+        A PostgreSQL connection that drops while the outcome commits may have
+        committed it. The stored request is this decision's outcome when it no
+        longer waits and records this reviewer at this decision's time; then
+        nothing may be taken back. Reading it may fail too: then the decision
+        counts as not stored and is undone, so no access stays in force for a
+        request that waits.
+        """
+
+        if decided_at is None:
+            return None
+        try:
+            stored = self.service.store.get_request(request_id)
+        except Exception:  # noqa: BLE001 - logged; treated as not stored
+            logger.exception(
+                "Could not read back an access request after its decision failed; undoing the decision. "
+                "event=access_decision_readback_failed request_id=%s",
+                request_id,
+            )
+            return None
+        if (
+            stored is None
+            or stored.status not in {AccessRequestStatus.GRANTED, AccessRequestStatus.DENIED}
+            or stored.decided_by != SubjectRefV1(kind=SubjectKind.USER, id=reviewer.person_id)
+            or stored.decided_at_utc != decided_at
+        ):
+            return None
+        logger.warning(
+            "Storing an access decision reported a failure, but the decision was stored; it stands. "
+            "event=access_decision_stored_despite_error request_id=%s status=%s error=%s",
+            request_id,
+            stored.status.value,
+            type(error).__name__,
+        )
+        return stored
 
     def _decide_claimed(
         self,
@@ -879,6 +929,7 @@ class AccessRequests:
         reviewer: PersonPrincipal,
         choice: AccessReviewChoice,
         *,
+        decided_at: datetime,
         note: str,
         kept_item_ids: tuple[str, ...],
         keep: bool | None,
@@ -892,19 +943,19 @@ class AccessRequests:
             "decided_by": SubjectRefV1(kind=SubjectKind.USER, id=reviewer.person_id),
             "decision": choice,
             "decision_note": note,
-            "decided_at_utc": self.service.clock(),
+            "decided_at_utc": decided_at,
         }
         if request.kind is AccessRequestKind.CHANGE:
             return self._decide_change(request, claim, reviewer, choice, decided, kept_item_ids, keep_hours)
         if choice is AccessReviewChoice.DENY:
             return self._store_outcome(request.model_copy(update={**decided, "status": AccessRequestStatus.DENIED}), claim)
         given = self._approve(
-            request, reviewer, choice, keep, keep_hours=keep_hours, hand_on=hand_on is not False, created=created
+            request, reviewer, choice, keep, claim, keep_hours=keep_hours, hand_on=hand_on is not False, created=created
         )
         finished = request.model_copy(
             update={**decided, "status": AccessRequestStatus.GRANTED, "grant_ids": tuple(g.grant_id for g in given)}
         )
-        return self._store_outcome(finished, claim)
+        return self._store_outcome(finished, claim, created)
 
     def _decide_change(
         self,
@@ -954,7 +1005,8 @@ class AccessRequests:
         request: AccessRequestV1,
         reviewer: PersonPrincipal,
         choice: AccessReviewChoice,
-        keep: bool | None = None,
+        keep: bool | None,
+        claim: DecisionClaim,
         *,
         keep_hours: int | None = None,
         hand_on: bool = False,
@@ -966,35 +1018,42 @@ class AccessRequests:
         request (``access_control.grant_entries``): they serve it but belong
         to earlier decisions, so a failure never takes them back. The
         request's other hand-downs waiting for approval are denied when its
-        outcome is stored (``AccessRepository.finish_request``).
+        outcome is stored (``AccessRepository.finish_request``). Every grant is
+        stored under the decision's claim, and the narrower grants in force
+        that the new ones cover end only with the outcome.
         """
 
         pending = [grant for grant in self._grants(request) if grant.status is GrantStatus.PENDING]
         if choice is AccessReviewChoice.APPROVE and keep is not False and pending:
-            return self._approve_pending(pending, reviewer, created)
+            return self._approve_pending(pending, reviewer, claim, created)
         level = AccessLevel.READ if choice is AccessReviewChoice.APPROVE_READ else request.level
         lifetime, expires_at = self._chosen_lifetime(request, choice, keep, keep_hours)
         reviewer_ref = SubjectRefV1(kind=SubjectKind.USER, id=reviewer.person_id)
         specs = self.approval_specs(
             request, level=level, lifetime=lifetime, expires_at=expires_at, granted_by=reviewer_ref, hand_on=hand_on
         )
-        return self._give_specs(request, reviewer, specs, created)
+        return self._give_specs(request, reviewer, specs, claim, created)
 
     def _approve_pending(
-        self, pending: list[GrantV1], reviewer: PersonPrincipal, created: list[GrantV1]
+        self, pending: list[GrantV1], reviewer: PersonPrincipal, claim: DecisionClaim, created: list[GrantV1]
     ) -> list[GrantV1]:
         """Approve the request's waiting hand-downs in place; one already covered returns its cover."""
 
         approved: list[GrantV1] = []
         for grant in pending:
-            result = self.service.approve_pending(reviewer, grant.grant_id)
+            result = self.service.approve_pending(reviewer, grant.grant_id, claim=claim)
             if result.grant_id == grant.grant_id:
                 created.append(result)  # activated by this approval
             approved.append(result)
         return approved
 
     def _give_specs(
-        self, request: AccessRequestV1, reviewer: PersonPrincipal, specs: list[GrantV1], created: list[GrantV1]
+        self,
+        request: AccessRequestV1,
+        reviewer: PersonPrincipal,
+        specs: list[GrantV1],
+        claim: DecisionClaim,
+        created: list[GrantV1],
     ) -> list[GrantV1]:
         """Store the approval's grants with the reviewer's authority; ``created`` collects those stored now."""
 
@@ -1008,12 +1067,15 @@ class AccessRequests:
             if kept_by_lead and spec.subject == request.subject:
                 # The worker's access for this task comes from what the team
                 # lead now keeps, so removing that also ends it.
-                grant = self.service.hand_down(self.lead(), spec, task_id=request.work_id, person_id=request.person_id)
+                grant = self.service.hand_down(
+                    self.lead(), spec, task_id=request.work_id, person_id=request.person_id, claim=claim
+                )
             else:
-                grant = self.service.grant_by_person(reviewer, spec)
+                grant = self.service.grant_by_person(reviewer, spec, claim=claim)
             if grant.approval_id == request.request_id:
-                # Stored by this approval: the claim lets no other decision of
-                # this request store grants, and the claim ended any left over.
+                # Stored by this approval: every write checks the claim, so no
+                # other decision of this request stores grants, and claiming
+                # ended any left over.
                 created.append(grant)
             given.append(grant)
         return given
@@ -1032,8 +1094,21 @@ class AccessRequests:
     def _grants(self, request: AccessRequestV1) -> list[GrantV1]:
         return [grant for grant_id in request.grant_ids if (grant := self.service.store.get(grant_id)) is not None]
 
-    def _store_outcome(self, finished: AccessRequestV1, claim: DecisionClaim) -> AccessRequestV1:
-        self.service.store.finish_request(finished, claim_id=claim.claim_id)
+    def _store_outcome(
+        self, finished: AccessRequestV1, claim: DecisionClaim, created: Sequence[GrantV1] = ()
+    ) -> AccessRequestV1:
+        """Store the outcome under the claim; an approval's new grants then replace the narrower ones in force."""
+
+        made = list(created) if finished.status is AccessRequestStatus.GRANTED else []
+
+        def replacements() -> dict[str, str]:
+            # Planned inside the outcome's transaction: the grants in force
+            # each new grant covers, not counting the new grants themselves.
+            return self.service.plan_grants(made, ending=[grant.grant_id for grant in made]).replaced
+
+        self.service.store.finish_request(
+            finished, claim_id=claim.claim_id, replacements=replacements if made else None
+        )
         return finished
 
     def _abandon(
@@ -1044,7 +1119,7 @@ class AccessRequests:
         Only the grants this decision created are revoked. When one cannot be
         revoked (the store is still unavailable), the claim is kept: it runs
         out after ``DECISION_CLAIM_SECONDS`` and the gateway's Inbox pass
-        (``AccessRepository.recover_expired_claims``), or the next decision,
+        (``AccessRepository.recover_unfinished_decisions``), or the next decision,
         ends what was left.
         """
 
@@ -1075,9 +1150,9 @@ class AccessRequests:
                     claim.claim_id,
                 )
         logger.warning(
-            "An access decision did not finish; the grants it created were taken back. "
-            "event=access_decision_abandoned request_id=%s claim_id=%s by=%s error=%s undone=%s not_undone=%s "
-            "claim_released=%s",
+            "An access decision did not finish. The grants it created were taken back, except any listed as "
+            "not_undone, which end when its claim runs out. event=access_decision_abandoned request_id=%s "
+            "claim_id=%s by=%s error=%s undone=%s not_undone=%s claim_released=%s",
             claim.request_id,
             claim.claim_id,
             reviewer.person_id,

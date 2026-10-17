@@ -35,7 +35,7 @@ from access_control import safe_open
 from access_control.decisions import HandDownRefused
 from access_control.entities import PersonPrincipal
 from access_control.folders import FOLDER_ROOT_TEAM, FOLDER_ROOT_USERS, normalize_folder_id
-from access_control.requests import FILE_DELIVERY_CHANGE, AccessRequests, DecisionClaim
+from access_control.requests import FILE_DELIVERY_CHANGE, AccessRequests
 from access_control.sensitive_paths import sensitive_reason
 from access_control.safe_open import UnsafePath
 from custom_messages.contracts.access_v2 import (
@@ -59,7 +59,7 @@ from custom_messages.contracts.access_v2 import (
 )
 from id_generation import new_id
 from runtime_settings.instance_layout import person_folder_name
-from storage.access_repository import AccessStoreConflict
+from storage.access_repository import AccessStoreConflict, DecisionClaim
 
 logger = logging.getLogger(__name__)
 
@@ -374,9 +374,17 @@ class GatewayFileSharing:
         applied = finished.model_copy(update={"applied_at_utc": requests.service.clock()})
         try:
             requests.service.store.finish_request(applied, claim_id=claim.claim_id)
-        except AccessStoreConflict as exc:
-            self._discard(folder + (name,))
-            raise HandDownRefused(str(exc)) from exc
+        except BaseException as exc:
+            # Any failure (also a busy or lost database) removes the copy,
+            # unless the outcome was stored after all, so a later Deny or a
+            # second approval never finds a file already delivered.
+            kept = requests.outcome_stored_despite(exc, request.request_id, reviewer, finished.decided_at_utc)
+            if kept is None:
+                self._discard(folder + (name,))
+                if isinstance(exc, AccessStoreConflict):
+                    raise HandDownRefused(str(exc)) from exc
+                raise
+            applied = kept
         if plan.get("move"):
             self._remove_original(item, plan["sha256"])
         logger.info(

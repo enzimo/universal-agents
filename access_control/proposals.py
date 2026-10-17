@@ -50,6 +50,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 from access_catalog.catalog import MCP_SERVERS_TOOL_SET, CatalogError, CatalogSource, ToolCatalog
@@ -70,7 +71,7 @@ from access_control.folders import FOLDER_ROOT_USERS, FolderIdError, grantable_f
 from access_control.grant_entries import GrantPlan
 from access_control.mcp_servers import default_proposal_grants
 from access_control.people import is_administrator
-from access_control.requests import ACCESS_PROPOSAL_CHANGE, LEVEL_WORDS, AccessRequests, DecisionClaim
+from access_control.requests import ACCESS_PROPOSAL_CHANGE, LEVEL_WORDS, AccessRequests
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     AccessProposalV1,
@@ -102,7 +103,7 @@ from mcp_control.registry import (
     MCPConnectionStore,
     MCPConnectionTransport,
 )
-from storage.access_repository import AccessStoreConflict
+from storage.access_repository import AccessStoreConflict, DecisionClaim
 
 logger = logging.getLogger(__name__)
 
@@ -522,6 +523,11 @@ class ProposalCompiler:
         return rows
 
 
+# Failures that mean the approval no longer applies; they are reported as a
+# refusal. Anything else (a busy or lost database) is raised again as it was.
+_APPLY_REFUSALS = (HandDownRefused, CatalogError, AccessStoreConflict, PermissionError, ValueError)
+
+
 @dataclass
 class ProposalApplier:
     """Applies an approved proposal at the decision (``access_control.requests.ChangeApplier``)."""
@@ -611,32 +617,73 @@ class ProposalApplier:
         compiled: CompiledProposal,
         claim: DecisionClaim,
     ) -> AccessRequestV1:
-        """Write tool files and install MCP servers, then store the rest together; undo all on failure."""
+        """Write tool files and install MCP servers, then store the rest together; undo all on any failure.
+
+        Each download runs between two renewals of the decision's claim
+        (``AccessRequests.renew_claim``): the download gets the claim's whole
+        time limit, and a decision that lost the request meanwhile stops
+        before it writes anything. Any failure (also a busy or lost database)
+        undoes the files, programs and servers this approval wrote, unless the
+        outcome was stored after all; refusals are reported as such and other
+        errors are raised again as they were.
+        """
 
         written: list[Path] = []
         programs: list = []
         installed: list[MCPConnectionRecordV1] = []
+
+        def download(url: str) -> bytes:
+            requests.renew_claim(claim)
+            data = self.download(url)
+            requests.renew_claim(claim)
+            return data
+
         try:
-            install_programs(self.instance_root, compiled.proposal.clis, self.download, programs)
+            install_programs(self.instance_root, compiled.proposal.clis, download, programs)
             for tool in (*compiled.proposal.tools, *compiled.proposal.clis):
                 written.append(write_instance_tool(self.instance_root, tool))
             self._install_servers(compiled.proposal, request, reviewer, installed, now=requests.service.clock())
             requests.service.catalog = self.catalogs.current()
             return self._store(requests, request, reviewer, finished, compiled, claim)
-        except (HandDownRefused, CatalogError, AccessStoreConflict, PermissionError, ValueError) as exc:
-            for path in written:
-                remove_instance_tool(path)
-            remove_programs(programs)
-            self._restore_servers(installed)
-            requests.service.catalog = self.catalogs.current()
+        except BaseException as exc:
+            stored = requests.outcome_stored_despite(exc, request.request_id, reviewer, finished.decided_at_utc)
+            if stored is not None:
+                return stored
+            self._undo_items(requests, written, programs, installed)
             logger.warning(
                 "An approved proposal could not be applied; nothing changed. event=proposal_apply_failed "
-                "request_id=%s by=%s error=%s",
+                "request_id=%s by=%s error_type=%s error=%s",
                 request.request_id,
                 reviewer.person_id,
+                type(exc).__name__,
                 exc,
             )
-            raise HandDownRefused(f"The proposal could not be applied, so nothing changed: {exc}") from exc
+            if isinstance(exc, _APPLY_REFUSALS):
+                raise HandDownRefused(f"The proposal could not be applied, so nothing changed: {exc}") from exc
+            raise
+
+    def _undo_items(
+        self,
+        requests: AccessRequests,
+        written: list[Path],
+        programs: list[Any],
+        installed: list[MCPConnectionRecordV1],
+    ) -> None:
+        """Take back the files, programs and servers a failed approval wrote (each step logged on failure)."""
+
+        steps: list[tuple[str, Callable[[], None]]] = [
+            *((f"tool file {path.name}", lambda path=path: remove_instance_tool(path)) for path in written),
+            ("programs", lambda: remove_programs(programs)),
+            ("MCP servers", lambda: self._restore_servers(installed)),
+            ("catalog", lambda: setattr(requests.service, "catalog", self.catalogs.current())),
+        ]
+        for what, step in steps:
+            try:
+                step()
+            except Exception:  # noqa: BLE001 - logged; the remaining steps still run
+                logger.exception(
+                    "Could not take back part of a failed proposal. event=proposal_undo_failed part=%s", what
+                )
 
     def _install_servers(
         self,

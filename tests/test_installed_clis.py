@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import threading
+import time
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -45,8 +46,10 @@ from strands.interrupt import InterruptException
 
 from access_catalog.catalog import CatalogSource
 from access_control.caller_tokens import CALLER_MANAGER, BrokerCaller
-from access_control.cli_binaries import ProgramRefused, fetch_https, workspaces_root
+from access_control.cli_binaries import ProgramRefused, fetch_https, read_within_deadline, workspaces_root
+from access_control.decisions import HandDownRefused
 from access_control.proposals import ACCESS_PROPOSAL_KIND, ProposalCompiler, ProposalRefused, proposal_summary
+from access_control.requests import AccessRequests
 from custom_agents.tool_setup_runs import plan_run
 from custom_messages.contracts.access_v2 import (
     AccessProposalV1,
@@ -295,6 +298,96 @@ def test_a_built_program_that_changed_or_is_a_link_is_refused(world, served, tmp
 def test_downloads_are_https_only() -> None:
     with pytest.raises(ProgramRefused, match="only over https"):
         fetch_https("http://dl.gitea.com/tea")
+
+
+def _trickling_server(seconds_per_byte: float, body: bytes):
+    """A server that sends its body one byte at a time: every read gets data, so no socket timeout trips."""
+
+    import socket
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def serve() -> None:
+        conn, _address = listener.accept()
+        conn.recv(4096)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n")
+        try:
+            for byte in body:
+                time.sleep(seconds_per_byte)
+                conn.sendall(bytes([byte]))
+        except OSError:
+            pass  # the reader stopped
+        conn.close()
+        listener.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return f"http://127.0.0.1:{listener.getsockname()[1]}/tea"
+
+
+def test_a_download_that_trickles_in_stops_at_its_total_deadline() -> None:
+    # The socket timeout bounds each read only (2026-10-17 review): this server
+    # never pauses longer than 0.2 seconds, so only a total deadline stops it.
+    url = _trickling_server(0.2, b"x" * 40)
+    with urllib.request.urlopen(url, timeout=1) as response:
+        with pytest.raises(ProgramRefused, match="stopped after 1 seconds in total because it was too slow"):
+            read_within_deadline(response, host="dl.gitea.com", deadline_seconds=1)
+
+    quick = _trickling_server(0.0, b"tea program")
+    with urllib.request.urlopen(quick, timeout=1) as response:
+        assert read_within_deadline(response, host="dl.gitea.com", deadline_seconds=5) == b"tea program"
+
+
+def test_each_download_runs_between_two_claim_renewals(world, served, monkeypatch) -> None:  # noqa: F811
+    _lead, requests, _gate, instance, _service = world
+    request, decide = approve(world, tea(), served)
+    applier = requests().appliers[ACCESS_PROPOSAL_KIND]
+    fetch = applier.download
+    steps: list[str] = []
+    renew = AccessRequests.renew_claim
+
+    def renew_claim(self, claim):  # noqa: ANN001 - patched method
+        steps.append("renew")
+        return renew(self, claim)
+
+    def download(url: str) -> bytes:
+        steps.append("download")
+        return fetch(url)
+
+    monkeypatch.setattr(AccessRequests, "renew_claim", renew_claim)
+    applier.download = download
+
+    decide()
+
+    assert steps == ["renew", "download", "renew"]
+    assert program_path(instance).read_bytes() == PROGRAM
+
+
+def test_a_decision_that_loses_its_claim_during_a_download_installs_nothing(world, served) -> None:  # noqa: F811
+    _lead, requests, _gate, instance, service = world
+    request, decide = approve(world, tea(), served)
+    applier = requests().appliers[ACCESS_PROPOSAL_KIND]
+    fetch = applier.download
+
+    def taken_over_meanwhile(url: str) -> bytes:
+        data = fetch(url)
+        # Meanwhile the claim ran out and another decision took the request.
+        with service.store._connect() as conn:
+            conn.execute(
+                "UPDATE access_request_claims SET claim_id = 'decision_other' WHERE request_id = ?",
+                (request.request_id,),
+            )
+            conn.commit()
+        return data
+
+    applier.download = taken_over_meanwhile
+    with pytest.raises(HandDownRefused, match="taken over"):
+        decide()
+
+    assert not program_path(instance).exists(), "a decision that lost the request writes nothing"
+    assert not (instance / "control" / "access" / "tools" / "proposed-cli-tea.yaml").exists()
+    assert service.store.get_request(request.request_id).status is AccessRequestStatus.WAITING
 
 
 # -- deciding and checking commands -------------------------------------------------------

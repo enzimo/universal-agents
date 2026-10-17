@@ -28,7 +28,7 @@ the gateway is where people see and decide them:
   (``AccessRequests.decide``), so pressing a button twice, or deciding in
   chat and on the web card at once, decides once; the second press is told
   someone is deciding it. Each maintenance pass recovers claims whose
-  decision stopped without finishing (``recover_expired_claims``).
+  decision stopped without finishing (``recover_unfinished_decisions``).
 - **Waking the agent.** After a decision the gateway sends
   ``AccessRequestResolvedV1`` to the requesting agent. When the transport is
   down the message is sent by the next maintenance pass
@@ -1030,8 +1030,17 @@ class GatewayAccessInbox:
         store = requests.service.store
         # A decision whose process ended keeps its request claimed until the
         # claim runs out; this ends what it left behind, and the request waits
-        # for a decision again (AccessRepository.recover_expired_claims).
-        await asyncio.to_thread(store.recover_expired_claims, self._settings.team_id, requests.service.clock())
+        # for a decision again (AccessRepository.recover_unfinished_decisions).
+        # A failure here must not skip the announcements and wake messages.
+        try:
+            await asyncio.to_thread(
+                store.recover_unfinished_decisions, self._settings.team_id, requests.service.clock()
+            )
+        except Exception:  # noqa: BLE001 - retried on the next pass
+            self._logger.exception(
+                "Could not recover unfinished access decisions. event=access_decision_recovery_failed team_id=%s",
+                self._settings.team_id,
+            )
         for request in await asyncio.to_thread(store.claim_unannounced, self._settings.team_id):
             try:
                 await self.announce(request)

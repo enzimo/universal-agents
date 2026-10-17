@@ -209,7 +209,9 @@ and the next step:
    continues with the decision. A request is decided once: if you press a
    button twice, or decide in chat and in the Inbox at the same moment, the
    second one is told someone is deciding it. If a decision cannot be saved,
-   nothing it gave is kept and the request waits for a decision again.
+   nothing it gave is kept and the request waits for a decision again; if a
+   decision stopped halfway (for example the gateway restarted), the request
+   can be decided again within 10 minutes.
 
 Workers ask the same way. A worker's request goes to the person directly;
 TeamLead does not pass the question along in its own conversation. When you
