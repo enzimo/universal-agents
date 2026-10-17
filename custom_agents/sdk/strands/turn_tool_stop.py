@@ -123,15 +123,22 @@ async def _wait_for_tool_calls(tool_stop: ToolStop, logger: logging.Logger) -> N
 
 
 async def _end_leftover_processes(tool_stop: ToolStop, logger: logging.Logger) -> None:
-    """End processes the turn's commands left running in their process groups."""
+    """End processes the turn's commands left running in their process groups.
 
-    terminated = tool_stop.signal_process_groups(signal.SIGTERM)
+    Each pass reads /proc once, in a worker thread, so the agent's event loop
+    keeps serving other work however many commands the turn ran.
+    """
+
+    terminated = await asyncio.to_thread(tool_stop.signal_process_groups, signal.SIGTERM)
     if not terminated:
         return
     deadline = time.monotonic() + BACKGROUND_TERM_GRACE_SECONDS
-    while tool_stop.live_process_groups() and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        still_live = await asyncio.to_thread(tool_stop.live_process_groups)
+        if not still_live:
+            break
         await asyncio.sleep(_POLL_SECONDS)
-    killed = tool_stop.signal_process_groups(signal.SIGKILL)
+    killed = await asyncio.to_thread(tool_stop.signal_process_groups, signal.SIGKILL)
     logger.info(
         "Ended processes that a stopped turn's commands left running. "
         "event=tool_background_processes_ended agent_id=%s task_id=%s reason=%s groups=%s killed_after_grace=%s",

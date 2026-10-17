@@ -15,7 +15,11 @@ from custom_agents.message_routing import resolve_requester_routing_key
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.prompt_context_sanitization import render_replied_message_lines
 from custom_agents.provider_error_runtime import ProviderTimeoutError, is_provider_timeout_error
-from custom_agents.sdk.strands.turn_tool_stop import invoke_with_tool_stop
+from custom_agents.sdk.strands.turn_tool_stop import (
+    TURN_CANCELLED_REASON,
+    invoke_with_tool_stop,
+    stop_tool_calls,
+)
 from custom_tools.tool_stop import ToolStop
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError, settle_failed_turn
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND
@@ -835,6 +839,11 @@ async def resume_interrupted_task_turn(agent: Any, task_id: str) -> Optional[Any
             datetime.now(timezone.utc).isoformat(),
         )
         return await _run_resumed_turn(agent, session, steering, task_info, response_blocks, tool_stop)
+    except asyncio.CancelledError:
+        # Like a fresh turn (sdk.strands.turn): end the turn's tool work
+        # wherever the stop landed, also after the model call returned.
+        await stop_tool_calls(tool_stop, agent._logger, reason=TURN_CANCELLED_REASON)
+        raise
     except Exception as exc:
         # The task holds the execution slot (IN_PROGRESS above). Unhandled, it
         # kept it and no queued task ever started again (turn_failure_runtime).

@@ -57,6 +57,7 @@ from custom_tools.code_sandbox import (
 )
 from custom_tools.openshell_sandboxes import OpenShellSandboxError, ensure_sandbox, workspace_mount
 from custom_tools.runtime_context import get_agent_ref
+from runtime_hosting.process_run import PROCESS_RUN_ENV_PREFIX
 from runtime_settings.security import SECURITY_LAYER_MODE_BROKER, SECURITY_LAYER_MODE_OPENSHELL
 from custom_tools.shell_execution import (
     AnyCancel,
@@ -196,6 +197,9 @@ def _build_env() -> Dict[str, str]:
     env = {}
     for key, value in os.environ.items():
         upper = key.upper()
+        if upper.startswith(PROCESS_RUN_ENV_PREFIX):
+            # Identifies this agent process's run; never for the commands it runs.
+            continue
         if key in allowlist:
             env[key] = value
             continue

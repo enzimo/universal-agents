@@ -142,7 +142,9 @@ def embedded_commands() -> Iterator[None]:
     Tests and scripts that call the shell or Python tools directly use this.
     It has no effect in a process the runtime's supervisor started
     (``UA_PROCESS_RUN_ID`` set, runtime_hosting.process_run), where a command
-    without an agent is always a fault.
+    without an agent is always a fault. The commands agents run never get that
+    variable (custom_tools.non_interactive_shell), so tests an agent runs on
+    this repository still opt in normally.
     """
 
     global _embedded_users

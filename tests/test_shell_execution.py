@@ -201,3 +201,30 @@ def test_a_supervised_runtime_process_refuses_commands_without_an_agent_even_whe
     assert result["reason_code"] == REASON_NO_AGENT
     assert not (folder / "ran.txt").exists()
     assert "event=code_refused_without_agent tool_id=code:shell reason=runtime_process" in caplog.text
+
+
+def test_commands_never_get_the_agent_process_run_variables(monkeypatch) -> None:
+    """Only the agent process reads them; a command with them would look like a supervised agent process."""
+
+    from custom_tools.non_interactive_shell import _build_env
+
+    monkeypatch.setenv(PROCESS_RUN_ID_ENV, "run-1")
+    monkeypatch.setenv("UA_PROCESS_RUN_PROVEN", "1")
+    monkeypatch.setenv("UA_PROCESS_RUN_LOCK_FD", "9")
+    monkeypatch.setenv("SHELL_PASSTHROUGH_ENV_ALLOWLIST", f"{PROCESS_RUN_ID_ENV},UA_PROCESS_RUN_PROVEN")
+    monkeypatch.setenv("UA_KEPT_FOR_COMMANDS", "yes")
+
+    env = _build_env()
+
+    assert not [key for key in env if key.startswith("UA_PROCESS_RUN_")]
+    assert env["UA_KEPT_FOR_COMMANDS"] == "yes"
+
+
+def test_a_command_does_not_see_the_process_run_variables(agents_workspace: Path, monkeypatch) -> None:
+    monkeypatch.setenv("UA_PROCESS_RUN_PROVEN", "1")
+    monkeypatch.setenv("UA_PROCESS_RUN_LOCK_FD", "9")
+
+    result = _execute_single_command("env", default_work_dir=str(agents_workspace), default_timeout=5)
+
+    assert result["status"] == "success", result
+    assert "UA_PROCESS_RUN_" not in result["output"]

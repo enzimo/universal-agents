@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError
 
+import asyncio
 import hashlib
 import mimetypes
 import sys
@@ -15,7 +16,11 @@ from strands import Agent
 from custom_agents.context_engine import ContextEngine
 from custom_agents.model_turn import TurnDecisionOutcome
 from custom_agents.task_operation_runtime import TaskOperationRuntime
-from custom_agents.sdk.strands.turn_tool_stop import invoke_with_tool_stop
+from custom_agents.sdk.strands.turn_tool_stop import (
+    TURN_CANCELLED_REASON,
+    invoke_with_tool_stop,
+    stop_tool_calls,
+)
 from custom_agents.sdk.strands.turn_ports import (
     TurnRuntimeSettings,
     TurnRuntimeEffects,
@@ -640,6 +645,17 @@ class LLMTurnExecutor:
         if model is None:
             raise RuntimeError("LLM turn requires an initialized Strands agent.")
         return model
+
+    async def _end_tool_work_of_cancelled_turn(self, turn: _TurnState) -> None:
+        """End the turn's tool work, wherever the stop landed.
+
+        A stop can land after the model call returned (the late-guidance
+        check, applying the result, a retry wait), where the invocation no
+        longer ends the turn's tool work. Doing it twice is harmless.
+        """
+
+        if turn.tool_stop is not None:
+            await stop_tool_calls(turn.tool_stop, self.logger, reason=TURN_CANCELLED_REASON)
 
     @staticmethod
     def _require_tool_stop(turn: _TurnState) -> ToolStop:
@@ -1904,6 +1920,9 @@ class LLMTurnExecutor:
             await self._prepare_invocation(turn)
             await self._invoke_model(turn)
             return await self._complete_turn(turn)
+        except asyncio.CancelledError:
+            await self._end_tool_work_of_cancelled_turn(turn)
+            raise
         except ToolCallLimitExceeded as e:
             await self._write_context_debug_post_turn(
                 request=turn.context_request,

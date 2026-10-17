@@ -24,11 +24,14 @@ clears:
   supervisor (``custom_tools.shell_execution``) gets the stop event, refuses to
   start a command once it is set and stops a running one. A call that starts
   after the stop does nothing.
-- Each command's process group is recorded. A command can leave processes
-  running in its group after it returns (``server &``); when the turn stops,
-  ``end_process_groups`` ends those too, after checking that the group number
-  still belongs to that command. A process that moves itself into a new
-  session or group (``setsid``, daemonizing) is not reached.
+- Each command's process group is recorded (also when the command already
+  exited: its leader is then a zombie the supervisor has not collected yet). A
+  command can leave processes running in its group after it returns
+  (``server &``); when the turn stops, wherever the stop lands, those are
+  ended too (``signal_process_groups``), after checking that the group number
+  still belongs to that command. Each check reads /proc once for all groups
+  and runs in a worker thread. A process that moves itself into a new session
+  or group (``setsid``, daemonizing) is not reached.
 - The turn waits with ``wait_until_idle``, at most ``TOOL_STOP_GRACE_SECONDS``,
   until its tool calls have ended, so a stopped turn finishes only after its
   commands did (``custom_agents.sdk.strands.turn_tool_stop``).
@@ -47,6 +50,7 @@ import os
 import signal
 import threading
 import time
+from collections import defaultdict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -112,33 +116,52 @@ class EndedGroup:
     pids: tuple[int, ...] = field(default=())
 
 
-def _process_stat(pid: int) -> tuple[int, int] | None:
-    """(process group, kernel start time) of a live process; None when gone or a zombie."""
+@dataclass(frozen=True)
+class _ProcessInfo:
+    """What /proc shows about one process: its group, kernel start time, and whether it is a zombie."""
+
+    pgid: int
+    start: int
+    zombie: bool
+
+
+def _read_stat(pid: int) -> _ProcessInfo | None:
+    """One process's /proc entry; None when it is gone (reaped) or unreadable.
+
+    A zombie (exited, not yet collected by its parent) still shows its real
+    group and start time, and its number cannot be reused until it is
+    collected, so it counts.
+    """
 
     try:
         text = Path(f"/proc/{pid}/stat").read_text()
     except OSError:
         return None
     fields = text.rsplit(")", 1)[-1].split()
-    if len(fields) < 20 or fields[0] == "Z":
+    if len(fields) < 20:
         return None
-    return int(fields[2]), int(fields[19])
+    return _ProcessInfo(pgid=int(fields[2]), start=int(fields[19]), zombie=fields[0] == "Z")
 
 
-def _group_members(pgid: int) -> list[tuple[int, int]]:
-    """(pid, start time) of every live process in a process group."""
+def _scan_processes() -> dict[int, _ProcessInfo]:
+    """Every process on the host, read in one pass over /proc.
 
-    members = []
+    One pass serves every recorded group: a pass per group made a stop with
+    many recorded commands block for seconds on a busy host.
+    """
+
+    processes = {}
     for entry in os.scandir("/proc"):
-        if not entry.name.isdigit():
-            continue
-        stat = _process_stat(int(entry.name))
-        if stat is not None and stat[0] == pgid:
-            members.append((int(entry.name), stat[1]))
-    return members
+        if entry.name.isdigit():
+            info = _read_stat(int(entry.name))
+            if info is not None:
+                processes[int(entry.name)] = info
+    return processes
 
 
-def _owned_members(group: _StartedGroup) -> tuple[int, ...]:
+def _owned_members(
+    group: _StartedGroup, members: list[tuple[int, _ProcessInfo]], leader: _ProcessInfo | None
+) -> tuple[int, ...]:
     """The live processes still in ``group`` that belong to it; () when the number was reused.
 
     A group id stays taken while any member lives, so it can be reused only
@@ -147,10 +170,9 @@ def _owned_members(group: _StartedGroup) -> tuple[int, ...]:
     started before the recorded command cannot belong to it either.
     """
 
-    leader = _process_stat(group.pgid)
-    if leader is not None and leader[1] != group.leader_start:
+    if leader is not None and leader.start != group.leader_start:
         return ()
-    return tuple(pid for pid, started in _group_members(group.pgid) if started >= group.leader_start)
+    return tuple(pid for pid, info in members if not info.zombie and info.start >= group.leader_start)
 
 
 class ToolStop:
@@ -232,11 +254,11 @@ class ToolStop:
         """A callback for the process supervisor: records the group of each command it starts."""
 
         def record(pid: int) -> None:
-            stat = _process_stat(pid)
-            if stat is None:
-                # Gone within microseconds of starting: whatever it left
-                # behind cannot be told from a later process, so it is not
-                # recorded (and is logged, so the gap is visible).
+            info = _read_stat(pid)
+            if info is None:
+                # The supervisor collects its child only after this call, so a
+                # command that already exited is still a readable zombie here;
+                # None means /proc cannot be read, and the gap is logged.
                 logger.warning(
                     "A command ended before its process group could be recorded; processes it left "
                     "behind are not ended with its task. event=tool_process_group_unrecorded "
@@ -248,12 +270,16 @@ class ToolStop:
                 )
                 return
             with self._lock:
-                self._groups.append(_StartedGroup(pgid=pid, leader_start=stat[1], tool_name=tool_name))
+                self._groups.append(_StartedGroup(pgid=pid, leader_start=info.start, tool_name=tool_name))
 
         return record
 
     def live_process_groups(self) -> tuple[EndedGroup, ...]:
-        """Recorded groups that still have processes of their own."""
+        """Recorded groups that still have processes of their own (one /proc pass).
+
+        Blocking: it reads /proc, so call it from a worker thread
+        (custom_agents.sdk.strands.turn_tool_stop), not on the event loop.
+        """
 
         with self._lock:
             groups = list(self._groups)
@@ -267,11 +293,28 @@ class ToolStop:
                 self.task_id,
             )
             return ()
-        live = (EndedGroup(group.pgid, group.tool_name, _owned_members(group)) for group in groups)
+        processes = _scan_processes()
+        by_group: dict[int, list[tuple[int, _ProcessInfo]]] = defaultdict(list)
+        for pid, info in processes.items():
+            by_group[info.pgid].append((pid, info))
+        live = (
+            EndedGroup(
+                group.pgid, group.tool_name, _owned_members(group, by_group[group.pgid], processes.get(group.pgid))
+            )
+            for group in groups
+        )
         return tuple(group for group in live if group.pids)
 
     def signal_process_groups(self, sig: signal.Signals) -> tuple[EndedGroup, ...]:
-        """Send ``sig`` to every recorded group that still has processes of its own."""
+        """Send ``sig`` to every recorded group that still has processes of its own.
+
+        Blocking (one /proc pass). The group id cannot be reused while any of
+        the members just seen lives, so the window between the check and
+        ``killpg`` is the microseconds in which they might all exit and a new
+        group might take the number. Signalling each member by pidfd would
+        close that window but miss children forked after the check, which
+        ``killpg`` reaches.
+        """
 
         signalled = []
         for group in self.live_process_groups():

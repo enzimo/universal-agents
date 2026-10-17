@@ -919,6 +919,8 @@ reach. Only code that embeds the tools on purpose (tests, scripts) may run
 such commands, inside `custom_agents.code_access.embedded_commands()`, and
 never in a process the supervisor started (`UA_PROCESS_RUN_ID` set,
 `runtime_hosting/process_run.py`), where a missing agent is always a fault.
+The commands agents run never get the `UA_PROCESS_RUN_*` variables: only the
+agent process itself reads them.
 
 Running a command outside the sandbox is its own catalog tool,
 `code:unconfined`, so network access never implies host access:
@@ -961,11 +963,15 @@ ends the running command's whole process group (SIGTERM, then SIGKILL a second
 later) and starts none of the turn's remaining commands; a tool call that
 starts after the stop does nothing. A command can leave processes running in
 its group after it returns (`server &`), so each command's process group is
-recorded; on a stop, the groups that still have processes get SIGTERM, then
-SIGKILL a second later (`event=tool_background_processes_ended`). A group is
-signalled only while its number still belongs to that command: the number
-cannot be reused while any member lives, and a process holding it with a
-different start time is a reuse and left alone. A turn that ends normally
+recorded, also when the command already exited (its leader is then a zombie
+the supervisor has not collected yet). On a stop, wherever it lands (during
+the model call or after it, while the turn applies its result), the groups
+that still have processes get SIGTERM, then SIGKILL a second later
+(`event=tool_background_processes_ended`). Each check reads `/proc` once for
+all groups, in a worker thread, so the agent's event loop keeps running. A
+group is signalled only while its number still belongs to that command: the
+number cannot be reused while any member lives, and a process holding it with
+a different start time is a reuse and left alone. A turn that ends normally
 leaves its background processes running, as before. A tool call keeps the task
 it started for until it returns (`runtime_context.bind_tool_call_task`), so a
 call that outlives its turn never picks up the next task's person and folders.

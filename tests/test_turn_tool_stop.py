@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -389,3 +390,162 @@ async def test_a_turn_that_ends_normally_leaves_its_background_processes_running
 
     assert process_alive(pid)
     assert not stop.is_requested()
+
+
+BACKGROUND = "sh -c 'echo $$ > {pid}; exec sleep 60' > /dev/null 2>&1 & sleep 0.3; echo started"
+
+
+@pytest.mark.asyncio
+async def test_a_stop_after_the_model_call_still_ends_background_processes(work_dir: Path) -> None:
+    """A stop can land after the invocation returned, while the turn still runs.
+
+    The command left a background process and returned, the invocation ended
+    normally, and the turn is in its late-guidance check when the stop comes.
+    The turn's leftovers must still end; at first they were ended only when
+    the cancellation hit inside the model call.
+    """
+
+    from collections import deque
+    from dataclasses import replace
+
+    from tests.test_runtime_owner_boundaries import build_turn_owner
+
+    pid_file = work_dir / "bg.pid"
+    sdk = shell_agent([BACKGROUND.format(pid=pid_file.name)], work_dir)
+
+    async def invoke(prompt, **kwargs):
+        # Without structured output the scripted text reply ends the invocation normally.
+        kwargs.pop("structured_output_model", None)
+        kwargs.pop("structured_output_prompt", None)
+        return await sdk.invoke_async(prompt, **kwargs)
+
+    in_post_processing, hold = asyncio.Event(), asyncio.Event()
+    guidance_calls: list[str] = []
+
+    async def late_guidance(task_id):
+        # Asked once while preparing the turn and again right after the invocation returned.
+        guidance_calls.append(task_id)
+        if len(guidance_calls) >= 2:
+            in_post_processing.set()
+            await hold.wait()
+        return ""
+
+    executor, _ = build_turn_owner(invoke=invoke, guidance=deque([""]), committed=[], cleared=[])
+    stops: list[ToolStop] = []
+
+    def set_active_execution_context(task_id):
+        stops.append(ToolStop(agent_id="independent", task_id=task_id))
+        return stops[-1]
+
+    executor.effects = replace(
+        executor.effects,
+        set_active_execution_context=set_active_execution_context,
+        consume_pending_proactive_guidance_message=late_guidance,
+    )
+    turn_task = Task(task_id="post-turn", task_type=MessageMetaType.REQUEST, problem_statement="run it")
+    running = asyncio.create_task(executor.process_llm_interaction(turn_task, MessageHeader(), MessageMeta()))
+    await asyncio.wait_for(in_post_processing.wait(), 30)
+    pid = await wait_for_pid(pid_file)
+    [stop] = stops
+    assert stop.running() == ()  # the model call is over
+    host = SimpleNamespace(
+        id="independent",
+        _active_execution_task=running,
+        _active_execution_task_id=turn_task.task_id,
+        _active_tool_stop=stop,
+        _logger=LOGGER,
+    )
+
+    await _interrupt_active_execution(
+        host, root_task_id=turn_task.task_id, graph_task_ids={turn_task.task_id}, reason=TASK_STOPPED_REASON
+    )
+
+    assert not process_alive(pid)
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_turn_stopped_after_its_model_call_ends_background_processes(tmp_path: Path) -> None:
+    """The resumed-turn runner (task_steering_runtime) ends leftovers on a stop too."""
+
+    import subprocess
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    from custom_agents.task_manager import TaskManager
+    from custom_agents.task_steering_runtime import StrandsInterruptedTurnSession, resume_interrupted_task_turn
+    from custom_messages.contracts.task_v1 import TaskSteering, TaskSteeringInterruptRecord
+    from custom_messages.enums import TaskSteeringType
+    from custom_tools.tool_stop import TOOL_STOP_STATE_KEY
+
+    manager = TaskManager(db_path=str(tmp_path / "tasks.db"))
+    manager.set_owner_identity("manager", "Manager", "team", "TeamArchitect")
+    task = Task(task_id="resumed", task_type=MessageMetaType.REQUEST, problem_statement="resume")
+    manager.add_task(task, MessageHeader(from_agent_id="gateway"), MessageMeta(), owner_person_id=None)
+    background: list[int] = []
+    in_post_processing, hold = asyncio.Event(), asyncio.Event()
+
+    async def invoke(prompt, **kwargs):
+        # Stands in for a resumed Strands call whose command left a server running.
+        record = kwargs["invocation_state"][TOOL_STOP_STATE_KEY].process_group_recorder("shell")
+        leader = subprocess.Popen(
+            ["sh", "-c", "sleep 60 >/dev/null 2>&1 & echo $!"], stdout=subprocess.PIPE, start_new_session=True
+        )
+        record(leader.pid)
+        background.append(int(leader.stdout.readline()))
+        leader.wait()
+        return SimpleNamespace(stop_reason="end_turn")
+
+    async def dispatch(**kwargs):
+        in_post_processing.set()
+        await hold.wait()
+
+    now = datetime.now(timezone.utc).isoformat()
+    session = StrandsInterruptedTurnSession(
+        task.task_id, SimpleNamespace(invoke_async=invoke), {}, "prompt", task,
+        MessageHeader(from_agent_id="gateway"), MessageMeta(), now,
+        [TaskSteeringInterruptRecord(interrupt_id="interrupt_1", reason={"access_request_id": "areq_1"})],
+    )
+    steering = TaskSteering(
+        steering_type=TaskSteeringType.INTERRUPT_RESPONSE,
+        target_task_id=task.task_id,
+        interrupt_responses=[{"interrupt_id": "interrupt_1", "response": {"access_request_id": "areq_1", "status": "granted"}}],
+    )
+    stops: list[ToolStop] = []
+    agent = SimpleNamespace(
+        id="manager",
+        name="Manager",
+        task_manager=manager,
+        _interrupted_turn_sessions={task.task_id: session},
+        _pending_interrupt_responses={task.task_id: steering},
+        _strands_agent=None,
+        _strands_agent_replacement_required=False,
+        _set_active_execution_context=lambda task_id: stops.append(ToolStop(agent_id="manager", task_id=task_id))
+        or stops[-1],
+        _clear_active_execution_context=lambda: None,
+        _refresh_self_agent_state=AsyncMock(),
+        _apply_task_processing_result=AsyncMock(),
+        _execute_turn_decision_outbox=dispatch,
+        _logger=LOGGER,
+        turn_executor=SimpleNamespace(
+            _apply_agent_result_transformer=lambda _, result: result,
+            decode_result=lambda **_: SimpleNamespace(decision=None, structured_output_details=None),
+        ),
+    )
+    resumed = asyncio.create_task(resume_interrupted_task_turn(agent, task.task_id))
+    try:
+        await asyncio.wait_for(in_post_processing.wait(), 10)
+        [pid] = background
+        assert process_alive(pid)
+
+        resumed.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await resumed
+
+        assert not process_alive(pid)
+        assert stops[0].reason == "turn_cancelled"
+    finally:
+        for leftover in background:
+            if process_alive(leftover):
+                os.kill(leftover, 9)

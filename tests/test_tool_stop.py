@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import subprocess
 import sys
@@ -27,7 +28,7 @@ from custom_agents.sdk.strands.turn_tool_stop import stop_tool_calls
 from custom_tools.tool_stop import (
     TOOL_STOP_STATE_KEY,
     ToolStop,
-    _process_stat,
+    _read_stat,
     _StartedGroup,
     tool_stop_for,
     tracked_tool_call,
@@ -312,10 +313,10 @@ def test_a_reused_process_group_number_is_never_signalled(tmp_path: Path) -> Non
     other = subprocess.Popen(["sleep", "60"], start_new_session=True)
     try:
         stop = ToolStop(agent_id="agent", task_id="task")
-        started = _process_stat(other.pid)
+        started = _read_stat(other.pid)
         assert started is not None
         # A group recorded earlier whose number now belongs to this unrelated process.
-        stop._groups.append(_StartedGroup(pgid=other.pid, leader_start=started[1] - 1, tool_name="shell"))
+        stop._groups.append(_StartedGroup(pgid=other.pid, leader_start=started.start - 1, tool_name="shell"))
         assert stop.signal_process_groups(signal.SIGKILL) == ()
         assert other.poll() is None
 
@@ -401,3 +402,80 @@ async def test_parallel_commands_not_started_before_a_turn_stop_say_why(work_dir
 
     assert first["Termination Reason"] == "cancelled"
     assert second["Error"] == third["Error"] == "Command not started because the task was stopped"
+
+
+def test_a_command_that_already_exited_still_has_its_group_recorded(tmp_path: Path) -> None:
+    """Its leader is a zombie until the supervisor collects it, with the real group and start time."""
+
+    leader = subprocess.Popen(
+        ["sh", "-c", "sleep 60 >/dev/null 2>&1 & echo $!"], stdout=subprocess.PIPE, start_new_session=True
+    )
+    background = int(leader.stdout.readline())
+    try:
+        deadline = time.monotonic() + 5
+        while (info := _read_stat(leader.pid)) is not None and not info.zombie and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert info is not None and info.zombie  # exited, not yet collected
+        stop = ToolStop(agent_id="agent", task_id="task")
+
+        stop.process_group_recorder("shell")(leader.pid)
+        [ended] = stop.signal_process_groups(signal.SIGKILL)
+
+        assert ended.pids == (background,)
+        deadline = time.monotonic() + 5
+        while process_alive(background) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not process_alive(background)
+    finally:
+        if process_alive(background):
+            os.kill(background, signal.SIGKILL)
+        leader.wait()
+
+
+def test_each_pass_reads_proc_once_however_many_groups_were_recorded(monkeypatch) -> None:
+    from custom_tools import tool_stop as tool_stop_module
+
+    scans: list[int] = []
+    real_scan = tool_stop_module._scan_processes
+    monkeypatch.setattr(tool_stop_module, "_scan_processes", lambda: scans.append(1) or real_scan())
+    stop = ToolStop(agent_id="agent", task_id="task")
+    for number in range(300):
+        stop._groups.append(_StartedGroup(pgid=4_000_000 + number, leader_start=1, tool_name="shell"))
+
+    assert stop.live_process_groups() == ()
+    assert stop.signal_process_groups(signal.SIGTERM) == ()
+    assert len(scans) == 2
+
+
+@pytest.mark.asyncio
+async def test_ending_leftovers_reads_proc_off_the_event_loop_and_kills_what_ignores_sigterm(monkeypatch) -> None:
+    from custom_tools import tool_stop as tool_stop_module
+
+    scans_on_loop: list[bool] = []
+    real_scan = tool_stop_module._scan_processes
+
+    def scan():
+        scans_on_loop.append(threading.current_thread() is threading.main_thread())
+        return real_scan()
+
+    monkeypatch.setattr(tool_stop_module, "_scan_processes", scan)
+    stubborn = subprocess.Popen(
+        [sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"],
+        start_new_session=True,
+    )
+    try:
+        await asyncio.sleep(0.3)  # let it ignore SIGTERM before the stop
+        stop = ToolStop(agent_id="agent", task_id="task")
+        for number in range(200):
+            stop._groups.append(_StartedGroup(pgid=4_000_000 + number, leader_start=1, tool_name="shell"))
+        stop.process_group_recorder("shell")(stubborn.pid)
+
+        await stop_tool_calls(stop, logging.getLogger("tests.tool_stop"), reason="task_stopped")
+
+        assert stubborn.wait(5) == -signal.SIGKILL
+        assert scans_on_loop and not any(scans_on_loop)
+        # SIGTERM pass, about one check per 50 ms during the one-second grace, SIGKILL pass.
+        assert len(scans_on_loop) <= 2 + 1.0 / 0.05 + 2
+    finally:
+        if stubborn.poll() is None:
+            stubborn.kill()
