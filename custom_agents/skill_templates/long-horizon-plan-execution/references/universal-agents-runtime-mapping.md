@@ -230,9 +230,20 @@ the current Plan subgoals. Available lifecycle commands are `/pause objective
 also cancels current Objective work at a safe boundary; abandon retains a
 terminal record; delete disables linked future work, stops active work, and
 creates a recoverable tombstone while retaining Plans, evidence, checkpoints,
-and audit history. User controls resolve canonical-user ownership and may adopt
-legacy same-team TeamArchitect custody before acting. Never attempt to bypass,
-forge, or weaken these authenticated controls.
+and audit history. Each status offers only some of these (a satisfied Objective
+can only be deleted), and the runtime refuses the rest. A task that ends while
+its Objective is paused or being deleted leaves it paused or deleting; nothing
+re-reviews it when the person resumes. User controls resolve canonical-user
+ownership and may adopt legacy same-team TeamArchitect custody before acting.
+Never attempt to bypass, forge, or weaken these authenticated controls.
+
+`objectives(action="update_status")` applies the same lifecycle change as these
+controls: pausing or closing an Objective also pauses its bounded work sessions
+and the schedules and heartbeat items it manages, and `active` resumes only
+what an Objective control paused, never a work-session setting the person
+turned off. Read `lifecycle_warnings` in its reply and tell the person about
+any control that did not finish. It refuses `deleting` and `deleted`, and
+leaves an Objective its person is deleting alone: only the person deletes.
 
 Runtime Controls also exposes owner-scoped schedules and authorized MCP
 lifecycle actions. Treat a user pause, disable, detach, stop, remove, abandon,
@@ -313,8 +324,8 @@ Update objective progress and status after health decisions. Map:
 - unattainable accepted conditions to `FAILED`
 - sponsor withdrawal to `CANCELLED`
 - authorized terminal discontinuation to `ABANDONED`
-- an authenticated recoverable deletion in progress to `DELETING`, followed by
-  the retained tombstone state `DELETED`
+- `DELETING` and the retained tombstone `DELETED` come only from the person's
+  own deletion (`/delete objective <id>` or Runtime Controls); never set them
 
 Never use `SATISFIED` for abandonment, deferment, partial work, or task-level
 completion. Cascade lifecycle changes through objective-owned links and
