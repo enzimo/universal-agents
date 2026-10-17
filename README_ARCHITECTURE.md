@@ -283,6 +283,18 @@ change, the gateway moving a maintenance schedule to the person's current chat)
 move the saved policy along (`follow_authorized_change`). See
 [Scheduled workers](user_docs_source/scheduled-workers.md).
 
+A schedule change never overwrites a newer one (`custom_agents.schedule_store`).
+Every write that depends on a schedule's current values reads, decides and
+writes in one write transaction (`ScheduleRepository.write_locked`: SQLite's
+write lock, or PostgreSQL's schedule-id and row locks). A run changes only its
+notes; an edit made to a copy read earlier is refused when the schedule is gone
+or someone changed it meanwhile, and keeps the next run time, count and notes
+unless it set them; turning on and off, pausing and resuming keep the claim;
+and the advance after a run applies only while its agent holds the claim and
+the claimed run time still stands. Before, saves replaced whole rows with
+copies read earlier, which could bring back a deleted schedule, undo a pause,
+or make a run happen twice.
+
 Whether a worker start's process is gone is proven, never assumed from a timeout
 (`runtime_hosting.process_run`). The supervisor holds an exclusive lock on
 `runtime/process_run.lock` and passes the locked file to every agent process, so

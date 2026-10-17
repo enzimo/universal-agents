@@ -189,7 +189,7 @@ picked up is **stuck**. You are told about it, without asking:
   `agent.schedule_workers.missed_one_time_after_seconds` late (one hour by
   default) is turned off instead, and its owner is told it was missed, so a
   reminder never arrives days late. Ask your assistant to set it up again if
-  you still need it.
+  you still need it. A run a worker has just started is not turned off.
 
 To fix a stuck schedule, ask your assistant about it in your normal
 conversation; it inspects the schedule and repairs what it can, keeping the
@@ -200,6 +200,14 @@ Recreating the timer is not the normal repair. When you change a schedule
 yourself (through your assistant), or a person approves a change to a schedule
 the runtime manages, its worker policy follows automatically; the schedule
 does not wait for a second confirmation.
+
+A change never overwrites a newer one. If the schedule was paused, turned off,
+changed or deleted after your assistant read it, the change is refused and the
+assistant reads the schedule again; the controls on the Schedules page do the
+same when the schedule changed after the page showed it. A run that writes its
+notes never undoes your change, and pausing a schedule while it runs does not
+make that run happen again when you resume it. A one-time schedule always runs
+once: asking for more runs needs an interval or a cron time.
 
 The runtime notices and reports; it does not guarantee a repair. Disallowed
 types, missing tools or credentials, or a stopped team lead can still need an
@@ -508,6 +516,11 @@ schedule (`cron_timezone`) when it is created:
 - An agent passes `cron_timezone` (an IANA name such as `Europe/Berlin`) only
   when the person asks for another zone. `update_scheduled_job` changes it the
   same way, and schedule listings show it.
+
+When clocks go back, the times of the repeated hour happen twice; a daily
+schedule at such a time (01:30 in New York, 02:30 in Berlin) still runs only
+once that night. When clocks go forward, a time in the skipped hour runs at the
+first time after it: a 02:30 schedule runs at 03:00 that day.
 
 Interval schedules ("every 6 hours") do not depend on a time zone. Objective
 work plans use their `cadence_timezone`, which is `owner` by default (see
