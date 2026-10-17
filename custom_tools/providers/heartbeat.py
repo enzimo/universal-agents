@@ -34,6 +34,7 @@ from custom_tools.providers._runtime import (
     _objective_in_view,
     _resolve_heartbeat_source_id,
     _objective_to_link,
+    _link_to_objective,
 )
 from custom_tools.providers._user_scope import _private_user_scope
 
@@ -254,16 +255,18 @@ def add_heartbeat_item(
             target_agent_type=target_agent_type.strip() or None,
             objective_id=resolved_objective_id,
         )
-        if resolved_objective_id:
-            agent.task_manager.operations_runtime.run_sync(
-                agent.task_manager.link_heartbeat_to_objective,
+        payload = _heartbeat_item_payload(item)
+        payload.update(
+            _link_to_objective(
+                agent,
+                "heartbeat",
                 resolved_objective_id,
                 item.heartbeat_item_id,
                 managed_by_objective=True,
                 user_visible=True,
                 reason="Heartbeat item created from objective-linked task context.",
             )
-        payload = _heartbeat_item_payload(item)
+        )
         runtime_state = _heartbeat_runtime_state(agent, resolved_source_id)
         payload.update(
             {
@@ -322,16 +325,19 @@ def update_heartbeat_item(
             return json.dumps(
                 {"error": f"Heartbeat item not found: {heartbeat_item_id}"}
             )
-        if resolved_objective_id:
-            agent.task_manager.operations_runtime.run_sync(
-                agent.task_manager.link_heartbeat_to_objective,
+        payload = _heartbeat_item_payload(item)
+        payload.update(
+            _link_to_objective(
+                agent,
+                "heartbeat",
                 resolved_objective_id,
                 item.heartbeat_item_id,
                 managed_by_objective=True,
                 user_visible=True,
                 reason="Heartbeat item updated with objective link.",
             )
-        return json.dumps(_heartbeat_item_payload(item))
+        )
+        return json.dumps(payload)
     except Exception as exc:
         return json.dumps({"error": str(exc)})
 

@@ -128,7 +128,12 @@ class PlansEnabledOperation(Protocol):
 
 
 class SaveObjectiveOperation(Protocol):
-    def __call__(self, objective: ObjectiveRecord) -> bool: ...
+    """Save an Objective for a step that goes on without it; False when the write failed.
+
+    ``ObjectiveCoordinator._save_objective_logged``: the failure is logged with ``step``.
+    """
+
+    def __call__(self, objective: ObjectiveRecord, *, step: str) -> bool: ...
 
 
 class SavePlanOperation(Protocol):

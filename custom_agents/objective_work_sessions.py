@@ -750,7 +750,7 @@ class ObjectiveWorkSessionCoordinator:
             user_visible=True,
             details={"policy": policy.model_dump(mode="json")},
         )
-        self.operations.save_objective(objective)
+        self.operations.save_objective(objective, step="work_session_policy_enabled")
         self._emit_snapshot(objective_id, "Bounded Objective execution enabled.", task_id=accepted_by_task_id)
         return policy
 
@@ -796,7 +796,7 @@ class ObjectiveWorkSessionCoordinator:
                 user_visible=True,
                 details={"policy": policy.model_dump(mode="json")},
             )
-            self.operations.save_objective(objective)
+            self.operations.save_objective(objective, step="work_session_policy_disabled")
         self._emit_snapshot(objective_id, "Bounded Objective execution disabled.", task_id=None)
         return cast(ObjectiveWorkPolicy, policy)
 
@@ -833,7 +833,7 @@ class ObjectiveWorkSessionCoordinator:
                 user_visible=True,
                 details={"policy": policy.model_dump(mode="json")},
             )
-            self.operations.save_objective(objective)
+            self.operations.save_objective(objective, step="work_session_policy_resumed")
         self._emit_snapshot(
             objective_id,
             "Bounded Objective execution resumed.",
@@ -909,7 +909,7 @@ class ObjectiveWorkSessionCoordinator:
             user_visible=True,
             details={"session": session.model_dump(mode="json")},
         )
-        self.operations.save_objective(objective)
+        self.operations.save_objective(objective, step="work_session_started")
         self._emit_snapshot(objective_id, "Objective work session started.", task_id=task_id)
         return session
 
@@ -1213,7 +1213,7 @@ class ObjectiveWorkSessionCoordinator:
                 user_visible=True,
                 details={"checkpoint": checkpoint.model_dump(mode="json")},
             )
-            self.operations.save_objective(objective)
+            self.operations.save_objective(objective, step="work_session_checkpointed")
         self._emit_snapshot(session.objective_id, "Objective work session checkpointed.", task_id=session.task_id)
         return checkpoint
 

@@ -27,6 +27,7 @@ from custom_agents.schedule_management import (
     ScheduleMutationOperation,
     is_system_managed_schedule,
 )
+from custom_agents.task_manager_objectives import ObjectiveSaveFailed
 from custom_agents.schedule_store import (
     schedule_claim_scope_for_agent,
 )
@@ -64,6 +65,7 @@ if TYPE_CHECKING:
 
 from custom_tools.providers._runtime import (
     _get_current_task_info,
+    _link_to_objective,
     _named_task_refusal,
     _new_conversation_id,
     _objective_in_view,
@@ -329,7 +331,7 @@ def create_objective(
             current_focus=current_focus or None,
             progress_summary=progress_summary or None,
         )
-    except (ValueError, json.JSONDecodeError) as exc:
+    except (ValueError, json.JSONDecodeError, ObjectiveSaveFailed) as exc:
         return json.dumps({"error": str(exc)})
 
     if objective is None:
@@ -480,7 +482,7 @@ def _update_progress(
             plan_id=plan_id or None,
             user_visible=_coerce_tool_bool(user_visible),
         )
-    except (ValueError, json.JSONDecodeError) as exc:
+    except (ValueError, json.JSONDecodeError, ObjectiveSaveFailed) as exc:
         return json.dumps({"error": str(exc)})
 
     if objective is None:
@@ -557,7 +559,7 @@ def _update_status(
             plan_id=plan_id or None,
             user_visible=_coerce_tool_bool(user_visible),
         )
-    except ValueError as exc:
+    except (ValueError, ObjectiveSaveFailed) as exc:
         return json.dumps({"error": str(exc)})
 
     if objective is None:
@@ -623,7 +625,7 @@ def start_objective_task(
             current_focus=current_focus or None,
             user_visible=_coerce_tool_bool(user_visible),
         )
-    except ValueError as exc:
+    except (ValueError, ObjectiveSaveFailed) as exc:
         return json.dumps({"error": str(exc)})
     if task_info is None:
         return json.dumps(
@@ -1169,6 +1171,7 @@ def start_isolated_recovery(
         return json.dumps({"error": "Failed to queue isolated recovery task"})
 
     checkpoint_schedule = None
+    checkpoint_link_fields: dict[str, str] = {}
     if _coerce_tool_bool(notify_user) and checkpoint_delay_seconds > 0:
         try:
             checkpoint_schedule_id = new_id("recov_ckpt")
@@ -1218,15 +1221,15 @@ def start_isolated_recovery(
                 checkpoint_schedule,
                 **schedule_claim_scope_for_agent(agent),
             )
-            if objective_id:
-                agent.task_manager.operations_runtime.run_sync(
-                    agent.task_manager.link_schedule_to_objective,
-                    objective_id,
-                    checkpoint_schedule_id,
-                    managed_by_objective=True,
-                    user_visible=False,
-                    reason="Isolated recovery checkpoint schedule.",
-                )
+            checkpoint_link_fields = _link_to_objective(
+                agent,
+                "schedule",
+                objective_id,
+                checkpoint_schedule_id,
+                managed_by_objective=True,
+                user_visible=False,
+                reason="Isolated recovery checkpoint schedule.",
+            )
             agent.task_manager.operations_runtime.run_sync(
                 agent.task_manager.set_recovery_checkpoint_schedule_id,
                 recovery_task_id,
@@ -1246,13 +1249,33 @@ def start_isolated_recovery(
             in recovery_task_info.task.model_dump(),
             "user_notice_recorded": bool(_coerce_tool_bool(notify_user)),
             "checkpoint_schedule": (
-                {"scheduled": True}
+                {"scheduled": True, **checkpoint_link_fields}
                 if isinstance(checkpoint_schedule, ScheduledMessage)
                 else checkpoint_schedule
             ),
         },
         default=str,
     )
+
+
+def _save_cascaded_links(agent: "UniversalAgent", objective: Any) -> tuple[str, ...]:
+    """Save which links a cascade paused or resumed; a warning when the Objective could not.
+
+    The schedules and heartbeat items already changed. An Objective that does
+    not remember pausing them does not restart them when it resumes.
+    """
+
+    try:
+        agent.task_manager.operations_runtime.run_sync(
+            agent.task_manager._save_objective, objective
+        )
+    except ObjectiveSaveFailed:
+        return (
+            f"Objective {objective.objective_id} could not record which schedules and heartbeat "
+            "items it paused or resumed, so resuming it will not restart the ones it paused. "
+            "Tell the person.",
+        )
+    return ()
 
 
 def _apply_objective_lifecycle_cascade(
@@ -1338,9 +1361,7 @@ def _apply_objective_lifecycle_cascade(
                 changed = True
 
     if changed:
-        agent.task_manager.operations_runtime.run_sync(
-            agent.task_manager._save_objective, objective
-        )
+        warnings = (*warnings, *_save_cascaded_links(agent, objective))
         refreshed = agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.get_objective, objective.objective_id
         )

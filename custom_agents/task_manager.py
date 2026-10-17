@@ -219,7 +219,7 @@ class TaskManager(
                 enqueue_next_plan_step_task=self._enqueue_next_plan_step_task,
                 objectives_enabled=self._objectives_enabled,
                 persist_runtime_state=self._persist_runtime_state,
-                save_objective=self._save_objective,
+                save_objective=self._save_objective_logged,
                 save_plan=self._save_plan,
                 durable_manager_scope_id=self.durable_manager_scope_id,
                 get_objective=self.get_objective,
@@ -248,7 +248,7 @@ class TaskManager(
                 new_plan_id=partial(new_id, "plan_id"),
                 persist_runtime_state=self._persist_runtime_state,
                 plans_enabled=self._plans_enabled,
-                save_objective=self._save_objective,
+                save_objective=self._save_objective_logged,
                 add_task=self.add_task,
                 append_history_entry=self.append_history_entry,
                 append_history_entry_to_archived_task=self.append_history_entry_to_archived_task,
@@ -573,8 +573,11 @@ class TaskManager(
     def _objectives_enabled(self) -> bool:
         return self._plans_enabled()
 
-    def _save_objective(self, objective: ObjectiveRecord) -> bool:
-        return self.objective_coordinator._save_objective(objective)
+    def _save_objective(self, objective: ObjectiveRecord) -> None:
+        self.objective_coordinator._save_objective(objective)
+
+    def _save_objective_logged(self, objective: ObjectiveRecord, *, step: str) -> bool:
+        return self.objective_coordinator._save_objective_logged(objective, step=step)
 
     def _append_objective_event(
         self,
@@ -3265,7 +3268,7 @@ class TaskManager(
                     user_visible=False,
                     details={"parent_task_id": parent_task_id},
                 )
-                self._save_objective(objective)
+                self._save_objective_logged(objective, step="subtask_linked")
         self._logger.info(
             f"Subtask {subtask.task_id} added for parent {parent_task_id}."
         )

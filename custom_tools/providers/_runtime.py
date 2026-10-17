@@ -2,12 +2,13 @@
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from access_control.entities import PersonPrincipal
 from access_control.identity import IdentityRejected
 from access_control.ownership import PRIVATE_UPDATE, named_task_access, objective_access
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
+from custom_agents.task_manager_objectives import ObjectiveSaveFailed
 from custom_agents.schedule_store import (
     ScheduleStore,
 )
@@ -249,6 +250,38 @@ def _task_owner(agent: "UniversalAgent", task_id: str) -> tuple[bool, Optional[s
     if archived is None:
         return False, None
     return True, archived.owner_canonical_user_id
+
+
+def _link_to_objective(
+    agent: "UniversalAgent",
+    kind: Literal["schedule", "heartbeat"],
+    objective_id: Optional[str],
+    item_id: str,
+    **link_options: Any,
+) -> dict[str, str]:
+    """Record a schedule or heartbeat item that now exists on its Objective, if it has one.
+
+    Returns fields for the tool's reply:
+    none, or ``objective_link_warning`` when the Objective could not record
+    the item. The item stays, since it was made as asked, but an Objective
+    that does not list it does not pause or stop it, so the reply says so
+    instead of reporting a complete link.
+    """
+
+    if not objective_id:
+        return {}
+    manager = agent.task_manager
+    link = manager.link_schedule_to_objective if kind == "schedule" else manager.link_heartbeat_to_objective
+    try:
+        manager.operations_runtime.run_sync(link, objective_id, item_id, **link_options)
+    except ObjectiveSaveFailed:
+        return {
+            "objective_link_warning": (
+                f"{item_id} was saved, but Objective {objective_id} could not record it, so pausing "
+                "or closing the Objective will not pause or stop it. Tell the person."
+            )
+        }
+    return {}
 
 
 def _resolve_heartbeat_source_id(
