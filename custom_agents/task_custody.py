@@ -18,10 +18,18 @@ An agent receiving a task that someone else holds:
   is still finishing other work;
 - takes it over when the holder is gone: if the holder's saved work still has
   the task, the replacement that takes that work over leaves it out
-  (``RuntimeSnapshotCoordinator._taken_by_other_agents``), so it runs once.
+  (``RuntimeSnapshotCoordinator._taken_by_other_agents``), so that replacement
+  does not run it too.
 
 The takeover is a compare-and-set in the admission's save, so a racing
 recovery or a second copy cannot both win; the loser drops its copy.
+
+What this does not cover: a holder judged gone that is in fact still running
+(the liveness rule decides), work the gone holder already did before it
+stopped (the taker starts the task again), agents that do not share the
+team's database, and, with ``agent.same_role_runtime_takeover_enabled`` off, a
+copy dropped while its holder looked alive when that holder stops later
+(nobody adopts the holder's saved work).
 """
 
 from __future__ import annotations

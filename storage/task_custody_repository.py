@@ -7,9 +7,9 @@ unreachable for longer than the wait. An agent checked only its own records
 for duplicates, so a second worker of the type ran the copy while the first
 holder, or the replacement that took over its saved work, ran the original.
 
-The row is written in the transaction that saves the holder's runtime
-snapshot (``RuntimeStateRepository.save_task_runtime``), so a row exists
-exactly while some agent's saved work holds the task:
+Rows change only inside the transactions that save, recover or clear an
+agent's runtime snapshot (``RuntimeStateRepository.save_task_runtime``), so a
+row names the agent whose saved work last claimed the task:
 
 - a task entering an owner's snapshot claims its row; a row held by another
   agent refuses the save (``TaskCustodyConflict``) unless the caller names
@@ -20,6 +20,12 @@ exactly while some agent's saved work holds the task:
   transaction that moves the snapshot (``transfer_on_recovery``) and refuses a
   task another agent holds;
 - clearing an owner's snapshot releases all its rows.
+
+Two gaps are expected. After a takeover, the gone holder's snapshot still
+lists the task until a replacement recovers it and leaves the task out. A
+task in a snapshot saved before this table existed has no row until that
+snapshot is restored (every restore commits through recovery, which creates
+the missing rows).
 
 Only tasks an agent executes have rows. A requester's records of the tasks it
 delegated (``subtask_to_parent_map``) share the worker's task id and never

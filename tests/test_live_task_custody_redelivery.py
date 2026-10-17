@@ -1,4 +1,5 @@
-"""A task NATS delivers again runs once (real NATS, fake models, one shared database).
+"""A task NATS delivers again after its holder saved it runs once (real NATS, fake models,
+one shared database).
 
 Reproduces the 2026-10-17 finding: an agent checked only its own records for
 duplicates, so a task delivered again while its first holder (or the
