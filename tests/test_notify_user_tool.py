@@ -698,3 +698,30 @@ def test_a_default_notice_for_another_person_goes_to_their_route_never_the_first
         _notify_user_gateway_context(
             config, target="default", source_meta=_meta_for("usr_first", session_key="session_first"), person_id="usr_ben"
         )
+
+
+def test_notify_user_says_plainly_why_a_send_did_not_finish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare TimeoutError printed as an empty string: "Failed to publish user notification: "."""
+    import asyncio
+
+    from custom_tools.providers import _runtime, communication
+
+    async def stuck_send(**_kwargs):
+        await asyncio.Event().wait()
+
+    team_comms = SimpleNamespace(send_message=AsyncMock(side_effect=stuck_send))
+    agent = _fake_agent(_write_config(tmp_path), team_comms=team_comms)
+    monkeypatch.setattr(
+        communication,
+        "_run_agent_coroutine",
+        lambda target, coroutine: _runtime._run_agent_coroutine(target, coroutine, timeout=0.05),
+    )
+    set_agent_ref(agent)
+    try:
+        result = _notify("Done with the GitHub task.")
+    finally:
+        _agent_ctx.set(None)
+    assert result["status"] == "error"
+    assert result["error"] == (
+        "Failed to publish user notification: the send did not finish within 0.05 s and was cancelled"
+    )

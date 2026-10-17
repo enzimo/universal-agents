@@ -295,6 +295,6 @@ def test_holding_a_task_for_its_workflow_keeps_the_restart_note_it_has_not_read(
 
     assert defer_workflow_completion(manager, task_id="task-lead", team_id=TEAM) is True
 
-    directive = manager.consume_runtime_resume_directive("task-lead")
+    directive = manager.read_runtime_resume_directive("task-lead")
     assert restart_note in directive
     assert "get_access_workflow" in directive

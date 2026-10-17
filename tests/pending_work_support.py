@@ -144,6 +144,8 @@ class DrainAgent:
         self._should_exit = asyncio.Event()
         self._pending_work_task: asyncio.Task | None = None
         self._pending_work_requested = False
+        self._pending_work_failures = 0
+        self._pending_work_retry: asyncio.TimerHandle | None = None
         self._pending_work_timers: set[asyncio.TimerHandle] = set()
         self._owned_tasks: set[asyncio.Task] = set()
         self._pending_interrupt_responses: dict[str, Any] = {}

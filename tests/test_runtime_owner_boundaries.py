@@ -43,7 +43,7 @@ def unexpected(name):
     return fail
 
 
-def build_turn_owner(*, invoke, guidance, committed, cleared):
+def build_turn_owner(*, invoke, guidance, committed, cleared, task_operations=None):
     decision = StructuredAgentTurnDecision(
         actions=[
             TaskResponseAction(
@@ -88,9 +88,10 @@ def build_turn_owner(*, invoke, guidance, committed, cleared):
         objective_work_coordinator=None,
         is_isolated_recovery_task=lambda task_id: False,
         is_plan_step_task=lambda task_id: False,
-        consume_runtime_resume_directive=lambda task_id: None,
-        consume_partial_tool_call_limit=lambda task_id: None,
+        read_runtime_resume_directive=lambda task_id: None,
+        read_partial_tool_call_limit=lambda task_id: None,
     )
+    tasks.update(task_operations or {})
     settings = TurnRuntimeSettings(
         id="independent",
         name="Independent",

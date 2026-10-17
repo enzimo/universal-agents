@@ -10,7 +10,9 @@ writes them (that writer is covered in ``test_runtime_restart_service``).
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections import deque
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -117,7 +119,7 @@ async def test_the_resumed_task_learns_its_restarts_happened(tmp_path: Path, cap
     manager = agent.task_manager
     assert manager.get_task_info(TASK_ID).state == ProgressState.ACCEPTED
     assert manager.has_queued_top_level_tasks()
-    directive = manager.consume_runtime_resume_directive(TASK_ID)
+    directive = manager.read_runtime_resume_directive(TASK_ID)
     assert directive is not None
     assert directive.startswith("A directive saved before the restart.")
     assert "runtime_restart_aaaaaaaaaaaa" in directive and "runtime_restart_bbbbbbbbbbbb" in directive
@@ -142,7 +144,7 @@ async def test_a_second_restart_before_the_turn_does_not_repeat_the_directive(tm
 
     await recover_runtime_after_restart(second)
 
-    directive = second.task_manager.consume_runtime_resume_directive(TASK_ID)
+    directive = second.task_manager.read_runtime_resume_directive(TASK_ID)
     assert directive is not None and directive.count("runtime_restart_aaaaaaaaaaaa") == 1
 
 
@@ -154,7 +156,7 @@ async def test_a_task_that_asked_for_no_restart_gets_no_restart_directive(tmp_pa
 
     await recover_runtime_after_restart(agent)
 
-    assert agent.task_manager.consume_runtime_resume_directive(TASK_ID) == "A directive saved before the restart."
+    assert agent.task_manager.read_runtime_resume_directive(TASK_ID) == "A directive saved before the restart."
 
 
 @pytest.mark.asyncio
@@ -165,7 +167,7 @@ async def test_other_agent_types_do_not_read_restart_receipts(tmp_path: Path) ->
 
     await recover_runtime_after_restart(agent)
 
-    assert agent.task_manager.consume_runtime_resume_directive(TASK_ID) == "A directive saved before the restart."
+    assert agent.task_manager.read_runtime_resume_directive(TASK_ID) == "A directive saved before the restart."
 
 
 @pytest.mark.asyncio
@@ -193,7 +195,7 @@ async def test_restart_outcome_survives_another_access_wait(tmp_path: Path, save
     decision = SimpleNamespace(task_id=TASK_ID, request_id="another_request",
                                status=AccessRequestStatus.GRANTED, decision_note="Continue")
     await _resume_without_live_turn(agent, decision)
-    directive = agent.task_manager.consume_runtime_resume_directive(TASK_ID)
+    directive = agent.task_manager.read_runtime_resume_directive(TASK_ID)
     assert directive is not None
     assert "runtime_restart_aaaaaaaaaaaa" in directive
     assert "Check the loaded settings" in directive
@@ -215,8 +217,10 @@ def test_notes_for_the_next_turn_are_added_never_replaced(tmp_path: Path) -> Non
     manager.append_runtime_resume_directive(TASK_ID, brief)
     manager.append_runtime_resume_directive(TASK_ID, restart_note)
 
-    assert manager.consume_runtime_resume_directive(TASK_ID) == f"{restart_note}\n\n{brief}"
-    assert manager.consume_runtime_resume_directive(TASK_ID) is None
+    note = f"{restart_note}\n\n{brief}"
+    assert manager.read_runtime_resume_directive(TASK_ID) == note
+    manager.release_runtime_resume_directive(TASK_ID, note)  # the turn that read it ended
+    assert manager.read_runtime_resume_directive(TASK_ID) is None
     assert not hasattr(manager, "record_runtime_resume_directive"), "Notes have one way in, which adds"
 
 
@@ -282,13 +286,14 @@ async def test_distinct_requester_corrections_survive_until_the_restarted_tasks_
     # Read the persisted notes through a new manager, as another restart would.
     restored = _manager(tmp_path, "TeamArchitect")
     restored.restore_runtime_state()
-    directive = restored.consume_runtime_resume_directive(TASK_ID)
+    directive = restored.read_runtime_resume_directive(TASK_ID)
     assert directive is not None
     assert "A directive saved before the restart." in directive
     assert directive.count("Runtime mid-turn interrupt response") == 2
     assert first_response in directive
     assert directive.endswith(second_response)
-    assert restored.consume_runtime_resume_directive(TASK_ID) is None
+    restored.release_runtime_resume_directive(TASK_ID, directive)
+    assert restored.read_runtime_resume_directive(TASK_ID) is None
 
 
 def test_resume_note_deduplication_matches_whole_blocks(tmp_path: Path) -> None:
@@ -304,4 +309,121 @@ def test_resume_note_deduplication_matches_whole_blocks(tmp_path: Path) -> None:
     for note in notes + notes:
         manager.append_runtime_resume_directive(TASK_ID, note)
 
-    assert manager.consume_runtime_resume_directive(TASK_ID) == "\n\n".join(notes)
+    assert manager.read_runtime_resume_directive(TASK_ID) == "\n\n".join(notes)
+
+
+def _turn_with_saved_notes(manager: TaskManager, invoke):
+    """The real turn owner, reading and releasing notes in ``manager``; and a model result."""
+    from tests.test_runtime_owner_boundaries import build_turn_owner
+
+    return build_turn_owner(
+        invoke=invoke,
+        guidance=deque(["", ""]),
+        committed=[],
+        cleared=[],
+        task_operations={
+            "read_runtime_resume_directive": manager.read_runtime_resume_directive,
+            "release_runtime_resume_directive": manager.release_runtime_resume_directive,
+            "read_partial_tool_call_limit": manager.read_partial_tool_call_limit,
+            "release_partial_tool_call_limit": manager.release_partial_tool_call_limit,
+        },
+    )
+
+
+DECISION_NOTE = "The access request this task paused for was granted. Continue the task."
+
+
+@pytest.mark.asyncio
+async def test_a_turn_cancelled_at_shutdown_keeps_its_note_through_a_restart(tmp_path: Path) -> None:
+    """2026-10-17: the note was removed at turn start, so a turn cancelled at
+    shutdown came back after the restart without the access decision it carried."""
+
+    _interrupted_task(tmp_path, "WebResearchAgent")
+    manager = _manager(tmp_path, "WebResearchAgent")
+    manager.restore_runtime_state()
+    manager.append_runtime_resume_directive(TASK_ID, DECISION_NOTE)
+    manager.record_partial_tool_call_limit(TASK_ID, 3)
+    started, prompts = asyncio.Event(), []
+
+    async def model_call(prompt, **_kwargs):
+        prompts.append(prompt)
+        started.set()
+        await asyncio.Event().wait()
+
+    executor, _ = _turn_with_saved_notes(manager, model_call)
+    turn = asyncio.create_task(
+        executor.process_llm_interaction(
+            Task(task_id=TASK_ID, task_type=MessageMetaType.REQUEST, problem_statement="1"),
+            MessageHeader(),
+            MessageMeta(),
+        )
+    )
+    await asyncio.wait_for(started.wait(), 5)
+    assert DECISION_NOTE in prompts[0]  # the turn read the note
+    turn.cancel()  # shutdown cancels the turn
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    agent = _restarted_agent(tmp_path, "WebResearchAgent")  # restarted within the grace period
+    agent._finalize_conversation_turn = AsyncMock()
+    agent._send_task_error_response = AsyncMock()
+    await recover_runtime_after_restart(agent)
+
+    restarted = agent.task_manager
+    assert restarted.get_task_info(TASK_ID).state == ProgressState.ACCEPTED
+    assert restarted.has_queued_top_level_tasks()
+    note = restarted.read_runtime_resume_directive(TASK_ID)
+    assert note is not None and DECISION_NOTE in note
+    assert restarted.read_partial_tool_call_limit(TASK_ID) == 3
+    agent._send_task_error_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_finished_turn_removes_only_the_note_it_read(tmp_path: Path) -> None:
+    """A note added while the turn runs is for the task's next turn."""
+
+    _interrupted_task(tmp_path, "WebResearchAgent")
+    manager = _manager(tmp_path, "WebResearchAgent")
+    manager.restore_runtime_state()
+    manager.record_partial_tool_call_limit(TASK_ID, 3)
+    later_note = "A failed action's recovery brief, added during the turn."
+
+    async def model_call(_prompt, **_kwargs):
+        manager.append_runtime_resume_directive(TASK_ID, later_note)
+        return result
+
+    executor, result = _turn_with_saved_notes(manager, model_call)
+    response = await executor.process_llm_interaction(
+        Task(task_id=TASK_ID, task_type=MessageMetaType.REQUEST, problem_statement="1"),
+        MessageHeader(),
+        MessageMeta(),
+    )
+    assert response.task_id == TASK_ID
+    assert manager.read_runtime_resume_directive(TASK_ID) == later_note
+    assert manager.read_partial_tool_call_limit(TASK_ID) is None
+    reloaded = _manager(tmp_path, "WebResearchAgent")
+    reloaded.restore_runtime_state()
+    assert reloaded.read_runtime_resume_directive(TASK_ID) == later_note  # saved, not only in memory
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_raises_keeps_its_note_for_the_next_attempt(tmp_path: Path) -> None:
+    """A provider failover or retry queues the task again; that turn needs the note too."""
+
+    _interrupted_task(tmp_path, "WebResearchAgent")
+    manager = _manager(tmp_path, "WebResearchAgent")
+    manager.restore_runtime_state()
+    manager.append_runtime_resume_directive(TASK_ID, DECISION_NOTE)
+
+    async def failing_model_call(_prompt, **_kwargs):
+        raise ConnectionError("the provider is unavailable")
+
+    executor, _ = _turn_with_saved_notes(manager, failing_model_call)
+    with pytest.raises(Exception):
+        await executor.process_llm_interaction(
+            Task(task_id=TASK_ID, task_type=MessageMetaType.REQUEST, problem_statement="1"),
+            MessageHeader(),
+            MessageMeta(),
+        )
+    note = manager.read_runtime_resume_directive(TASK_ID)
+    assert note is not None and DECISION_NOTE in note

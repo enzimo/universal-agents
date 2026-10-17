@@ -225,16 +225,24 @@ class AppendHistoryEntryOperation(Protocol):
     ) -> Optional[TaskHistoryEntry]: ...
 
 
-class ConsumePartialToolCallLimitOperation(Protocol):
+class ReadPartialToolCallLimitOperation(Protocol):
     def __call__(self, task_id: Optional[str]) -> Optional[int]: ...
+
+
+class ReleasePartialToolCallLimitOperation(Protocol):
+    def __call__(self, task_id: Optional[str], limit: int) -> None: ...
 
 
 class ConsumePendingProactiveGuidanceMessageOperation(Protocol):
     async def __call__(self, task_id: Optional[str]) -> str: ...
 
 
-class ConsumeRuntimeResumeDirectiveOperation(Protocol):
+class ReadRuntimeResumeDirectiveOperation(Protocol):
     def __call__(self, task_id: Optional[str]) -> Optional[str]: ...
+
+
+class ReleaseRuntimeResumeDirectiveOperation(Protocol):
+    def __call__(self, task_id: Optional[str], applied: str) -> None: ...
 
 
 class CountRecoverablePausesOperation(Protocol):
@@ -381,8 +389,11 @@ class PublishTurnMessage(Protocol):
 class TurnTaskOperations:
     runtime: TaskOperationRuntime
     append_history_entry: AppendHistoryEntryOperation
-    consume_partial_tool_call_limit: ConsumePartialToolCallLimitOperation
-    consume_runtime_resume_directive: ConsumeRuntimeResumeDirectiveOperation
+    # Read at turn start, released when the turn ends without being cancelled.
+    read_partial_tool_call_limit: ReadPartialToolCallLimitOperation
+    release_partial_tool_call_limit: ReleasePartialToolCallLimitOperation
+    read_runtime_resume_directive: ReadRuntimeResumeDirectiveOperation
+    release_runtime_resume_directive: ReleaseRuntimeResumeDirectiveOperation
     count_recoverable_pauses: CountRecoverablePausesOperation
     get_task_info: GetTaskInfoOperation
     is_isolated_recovery_task: IsIsolatedRecoveryTaskOperation

@@ -2793,13 +2793,18 @@ class TaskManager(
             self.task_state.partial_tool_call_limit_overrides[task_id] = int(limit)
         self._persist_runtime_state()
 
-    def consume_partial_tool_call_limit(self, task_id: Optional[str]) -> Optional[int]:
+    def read_partial_tool_call_limit(self, task_id: Optional[str]) -> Optional[int]:
+        """The limit the task's next turn uses; the turn releases it when it ends."""
         if not task_id:
             return None
-        limit = self.task_state.partial_tool_call_limit_overrides.pop(task_id, None)
-        if limit is not None:
-            self._persist_runtime_state()
-        return limit
+        return self.task_state.partial_tool_call_limit_overrides.get(task_id)
+
+    def release_partial_tool_call_limit(self, task_id: Optional[str], limit: int) -> None:
+        """Remove the limit a turn used, unless a newer one replaced it meanwhile."""
+        if not task_id or self.task_state.partial_tool_call_limit_overrides.get(task_id) != limit:
+            return
+        del self.task_state.partial_tool_call_limit_overrides[task_id]
+        self._persist_runtime_state()
 
     def append_runtime_resume_directive(self, task_id: str, directive: str) -> None:
         """Add to the note the task's next turn reads (the only way to leave one).
@@ -2821,13 +2826,40 @@ class TaskManager(
         self.task_state.runtime_resume_directives[task_id] = f"{earlier}\n\n{text}" if earlier else text
         self._persist_runtime_state()
 
-    def consume_runtime_resume_directive(self, task_id: Optional[str]) -> Optional[str]:
+    def read_runtime_resume_directive(self, task_id: Optional[str]) -> Optional[str]:
+        """The note for the task's next turn; the turn releases it when it ends.
+
+        A turn cancelled at shutdown never releases it, so the task's turn after
+        the restart reads it again.
+        """
         if not task_id:
             return None
-        directive = self.task_state.runtime_resume_directives.pop(task_id, None)
-        if directive is not None:
-            self._persist_runtime_state()
-        return directive
+        return self.task_state.runtime_resume_directives.get(task_id)
+
+    def release_runtime_resume_directive(self, task_id: Optional[str], applied: str) -> None:
+        """Remove the note a turn read, keeping what was added during the turn.
+
+        Notes are only ever added after the existing text
+        (``append_runtime_resume_directive``), so the note a turn read is the
+        start of the stored note.
+        """
+        if not task_id or not applied:
+            return
+        current = self.task_state.runtime_resume_directives.get(task_id)
+        if current is None:
+            return
+        if current == applied:
+            del self.task_state.runtime_resume_directives[task_id]
+        elif current.startswith(f"{applied}\n\n"):
+            self.task_state.runtime_resume_directives[task_id] = current[len(applied) + 2 :]
+        else:
+            self._logger.warning(
+                "The note for a task's next turn changed during the turn in an unexpected way; "
+                "it is kept for the next turn. event=resume_note_kept_after_turn task_id=%s",
+                task_id,
+            )
+            return
+        self._persist_runtime_state()
 
     def get_latest_pending_task_query(self, parent_task_id: str) -> Optional[TaskQuery]:
         """Return the latest unanswered TaskQuery request for the task, if any."""

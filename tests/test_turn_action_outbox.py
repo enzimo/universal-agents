@@ -1401,7 +1401,7 @@ def test_manual_signup_result_resumes_with_friendly_output_directive(tmp_path) -
 
     async def fake_process_llm_interaction(**_kwargs):
         captured["directive"] = (
-            manager.consume_runtime_resume_directive(parent.task_id) or ""
+            manager.read_runtime_resume_directive(parent.task_id) or ""
         )
         return Task(
             task_id=parent.task_id,
@@ -1453,7 +1453,7 @@ def test_credential_collection_that_continues_the_task_resumes_through_the_model
     captured: dict[str, object] = {}
 
     async def fake_process_llm_interaction(**kwargs):
-        captured["directive"] = manager.consume_runtime_resume_directive(parent.task_id) or ""
+        captured["directive"] = manager.read_runtime_resume_directive(parent.task_id) or ""
         return Task(task_id=parent.task_id, task_type=MessageMetaType.RESPONSE, answer="Linked and posted.")
 
     result = SecureCredentialCollectionResult(

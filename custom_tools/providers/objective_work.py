@@ -58,12 +58,12 @@ if TYPE_CHECKING:
 
 from custom_tools.providers._objective_profile_export import export_profile
 from custom_tools.providers._objective_work_skills import missing_objective_work_skills
+from custom_agents.pending_work_runtime import wake_scheduler
 from custom_tools.providers._runtime import (
     _get_current_task_info,
     _require_manager_tool,
     _resolve_objective_id_for_tool,
     _schedule_store,
-    _wake_agent_scheduler,
 )
 from custom_tools.providers._user_scope import _private_user_scope
 from custom_tools.providers.diagnostics import (
@@ -274,7 +274,7 @@ def _install_objective_work_schedule(
                     rollback_exc,
                 )
         raise
-    _wake_agent_scheduler(agent)
+    wake_scheduler(agent)
     return policy
 
 

@@ -293,13 +293,13 @@ class DeferredMessageInbox:
                     ]
                     await self._commit(remaining)
             except Exception:
+                # The ids are in the text: the agent log format prints no ``extra``.
                 self.logger.exception(
-                    "Deferred dispatch did not complete; retaining durable work",
-                    extra={
-                        "event": "deferred_dispatch_retained",
-                        "agent_id": self.owner.agent_id,
-                        "message_id": envelope.msg_header.message_id,
-                    },
+                    "A waiting message could not be handled and is kept. "
+                    "event=deferred_dispatch_retained agent_id=%s message_id=%s task_id=%s",
+                    self.owner.agent_id,
+                    envelope.msg_header.message_id,
+                    getattr(envelope.msg_content, "task_id", None),
                 )
                 return False
         return True

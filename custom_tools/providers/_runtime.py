@@ -1,6 +1,7 @@
 """Runtime support for the trusted Strands tool surface."""
 
 import asyncio
+import concurrent.futures
 import logging
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, Optional
 
@@ -8,7 +9,7 @@ from access_control.entities import PersonPrincipal
 from access_control.identity import IdentityRejected
 from access_control.ownership import PRIVATE_UPDATE, named_task_access, objective_access
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
-from custom_agents.pending_work_runtime import run_as_owned_task
+from custom_agents.pending_work_runtime import AgentStopping, run_as_owned_task
 from custom_agents.task_manager_objectives import ObjectiveSaveFailed
 from custom_agents.schedule_store import (
     ScheduleStore,
@@ -66,6 +67,13 @@ def _on_event_loop_thread() -> bool:
     return True
 
 
+_SEND_REFUSALS = {
+    "event_loop_thread": "the tool ran on the agent's event loop instead of a worker thread",
+    "agent_not_running": "the agent is not running",
+}
+_SHUTTING_DOWN = "the agent is shutting down, so the message was not sent"
+
+
 def _refuse_tool_send(agent: "UniversalAgent", coroutine: Any, reason: str) -> NoReturn:
     coroutine.close()
     logger.error(
@@ -74,7 +82,7 @@ def _refuse_tool_send(agent: "UniversalAgent", coroutine: Any, reason: str) -> N
         getattr(agent, "id", None),
         reason,
     )
-    raise RuntimeError(f"The tool's message was not sent ({reason}).")
+    raise RuntimeError(f"The message was not sent: {_SEND_REFUSALS[reason]}.")
 
 
 def _run_agent_coroutine(
@@ -101,6 +109,8 @@ def _run_agent_coroutine(
         run_as_owned_task(agent, coroutine, name=f"tool-send:{getattr(agent, 'id', None)}"),
         runtime_loop,
     )
+    # The tool shows these errors' text to the model, so each says why plainly
+    # (a bare TimeoutError or CancelledError prints as an empty string).
     try:
         future.result(timeout=timeout)
     except TimeoutError:
@@ -111,24 +121,9 @@ def _run_agent_coroutine(
             getattr(agent, "id", None),
             timeout,
         )
-        raise
-
-
-def _wake_agent_scheduler(agent: "UniversalAgent") -> None:
-    """Wake the agent's scheduler loop from a tool's worker thread or from the agent loop.
-
-    ``asyncio.Event`` is not thread-safe, so from another thread the event is
-    set on the agent loop. Without a running agent loop no scheduler waits on
-    the event and nothing can race with setting it directly.
-    """
-    wake = getattr(agent, "_scheduler_wake", None)
-    if wake is None:
-        return
-    runtime_loop = getattr(agent, "_runtime_loop", None)
-    if runtime_loop is None or not runtime_loop.is_running() or _on_event_loop_thread():
-        wake.set()
-        return
-    runtime_loop.call_soon_threadsafe(wake.set)
+        raise TimeoutError(f"the send did not finish within {timeout:g} s and was cancelled") from None
+    except (AgentStopping, concurrent.futures.CancelledError):
+        raise AgentStopping(_SHUTTING_DOWN) from None
 
 
 def _require_manager_tool(agent: "UniversalAgent", tool_name: str) -> Optional[str]:

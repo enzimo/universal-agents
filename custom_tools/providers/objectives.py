@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from custom_agents.strands_agent import UniversalAgent
 
 
+from custom_agents.pending_work_runtime import wake_scheduler
 from custom_tools.providers._runtime import (
     _get_current_task_info,
     _link_to_objective,
@@ -73,7 +74,6 @@ from custom_tools.providers._runtime import (
     _require_manager_tool,
     _resolve_objective_id_for_tool,
     _schedule_store,
-    _wake_agent_scheduler,
 )
 from custom_tools.providers.diagnostics import (
     _build_initial_recovery_context,
@@ -1236,7 +1236,7 @@ def start_isolated_recovery(
                 recovery_task_id,
                 checkpoint_schedule_id,
             )
-            _wake_agent_scheduler(agent)
+            wake_scheduler(agent)
         except Exception as exc:
             checkpoint_schedule = {"error": str(exc)}
 
@@ -1339,7 +1339,7 @@ def _apply_objective_lifecycle_cascade(
                     link.disabled_by_objective_pause = False
                     changed = True
         if changed:
-            _wake_agent_scheduler(agent)
+            wake_scheduler(agent)
 
     heartbeat_links = getattr(objective, "heartbeat_links", []) or []
     heartbeat_store, warnings = _objective_heartbeat_store_for_cascade(

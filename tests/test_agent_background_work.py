@@ -17,9 +17,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from custom_agents import scheduled_runtime
-from custom_agents.pending_work_runtime import close_pending_work, schedule_pending_work
+from custom_agents.pending_work_runtime import (
+    AgentStopping,
+    close_pending_work,
+    schedule_pending_work,
+    wake_scheduler,
+)
 from custom_agents.strands_agent import UniversalAgent
-from custom_tools.providers._runtime import _run_agent_coroutine, _wake_agent_scheduler
+from custom_tools.providers._runtime import _run_agent_coroutine
 from tests.broker_access_support import forget_task_context_keys
 from tests.pending_work_support import DrainAgent, use_simple_queue_checks
 
@@ -189,13 +194,14 @@ async def _send_from_tool_thread(agent, coroutine, **kwargs):
 
 @pytest.mark.asyncio
 async def test_a_tool_send_runs_on_the_agent_loop_and_finishes_first():
-    sent = []
+    agent_loop = asyncio.get_running_loop()
+    ran_on = []
 
     async def send():
-        sent.append(True)
+        ran_on.append(asyncio.get_running_loop())
 
-    await _send_from_tool_thread(_tool_agent(asyncio.get_running_loop()), send())
-    assert sent == [True]
+    await _send_from_tool_thread(_tool_agent(agent_loop), send())
+    assert ran_on == [agent_loop]  # the agent's loop and connection, never a private loop
 
 
 @pytest.mark.asyncio
@@ -215,11 +221,11 @@ async def test_a_tool_send_is_refused_from_the_event_loop_or_without_a_running_a
     agent = _tool_agent(asyncio.get_running_loop())
     coroutine = send()
     with caplog.at_level(logging.ERROR, logger="custom_tools.providers._runtime"):
-        with pytest.raises(RuntimeError, match="event_loop_thread"):
+        with pytest.raises(RuntimeError, match="the tool ran on the agent's event loop instead of a worker thread"):
             _run_agent_coroutine(agent, coroutine)
         assert coroutine.cr_frame is None  # closed, never left unawaited
         stopped = _tool_agent(None)  # no running agent loop: no private loop either
-        with pytest.raises(RuntimeError, match="agent_not_running"):
+        with pytest.raises(RuntimeError, match="the agent is not running"):
             await _send_from_tool_thread(stopped, send())
     assert caplog.text.count("event=agent_tool_send_refused") == 2
 
@@ -227,8 +233,6 @@ async def test_a_tool_send_is_refused_from_the_event_loop_or_without_a_running_a
 @pytest.mark.asyncio
 async def test_a_tool_send_after_shutdown_started_is_refused(caplog):
     """A sync tool keeps running after its turn is cancelled; its send must not publish."""
-    from custom_agents.pending_work_runtime import AgentStopping
-
     agent = _tool_agent(asyncio.get_running_loop())
     await close_pending_work(agent)
     sent = []
@@ -237,7 +241,7 @@ async def test_a_tool_send_after_shutdown_started_is_refused(caplog):
         sent.append("published after exit")
 
     with caplog.at_level(logging.WARNING, logger="test_agent_background_work"):
-        with pytest.raises(AgentStopping):
+        with pytest.raises(AgentStopping, match="^the agent is shutting down, so the message was not sent$"):
             await _send_from_tool_thread(agent, send())
     assert sent == [] and agent._owned_tasks == set()
     assert "event=owned_task_refused" in caplog.text and "tool-send:agent_tools" in caplog.text
@@ -245,8 +249,6 @@ async def test_a_tool_send_after_shutdown_started_is_refused(caplog):
 
 @pytest.mark.asyncio
 async def test_shutdown_cancels_and_joins_a_tool_send_in_progress():
-    import concurrent.futures
-
     agent = _tool_agent(asyncio.get_running_loop())
     sending, stopped = asyncio.Event(), []
 
@@ -258,11 +260,11 @@ async def test_shutdown_cancels_and_joins_a_tool_send_in_progress():
             stopped.append(True)
             raise
 
-    def tool() -> type[BaseException] | None:
+    def tool() -> Exception | None:
         try:
             _run_agent_coroutine(agent, slow_send())
         except Exception as exc:  # what the tool's own error handling receives
-            return type(exc)
+            return exc
         return None
 
     seen = asyncio.create_task(asyncio.to_thread(tool))
@@ -270,7 +272,9 @@ async def test_shutdown_cancels_and_joins_a_tool_send_in_progress():
     assert len(agent._owned_tasks) == 1
     await close_pending_work(agent)
     assert stopped == [True] and agent._owned_tasks == set()
-    assert await seen is concurrent.futures.CancelledError  # the tool reports the send as not done
+    error = await seen  # the tool reports the send as not done, and says why
+    assert isinstance(error, AgentStopping)
+    assert str(error) == "the agent is shutting down, so the message was not sent"
 
 
 @pytest.mark.asyncio
@@ -286,7 +290,7 @@ async def test_a_tool_send_that_times_out_is_cancelled(caplog):
             raise
 
     with caplog.at_level(logging.WARNING, logger="custom_tools.providers._runtime"):
-        with pytest.raises(TimeoutError):
+        with pytest.raises(TimeoutError, match="^the send did not finish within 0.05 s and was cancelled$"):
             await _send_from_tool_thread(agent, stuck_send(), timeout=0.05)
     await asyncio.wait_for(stopped.wait(), 5)  # not left running after the tool gave up
     assert "event=agent_tool_send_timed_out" in caplog.text
@@ -304,13 +308,13 @@ async def test_a_tool_wakes_the_scheduler_on_the_agent_loop():
             set_on.append(threading.get_ident())
 
     agent = SimpleNamespace(_scheduler_wake=Wake(), _runtime_loop=asyncio.get_running_loop())
-    await asyncio.to_thread(_wake_agent_scheduler, agent)  # from a tool's worker thread
+    await asyncio.to_thread(wake_scheduler, agent)  # from a tool's worker thread
     await asyncio.sleep(0)
-    _wake_agent_scheduler(agent)  # from the agent loop itself
+    wake_scheduler(agent)  # from the agent loop itself
     assert set_on == [loop_thread, loop_thread]
 
     idle = SimpleNamespace(_scheduler_wake=Wake(), _runtime_loop=None)
-    await asyncio.to_thread(_wake_agent_scheduler, idle)  # no loop runs a scheduler yet
+    await asyncio.to_thread(wake_scheduler, idle)  # no loop runs a scheduler yet
     assert len(set_on) == 3
 
 

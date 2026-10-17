@@ -593,6 +593,10 @@ class _TurnState:
     provider_retry_attempt: int = field(init=False)
     strands_invocation_attempt: int = field(init=False)
     reasoning_summary_repair_attempted: bool = field(init=False)
+    # What the turn read for itself at its start; removed only when the turn
+    # ends without being cancelled (LLMTurnExecutor._release_turn_start_state).
+    read_resume_directive: str | None = None
+    read_partial_tool_call_limit: int | None = None
 
 
 class LLMTurnExecutor:
@@ -1886,6 +1890,45 @@ class LLMTurnExecutor:
             # A turn that pauses before the model runs gives back a person's model too.
             self.effects.clear_active_execution_context()
             return early_response
+        content = await self._run_invocation(turn)
+        await self._release_turn_start_state(turn)
+        return content
+
+    async def _release_turn_start_state(self, turn: _TurnState) -> None:
+        """Remove the note and partial limit this turn read, now that it returned.
+
+        They are read, not removed, at the start of the turn, and removed only
+        when the turn returns a result. A turn that is cancelled (shutdown, a
+        stop) or raises (a provider failover or retry queues the task again)
+        leaves them for the task's next turn. Before 2026-10-17 they were
+        removed at turn start, so a turn cancelled at shutdown lost them: the
+        task resumed after the restart without, for example, the access
+        decision its note carried. Reading a note again can repeat an action
+        the earlier turn already took; the actions a note asks for
+        (apply_change, delegations) check that they apply once.
+        """
+        try:
+            if turn.read_resume_directive:
+                await self.tasks.runtime.run(
+                    self.tasks.release_runtime_resume_directive,
+                    turn.active_task_id,
+                    turn.read_resume_directive,
+                )
+            if turn.read_partial_tool_call_limit is not None:
+                await self.tasks.runtime.run(
+                    self.tasks.release_partial_tool_call_limit,
+                    turn.active_task_id,
+                    turn.read_partial_tool_call_limit,
+                )
+        except Exception:
+            self.logger.exception(
+                "Could not remove the note a finished turn read; the next turn reads it again. "
+                "event=turn_start_state_release_failed agent_id=%s task_id=%s",
+                self.settings.id,
+                turn.active_task_id,
+            )
+
+    async def _run_invocation(self, turn: _TurnState) -> ContentType:
         try:
             await self._prepare_invocation(turn)
             await self._invoke_model(turn)
@@ -2266,11 +2309,13 @@ class LLMTurnExecutor:
         tool_call_limit = self.effects.resolved_max_tool_calls_per_task()
         turn.tool_call_limit_handler = None
         runtime_resume_directive = await self.tasks.runtime.run(
-            self.tasks.consume_runtime_resume_directive, turn.active_task_id
+            self.tasks.read_runtime_resume_directive, turn.active_task_id
         )
+        turn.read_resume_directive = runtime_resume_directive
         partial_tool_call_limit = await self.tasks.runtime.run(
-            self.tasks.consume_partial_tool_call_limit, turn.active_task_id
+            self.tasks.read_partial_tool_call_limit, turn.active_task_id
         )
+        turn.read_partial_tool_call_limit = partial_tool_call_limit
         turn.partial_finalization_requested = partial_tool_call_limit is not None
         if partial_tool_call_limit is not None:
             tool_call_limit = partial_tool_call_limit

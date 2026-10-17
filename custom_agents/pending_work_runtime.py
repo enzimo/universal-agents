@@ -15,9 +15,16 @@ message, scheduler enqueues and outbox retries each started their own drain).
   request and the drain runs passes while one is recorded. While another
   holder has the slot the request stays recorded, and that holder's release
   starts the next pass (``wake_after_slot_release``, the slot's release
-  callback). A pass that ends on a failed waiting message stops the drain; the
-  request stays recorded for the next real wake-up, so a message whose
-  handler records a wake-up before failing cannot repeat in a tight loop.
+  callback).
+- A pass that fails, or ends on a waiting message that failed and was kept,
+  is retried after a delay that starts at ``FAILURE_RETRY_FIRST_SECONDS`` and
+  doubles up to ``FAILURE_RETRY_MAX_SECONDS``, resetting once a pass finishes.
+  The rule is the same whether or not the failing handler recorded a wake-up:
+  a failure never repeats in a tight loop (found 2026-10-17: a handler that
+  recorded a wake-up and then failed was retried thousands of times a second)
+  and never waits forever (a message that failed once on a short-lived error,
+  such as a locked database, stayed unhandled on an idle worker, which then
+  stopped asking for work and never retired).
 - ``wake_pending_work_after`` wakes the drain at a later time with a timer.
 - ``start_owned_task`` runs short work that is safe to stop (its durable state
   is saved before it starts; see each caller). ``run_as_owned_task`` does the
@@ -32,6 +39,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Coroutine
 from typing import Any
+
+
+FAILURE_RETRY_FIRST_SECONDS = 5.0
+FAILURE_RETRY_MAX_SECONDS = 300.0
 
 
 class AgentStopping(RuntimeError):
@@ -65,34 +76,70 @@ async def _drain_pending_work(agent: Any) -> None:
 
 
 async def _run_pass(agent: Any) -> bool:
-    """Run one pass; False ends the drain until the next wake-up.
+    """Run one pass; False ends the drain.
 
     A pass that fails, or ends on a waiting message that failed and was kept,
-    stops the drain instead of repeating the failure in a tight loop: a
-    recorded request waits for the next real wake-up.
+    ends the drain and is retried after a backoff delay (module docstring).
     """
     try:
         finished = await agent._continue_pending_work()
     except Exception:
+        delay = _retry_after_failure(agent)
         agent._logger.exception(
-            "Pending task processing failed. event=pending_work_failed agent_id=%s",
+            "Pending task processing failed; the queue drain tries again in %.0f s. "
+            "event=pending_work_failed agent_id=%s failures=%s",
+            delay,
             agent.id,
+            agent._pending_work_failures,
         )
         return False
     if not finished:
+        delay = _retry_after_failure(agent)
+        message_id, task_id = _first_waiting_message(agent)
         agent._logger.warning(
-            "A waiting message failed and was kept; the queue drain waits for the next wake-up. "
-            "event=pending_work_stopped_after_failure agent_id=%s wake_up_recorded=%s",
+            "A waiting message failed and was kept; the queue drain tries again in %.0f s. "
+            "event=pending_work_retry_scheduled agent_id=%s message_id=%s task_id=%s failures=%s",
+            delay,
             agent.id,
-            agent._pending_work_requested,
+            message_id,
+            task_id,
+            agent._pending_work_failures,
         )
         return False
+    agent._pending_work_failures = 0
     if agent.is_executing:
         # Another holder took the slot before this pass made all its checks;
         # its release starts the next pass.
         agent._pending_work_requested = True
         return False
     return True
+
+
+def _retry_after_failure(agent: Any) -> float:
+    """Arm the one backoff retry for a failed pass and return its delay.
+
+    Only the retry, or a new wake-up, runs the next pass: a wake-up the failing
+    handler recorded is dropped, so a slot release cannot retry it early.
+    """
+    failures: int = agent._pending_work_failures + 1
+    agent._pending_work_failures = failures
+    delay = min(FAILURE_RETRY_MAX_SECONDS, FAILURE_RETRY_FIRST_SECONDS * 2.0 ** min(failures - 1, 16))
+    agent._pending_work_requested = False
+    previous = agent._pending_work_retry
+    if previous is not None:
+        previous.cancel()
+        agent._pending_work_timers.discard(previous)
+    agent._pending_work_retry = wake_pending_work_after(agent, delay)
+    return delay
+
+
+def _first_waiting_message(agent: Any) -> tuple[str | None, str | None]:
+    """Message and task id of the first waiting message: the one a failed pass kept."""
+    waiting = agent.deferred_inbox.messages
+    if not waiting:
+        return None, None
+    envelope = waiting[0]
+    return envelope.msg_header.message_id, getattr(envelope.msg_content, "task_id", None)
 
 
 def wake_after_slot_release(agent: Any, owner: asyncio.Task[Any]) -> None:
@@ -109,10 +156,35 @@ def wake_after_slot_release(agent: Any, owner: asyncio.Task[Any]) -> None:
     schedule_pending_work(agent)
 
 
-def wake_pending_work_after(agent: Any, delay_seconds: float) -> None:
+def wake_scheduler(agent: Any) -> None:
+    """Wake the agent's scheduler loop from a tool's worker thread or from the agent loop.
+
+    ``asyncio.Event`` is not thread-safe, so from another thread the event is
+    set on the agent loop. Without a running agent loop no scheduler waits on
+    the event and nothing can race with setting it directly.
+    """
+    wake = getattr(agent, "_scheduler_wake", None)
+    if wake is None:
+        return
+    runtime_loop = getattr(agent, "_runtime_loop", None)
+    if runtime_loop is None or not runtime_loop.is_running() or _on_event_loop_thread():
+        wake.set()
+        return
+    runtime_loop.call_soon_threadsafe(wake.set)
+
+
+def _on_event_loop_thread() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def wake_pending_work_after(agent: Any, delay_seconds: float) -> asyncio.TimerHandle | None:
     """Wake the drain after ``delay_seconds``; shutdown cancels the timer."""
     if agent._should_exit.is_set():
-        return
+        return None
     timers: set[asyncio.TimerHandle] = agent._pending_work_timers
 
     def wake() -> None:
@@ -121,6 +193,7 @@ def wake_pending_work_after(agent: Any, delay_seconds: float) -> None:
 
     handle = asyncio.get_running_loop().call_later(max(0.0, delay_seconds), wake)
     timers.add(handle)
+    return handle
 
 
 def start_owned_task(
@@ -192,8 +265,13 @@ async def run_as_owned_task(agent: Any, coroutine: Coroutine[Any, Any, Any], *, 
 async def close_pending_work(agent: Any) -> None:
     """Stop new background work, then cancel and join what is running.
 
-    A cancelled drain may stop a model turn halfway; its task stays saved and
-    restart recovery queues it again.
+    A cancelled drain may stop a model turn halfway. Its task stays saved as in
+    progress, with the note the turn read (a turn removes it only when it ends,
+    ``LLMTurnExecutor._release_turn_start_state``). Restart recovery queues the
+    task again only if the agent restarts within
+    ``restart_executing_task_grace_seconds`` (900 s by default) of the task's
+    last saved state; after that, recovery fails the task and tells its
+    requester (``runtime_recovery.should_fail_stale_executing_recovery``).
     """
     agent._should_exit.set()
     timers: set[asyncio.TimerHandle] = agent._pending_work_timers

@@ -713,3 +713,26 @@ def test_an_mcp_requirement_needs_an_installed_server_that_names_the_worker_type
     assert attached["checks"][0]["status"] == "ready"
     assert attached["checks"][0]["tool_id"] == "mcp:crawler"
     assert attached["checks"][0]["access_level"] == "full", "an unconfirmed MCP operation needs full"
+
+
+@pytest.mark.asyncio
+async def test_configuring_a_worker_from_a_tool_thread_wakes_the_scheduler_on_its_loop(lead):
+    """configure_scheduled_worker is a sync tool: it runs in a worker thread, and
+    asyncio.Event is not thread-safe, so the scheduler is woken on the agent loop."""
+    import threading
+
+    loop_thread = threading.get_ident()
+    set_on: list[int] = []
+
+    class RecordingWake(asyncio.Event):
+        def set(self) -> None:
+            set_on.append(threading.get_ident())
+            super().set()
+
+    lead._runtime_loop = asyncio.get_running_loop()
+    lead._scheduler_wake = RecordingWake()
+    result = await asyncio.to_thread(configure, lead)  # as Strands runs the sync tool
+    await asyncio.sleep(0.05)
+    assert "error" not in result
+    assert set_on == [loop_thread]
+    assert lead._scheduler_wake.is_set()

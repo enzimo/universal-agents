@@ -1182,6 +1182,9 @@ class UniversalAgent(BaseModel):
     _pending_work_task: Optional[asyncio.Task] = PrivateAttr(default=None)
     # A wake-up arrived that the drain has not yet answered with a pass.
     _pending_work_requested: bool = PrivateAttr(default=False)
+    # Failed passes since the last finished one, and the backoff retry timer.
+    _pending_work_failures: int = PrivateAttr(default=0)
+    _pending_work_retry: Optional[asyncio.TimerHandle] = PrivateAttr(default=None)
     # Timers that wake the drain later, and short background work such as
     # sends; shutdown cancels and joins both (pending_work_runtime).
     _pending_work_timers: set[asyncio.TimerHandle] = PrivateAttr(default_factory=set)
@@ -6018,8 +6021,10 @@ class UniversalAgent(BaseModel):
                 tasks=TurnTaskOperations(
                     runtime=self.task_manager.operations_runtime,
                     append_history_entry=self.task_manager.append_history_entry,
-                    consume_partial_tool_call_limit=self.task_manager.consume_partial_tool_call_limit,
-                    consume_runtime_resume_directive=self.task_manager.consume_runtime_resume_directive,
+                    read_partial_tool_call_limit=self.task_manager.read_partial_tool_call_limit,
+                    release_partial_tool_call_limit=self.task_manager.release_partial_tool_call_limit,
+                    read_runtime_resume_directive=self.task_manager.read_runtime_resume_directive,
+                    release_runtime_resume_directive=self.task_manager.release_runtime_resume_directive,
                     count_recoverable_pauses=self.task_manager.count_recoverable_pauses,
                     get_task_info=self.task_manager.get_task_info,
                     is_isolated_recovery_task=self.task_manager.is_isolated_recovery_task,
