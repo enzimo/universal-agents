@@ -100,6 +100,7 @@ from default_values import STORAGE_DEFAULTS
 from id_generation import new_id
 from storage.after_action_report_repository import create_after_action_report_repository
 from storage.config import StorageSettings, resolve_storage_settings
+from storage.runtime_state_repository import RuntimeCustodyLost
 from storage.durable_owner_scope_repository import (
     create_durable_owner_scope_repository,
 )
@@ -2919,6 +2920,11 @@ class TaskManager(
             # Establish durable custody before history/Plan/Objective side effects.
             # A failed initial admission must not become an in-memory duplicate.
             self._persist_runtime_state(schedule_admission=schedule_admission)
+        except RuntimeCustodyLost:
+            # Another agent took this agent's saved work over: the snapshot
+            # coordinator already dropped every task from memory, this one
+            # included. The delivery is retried and admitted as a new task.
+            raise
         except Exception:
             del self.task_state.tasks[task.task_id]
             self.task_state.task_queue.remove(task.task_id)
@@ -3243,6 +3249,9 @@ class TaskManager(
             # Subtasks have their own admission boundary before history or
             # Plan/Objective side effects can describe them as accepted work.
             self._persist_runtime_state()
+        except RuntimeCustodyLost:
+            # The snapshot coordinator already dropped every task, the parent too.
+            raise
         except Exception:
             self.task_state.tasks.pop(subtask.task_id)
             self.task_state.subtask_to_parent_map.pop(subtask.task_id)

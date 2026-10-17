@@ -310,6 +310,12 @@ class AgentStatus(BaseModel):
             self.is_busy = self.is_executing
 
 
+# Fields agents exchange for liveness checks (custom_agents.agent_liveness) that
+# are never shown to a model or a person: process numbers and host names say
+# nothing useful there.
+AGENT_STATUS_RUNTIME_ONLY_FIELDS = frozenset({"process_identity"})
+
+
 class AgentStatusMap(BaseModel):
     """Map of received AgentStatus messages"""
 

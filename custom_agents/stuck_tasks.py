@@ -42,7 +42,7 @@ from typing import Any, Iterable
 
 from access_control.identity import IdentityRejected
 from custom_agents.instance_delivery_context import configured_owner_route
-from custom_agents.agent_liveness import owner_liveness, parse_utc
+from custom_agents.agent_liveness import LivenessPurpose, owner_liveness, parse_utc
 from custom_agents.liveness_observation import heartbeat_checks_deferred
 from custom_agents.stuck_work import (
     ChatRoute,
@@ -177,7 +177,9 @@ class StuckTasks:
         """
         if owner.owner_agent_id == self.agent.id:
             return None
-        decision = owner_liveness(self.agent, owner.owner_agent_id, now=now)
+        decision = owner_liveness(
+            self.agent, owner.owner_agent_id, purpose=LivenessPurpose.STUCK_TASK_NOTICE, now=now
+        )
         if not decision.gone:
             return None
         since = decision.gone_since(owner.updated_at) or now

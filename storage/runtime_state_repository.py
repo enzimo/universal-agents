@@ -455,7 +455,13 @@ class _RelationalRuntimeStateRepository:
                              (datetime.now(timezone.utc).isoformat(), owner_agent_id))
                 conn.commit()
         except RuntimeCustodyLost as lost:
-            self._log_custody_refused(lost)
+            # The coordinator knows whether this owner ever saved and logs which case it is.
+            self._logger.warning(
+                "Refused a task history write: this agent has no saved row. "
+                "event=runtime_history_write_refused owner_agent_id=%s task_id=%s",
+                lost.owner_agent_id,
+                task.task_id,
+            )
             raise
         except Exception:
             self._logger.exception("Failed to persist task history", extra={"owner_agent_id": owner_agent_id, "task_id": task.task_id})

@@ -203,3 +203,87 @@ async def test_the_deferred_inbox_refuses_to_recreate_taken_over_messages(tmp_pa
     # The refused message was never accepted; a redelivery makes a new row.
     await old_inbox.admit(_envelope("second"))
     assert len(repository.load_deferred_messages_by_owner(OLD)) == 1
+
+
+# -- review 2026-10-17: a refused admission and tasks this agent holds again ------
+
+
+def test_a_new_request_refused_by_the_custody_check_is_admitted_on_redelivery(tmp_path):
+    """The first save after the takeover is a new request: it was never saved here."""
+    old = manager(tmp_path, OLD)
+    admit(old, "work")
+    manager(tmp_path, NEW).restore_runtime_state_for_owner_ids([OLD])
+    released: list[tuple[str, ...]] = []
+    old.set_custody_lost_listener(released.append)
+    with pytest.raises(RuntimeCustodyLost):  # not a KeyError from the admission rollback
+        admit(old, "next")
+    assert released == [("work",)]
+    admit(old, "next")  # the request is redelivered
+    assert holders(old) == {NEW: ["work"], OLD: ["next"]}
+
+
+def failing_agent(task_manager: TaskManager, monkeypatch) -> SimpleNamespace:
+    agent = agent_for(task_manager, inbox_for(OLD, task_manager))
+    agent._notify_context_after_turn = AsyncMock()
+    for name in ("_conversation_store", "_conversation_compactor", "_conversation_artifact_offloader",
+                 "_conversation_summary_generator"):
+        setattr(agent, name, None)
+    agent.team_id, agent.named_agent_type = "team", "ResearchAgent"
+    monkeypatch.setattr("custom_agents.turn_failure_runtime.finalize_conversation_turn", AsyncMock())
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_a_readmitted_task_that_fails_gets_its_failure_reply(tmp_path, monkeypatch):
+    old = manager(tmp_path, OLD)
+    agent = failing_agent(old, monkeypatch)
+    install_custody_listeners(agent, interrupt_turn=_interrupt_active_execution)
+    await old.operations_runtime.run(partial(admit, old, "work"))
+    manager(tmp_path, NEW).restore_runtime_state_for_owner_ids([OLD])
+    with pytest.raises(RuntimeCustodyLost):
+        await old.operations_runtime.run(partial(admit, old, "next"))
+    await asyncio.sleep(0)
+    assert agent._custody_release.released_task_ids == {"work"}
+
+    await old.operations_runtime.run(partial(admit, old, "next"))
+    await fail_task_after_turn_error(agent, "next", old.get_task_info("next"), RuntimeError("provider timed out"))
+    agent._send_task_error_response.assert_awaited_once()
+    assert old.get_task_from_db("next") is not None  # failed and archived here
+
+
+@pytest.mark.asyncio
+async def test_a_released_task_handed_back_to_this_agent_is_its_own_again(tmp_path, monkeypatch):
+    old = manager(tmp_path, OLD)
+    agent = failing_agent(old, monkeypatch)
+    install_custody_listeners(agent, interrupt_turn=_interrupt_active_execution)
+    agent._custody_release.released_task_ids.add("work")
+    await old.operations_runtime.run(partial(admit, old, "work"))
+    await fail_task_after_turn_error(agent, "work", old.get_task_info("work"), RuntimeError("tool failed"))
+    agent._send_task_error_response.assert_awaited_once()
+    assert agent._custody_release.released_task_ids == set()
+
+
+@pytest.mark.asyncio
+async def test_recording_a_failure_is_the_first_save_after_the_takeover(tmp_path, monkeypatch):
+    """The owner does not know yet: failing the task finds its row gone, so nothing is sent."""
+    old = manager(tmp_path, OLD)
+    agent = failing_agent(old, monkeypatch)
+    install_custody_listeners(agent, interrupt_turn=_interrupt_active_execution)
+    await old.operations_runtime.run(partial(admit, old, "work"))
+    info = old.get_task_info("work")
+    manager(tmp_path, NEW).restore_runtime_state_for_owner_ids([OLD])
+    await fail_task_after_turn_error(agent, "work", info, RuntimeError("provider timed out"))
+    agent._send_task_error_response.assert_not_awaited()
+    assert holders(old) == {NEW: ["work"]}
+
+
+def test_only_a_refused_task_snapshot_save_counts_as_moved_custody():
+    agent = SimpleNamespace(_custody_release=None)
+    for store, moved in ((CustodyStore.TASK_RUNTIME, True), (CustodyStore.DEFERRED_MESSAGES, False)):
+        try:
+            try:
+                raise RuntimeCustodyLost(OLD, store)
+            except RuntimeCustodyLost as lost:
+                raise RuntimeError("turn failed") from lost
+        except RuntimeError as wrapped:
+            assert custody_moved(agent, "work", wrapped) is moved

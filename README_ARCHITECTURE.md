@@ -337,12 +337,18 @@ Four repairs keep work from getting stuck in the first place:
   its process is proven gone. A startup agent or the team lead reports its own
   process in its status (`AgentStatus.process_identity`) and is gone only when
   that process is proven gone (`runtime_hosting.process_run`); while it runs it
-  keeps its work, however old its heartbeat. Only an agent with neither record
-  is judged by its heartbeat, after
-  `agent.schedule_maintenance.stuck_tasks.owner_gone_after_seconds`. Each agent
-  marks only its own status row as exiting when it stops; the team lead removes
-  rows of agents that are gone on its own timer, so a manager-only restart no
-  longer makes running startup agents look gone.
+  keeps its work, however old its heartbeat. An agent that reports no process,
+  or whose process cannot be checked from here (logged as
+  `owner_liveness_unknown`), is judged by its heartbeat, after
+  `agent.schedule_maintenance.stuck_tasks.owner_gone_after_seconds`. The proof
+  assumes every agent process of a team is a child of one supervisor run on one
+  host: a process from another run counts as gone whatever host it names, so
+  agent processes of a second runtime sharing the database are not supported.
+  Each agent writes only its own status row as it stops (marked exiting from
+  the moment its exit begins); the team lead stores other agents' presence only
+  when it is newer, never later than its own clock, and removes rows of agents
+  that are gone on its own timer, so a manager-only restart no longer makes
+  running startup agents look gone.
 - A worker stays up while it holds any unfinished task, waiting ones included
   (`strands_team.worker_holds_work`); replies to a waiting task are addressed to
   it.

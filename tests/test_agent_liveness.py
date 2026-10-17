@@ -21,17 +21,21 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
 import custom_agents.agent_liveness as agent_liveness
 from custom_agents.agent_liveness import (
+    LivenessPurpose,
     OwnerEvidence,
     gone_owner_ids,
     own_process_identity,
     owner_liveness,
+    parse_utc,
     prune_departed_agent_rows,
     prune_departed_agent_rows_when_due,
+    received_status_time,
 )
 from custom_agents.agent_state_store import AgentStateStore
 from custom_agents.orphaned_work_takeover import _orphaned_owners, take_over_orphaned_work
@@ -46,10 +50,13 @@ from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
 from custom_messages.enums import ControlType, MessageMetaType
 from runtime_hosting.blocking_io import BlockingIOLane
 from runtime_hosting.process_run import ProcessIdentity, current_process_identity, process_start_ticks
+from storage.agent_state_repository import create_agent_state_repository
+from storage.config import resolve_storage_settings
 from tests.test_orphaned_work_takeover import held_work, launch_record
 from tests.test_schedule_worker_service import lead  # noqa: F401
 
 STARTUP = "agent_startup_worker"
+TEST = LivenessPurpose.STARTUP_TAKEOVER
 GONE_AFTER = timedelta(seconds=600)
 
 
@@ -123,8 +130,8 @@ async def test_a_live_startup_agent_with_an_old_heartbeat_keeps_its_work(team, l
     """Host sleep left the heartbeat 20 minutes old; the process still runs."""
     held_work(team, owner=STARTUP, signed=True)
     report(team, STARTUP, seen_ago=timedelta(minutes=20), identity=identity_of(live_process.pid))
-    assert owner_liveness(team, STARTUP).evidence is OwnerEvidence.PROCESS_ALIVE
-    assert await gone_owner_ids(team, [STARTUP], purpose="test") == []
+    assert owner_liveness(team, STARTUP, purpose=TEST).evidence is OwnerEvidence.PROCESS_ALIVE
+    assert await gone_owner_ids(team, [STARTUP], purpose=TEST) == []
     assert await take_over_orphaned_work(team, clock=1.0) == 0
     assert stuck_since(team, STARTUP) is None
 
@@ -133,9 +140,9 @@ async def test_a_live_startup_agent_with_an_old_heartbeat_keeps_its_work(team, l
 async def test_an_exited_startup_agent_is_taken_over_at_once(team):
     held_work(team, owner=STARTUP, signed=True)
     report(team, STARTUP, identity=exited_identity())
-    decision = owner_liveness(team, STARTUP)
+    decision = owner_liveness(team, STARTUP, purpose=TEST)
     assert (decision.evidence, decision.gone) == (OwnerEvidence.PROCESS_GONE, True)
-    assert await gone_owner_ids(team, [STARTUP], purpose="test") == [STARTUP]
+    assert await gone_owner_ids(team, [STARTUP], purpose=TEST) == [STARTUP]
     assert await take_over_orphaned_work(team, clock=1.0) == 1
 
 
@@ -145,21 +152,50 @@ def test_a_startup_agent_from_an_earlier_run_is_gone(team, live_process, monkeyp
     monkeypatch.setattr(agent_liveness, "current_process_identity", lambda: now_run)
     monkeypatch.setattr(agent_liveness, "current_run_proven", lambda: True)
     report(team, STARTUP, identity=identity_of(live_process.pid, run_id="run_before"))
-    assert owner_liveness(team, STARTUP).evidence is OwnerEvidence.PROCESS_GONE
+    assert owner_liveness(team, STARTUP, purpose=TEST).evidence is OwnerEvidence.PROCESS_GONE
 
 
-def test_unknown_process_evidence_keeps_the_owner(team, live_process):
-    report(team, STARTUP, seen_ago=timedelta(days=1), identity=identity_of(live_process.pid, hostname="another-host"))
-    decision = owner_liveness(team, STARTUP)
-    assert (decision.evidence, decision.gone) == (OwnerEvidence.PROCESS_UNKNOWN, False)
+@pytest.mark.asyncio
+async def test_an_unchecked_process_falls_back_to_the_heartbeat(team, live_process, caplog):
+    """An unproven run and a recreated container: the identity names a host this process cannot inspect.
+
+    Until review on 2026-10-17 such an owner kept its work for good: no
+    replacement, no notice, no pruning, and schedule coalescing folded every
+    new fire into its dead run.
+    """
+    held_work(team, owner=STARTUP, signed=True)
+    elsewhere = identity_of(live_process.pid, hostname="old-container")
+    report(team, STARTUP, seen_ago=timedelta(seconds=30), identity=elsewhere)
+    with caplog.at_level(logging.INFO):
+        fresh = owner_liveness(team, STARTUP, purpose=TEST)
+        owner_liveness(team, STARTUP, purpose=TEST)  # the same state is not logged again
+    assert (fresh.evidence, fresh.gone, fresh.unchecked_process) == (OwnerEvidence.HEARTBEAT_FRESH, False, elsewhere)
+    assert caplog.text.count("event=owner_liveness_unknown") == 1
+    assert caplog.text.count("event=owner_liveness_decided") == 1
+
+    report(team, STARTUP, seen_ago=GONE_AFTER + timedelta(seconds=1), identity=elsewhere)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert _orphaned_owners(team, datetime.now(timezone.utc))
+        assert stuck_since(team, STARTUP) is not None
+        assert await gone_owner_ids(team, [STARTUP], purpose=LivenessPurpose.SCHEDULE_COALESCING) == [STARTUP]
+        assert await take_over_orphaned_work(team, clock=1.0) == 1
+    # Still unknown, so not reported again; the move to a stale heartbeat is logged once.
+    assert "event=owner_liveness_unknown" not in caplog.text
+    assert caplog.text.count("event=owner_liveness_decided") == 1
+    assert "evidence=heartbeat_stale previous_evidence=heartbeat_fresh" in caplog.text
+    assert prune_departed_agent_rows(team) == 1
 
 
-def test_a_status_naming_this_process_is_judged_by_its_heartbeat(team):
+def test_the_process_rule_applies_only_to_another_process(team, live_process):
     """The process says nothing about another agent inside it (tests, in-process workers)."""
-    report(team, STARTUP, seen_ago=timedelta(minutes=20), identity=current_process_identity().text())
-    assert owner_liveness(team, STARTUP).evidence is OwnerEvidence.HEARTBEAT_STALE
+    silent = GONE_AFTER * 2
+    report(team, STARTUP, seen_ago=silent, identity=identity_of(live_process.pid))
+    assert owner_liveness(team, STARTUP, purpose=TEST).evidence is OwnerEvidence.PROCESS_ALIVE
+    report(team, STARTUP, seen_ago=silent, identity=current_process_identity().text())
+    assert owner_liveness(team, STARTUP, purpose=TEST).evidence is OwnerEvidence.HEARTBEAT_STALE
     report(team, STARTUP, identity=current_process_identity().text())
-    assert owner_liveness(team, STARTUP).evidence is OwnerEvidence.HEARTBEAT_FRESH
+    assert owner_liveness(team, STARTUP, purpose=TEST).evidence is OwnerEvidence.HEARTBEAT_FRESH
 
 
 def test_only_agents_that_are_their_own_process_publish_it(team):
@@ -180,7 +216,7 @@ async def test_every_caller_uses_one_heartbeat_threshold(team, silent_for, gone)
     report(team, STARTUP, seen_ago=silent_for)
     now = datetime.now(timezone.utc)
     # Startup takeover and schedule coalescing both ask gone_owner_ids.
-    assert (await gone_owner_ids(team, [STARTUP], purpose="test") == [STARTUP]) is gone
+    assert (await gone_owner_ids(team, [STARTUP], purpose=TEST) == [STARTUP]) is gone
     assert bool(_orphaned_owners(team, now)) is gone
     assert (stuck_since(team, STARTUP) is not None) is gone
 
@@ -262,7 +298,7 @@ async def test_new_lead_sees_startup_worker_alive_after_manager_restart(team, li
     pool_worker = SimpleNamespace(id="agent_pool", _logger=team._logger, task_manager=team.task_manager,
                                   _agent_state_store=team._agent_state_store, schedule_maintenance={},
                                   team_id="team", _local_team_runtime=team._local_team_runtime)
-    assert await gone_owner_ids(pool_worker, [STARTUP], purpose="test") == []
+    assert await gone_owner_ids(pool_worker, [STARTUP], purpose=TEST) == []
     assert team.task_manager.runtime_state_store.load_task_runtime_by_owner(STARTUP)
 
 
@@ -273,7 +309,7 @@ async def test_exited_agents_taken_over_immediately_after_full_restart(team):
     held_work(team, owner="old_worker", signed=True)
     report(team, "old_startup", exiting=True, identity=exited_identity())
     report(team, "old_worker", exiting=True)
-    assert await gone_owner_ids(team, ["old_startup", "old_worker"], purpose="test") == ["old_startup", "old_worker"]
+    assert await gone_owner_ids(team, ["old_startup", "old_worker"], purpose=TEST) == ["old_startup", "old_worker"]
 
 
 def test_prune_removes_rows_unseen_past_gone_after(team, live_process):
@@ -324,7 +360,8 @@ async def test_the_lead_prunes_on_its_own_timer(team):
 async def test_lead_stores_sender_last_seen(team, caplog):
     sent = status(STARTUP, seen_ago=timedelta(seconds=45))
     await receive(new_lead(team), sent)
-    assert team._agent_state_store.get_by_id(STARTUP).last_seen_at == sent.last_seen_at
+    stored = team._agent_state_store.get_by_id(STARTUP).last_seen_at
+    assert parse_utc(stored) == parse_utc(sent.last_seen_at)
     # A status without its time is stored with the arrival time, and that is logged.
     with caplog.at_level(logging.WARNING):
         await receive(team, status("agent_untimed", seen_ago=None))
@@ -339,8 +376,8 @@ async def test_replayed_snapshot_cannot_revive_dead_agent(team):
     lead = new_lead(team)
     await receive(lead, status("crashed_startup", identity=exited_identity()))
     await receive(lead, status("crashed_worker", seen_ago=GONE_AFTER + timedelta(seconds=5)))
-    assert owner_liveness(team, "crashed_startup").evidence is OwnerEvidence.PROCESS_GONE
-    assert owner_liveness(team, "crashed_worker").evidence is OwnerEvidence.HEARTBEAT_STALE
+    assert owner_liveness(team, "crashed_startup", purpose=TEST).evidence is OwnerEvidence.PROCESS_GONE
+    assert owner_liveness(team, "crashed_worker", purpose=TEST).evidence is OwnerEvidence.HEARTBEAT_STALE
 
 
 # -- startup takeover that loses a race ---------------------------------------------
@@ -378,3 +415,94 @@ async def test_startup_takeover_logs_a_lost_race_and_continues(team, monkeypatch
     assert "event=role_takeover_lost_race" in caplog.text
     assert starting.list_task_infos() == []
     assert [info.task.task_id for info in rival.list_task_infos()] == ["work-1"]
+
+
+# -- the lead bounds and orders the times it stores ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_sender_clock_ahead_is_capped_and_logged_when_it_starts_and_ends(team, caplog):
+    """A sender two days ahead stayed fresh and unpruned for two days."""
+    lead = new_lead(team)
+    with caplog.at_level(logging.INFO):
+        await receive(lead, status("skewed_worker", seen_ago=-timedelta(days=2)))
+        await receive(lead, status("skewed_worker", seen_ago=-timedelta(days=2)))
+        stored = parse_utc(team._agent_state_store.get_by_id("skewed_worker").last_seen_at)
+        await receive(lead, status("skewed_worker"))
+    assert stored <= datetime.now(timezone.utc)
+    assert caplog.text.count("event=agent_status_clock_ahead ") == 1
+    assert caplog.text.count("event=agent_status_clock_ahead_cleared") == 1
+    # The stored time is the arrival, so the agent ages out on the lead's clock.
+    arrived = datetime.now(timezone.utc) - GONE_AFTER * 2
+    capped = received_status_time(lead, status("skewed_worker", seen_ago=-timedelta(days=2)), now=arrived)
+    assert parse_utc(capped) == arrived
+
+
+@pytest.mark.asyncio
+async def test_a_delayed_older_status_cannot_overwrite_a_newer_row(team):
+    report(team, STARTUP, seen_ago=timedelta(seconds=5), exiting=True)  # the agent's own last write
+    await receive(new_lead(team), status(STARTUP, seen_ago=timedelta(seconds=25)))  # presence sent earlier
+    row = team._agent_state_store.get_by_id(STARTUP)
+    assert row.is_exiting is True
+    assert datetime.now(timezone.utc) - parse_utc(row.last_seen_at) < timedelta(seconds=20)
+
+
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.live)])
+def status_repository(request, tmp_path):
+    if request.param == "postgres":
+        dsn = os.environ.get("LIVE_TEST_POSTGRES_DSN")
+        if not dsn:
+            pytest.skip("LIVE_TEST_POSTGRES_DSN is required for real PostgreSQL status rows")
+        config = {"backend": "postgres", "postgres": {"dsn": dsn}}
+    else:
+        config = {"backend": "sqlite", "sqlite": {"path": str(tmp_path / "status.db")}}
+    return create_agent_state_repository(resolve_storage_settings(config))
+
+
+def test_a_received_status_is_written_only_when_newer(status_repository):
+    """One statement on both databases, whatever form the stored time text takes."""
+    agent_id = f"agent_{uuid4().hex}"
+
+    def at(text, *, exiting=False):
+        return status(agent_id, seen_ago=None, exiting=exiting).model_copy(update={"last_seen_at": text})
+
+    try:
+        assert status_repository.upsert_if_newer(at("2026-10-17T12:00:05+00:00")) is True
+        status_repository.upsert(at("2026-10-17T12:00:10.000001+00:00", exiting=True))
+        assert status_repository.upsert_if_newer(at("2026-10-17T12:00:09.999999+00:00")) is False
+        assert status_repository.get_by_id(agent_id).is_exiting is True
+        assert status_repository.upsert_if_newer(at("2026-10-17T12:00:11Z")) is True
+        row = status_repository.get_by_id(agent_id)
+        assert parse_utc(row.last_seen_at) == datetime(2026, 10, 17, 12, 0, 11, tzinfo=timezone.utc)
+    finally:
+        status_repository.remove(agent_id)
+
+
+# -- process identity stays between agents ----------------------------------------
+
+
+def test_process_identity_is_not_shown_to_models_or_people(team, monkeypatch):
+    """Run ids, host names and process numbers help nobody reading a status."""
+    from assistant_gateway.application.delivery_presentation import GatewayDeliveryPresentation
+    from custom_messages.contracts.envelope_v1 import MessageEnvelope
+    from custom_tools.providers.agent_management import get_known_agents, query_agent_state
+    from custom_tools.providers.runtime_settings import get_self_status
+
+    shown = report(team, STARTUP, identity=current_process_identity().text())
+    agent = SimpleNamespace(
+        _agent_state_store=team._agent_state_store,
+        known_agents=AgentStatusMap(agent_map={STARTUP: shown}),
+        get_self_status=lambda info_type=None: shown,
+    )
+    for module in ("agent_management", "runtime_settings"):
+        monkeypatch.setattr(f"custom_tools.providers.{module}.get_agent_ref", lambda: agent)
+    envelope = MessageEnvelope(msg_content=shown, msg_header=MessageHeader(from_agent_id=STARTUP), msg_meta=MessageMeta())
+    outputs = {
+        "get_known_agents": get_known_agents(),
+        "query_agent_state": query_agent_state(team_id="team"),
+        "get_self_status": get_self_status(),
+        "chat reply": GatewayDeliveryPresentation.render_envelope(envelope),
+    }
+    for where, text in outputs.items():
+        assert STARTUP in text, where
+        assert "process_identity" not in text, where

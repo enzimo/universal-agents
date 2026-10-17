@@ -4,8 +4,9 @@ Five places ask this question: a starting agent taking over saved work of its
 type (``runtime_recovery``, for tasks and for deferred messages), a scheduled
 fire deciding whether another worker's unfinished run is still live
 (``scheduled_runtime``), the team lead starting a replacement for a dead owner
-(``orphaned_work_takeover``) and the stuck-task notices (``stuck_tasks``). All of
-them call ``owner_liveness`` or ``gone_owner_ids`` here, so they cannot disagree.
+(``orphaned_work_takeover``) and the stuck-task notices (``stuck_tasks``); the
+lead's pruning of status rows asks it too. All of them call ``owner_liveness``
+or ``gone_owner_ids`` here, so they cannot disagree.
 
 The rule, strongest evidence first:
 
@@ -18,10 +19,12 @@ The rule, strongest evidence first:
    provably gone (``runtime_hosting.process_run``: another run of the runtime,
    or the same process number with another start time or none at all) means
    gone. A live process means the agent still runs, even while its heartbeat
-   is old or it announced its exit. When the process cannot be inspected the
-   agent keeps its work, as with a start record.
-3. Heartbeat, only for agents with neither: an announced exit or no heartbeat
-   at all means gone; otherwise silence longer than
+   is old or it announced its exit. A process that cannot be inspected from
+   here (another host, an unproven run, no ``/proc``) proves nothing either
+   way, so rule 3 decides, and ``event=owner_liveness_unknown`` is logged.
+3. Heartbeat, for agents that report no process and for processes that cannot
+   be inspected: an announced exit or no heartbeat at all means gone; otherwise
+   silence longer than
    ``agent.schedule_maintenance.stuck_tasks.owner_gone_after_seconds``. While
    the task monitor catches up after a pause (``liveness_observation``) an old
    heartbeat proves nothing.
@@ -38,6 +41,23 @@ A process says nothing about other agents inside it, so workers started inside
 a process publish no process (their start record decides), and a status that
 names the deciding process itself is judged by its heartbeat.
 
+An unknown process used to keep its work for good. On 2026-10-17 review found
+the gap: with an unproven run and a recreated container, a crashed startup
+agent's identity names the old host, so nothing replaced it, no notice went
+out, and schedule coalescing folded every new fire into its dead run. Falling
+back to the heartbeat is safe because a previous owner that is in fact still
+running cannot save the work again (``RuntimeCustodyLost``,
+``custom_agents.custody_loss``).
+
+Assumption: every agent process of a team is a child of one supervisor run on
+one host (``runtime_hosting.process_run``; the run lock refuses a second
+runtime for the instance folder). A process from another run counts as gone
+whatever host it names, so agent processes of another runtime sharing the
+database would be judged gone at once; that deployment is not supported.
+
+Each observer logs an owner's decision when it first makes it and whenever it
+changes (``event=owner_liveness_decided``), not on every pass.
+
 It depends only on stores and settings, so every runtime module may import it.
 """
 
@@ -48,7 +68,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from functools import partial
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from custom_agents.agent_state_store import AgentStateStore
 from custom_agents.liveness_observation import heartbeat_checks_deferred
@@ -64,14 +84,27 @@ from runtime_settings.stuck_tasks import StuckTaskSettings
 from storage.agent_launch_repository import ACTIVE_LAUNCH_STATES, AgentLaunchRepository
 
 _ENDED_LAUNCH_STATES = frozenset({AgentLaunchState.RETIRED, AgentLaunchState.FAILED})
+# A sender's own time may run this far ahead of the lead's clock before it is logged.
+STATUS_CLOCK_TOLERANCE = timedelta(seconds=5)
 # How often the team lead removes status rows of agents that are gone.
 AGENT_ROW_PRUNE_SECONDS = 60.0
 # What LocalAgentTeamRuntime.inspect_launch answers for a start whose process is gone.
 _LAUNCH_ABSENT = "absent"
 
 
+class LivenessPurpose(StrEnum):
+    """Which decision asked; logged with it."""
+
+    STARTUP_TAKEOVER = "startup_takeover"
+    DEFERRED_TAKEOVER = "deferred_takeover"
+    SCHEDULE_COALESCING = "schedule_coalescing"
+    REPLACEMENT_PASS = "replacement_pass"
+    STUCK_TASK_NOTICE = "stuck_task_notice"
+    STATUS_ROW_PRUNE = "status_row_prune"
+
+
 class OwnerEvidence(StrEnum):
-    """What decided whether an owner is gone; logged with every decision."""
+    """What decided whether an owner is gone; logged with the decision."""
 
     LAUNCH_ENDED = "launch_ended"
     LAUNCH_PROCESS_ABSENT = "launch_process_absent"
@@ -109,6 +142,8 @@ class OwnerLiveness:
     evidence: OwnerEvidence
     status: Optional[AgentStatus]
     launch: Optional[AgentLaunchV1]
+    # The process the owner reported, when it could not be inspected (rule 2).
+    unchecked_process: Optional[str] = None
 
     @property
     def gone(self) -> bool:
@@ -212,44 +247,87 @@ def _heartbeat_evidence(agent: Any, status: Optional[AgentStatus], now: datetime
     return OwnerEvidence.HEARTBEAT_FRESH
 
 
+def _decide(agent: Any, owner_agent_id: str, status: Optional[AgentStatus], now: datetime) -> OwnerLiveness:
+    launch = latest_launch(agent, owner_agent_id)
+    if launch is not None:
+        return OwnerLiveness(owner_agent_id, _launch_evidence(agent, launch), status, launch)
+    process = _process_evidence(status)
+    if process in (OwnerEvidence.PROCESS_GONE, OwnerEvidence.PROCESS_ALIVE):
+        return OwnerLiveness(owner_agent_id, process, status, None)
+    unchecked = status.process_identity if process is OwnerEvidence.PROCESS_UNKNOWN and status else None
+    return OwnerLiveness(owner_agent_id, _heartbeat_evidence(agent, status, now), status, None, unchecked)
+
+
+def _observer_memory(agent: Any, name: str, empty: Callable[[], Any]) -> Any:
+    """Per-observer state kept on the agent (``_liveness_decisions``, ``_status_clock_ahead``)."""
+    memory = getattr(agent, name, None)
+    if memory is None:
+        memory = empty()
+        setattr(agent, name, memory)
+    return memory
+
+
+def _note_decision(agent: Any, decision: OwnerLiveness, purpose: LivenessPurpose) -> None:
+    """Log an owner's decision the first time and whenever it changes, not on every pass."""
+    memory: dict[str, tuple[Any, ...]] = _observer_memory(agent, "_liveness_decisions", dict)
+    current = (decision.evidence, decision.unchecked_process)
+    previous = memory.get(decision.owner_agent_id)
+    if previous == current:
+        return
+    memory[decision.owner_agent_id] = current
+    last_seen = None if decision.status is None else decision.status.last_seen_at
+    if decision.unchecked_process and (previous is None or previous[1] != decision.unchecked_process):
+        agent._logger.warning(
+            "Could not check whether an agent's process still runs; judging it by its heartbeat. "
+            "event=owner_liveness_unknown purpose=%s owner_agent_id=%s process_identity=%s "
+            "gone=%s evidence=%s last_seen_at=%s",
+            purpose.value,
+            decision.owner_agent_id,
+            decision.unchecked_process,
+            decision.gone,
+            decision.evidence.value,
+            last_seen,
+        )
+    agent._logger.info(
+        "Decided whether an agent holding saved work is gone. event=owner_liveness_decided "
+        "purpose=%s owner_agent_id=%s gone=%s evidence=%s previous_evidence=%s last_seen_at=%s",
+        purpose.value,
+        decision.owner_agent_id,
+        decision.gone,
+        decision.evidence.value,
+        None if previous is None else previous[0].value,
+        last_seen,
+    )
+
+
 def owner_liveness(
     agent: Any,
     owner_agent_id: str,
     *,
+    purpose: LivenessPurpose,
     now: datetime | None = None,
     status: Optional[AgentStatus] = None,
 ) -> OwnerLiveness:
     """Decide whether one owner is gone (module docstring); ``status`` skips a second read."""
     moment = now or datetime.now(timezone.utc)
-    launch = latest_launch(agent, owner_agent_id)
     known_status = status if status is not None else lookup_owner_status(agent, owner_agent_id)
-    if launch is not None:
-        evidence = _launch_evidence(agent, launch)
-    else:
-        evidence = _process_evidence(known_status) or _heartbeat_evidence(agent, known_status, moment)
-    return OwnerLiveness(owner_agent_id, evidence, known_status, launch)
+    decision = _decide(agent, owner_agent_id, known_status, moment)
+    _note_decision(agent, decision, purpose)
+    return decision
 
 
-async def gone_owner_ids(agent: Any, owner_agent_ids: Iterable[str], *, purpose: str) -> list[str]:
-    """The owners among these that are gone, never this agent; each decision is logged."""
+async def gone_owner_ids(
+    agent: Any, owner_agent_ids: Iterable[str], *, purpose: LivenessPurpose
+) -> list[str]:
+    """The owners among these that are gone, never this agent."""
     moment = datetime.now(timezone.utc)
-    gone: list[str] = []
-    for owner_agent_id in dict.fromkeys(owner_agent_ids):
-        if not owner_agent_id or owner_agent_id == agent.id:
-            continue
-        decision = owner_liveness(agent, owner_agent_id, now=moment)
-        agent._logger.info(
-            "Decided whether an agent holding saved work is gone. event=owner_liveness_decided "
-            "purpose=%s owner_agent_id=%s gone=%s evidence=%s last_seen_at=%s",
-            purpose,
-            owner_agent_id,
-            decision.gone,
-            decision.evidence.value,
-            None if decision.status is None else decision.status.last_seen_at,
-        )
-        if decision.gone:
-            gone.append(owner_agent_id)
-    return gone
+    return [
+        owner_agent_id
+        for owner_agent_id in dict.fromkeys(owner_agent_ids)
+        if owner_agent_id
+        and owner_agent_id != agent.id
+        and owner_liveness(agent, owner_agent_id, purpose=purpose, now=moment).gone
+    ]
 
 
 def prune_departed_agent_rows(agent: Any, now: datetime | None = None) -> int:
@@ -274,9 +352,12 @@ def prune_departed_agent_rows(agent: Any, now: datetime | None = None) -> int:
         last_seen = parse_utc(status.last_seen_at)
         if last_seen is not None and moment - last_seen < gone_after:
             continue
-        decision = owner_liveness(agent, agent_id, now=moment, status=status)
+        decision = owner_liveness(
+            agent, agent_id, purpose=LivenessPurpose.STATUS_ROW_PRUNE, now=moment, status=status
+        )
         if not decision.gone or not store.remove_unseen(agent_id, status.last_seen_at):
             continue
+        _observer_memory(agent, "_liveness_decisions", dict).pop(agent_id, None)
         removed += 1
         agent._logger.info(
             "Removed the status row of an agent that is gone. event=agent_status_row_pruned "
@@ -299,3 +380,44 @@ async def prune_departed_agent_rows_when_due(agent: Any, *, clock: float | None 
     agent._agent_row_prune_after = moment + AGENT_ROW_PRUNE_SECONDS
     removed: int = await agent.task_manager.operations_runtime.run(partial(prune_departed_agent_rows, agent))
     return removed
+
+
+def received_status_time(agent: Any, status: AgentStatus, *, now: datetime | None = None) -> str:
+    """The time the lead stores for a received status: the sender's own, never later than now.
+
+    Presence is replayed when the lead subscribes, so the arrival time would
+    make an agent that just crashed look alive. The sender's time is used
+    instead, but a sender whose clock runs ahead must not stay fresh (and
+    unpruned) on that clock, so the earlier of the two is kept. Being ahead
+    by more than ``STATUS_CLOCK_TOLERANCE`` is logged when it starts and ends.
+    """
+    arrived = now or datetime.now(timezone.utc)
+    agent_id = status.self_id or ""
+    sent = parse_utc(status.last_seen_at)
+    if sent is None:
+        agent._logger.warning(
+            "An agent status arrived without the time it was sent; storing the time it "
+            "arrived. event=agent_status_without_sent_time agent_id=%s",
+            agent_id,
+        )
+        return arrived.isoformat()
+    ahead: set[str] = _observer_memory(agent, "_status_clock_ahead", set)
+    if sent - arrived > STATUS_CLOCK_TOLERANCE:
+        if agent_id not in ahead:
+            ahead.add(agent_id)
+            agent._logger.warning(
+                "An agent's clock runs ahead of the team lead's; storing the arrival time. "
+                "event=agent_status_clock_ahead agent_id=%s sent_at=%s arrived_at=%s ahead_seconds=%.1f",
+                agent_id,
+                sent.isoformat(),
+                arrived.isoformat(),
+                (sent - arrived).total_seconds(),
+            )
+    elif agent_id in ahead:
+        ahead.discard(agent_id)
+        agent._logger.info(
+            "An agent's clock no longer runs ahead of the team lead's. "
+            "event=agent_status_clock_ahead_cleared agent_id=%s",
+            agent_id,
+        )
+    return min(sent, arrived).isoformat()

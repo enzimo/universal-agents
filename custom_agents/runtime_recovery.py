@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from custom_agents.agent_liveness import gone_owner_ids
+from custom_agents.agent_liveness import LivenessPurpose, gone_owner_ids
 from custom_agents.task_human_interaction_blockers import (
     has_pending_human_interaction,
 )
@@ -232,7 +232,8 @@ async def _preserve_or_requeue_recovered_pause(
 
 def _log_lost_takeover_race(agent: Any, store: CustodyStore, owner_agent_ids: List[str]) -> None:
     agent._logger.warning(
-        "Another agent took over this saved work first; starting without it. "
+        "Could not take over this saved work: another agent took it over first, or its "
+        "owner saved it again meanwhile (so it was not gone). Starting without it. "
         "event=role_takeover_lost_race agent_id=%s store=%s owner_agent_ids=%s",
         agent.id,
         store.value,
@@ -256,7 +257,7 @@ async def _take_over_saved_tasks(agent: Any) -> Optional[Dict[str, Any]]:
         agent.team_id, agent.named_agent_type
     )
     owner_ids = await gone_owner_ids(
-        agent, [row.owner_agent_id for row in candidates], purpose="startup_takeover"
+        agent, [row.owner_agent_id for row in candidates], purpose=LivenessPurpose.STARTUP_TAKEOVER
     )
     try:
         restored: Optional[Dict[str, Any]] = await agent.task_manager.operations_runtime.run(
@@ -273,7 +274,7 @@ async def _take_over_deferred_messages(agent: Any) -> bool:
     decided: List[str] = []
 
     async def gone(owner_ids: List[str]) -> List[str]:
-        decided.extend(await gone_owner_ids(agent, owner_ids, purpose="deferred_takeover"))
+        decided.extend(await gone_owner_ids(agent, owner_ids, purpose=LivenessPurpose.DEFERRED_TAKEOVER))
         return decided
 
     try:

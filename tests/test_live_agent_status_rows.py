@@ -16,9 +16,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 from live_nats_client import resolve_live_transport_settings
 
-from custom_agents.agent_liveness import owner_liveness
+from custom_agents.agent_liveness import LivenessPurpose, owner_liveness, parse_utc
 from custom_agents.task_manager import TaskManager
 from id_generation import new_id
+from runtime_hosting.process_run import current_process_identity
 from runtime_settings.projection import _project_transport
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
@@ -65,6 +66,9 @@ async def test_live_manager_restart_keeps_startup_worker_rows(tmp_path):
             await _until(lambda: worker._worker_ready)
             store = old_lead._agent_state_store
             await _until(lambda: store.get_by_id(worker.id) is not None)
+            # The worker is its own agent here (no start record): it publishes its process.
+            assert worker.get_self_status().process_identity == current_process_identity().text()
+            assert store.get_by_id(worker.id).process_identity == current_process_identity().text()
 
             await stop("old lead")
             kept = store.get_by_id(worker.id)
@@ -76,8 +80,11 @@ async def test_live_manager_restart_keeps_startup_worker_rows(tmp_path):
             # The worker's replayed presence keeps the time the worker sent it.
             await _until(lambda: new_lead.known_agents.agent_map.get(worker.id) is not None)
             replayed = new_lead.known_agents.agent_map[worker.id]
-            assert replayed.last_seen_at <= new_lead._agent_state_store.get_by_id(worker.id).last_seen_at
-            assert owner_liveness(new_lead, worker.id).gone is False
+            stored = new_lead._agent_state_store.get_by_id(worker.id)
+            assert parse_utc(replayed.last_seen_at) <= parse_utc(stored.last_seen_at)
+            assert stored.process_identity == current_process_identity().text()
+            decision = owner_liveness(new_lead, worker.id, purpose=LivenessPurpose.STARTUP_TAKEOVER)
+            assert decision.gone is False
         finally:
             for label in list(running):
                 with contextlib.suppress(Exception):

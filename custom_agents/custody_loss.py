@@ -114,8 +114,22 @@ def _report_released_messages(agent: Any, count: int) -> None:
 
 
 def custody_moved(agent: Any, task_id: str, error: BaseException) -> bool:
-    """Whether a failed turn's task now belongs to another agent, so this agent must not fail or answer it."""
+    """Whether a failed turn's task now belongs to another agent, so this agent must not fail or answer it.
+
+    A task this agent holds again (a redelivered request, a handed-back task
+    it picked up) is its own: it leaves the released set and fails as usual.
+    Only a refused save of the task snapshot counts; a refused deferred-message
+    save says nothing about this task.
+    """
     state = getattr(agent, "_custody_release", None)
+    manager = getattr(agent, "task_manager", None)
+    if manager is not None and manager.get_task_info(task_id) is not None:
+        if state is not None:
+            state.released_task_ids.discard(task_id)
+        return False
     if state is not None and task_id in state.released_task_ids:
         return True
-    return any(isinstance(cause, RuntimeCustodyLost) for cause in iter_exception_chain(error))
+    return any(
+        isinstance(cause, RuntimeCustodyLost) and cause.store is CustodyStore.TASK_RUNTIME
+        for cause in iter_exception_chain(error)
+    )

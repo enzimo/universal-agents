@@ -15,9 +15,10 @@ class StuckTaskSettings(BaseModel):
     enabled: bool = True
     # The agent holding the task stopped reporting in (crashed, or its
     # container was replaced) and no agent took the task over. It is also the
-    # one heartbeat threshold of custom_agents.agent_liveness: an agent known
-    # only by its heartbeat (no start record, no process to inspect) counts as
-    # gone, for takeover and for these notices, after this much silence.
+    # one heartbeat threshold of custom_agents.agent_liveness: an agent without
+    # a start record that reports no process, or whose process cannot be
+    # checked, counts as gone, for takeover and these notices, after this much
+    # silence.
     owner_gone_after_seconds: float = Field(default=600, ge=60)
     # Waiting on an access decision or on the person's answer to a question.
     # Such waits may last two days, so this is a reminder, not a failure.

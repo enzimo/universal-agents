@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from custom_agents.agent_liveness import OwnerEvidence, gone_owner_ids, owner_liveness
+from custom_agents.agent_liveness import LivenessPurpose, OwnerEvidence, gone_owner_ids, owner_liveness
 from custom_agents.agent_state_store import AgentStateStore
 from custom_agents.liveness_observation import observe_liveness
 from custom_agents.orphaned_work_takeover import take_over_orphaned_work
@@ -33,6 +33,7 @@ from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
 
 DEAD = "agent_dead_worker"
+TEST = LivenessPurpose.STARTUP_TAKEOVER
 
 
 @pytest.mark.asyncio
@@ -55,7 +56,7 @@ async def test_resume_does_not_replace_a_startup_worker_with_an_old_heartbeat(le
     clock[0] += 1
     observe_liveness(lead, now=woke)
     assert await take_over_orphaned_work(lead, now=woke, clock=1.0) == 0
-    assert await gone_owner_ids(lead, [DEAD], purpose="test") == []
+    assert await gone_owner_ids(lead, [DEAD], purpose=TEST) == []
     assert lead.starts == []
 
     # After the wait, actual heartbeat evidence decides whether to replace it.
@@ -67,7 +68,7 @@ async def test_resume_does_not_replace_a_startup_worker_with_an_old_heartbeat(le
     replacements = 0 if reports_after_wake else 1
     assert await take_over_orphaned_work(lead, now=woke + timedelta(seconds=60), clock=62.0) == replacements
     assert len(lead.starts) == replacements
-    assert await gone_owner_ids(lead, [DEAD], purpose="test") == ([] if reports_after_wake else [DEAD])
+    assert await gone_owner_ids(lead, [DEAD], purpose=TEST) == ([] if reports_after_wake else [DEAD])
 
 
 @pytest.mark.asyncio
@@ -83,7 +84,7 @@ async def test_a_proven_worker_exit_is_replaced_during_resume_grace(lead, monkey
     clock[0] += 1
     observe_liveness(lead, now=before + timedelta(minutes=18))
     assert await take_over_orphaned_work(lead, clock=1.0) == 1
-    assert await gone_owner_ids(lead, [DEAD], purpose="test") == [DEAD]
+    assert await gone_owner_ids(lead, [DEAD], purpose=TEST) == [DEAD]
 
 
 def launch_record(lead, state: AgentLaunchState, agent_id: str = DEAD):
@@ -119,16 +120,16 @@ def held_work(lead, owner: str = DEAD, state: ProgressState = ProgressState.WAIT
 
 
 def test_a_launch_record_decides_whether_its_worker_is_gone(lead):
-    assert owner_liveness(lead, "agent_without_launch").launch is None
+    assert owner_liveness(lead, "agent_without_launch", purpose=TEST).launch is None
     launch_record(lead, AgentLaunchState.FAILED)
-    ended = owner_liveness(lead, DEAD)
+    ended = owner_liveness(lead, DEAD, purpose=TEST)
     assert (ended.evidence, ended.gone) == (OwnerEvidence.LAUNCH_ENDED, True)
     launch_record(lead, AgentLaunchState.READY, agent_id="agent_alive")
     lead._local_team_runtime.inspect_launch = lambda record: "ready"
-    running = owner_liveness(lead, "agent_alive")
+    running = owner_liveness(lead, "agent_alive", purpose=TEST)
     assert (running.evidence, running.gone) == (OwnerEvidence.LAUNCH_ACTIVE, False)
     lead._local_team_runtime.inspect_launch = lambda record: "absent"
-    absent = owner_liveness(lead, "agent_alive")
+    absent = owner_liveness(lead, "agent_alive", purpose=TEST)
     assert (absent.evidence, absent.gone) == (OwnerEvidence.LAUNCH_PROCESS_ABSENT, True)
 
 
@@ -138,9 +139,9 @@ async def test_a_slow_worker_with_a_stale_heartbeat_keeps_its_work(lead):
     launch_record(lead, AgentLaunchState.READY, agent_id="agent_slow")
     lead._local_team_runtime.inspect_launch = lambda record: "ready"
     lead._agent_state_store = None
-    assert await gone_owner_ids(lead, ["agent_slow"], purpose="test") == []
+    assert await gone_owner_ids(lead, ["agent_slow"], purpose=TEST) == []
     lead._local_team_runtime.inspect_launch = lambda record: "absent"
-    assert await gone_owner_ids(lead, ["agent_slow"], purpose="test") == ["agent_slow"]
+    assert await gone_owner_ids(lead, ["agent_slow"], purpose=TEST) == ["agent_slow"]
 
 
 @pytest.mark.asyncio

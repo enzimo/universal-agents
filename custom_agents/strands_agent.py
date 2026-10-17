@@ -57,7 +57,7 @@ from custom_agents.deferred_message_runtime import (
 )
 from custom_agents.agent_team_runtime import LocalAgentTeamRuntime, unregister_local_worker
 from custom_agents.liveness_observation import LivenessObservation, NATS_PRESENCE_HEARTBEAT_SECONDS
-from custom_agents.agent_liveness import own_process_identity
+from custom_agents.agent_liveness import own_process_identity, received_status_time
 from custom_agents.custody_loss import install_custody_listeners
 from custom_agents.runtime_paths import (
     agent_layout,
@@ -1188,6 +1188,10 @@ class UniversalAgent(BaseModel):
     # Saved work this agent released after another agent took it over
     # (custom_agents.custody_loss); set when the agent connects.
     _custody_release: Any = PrivateAttr(default=None)
+    # This agent's last liveness decision per owner, so each change is logged
+    # once, and senders whose clocks run ahead (agent_liveness).
+    _liveness_decisions: Dict[str, Any] = PrivateAttr(default_factory=dict)
+    _status_clock_ahead: set[str] = PrivateAttr(default_factory=set)
     _active_execution_task_id: Optional[str] = PrivateAttr(default=None)
     _stop_reasons_by_task_id: Dict[str, str] = PrivateAttr(default_factory=dict)
     # Set once this worker loses its launch lease; see lease_loss_wind_down.
@@ -5064,11 +5068,13 @@ class UniversalAgent(BaseModel):
         # starts. Join them before releasing their provider and state resources.
         await adapter.close()
 
-        # Every agent, the lead included, marks only its own status row as
-        # exiting, after its last delivery settled. The lead used to delete the
-        # whole team's rows here, so startup agents that keep running through a
-        # manager-only restart looked gone; old rows are now removed by
-        # agent_liveness.prune_departed_agent_rows.
+        # Every agent, the lead included, writes only its own status row as it
+        # stops. Once the exit flag is set every refresh already marks the row
+        # exiting, and the exit presence went out above; this last write comes
+        # after deliveries settled, so the row ends exiting whatever ran before.
+        # The lead used to delete the whole team's rows here, so startup agents
+        # that keep running through a manager-only restart looked gone; old rows
+        # are now removed by agent_liveness.prune_departed_agent_rows.
         await self._refresh_self_agent_state(is_exiting=True)
 
     async def _publish_presence_status(self, *, is_exiting: bool) -> None:
@@ -5598,16 +5604,10 @@ class UniversalAgent(BaseModel):
             f"[{self.id}] Received status update for agent '{agent_name}' ({agent_id})."
         )
 
-        # Keep the time the sender wrote. Presence is replayed when the lead
-        # subscribes, so stamping the receipt time made agents that had just
-        # crashed look alive (agent_liveness, rule 3).
-        if not agent_status.last_seen_at:
-            agent_status.last_seen_at = datetime.now(timezone.utc).isoformat()
-            self._logger.warning(
-                "An agent status arrived without the time it was sent; storing the time it "
-                "arrived. event=agent_status_without_sent_time agent_id=%s",
-                agent_id,
-            )
+        # The sender's own time, never later than now: presence is replayed
+        # when the lead subscribes, so the arrival time made agents that had
+        # just crashed look alive (agent_liveness.received_status_time).
+        agent_status.last_seen_at = received_status_time(self, agent_status)
         self.known_agents.agent_map[agent_id] = agent_status
 
         self._resolve_pending_agent_status_probes(
@@ -5619,10 +5619,12 @@ class UniversalAgent(BaseModel):
         if agent_status.name:
             self._agent_id_by_name[agent_status.name] = agent_id
 
-        # Only team leads maintain records in the persistent store
+        # Only team leads maintain records of other agents, and only with a
+        # newer time: a delayed older status must not overwrite a row the agent
+        # wrote itself (for example its exiting mark).
         if self._agent_state_store and self.is_team_lead:
             await self.task_manager.operations_runtime.run(
-                self._agent_state_store.upsert, agent_status
+                self._agent_state_store.upsert_if_newer, agent_status
             )
 
         if agent_status.is_exiting:

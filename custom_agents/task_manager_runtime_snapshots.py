@@ -28,14 +28,17 @@ from custom_messages.enums import TaskActivityStage, TaskActivityType
 class RuntimeSnapshotCoordinator:
     """Persist and restore TaskManager active-runtime snapshots.
 
-    It remembers whether this owner holds a saved row (``_holds_custody``):
-    after its first save or an adopted recovery it does, after it clears its
-    row it does not. A save made while holding one must find the row; when it
-    is gone another agent took the work over (``RuntimeCustodyLost``). The
-    coordinator then drops every task from memory in the same task-lane
-    operation, so nothing here can run or save them again, and tells the
-    custody listener (``custom_agents.custody_loss``), which stops a running
-    turn of that work.
+    It remembers whether this owner holds a saved row (``_holds_custody``)
+    and which tasks that row held (``_saved_task_ids``): after its first save
+    or an adopted recovery it holds one, after it clears its row it does not.
+    A save made while holding one must find the row; when it is gone another
+    agent took the work over (``RuntimeCustodyLost``). The coordinator then
+    drops every task from memory in the same task-lane operation, so nothing
+    here can run or save them again, and tells the custody listener
+    (``custom_agents.custody_loss``) which tasks were taken over: only those in
+    the last saved row. A task added by the refused save itself was never
+    saved here; its caller rolls the admission back and its delivery is
+    retried as a new one.
     """
 
     def __init__(
@@ -62,6 +65,7 @@ class RuntimeSnapshotCoordinator:
             task_state, plan_state, objective_state, execution_state
         )
         self._holds_custody = False
+        self._saved_task_ids: frozenset[str] = frozenset()
         self._custody_lost_listener: Optional[Callable[[tuple[str, ...]], None]] = None
 
     def set_custody_lost_listener(self, listener: Optional[Callable[[tuple[str, ...]], None]]) -> None:
@@ -70,19 +74,23 @@ class RuntimeSnapshotCoordinator:
 
     def _release_lost_custody(self, lost: RuntimeCustodyLost) -> None:
         """Forget all work in memory: its saved row now belongs to another agent."""
-        released = tuple(sorted(self.task_state.tasks))
+        released = tuple(sorted(self._saved_task_ids))
+        never_saved = sorted(set(self.task_state.tasks) - self._saved_task_ids)
         self.state.restore(
             WorkflowRuntimeState(
                 TaskRuntimeState(), PlanRuntimeState(), ObjectiveRuntimeState(), ExecutionRuntimeState()
             )
         )
         self._holds_custody = False
+        self._saved_task_ids = frozenset()
         self._logger.warning(
             "Another agent took this agent's saved work over; dropped it from memory without "
-            "saving or replying. event=runtime_custody_lost owner_agent_id=%s store=%s task_ids=%s",
+            "saving or replying. event=runtime_custody_lost owner_agent_id=%s store=%s task_ids=%s "
+            "unsaved_task_ids=%s",
             lost.owner_agent_id,
             lost.store.value,
             list(released),
+            never_saved,
         )
         if self._custody_lost_listener is None:
             return
@@ -115,6 +123,7 @@ class RuntimeSnapshotCoordinator:
             if not self.task_state.tasks:
                 self.runtime_state_store.clear_task_runtime(self.identity.owner_agent_id)
                 self._holds_custody = False
+                self._saved_task_ids = frozenset()
                 return
 
             runtime_state_json = json.dumps(self._export_runtime_state())
@@ -128,6 +137,7 @@ class RuntimeSnapshotCoordinator:
                 **({"schedule_admission": schedule_admission} if schedule_admission is not None else {}),
             )
             self._holds_custody = True
+            self._saved_task_ids = frozenset(self.task_state.tasks)
         except RuntimeCustodyLost as lost:
             self._release_lost_custody(lost)
             raise
@@ -153,6 +163,12 @@ class RuntimeSnapshotCoordinator:
                 raise
         # Never saved: the task was not admitted durably, so nothing was taken
         # over. Raised outside the handler so no custody loss travels with it.
+        self._logger.error(
+            "A task history write came before this agent ever saved the task. "
+            "event=task_history_before_admission owner_agent_id=%s task_id=%s",
+            self.identity.owner_agent_id,
+            task_id,
+        )
         raise RuntimeRecoveryConflict("Task history requires existing durable task custody")
 
     def get_stored_runtime_team_id(self) -> Optional[str]:
@@ -196,6 +212,7 @@ class RuntimeSnapshotCoordinator:
             )
             committed = True
             self._holds_custody = True
+            self._saved_task_ids = frozenset(self.task_state.tasks)
             self._reconcile_restored_plans()
             self._persist_runtime_state()
             self._logger.info("Restored %s active tasks for %s", len(restored.task_state.tasks), self.identity.owner_agent_id)

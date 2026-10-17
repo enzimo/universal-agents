@@ -368,7 +368,7 @@ async def _coalesce_into_run_elsewhere(
     new fire must not run beside it. Only runs whose owner is still live count,
     so a crashed worker's leftover receipt cannot block the schedule forever.
     """
-    from custom_agents.agent_liveness import gone_owner_ids
+    from custom_agents.agent_liveness import LivenessPurpose, gone_owner_ids
 
     records = agent._schedule_store.worker_records
     unfinished = [
@@ -383,7 +383,9 @@ async def _coalesce_into_run_elsewhere(
         return False
     stale = set(
         await gone_owner_ids(
-            agent, sorted({record.agent_id for record in unfinished}), purpose="schedule_coalescing"
+            agent,
+            sorted({record.agent_id for record in unfinished}),
+            purpose=LivenessPurpose.SCHEDULE_COALESCING,
         )
     )
     live = sorted(
