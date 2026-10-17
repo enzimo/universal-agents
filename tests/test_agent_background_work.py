@@ -112,6 +112,7 @@ def test_a_fired_schedule_wakes_the_retained_drain(tmp_path, monkeypatch):
     runs.record_people(world, (runs.ANN, PersonStanding.ACTIVE, ("member",)))
     runs.save_schedule(world)
     renew_schedule_permits(world.manager, signer=world.signer)
+    world.worker.is_executing = False  # no turn holds the slot, so the drain runs a pass
 
     async def fire_and_wait():
         await runs.subscribe(world)
@@ -178,3 +179,22 @@ async def test_agent_tools_refuse_to_leave_sends_running_from_the_event_loop(cap
     worker.start()
     await asyncio.to_thread(worker.join, 5)
     assert sent == [True]
+
+
+def test_the_agent_runs_a_drain_pass_when_another_holder_releases_the_slot(tmp_path):
+    from tests.test_turn_action_outbox import _make_agent
+
+    agent = _make_agent(tmp_path)
+    object.__setattr__(agent, "_continue_pending_work", AsyncMock())
+
+    async def scenario():
+        async def other_holder():
+            async with agent._execution_gate.hold():
+                await asyncio.sleep(0)
+
+        await asyncio.create_task(other_holder())
+        assert agent._pending_work_task is not None
+        await asyncio.wait_for(agent._pending_work_task, 5)
+
+    asyncio.run(scenario())
+    agent._continue_pending_work.assert_awaited_once()

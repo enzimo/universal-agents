@@ -350,3 +350,34 @@ async def test_user_stop_cancels_sdk_child_without_cancelling_its_owner(host):
     finally:
         host.provider.release.set()
         await asyncio.gather(running, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_gate_release_callback_runs_once_per_outer_hold_even_when_cancelled():
+    released = []
+    gate = AgentExecutionGate(on_release=released.append)
+
+    async def holder():
+        async with gate.hold():
+            async with gate.hold():  # nested in the same task: no release yet
+                pass
+            assert released == []
+
+    owner = asyncio.create_task(holder())
+    await owner
+    assert released == [owner]
+
+    entered = asyncio.Event()
+
+    async def cancelled_holder():
+        async with gate.hold():
+            entered.set()
+            await asyncio.Event().wait()
+
+    stopped = asyncio.create_task(cancelled_holder())
+    await entered.wait()
+    stopped.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopped
+    assert released == [owner, stopped]
+    assert not gate.busy

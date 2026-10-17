@@ -1,6 +1,7 @@
 from __future__ import annotations
 from unittest.mock import AsyncMock
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -331,3 +332,82 @@ async def test_install_notification_rejects_tampered_managed_tree(
         )
     assert list_agent_skill_names(plugin, specialist._strands_agent) == ["base"]
     assert "Managed skill contents changed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_skill_reload_does_not_yield_to_event_loop(tmp_path: Path, monkeypatch) -> None:
+    """A skill reload must finish before any other work, such as a turn, can start.
+
+    The idle check before a reload does not hold the execution slot. That is
+    safe only because reloading with the runtime's file access (the Strands
+    agent's default sandbox; UniversalAgent sets none) never yields to the
+    event loop, as checked on 2026-10-17. If a Strands upgrade makes skill file
+    reads yield, this test fails: then hold the execution slot for the reload.
+    """
+    import custom_agents.skill_catalog_runtime as catalog_runtime
+    from strands import Agent
+
+    from tests.test_agent_execution_ownership import HeldModel
+
+    config, config_path = _instance(tmp_path)
+    specialist, _plugin = await _specialist_runtime(config, config_path)
+    specialist._strands_agent.sandbox = Agent(model=HeldModel(), callback_handler=None).sandbox
+    events: list[str] = []
+    original = catalog_runtime._hydrate_skill_plugins
+
+    async def traced(agent, *, changed):
+        events.append("reload_started")
+        try:
+            return await original(agent, changed=changed)
+        finally:
+            events.append("reload_finished")
+
+    monkeypatch.setattr(catalog_runtime, "_hydrate_skill_plugins", traced)
+    stop = asyncio.Event()
+
+    async def other_work() -> None:
+        while not stop.is_set():
+            events.append("other_work")
+            await asyncio.sleep(0)
+
+    other = asyncio.create_task(other_work())
+    await asyncio.sleep(0)
+    managed_root = Path(specialist.additional_skill_directories[0])
+    _write_skill(managed_root, "grill-me")
+    digest = _write_attestation(specialist, "grill-me")
+    _write_receipt(
+        specialist,
+        operation="install",
+        change_id=INSTALL_CHANGE_ID,
+        skill_name="grill-me",
+        installed_tree_sha256=digest,
+    )
+    manager, published = _manager_runtime()
+    await publish_managed_skill_catalog_notification(
+        manager,
+        {"change_id": INSTALL_CHANGE_ID, "skill_name": "grill-me", "installed_tree_sha256": digest},
+        operation="install",
+    )
+    notice = published[0]
+    try:
+        assert await handle_managed_skill_catalog_notification(
+            specialist, notification=notice.msg_content, msg_header=notice.msg_header, msg_meta=notice.msg_meta
+        )
+        _write_skill(managed_root, "second-skill")
+        _write_attestation(specialist, "second-skill")
+        assert await repair_agent_skill_catalog(specialist, reason="presence_heartbeat")
+    finally:
+        stop.set()
+        await other
+
+    assert events.count("reload_started") == 2
+    window: list[str] = []
+    inside = False
+    for event in events:
+        if event == "reload_started":
+            inside = True
+        elif event == "reload_finished":
+            inside = False
+        elif inside:
+            window.append(event)
+    assert window == [], "a skill reload let other work run halfway through"

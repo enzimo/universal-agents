@@ -13,11 +13,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
 from custom_agents import task_message_runtime
 from custom_agents.deferred_message_runtime import DeferredInboxOwner, DeferredMessageInbox
+from custom_agents.pending_work_runtime import wake_after_slot_release
 from custom_agents.strands_agent import UniversalAgent
 from custom_agents.task_operation_runtime import TaskOperationRuntime
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
@@ -139,10 +141,11 @@ class DrainAgent:
         self.paused = False
         self._should_exit = asyncio.Event()
         self._pending_work_task: asyncio.Task | None = None
+        self._pending_work_requested = False
         self._pending_work_timers: set[asyncio.TimerHandle] = set()
         self._owned_tasks: set[asyncio.Task] = set()
         self._pending_interrupt_responses: dict[str, Any] = {}
-        self._execution_gate = AgentExecutionGate()
+        self._execution_gate = AgentExecutionGate(on_release=partial(wake_after_slot_release, self))
         self._active_execution_task_id = None
         self._lease_loss_wind_down = None
         self._logger = logging.getLogger("tests.pending_work_support")

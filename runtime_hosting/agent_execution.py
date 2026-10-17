@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 
@@ -14,11 +14,17 @@ class AgentExecutionGate:
     Ownership belongs to an asyncio task, not a context variable inherited by
     background tasks. Waiting or cancelled contenders cannot release the owner.
     This is a runtime-local resource; durable task custody remains in the stores.
+
+    ``on_release`` is called with the owning task each time an outer hold ends,
+    including when the owner is cancelled. The agent uses it to start a queue
+    drain after another holder (``pending_work_runtime.wake_after_slot_release``).
+    It must not block.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, on_release: Callable[[asyncio.Task[Any]], None] | None = None) -> None:
         self._lock = asyncio.Lock()
         self._owner: asyncio.Task[Any] | None = None
+        self.on_release = on_release
 
     @property
     def busy(self) -> bool:
@@ -43,3 +49,5 @@ class AgentExecutionGate:
         finally:
             self._owner = None
             self._lock.release()
+            if self.on_release is not None:
+                self.on_release(owner)

@@ -8,6 +8,14 @@ message, scheduler enqueues and outbox retries each started their own drain).
 - Every wake-up of the queue drain goes through ``schedule_pending_work``. The
   drain runs in one retained task, never inside a delivery callback or the
   scheduler loop, so neither waits for a model turn.
+- A wake-up is never lost (found 2026-10-17: a wake-up merged into a pass that
+  had already made its checks was dropped, and the drain did nothing while
+  another holder had the execution slot, so a quiet worker left a saved
+  message waiting for unrelated traffic). ``schedule_pending_work`` records a
+  request and the drain runs passes while one is recorded. While another
+  holder has the slot the request stays recorded, and that holder's release
+  starts the next pass (``wake_after_slot_release``, the slot's release
+  callback).
 - ``wake_pending_work_after`` wakes the drain at a later time with a timer.
 - ``start_owned_task`` runs short work that is safe to stop (its durable state
   is saved before it starts; see each caller).
@@ -23,9 +31,14 @@ from typing import Any
 
 
 def schedule_pending_work(agent: Any) -> None:
-    """Coalesce wakeups and retain the task so shutdown can join its cleanup."""
+    """Record a wake-up and make sure the retained drain runs.
+
+    A paused agent records nothing: ``resume`` wakes the drain. Once the agent
+    is stopping nothing starts.
+    """
     if agent.paused or agent._should_exit.is_set():
         return
+    agent._pending_work_requested = True
     pending = agent._pending_work_task
     if pending is None or pending.done():
         agent._pending_work_task = asyncio.create_task(
@@ -34,13 +47,36 @@ def schedule_pending_work(agent: Any) -> None:
 
 
 async def _drain_pending_work(agent: Any) -> None:
-    try:
-        await agent._continue_pending_work()
-    except Exception:
-        agent._logger.exception(
-            "Pending task processing failed. event=pending_work_failed agent_id=%s",
-            agent.id,
-        )
+    """Run passes while a wake-up is recorded.
+
+    A failed pass is logged and ends the drain; a recorded request then waits
+    for the next wake-up instead of repeating the failure in a tight loop.
+    """
+    while agent._pending_work_requested and not (agent.paused or agent._should_exit.is_set()):
+        if agent.is_executing:
+            return  # the holder's release starts the next pass
+        agent._pending_work_requested = False
+        try:
+            await agent._continue_pending_work()
+        except Exception:
+            agent._logger.exception(
+                "Pending task processing failed. event=pending_work_failed agent_id=%s",
+                agent.id,
+            )
+            return
+
+
+def wake_after_slot_release(agent: Any, owner: asyncio.Task[Any]) -> None:
+    """The execution slot's release callback: run a pass after another holder.
+
+    A delivery, a parent resume or the scheduler's orphaned-slot check may hold
+    the slot while work is saved or freed; the drain waits for this release.
+    The drain's own releases start nothing: it continues by itself, and a pass
+    started from them could repeat a failing step without end.
+    """
+    if owner is agent._pending_work_task:
+        return
+    schedule_pending_work(agent)
 
 
 def wake_pending_work_after(agent: Any, delay_seconds: float) -> None:

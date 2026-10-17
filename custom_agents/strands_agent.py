@@ -234,6 +234,7 @@ from custom_agents.pending_work_runtime import (
     close_pending_work,
     schedule_pending_work,
     start_owned_task,
+    wake_after_slot_release,
 )
 from custom_agents.objective_work_completion import prepare_objective_work_completion
 from custom_agents.sdk.strands import turn as llm_turn_runtime
@@ -1179,10 +1180,12 @@ class UniversalAgent(BaseModel):
     _execution_gate: AgentExecutionGate = PrivateAttr(default_factory=AgentExecutionGate)
     _active_execution_task: Optional[asyncio.Task] = PrivateAttr(default=None)
     _pending_work_task: Optional[asyncio.Task] = PrivateAttr(default=None)
+    # A wake-up arrived that the drain has not yet answered with a pass.
+    _pending_work_requested: bool = PrivateAttr(default=False)
     # Timers that wake the drain later, and short background work such as
     # sends; shutdown cancels and joins both (pending_work_runtime).
     _pending_work_timers: set[asyncio.TimerHandle] = PrivateAttr(default_factory=set)
-    _owned_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
+    _owned_tasks: set[asyncio.Task[None]] = PrivateAttr(default_factory=set)
     # Next time to look for decided access requests whose notice never arrived
     # (access_request_runtime.resume_decided_access_waits).
     _decided_access_check_after: float = PrivateAttr(default=0.0)
@@ -1300,6 +1303,9 @@ class UniversalAgent(BaseModel):
         local_team_runtime = kwargs.pop("local_team_runtime", None)
         super().__init__(**kwargs)
         self._local_team_runtime = local_team_runtime
+        # Work saved or freed while another holder had the slot gets a drain
+        # pass when that holder lets go (pending_work_runtime).
+        self._execution_gate.on_release = partial(wake_after_slot_release, self)
 
         self._configured_model_provider = self.model_provider
         self._configured_model_id = self.model_id
