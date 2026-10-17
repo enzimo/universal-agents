@@ -203,11 +203,14 @@ does not wait for a second confirmation.
 
 A change never overwrites a newer one. If the schedule was paused, turned off,
 changed or deleted after your assistant read it, the change is refused and the
-assistant reads the schedule again; the controls on the Schedules page do the
-same when the schedule changed after the page showed it. A run that writes its
-notes never undoes your change, and pausing a schedule while it runs does not
-make that run happen again when you resume it. A one-time schedule always runs
-once: asking for more runs needs an interval or a cron time.
+assistant reads the schedule again. The controls on the Schedules page are
+refused the same way when someone changed the schedule after the page showed
+it; a run that only moved its next run time or wrote its notes does not count,
+so a schedule that runs often can still be paused. A run that writes its notes
+never undoes your change. Pausing or turning off a schedule just before a run
+starts stops that run, and pausing it while it runs does not make that run
+happen again when you resume it. A one-time schedule always runs once: asking
+for more runs needs an interval or a cron time.
 
 The runtime notices and reports; it does not guarantee a repair. Disallowed
 types, missing tools or credentials, or a stopped team lead can still need an
@@ -517,10 +520,13 @@ schedule (`cron_timezone`) when it is created:
   when the person asks for another zone. `update_scheduled_job` changes it the
   same way, and schedule listings show it.
 
-When clocks go back, the times of the repeated hour happen twice; a daily
-schedule at such a time (01:30 in New York, 02:30 in Berlin) still runs only
-once that night. When clocks go forward, a time in the skipped hour runs at the
-first time after it: a 02:30 schedule runs at 03:00 that day.
+Daylight saving changes follow the classic cron rule. When clocks go back, the
+times of the repeated hour happen twice: a schedule at fixed times of day (01:30
+in New York, 02:30 in Berlin, or `0,30 1 * * *`) runs once at each of its times
+that night, while an hourly or every-few-minutes schedule (`0 * * * *`,
+`*/30 * * * *`) runs in both copies of the hour, as in every other real hour.
+When clocks go forward, a time in the skipped hour runs at the first time after
+it: a 02:30 schedule runs at 03:00 that day.
 
 Interval schedules ("every 6 hours") do not depend on a time zone. Objective
 work plans use their `cadence_timezone`, which is `owner` by default (see

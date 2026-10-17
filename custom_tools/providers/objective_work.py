@@ -192,8 +192,11 @@ def _rollback_objective_work_schedule(
         owner_canonical_user_id=owner_canonical_user_id,
         candidate=existing_schedule,
     )
-    store.add(
+    # Restored against the installed schedule as just read: refused if it
+    # changed or went away meanwhile, and never recreated.
+    store.update(
         existing_schedule,
+        base=persisted_candidate,
         system_mutation_permit=rollback_permit,
         system_mutation_operation=ScheduleMutationOperation.UPDATE,
     )

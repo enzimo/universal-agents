@@ -155,7 +155,7 @@ class ScheduleRepository(Protocol):
         claimer_agent_id: str,
     ) -> bool: ...
 
-    def prune_expired(self, *, now_iso: str) -> int: ...
+    def prune_expired(self, *, now_iso: str) -> list[str]: ...
 
     def get_next_wake_time(self) -> Optional[str]: ...
 
@@ -503,18 +503,21 @@ class _RelationalScheduleRepository:
             conn.commit()
             return cursor.rowcount > 0
 
-    def prune_expired(self, *, now_iso: str) -> int:
+    def prune_expired(self, *, now_iso: str) -> list[str]:
+        """Delete schedules past their end; returns their ids (the store ends their access)."""
+
         with self._connect() as conn:
-            cursor = conn.execute(
+            rows = conn.execute(
                 f"""
                 DELETE FROM scheduled_messages
                  WHERE expires_at_utc IS NOT NULL
                    AND expires_at_utc <= {self._dialect.bind}
+                RETURNING schedule_id
                 """,
                 (now_iso,),
-            )
+            ).fetchall()
             conn.commit()
-            return int(cursor.rowcount or 0)
+        return [str(row[0]) for row in rows]
 
     def get_next_wake_time(self) -> Optional[str]:
         with self._connect() as conn:

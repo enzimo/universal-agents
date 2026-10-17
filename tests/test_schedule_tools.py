@@ -1357,3 +1357,31 @@ def test_recurring_fired_schedule_keeps_history_without_followup_delivery_obliga
     assert turn is not None
     assert turn["followup_to_task_id"] is None
     assert conversation_store.get_turn_by_task_id("task_prior_fire") is not None
+
+
+def test_notify_user_records_run_notes_only_on_a_schedule_the_task_may_record(tmp_path: Path):
+    """notify_user wrote notes on whatever schedule the task's metadata named, unlike record_scheduled_run."""
+    from custom_tools.providers.communication import _record_schedule_notification_if_active
+
+    db_path = str(tmp_path / "task_history.db")
+    owner = _FakeAgent(db_path)
+    set_agent_ref(owner)
+    schedule_id = json.loads(
+        create_scheduled_job(instruction="Check match state.", schedule_name="match monitor", interval_seconds=60)
+    )["schedule_id"]
+    someone_else = _FakeAgent(db_path, canonical_user_id="usr_sched_b")
+    someone_else.task_manager._task_info.meta.gateway_context.scheduled_job_id = schedule_id
+    set_agent_ref(someone_else)
+
+    refused = _record_schedule_notification_if_active(someone_else, message="Hello", notification_id="note_1", reason="")
+
+    assert refused == {"recorded": False, "reason": "schedule_not_recordable", "schedule_id": schedule_id}
+    assert someone_else._schedule_store.get_scheduled_message(schedule_id).schedule_memory.ledger.total_notifications == 0
+
+    owner.task_manager._task_info.meta.gateway_context.scheduled_job_id = schedule_id
+    set_agent_ref(owner)
+    recorded = _record_schedule_notification_if_active(owner, message="Hello", notification_id="note_2", reason="")
+
+    assert recorded == {"recorded": True, "schedule_id": schedule_id}
+    memory = owner._schedule_store.get_scheduled_message(schedule_id).schedule_memory
+    assert memory.ledger.total_notifications == 1

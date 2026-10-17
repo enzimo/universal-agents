@@ -289,11 +289,15 @@ writes in one write transaction (`ScheduleRepository.write_locked`: SQLite's
 write lock, or PostgreSQL's schedule-id and row locks). A run changes only its
 notes; an edit made to a copy read earlier is refused when the schedule is gone
 or someone changed it meanwhile, and keeps the next run time, count and notes
-unless it set them; turning on and off, pausing and resuming keep the claim;
-and the advance after a run applies only while its agent holds the claim and
-the claimed run time still stands. Before, saves replaced whole rows with
-copies read earlier, which could bring back a deleted schedule, undo a pause,
-or make a run happen twice.
+unless it set them; turning on and off, pausing and resuming keep the claim,
+and whoever starts or signs a claimed run checks again that the schedule is
+on, not paused and not ended; and the advance after a run applies only while
+its agent holds the claim and the claimed run time still stands. The Schedules
+page binds its controls to the schedule as listed without its next run time
+and run notes (`schedule_listing_digest`), so a schedule that runs often can
+still be paused. Before, saves replaced whole rows with copies read earlier,
+which could bring back a deleted schedule, undo a pause, or make a run happen
+twice.
 
 Whether a worker start's process is gone is proven, never assumed from a timeout
 (`runtime_hosting.process_run`). The supervisor holds an exclusive lock on

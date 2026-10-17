@@ -55,7 +55,8 @@ from custom_tools.providers._runtime import (
     _schedule_store,
 )
 from custom_agents.schedule_fields import schedule_memory_now
-from custom_tools.providers.schedules import _resolve_active_schedule_id
+from custom_agents.schedule_store import OwnerGuard, owner_canonical_user_id_for_schedule
+from custom_tools.providers.schedules import _owned_or_denial, _resolve_active_schedule_id
 
 _MEMORY_NOTIFICATION_REASON_MARKERS = (
     "memory",
@@ -578,6 +579,11 @@ def _record_schedule_notification_if_active(
         return {"recorded": False, "reason": "no_active_schedule"}
     try:
         store = _schedule_store(agent)
+        # The same check as record_scheduled_run: the person's own schedule, or
+        # in system work only the schedule its signed context names.
+        scheduled_message, denial = _owned_or_denial(agent, store, schedule_id, flag="recorded")
+        if denial is not None or scheduled_message is None:
+            return {"recorded": False, "reason": "schedule_not_recordable", "schedule_id": schedule_id}
         summary = _compact_notify_user_message(message)
 
         def record(memory: ScheduleTaskMemory) -> bool:
@@ -595,7 +601,8 @@ def _record_schedule_notification_if_active(
             )
             return True
 
-        if store.edit_schedule_memory(schedule_id, record) is None:
+        owner_guard = OwnerGuard(owner_canonical_user_id_for_schedule(scheduled_message))
+        if store.edit_schedule_memory(schedule_id, record, owner_guard=owner_guard) is None:
             return {
                 "recorded": False,
                 "reason": "schedule_not_found",

@@ -44,9 +44,12 @@ from custom_messages.contracts.routing_v1 import (
     MessageMeta,
 )
 from custom_messages.contracts.schedule_v1 import (
+    SCHEDULE_CHANGED_SINCE_LISTED,
     SYSTEM_SCHEDULE_CHANGE_NOT_ALLOWED,
+    SYSTEM_SCHEDULE_CHANGE_REFUSED,
     ManagerScheduleCommand,
     ScheduledMessage,
+    schedule_listing_digest,
 )
 from custom_messages.contracts.task_v1 import Task, TaskProgressStatus
 from custom_messages.enums import (
@@ -491,7 +494,7 @@ async def test_authenticated_gateway_can_remove_owned_system_schedule(
     refused_command = ManagerScheduleCommand(
         action="remove",
         schedule_id="hb_sched_manager_control",
-        expected_record_digest=contract_sha256(current.model_dump(mode="json")),
+        expected_record_digest=schedule_listing_digest(current),
     )
     await handle_manager_schedule_command(
         agent, command=refused_command, msg_header=header, msg_meta=meta
@@ -529,7 +532,7 @@ async def test_authenticated_gateway_can_remove_owned_system_schedule(
     assert stale_response.message == "schedule_changed"
     unchanged = store.get_scheduled_message("hb_sched_manager_control")
     assert unchanged is not None
-    command.expected_record_digest = contract_sha256(unchanged.model_dump(mode="json"))
+    command.expected_record_digest = schedule_listing_digest(unchanged)
     await handle_manager_schedule_command(
         agent,
         command=command,
@@ -557,6 +560,7 @@ async def test_authenticated_gateway_can_remove_owned_system_schedule(
         (False, ["member"], None, True),
         (True, ["admin"], "cancel", True),
         (True, ["admin"], "schedule_changed", True),
+        (True, ["admin"], "permit_refused", True),
         (True, ["admin"], "decision_failed", True),
     ],
 )
@@ -618,7 +622,10 @@ async def test_slow_schedule_permission_keeps_loop_responsive_and_precedes_mutat
                 command=ManagerScheduleCommand(
                     action="remove",
                     schedule_id=schedule.schedule_id,
-                    expected_record_digest=contract_sha256(schedule.model_dump(mode="json")),
+                    # Without a listed digest, only the store's permit check sees the change.
+                    expected_record_digest=(
+                        None if interruption == "permit_refused" else schedule_listing_digest(schedule)
+                    ),
                 ),
                 msg_header=MessageHeader(from_agent_id="gateway", response_routing_key="gateway"),
                 msg_meta=MessageMeta(gateway_context=_signed(
@@ -638,7 +645,7 @@ async def test_slow_schedule_permission_keeps_loop_responsive_and_precedes_mutat
             task.cancel()
             await asyncio.sleep(0)
             assert not task.done(), "Cancellation must join the in-flight lookup"
-        elif interruption == "schedule_changed":
+        elif interruption in ("schedule_changed", "permit_refused"):
             candidate = schedule.model_copy(update={"paused_until": "2030-01-01T00:00:00+00:00"})
             operation = manager_control_runtime.ScheduleMutationOperation.PAUSE
             permit = manager_control_runtime._authenticated_gateway_schedule_permit(
@@ -654,12 +661,13 @@ async def test_slow_schedule_permission_keeps_loop_responsive_and_precedes_mutat
                 await task
             assert store.get_scheduled_message(schedule.schedule_id) is not None
             assert not agent.team_comms.messages
-        elif interruption == "schedule_changed":
-            # The listed schedule is checked in the store's write transaction:
-            # the person is told it changed and nothing is removed.
+        elif interruption in ("schedule_changed", "permit_refused"):
+            # The listed schedule and the permit are checked in the store's
+            # write transaction: the person is told why and nothing is removed.
             await task
             response = agent.team_comms.messages[-1].msg_content
-            assert (response.success, response.message) == (False, "schedule_changed")
+            expected = SCHEDULE_CHANGED_SINCE_LISTED if interruption == "schedule_changed" else SYSTEM_SCHEDULE_CHANGE_REFUSED
+            assert (response.success, response.message) == (False, expected)
             assert store.get_scheduled_message(schedule.schedule_id).paused_until == candidate.paused_until
         elif interruption == "decision_failed":
             with pytest.raises(RuntimeError, match="Permission evaluator failed"):

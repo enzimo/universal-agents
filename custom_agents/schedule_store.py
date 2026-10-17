@@ -22,13 +22,17 @@ reminder so that it could never finish. Now:
   count and the run notes unless the change itself changed them.
 - ``edit_schedule_memory`` changes only the run notes.
 - Turning on and off, pausing, resuming and removing change only their own
-  fields, and never clear a claim: the claim holder's admission re-checks
-  enabled and pause (``ScheduleWorkerRepository.commit_admission``), and its
-  advance (``update_after_fire``) writes only the run time, the count and the
-  claim.
+  fields, and never clear a claim. A run that has not started is still
+  stopped: whoever starts or signs it checks the schedule again
+  (``schedule_stopped_reason``), and typed root jobs again at admission
+  (``ScheduleWorkerRepository.commit_admission``). The advance after a run
+  (``update_after_fire``) writes only the run time, the count and the claim.
+- Every deletion (``remove``, the advance that finishes a schedule,
+  ``prune_expired``) ends the schedule's access grants.
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -46,7 +50,6 @@ from custom_agents.schedule_management import (
     schedule_control_state_digest,
     schedule_reviewed_state_digest,
 )
-from custom_messages.contracts.common_v1 import contract_sha256
 from custom_messages.enums import ScheduleManagementClass
 from custom_messages.contracts.routing_v1 import PERSON_GATEWAY_FIELDS
 from default_values import STORAGE_DEFAULTS
@@ -236,10 +239,13 @@ def compute_next_fire_at(
     fills one when a schedule is added (``prepare_schedule_for_add``).
 
     ``previous_fire_at`` is the run just made. When clocks go back, the
-    repeated hour's local times come twice; a result with the same local date
-    and time as that run is skipped, so "30 1 * * *" runs once that night.
-    When clocks go forward, a time in the skipped hour runs at the first time
-    after it (02:30 runs at 03:00).
+    repeated hour's local times come twice. A schedule at fixed times of day
+    (``_fixed_time_of_day``: "30 1 * * *", "0,30 1 * * *") skips results whose
+    local time is not later than that run's, so it runs once per time that
+    night, as classic cron does. A schedule with a wildcard, step or range in
+    its minute or hour ("0 * * * *", "*/30 * * * *") runs every real hour,
+    the repeated one included. When clocks go forward, a time in the skipped
+    hour runs at the first time after it (02:30 runs at 03:00).
     """
     if from_time is None:
         from_time = datetime.now(timezone.utc)
@@ -251,24 +257,57 @@ def compute_next_fire_at(
     if cron_expression is not None:
         if not cron_timezone:
             raise ValueError(f"The cron schedule {cron_expression!r} has no time zone.")
-        from croniter import croniter
-
         if from_time.tzinfo is None:
             from_time = from_time.replace(tzinfo=timezone.utc)
-        zone = ZoneInfo(cron_timezone)
-        runs = croniter(cron_expression, from_time.astimezone(zone))
-        next_time = runs.get_next(datetime)
-        if previous_fire_at is not None and _same_local_time(next_time, previous_fire_at, zone):
-            next_time = runs.get_next(datetime)
-        return next_time.astimezone(timezone.utc).isoformat()
+        return _next_cron_run(cron_expression, from_time, ZoneInfo(cron_timezone), previous_fire_at)
 
     raise ValueError("Either interval_ms or cron_expression must be provided.")
 
 
-def _same_local_time(candidate: datetime, previous: datetime, zone: ZoneInfo) -> bool:
-    """Whether two moments show the same local date and wall-clock time in ``zone``."""
+def _next_cron_run(
+    cron_expression: str, from_time: datetime, zone: ZoneInfo, previous_fire_at: Optional[datetime]
+) -> str:
+    """The next cron run after ``from_time`` in ``zone``, by the classic rule for daylight saving changes."""
 
-    return candidate.astimezone(zone).replace(tzinfo=None) == previous.astimezone(zone).replace(tzinfo=None)
+    from croniter import croniter
+
+    runs = croniter(cron_expression, from_time.astimezone(zone))
+    next_time = runs.get_next(datetime)
+    if previous_fire_at is not None and _fixed_time_of_day(cron_expression):
+        previous_local = _local_wall_time(previous_fire_at, zone)
+        # Only the repeated hour can give such results, at most 60 of them.
+        for _ in range(_MAX_REPEATED_HOUR_RESULTS):
+            if _local_wall_time(next_time, zone) > previous_local:
+                break
+            next_time = runs.get_next(datetime)
+    return next_time.astimezone(timezone.utc).isoformat()
+
+
+_MAX_REPEATED_HOUR_RESULTS = 61
+# Cron shorthands at fixed times of day, and the one that is not.
+_FIXED_TIME_SHORTHANDS = frozenset({"@yearly", "@annually", "@monthly", "@weekly", "@daily", "@midnight"})
+_FIXED_FIELD = re.compile(r"\d+(,\d+)*")
+
+
+def _fixed_time_of_day(cron_expression: str) -> bool:
+    """Whether a cron expression runs only at fixed local times of day.
+
+    Both its minute and hour fields are numbers or lists of numbers: no
+    ``*``, step or range. Classic cron runs such a job once per time when
+    clocks go back, and every other job every real hour.
+    """
+
+    text = cron_expression.strip().lower()
+    if text.startswith("@"):
+        return text in _FIXED_TIME_SHORTHANDS
+    fields = text.split()
+    return len(fields) >= 2 and all(_FIXED_FIELD.fullmatch(field) for field in fields[:2])
+
+
+def _local_wall_time(moment: datetime, zone: ZoneInfo) -> datetime:
+    """The local date and wall-clock time of a moment in ``zone``, without its offset."""
+
+    return moment.astimezone(zone).replace(tzinfo=None, fold=0)
 
 
 def _valid_zone(name: Any) -> Optional[str]:
@@ -369,9 +408,14 @@ _CLEARED_CLAIM: dict[str, Any] = {
 
 
 def schedule_record_digest(schedule: "ScheduledMessage") -> str:
-    """The digest of a schedule as listed to people (the gateway's ``expected_record_digest``)."""
+    """The digest of a schedule as listed to people (the gateway's ``expected_record_digest``).
 
-    return contract_sha256(schedule.model_dump(mode="json"))
+    Leaves out what runs change by themselves (``schedule_listing_digest``).
+    """
+
+    from custom_messages.contracts.schedule_v1 import schedule_listing_digest
+
+    return schedule_listing_digest(schedule)
 
 
 def _stored_message(row: Mapping[str, Any]) -> "ScheduledMessage":
@@ -464,6 +508,52 @@ def _memory_json(memory: Optional["ScheduleTaskMemory"]) -> Optional[dict[str, A
     return memory.model_dump(mode="json") if memory is not None else None
 
 
+def _mark_memory_changed(memory: "ScheduleTaskMemory") -> None:
+    memory.updated_at = schedule_memory_now()
+    trim_schedule_memory_ledger(memory)
+
+
+def _edited_memory(
+    stored: Optional["ScheduleTaskMemory"], edit: Callable[["ScheduleTaskMemory"], Any]
+) -> "ScheduleTaskMemory":
+    """A copy of the stored run notes (or new ones) with ``edit`` applied."""
+
+    from custom_messages.contracts.schedule_v1 import ScheduleTaskMemory
+
+    memory = stored.model_copy(deep=True) if stored is not None else ScheduleTaskMemory()
+    edit(memory)
+    _mark_memory_changed(memory)
+    return memory
+
+
+# Why a claimed schedule must not start its run (``schedule_stopped_reason``).
+SCHEDULE_TURNED_OFF = "turned_off"
+SCHEDULE_PAUSED = "paused"
+SCHEDULE_ENDED = "ended"
+
+
+def schedule_stopped_reason(schedule: "ScheduledMessage", now: datetime) -> Optional[str]:
+    """Why a claimed schedule must not start a run now (turned off, paused or past its end), or None.
+
+    Claiming checks the same, but control changes keep the claim, so a person
+    can pause or turn off a schedule after it was claimed and before its run
+    starts. Whoever starts or signs the run checks again with the schedule
+    as it is now (``scheduled_runtime._fire_claimed_schedule``,
+    ``scheduled_run_contexts``); typed root jobs are also checked at admission
+    (``ScheduleWorkerRepository.commit_admission``).
+    """
+
+    if not schedule.enabled:
+        return SCHEDULE_TURNED_OFF
+    pause = _parse_utc_datetime(schedule.paused_until)
+    if pause and pause > now:
+        return SCHEDULE_PAUSED
+    end = _parse_utc_datetime(schedule.expires_at_utc)
+    if end and end <= now:
+        return SCHEDULE_ENDED
+    return None
+
+
 def _claim_live(row: Mapping[str, Any], now: datetime) -> bool:
     expires = _parse_utc_datetime(row.get("claim_expires_at"))
     return bool(row.get("claimed_by_agent_id")) and expires is not None and expires > now
@@ -485,8 +575,8 @@ NO_REPEAT_TIMING = "no_repeat_timing"
 def _after_run(row: Mapping[str, Any], previous_due: Optional[str], now: datetime) -> _AfterRun:
     """The run time and count after one run of the row's schedule (``update_after_fire``).
 
-    The next run is computed from the run's due time, or from now when the run
-    was late, so runs missed while nothing ran are not made up.
+    The next run is computed from the later of now and the run's due time, so
+    runs missed while nothing ran are not made up.
     """
 
     expires = _parse_utc_datetime(row.get("expires_at_utc"))
@@ -522,6 +612,31 @@ def _require_record_digest(current: "ScheduledMessage", expected: Optional[str])
             current.schedule_id,
             f"Schedule {current.schedule_id} changed after it was listed; nothing was changed.",
         )
+
+
+def _after_retimed_run(row: Mapping[str, Any], *, release_claim: bool) -> RowWrite:
+    """The advance after a run during which someone set a new next run time.
+
+    The new run time stands; the run that happened still counts, so a counted
+    series loses one run (and finishes when that was its last), and the claim
+    is released.
+    """
+
+    remaining = row.get("remaining_count")
+    if remaining is not None and remaining - 1 <= 0:
+        return RowWrite(delete=True, result=(AdvanceOutcome.FINISHED, _AfterRun(None, None, "last_run")))
+    columns: dict[str, Any] = dict(_CLEARED_CLAIM) if release_claim else {}
+    if remaining is not None:
+        columns["remaining_count"] = remaining - 1
+    return RowWrite(columns=columns, result=(AdvanceOutcome.DUE_CHANGED, None))
+
+
+def is_final_run(row: Mapping[str, Any]) -> bool:
+    """Whether the row's next run is its last: one run left, or a one-time schedule."""
+
+    remaining = row.get("remaining_count")
+    recurring = row.get("interval_ms") is not None or bool(row.get("cron_expression"))
+    return remaining == 1 or (not recurring and remaining is None)
 
 
 class ScheduleStore:
@@ -646,6 +761,7 @@ class ScheduleStore:
         *,
         base: "ScheduledMessage",
         remaining_count: Any = _UNSET_REMAINING_COUNT,
+        memory_edit: Optional[Callable[["ScheduleTaskMemory"], Any]] = None,
         system_mutation_permit: Optional[ScheduleMutationPermit] = None,
         system_mutation_operation: ScheduleMutationOperation = ScheduleMutationOperation.UPDATE,
         system_mutation_request_binding: Optional[dict[str, Any]] = None,
@@ -659,9 +775,11 @@ class ScheduleStore:
         count. Kept from the stored row unless the change itself changed
         them: the next run time (new timing or a new time), the remaining
         count (a new repeat count, or ``remaining_count`` when the change
-        sets the count again) and the run notes. The claim is always kept.
-        A system-managed schedule needs the exact permit for its current
-        state, checked in the same transaction.
+        sets the count again) and the run notes. A policy change to the run
+        notes is given as ``memory_edit`` and applied to the notes as stored
+        (no I/O). The claim is always kept. A system-managed schedule needs
+        the exact permit for its current state, checked in the same
+        transaction.
         """
 
         prepare_schedule_for_add(candidate, default_cron_timezone=self.default_cron_timezone)
@@ -689,7 +807,9 @@ class ScheduleStore:
             written = candidate.model_copy(deep=True)
             if not _next_run_changed(candidate, base):
                 written.next_fire_at = row["next_fire_at"]
-            if _memory_json(candidate.schedule_memory) == _memory_json(base.schedule_memory):
+            if memory_edit is not None:
+                written.schedule_memory = _edited_memory(_stored_message(row).schedule_memory, memory_edit)
+            elif _memory_json(candidate.schedule_memory) == _memory_json(base.schedule_memory):
                 written.schedule_memory = _stored_message(row).schedule_memory
             if remaining_count is not _UNSET_REMAINING_COUNT:
                 remaining = remaining_count
@@ -821,7 +941,8 @@ class ScheduleStore:
     def _end_schedule_access(self, schedule_id: str) -> None:
         """End the access a deleted schedule holds (``SubjectKind.SCHEDULE`` grants).
 
-        Every deletion comes through ``remove``, so this is the one place. A
+        Every deletion calls it: ``remove``, the advance that removes a
+        finished schedule (``update_after_fire``) and ``prune_expired``. A
         failure is logged; the grants stay listed but no run can use them.
         """
 
@@ -857,10 +978,11 @@ class ScheduleStore:
         In one write transaction, and only while this agent still holds the
         claim (when given) and the next run time is still ``due_at``, the run
         that was claimed. An edit that set a new run time during the run wins:
-        nothing is advanced and the claim is released. Writes only the run
-        time, the remaining count and the claim, so a pause or turn-off made
-        during the run stays. The caller logs an outcome that is not
-        ``applied``.
+        the run still counts against a counted series and the claim is
+        released (``_after_retimed_run``). Writes only the run time, the
+        remaining count and the claim, so a pause or turn-off made during the
+        run stays. The next run is computed from the later of now and
+        ``due_at``. The caller logs an outcome that is not ``applied``.
         """
 
         now = datetime.now(timezone.utc)
@@ -873,7 +995,7 @@ class ScheduleStore:
             ):
                 return RowWrite(result=(AdvanceOutcome.CLAIM_LOST, None))
             if due_at is not None and row.get("next_fire_at") != due_at:
-                return RowWrite(columns=_CLEARED_CLAIM if claim_token else {}, result=(AdvanceOutcome.DUE_CHANGED, None))
+                return _after_retimed_run(row, release_claim=bool(claim_token))
             after = _after_run(row, due_at or row.get("next_fire_at"), now)
             if after.next_fire_at is None:
                 return RowWrite(delete=True, result=(AdvanceOutcome.FINISHED, after))
@@ -884,18 +1006,22 @@ class ScheduleStore:
             result: tuple[AdvanceOutcome, Optional[_AfterRun]] = self._repository.write_locked(schedule_id, decide).result
         except Exception:
             self._logger.exception(
-                "Could not move a schedule on after its run. event=schedule_advance_failed schedule_id=%s due_at=%s",
+                "Could not move a schedule on after its run. event=schedule_advance_failed "
+                "schedule_id=%s due_at=%s agent_id=%s",
                 schedule_id,
                 due_at,
+                claimer_agent_id,
             )
             return AdvanceOutcome.FAILED
         outcome, after = result
-        self._log_advance(schedule_id, outcome, after, due_at)
+        self._log_advance(schedule_id, outcome, after)
+        if outcome is AdvanceOutcome.FINISHED:
+            self._end_schedule_access(schedule_id)
         return outcome
 
-    def _log_advance(
-        self, schedule_id: str, outcome: AdvanceOutcome, after: Optional[_AfterRun], due_at: Optional[str]
-    ) -> None:
+    def _log_advance(self, schedule_id: str, outcome: AdvanceOutcome, after: Optional[_AfterRun]) -> None:
+        """Log an advance that applied; the caller logs one that did not (``scheduled_runtime``)."""
+
         if outcome is AdvanceOutcome.ADVANCED and after is not None:
             remaining = "infinite" if after.remaining_count is None else str(after.remaining_count)
             self._logger.info(
@@ -909,10 +1035,6 @@ class ScheduleStore:
             )
         elif outcome is AdvanceOutcome.FINISHED and after is not None:
             self._logger.info("Schedule %s finished after its run (%s); removed.", schedule_id, after.reason)
-        else:
-            self._logger.info(
-                "Schedule %s was not moved on after its run. outcome=%s due_at=%s", schedule_id, outcome.value, due_at
-            )
 
     def get_all_enabled(self) -> List[dict]:
         try:
@@ -995,17 +1117,20 @@ class ScheduleStore:
         now_dt = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         try:
             pruned = self._repository.prune_expired(now_iso=now_dt.isoformat())
-            if pruned:
-                self._logger.warning(
-                    "Pruned %s expired scheduled message%s at %s.",
-                    pruned,
-                    "" if pruned == 1 else "s",
-                    now_dt.isoformat(),
-                )
-            return pruned
         except Exception as e:
             self._logger.error(f"Failed to prune expired schedules: {e}")
             return 0
+        if pruned:
+            self._logger.warning(
+                "Pruned %s expired scheduled message%s at %s. schedule_ids=%s",
+                len(pruned),
+                "" if len(pruned) == 1 else "s",
+                now_dt.isoformat(),
+                ",".join(pruned),
+            )
+        for schedule_id in pruned:
+            self._end_schedule_access(schedule_id)
+        return len(pruned)
 
     def build_telemetry_snapshot(
         self,
@@ -1249,14 +1374,14 @@ class ScheduleStore:
         propagate so the caller refuses and logs rather than guessing.
         """
 
-        row = self._repository.get_schedule_row(schedule_id)
-        if not row or len(row) < 18 or not claim_token or not claimer_agent_id:
+        row = self._row(schedule_id)
+        if not row or not claim_token or not claimer_agent_id:
             return False
-        claimed_by, token, expires_at = row[15], row[16], _parse_utc_datetime(row[17])
+        expires_at = _parse_utc_datetime(row.get("claim_expires_at"))
         moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         return (
-            token == claim_token
-            and claimed_by == claimer_agent_id
+            row.get("claim_token") == claim_token
+            and row.get("claimed_by_agent_id") == claimer_agent_id
             and expires_at is not None
             and expires_at > moment
         )
@@ -1348,8 +1473,9 @@ class ScheduleStore:
         One write transaction checks ``expected_record_digest`` (the listed
         schedule a person acted on; ``ScheduleWriteConflict`` when it changed)
         and the permit against the current row, then writes only these fields.
-        The claim is kept: a claim holder's admission re-checks enabled and
-        pause, and its advance writes only the run time, count and claim.
+        The claim is kept: a run that has not started is stopped where it
+        starts (``schedule_stopped_reason``), and the advance after a run
+        writes only the run time, count and claim.
         """
 
         def decide(row: Optional[dict[str, Any]]) -> RowWrite:
@@ -1380,16 +1506,20 @@ class ScheduleStore:
     def turn_off_missed_run(self, schedule_id: str, *, due_at: str, now: datetime) -> bool:
         """Turn off a schedule whose final run is too late, only if that run is still waiting.
 
-        One conditional write: the schedule is still on, its next run time is
-        still ``due_at`` and nobody holds a live claim (a worker may have just
-        claimed and started it). System-managed schedules are never turned off
-        here (no permit). False when nothing was changed.
+        One conditional write: the schedule is still on, not paused and not
+        ended, its next run time is still ``due_at``, that run is still its
+        last (``is_final_run``: nobody raised the count meanwhile) and nobody
+        holds a live claim (a worker may have just claimed and started it).
+        System-managed schedules are never turned off here (no permit). False
+        when nothing was changed.
         """
 
         def decide(row: Optional[dict[str, Any]]) -> RowWrite:
-            if row is None or not row.get("enabled") or row.get("next_fire_at") != due_at or _claim_live(row, now):
+            if row is None or row.get("next_fire_at") != due_at or not is_final_run(row):
                 return RowWrite(result=False)
             current = _row_message(row, self._logger)
+            if schedule_stopped_reason(current, now) is not None or _claim_live(row, now):
+                return RowWrite(result=False)
             require_schedule_mutation_permit(
                 current,
                 operation=ScheduleMutationOperation.DISABLE,
@@ -1434,8 +1564,7 @@ class ScheduleStore:
             result = edit(memory)
             if _memory_json(memory) == before:
                 return RowWrite(result=result)
-            memory.updated_at = schedule_memory_now()
-            trim_schedule_memory_ledger(memory)
+            _mark_memory_changed(memory)
             stored.schedule_memory = memory
             return RowWrite(columns={"schedule_json": stored.model_dump_json()}, result=result)
 
@@ -1464,8 +1593,8 @@ class ScheduleStore:
 
         from custom_messages.contracts.access_v2 import SignedSchedulePermitV1
 
-        row = self._repository.get_schedule_row(schedule_id)
-        raw = row[21] if row and len(row) > 21 else None
+        row = self._row(schedule_id)
+        raw = row.get("run_permit_json") if row else None
         if not raw:
             return None
         try:

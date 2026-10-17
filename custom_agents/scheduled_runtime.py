@@ -55,10 +55,12 @@ from custom_agents.orphaned_work_takeover import take_over_orphaned_work
 from custom_agents.turn_failure_runtime import release_orphaned_slot_when_idle
 from custom_agents.schedule_store import (
     DEFAULT_SCHEDULE_CLAIM_TTL_SECONDS,
+    AdvanceOutcome,
     compute_next_fire_at,
     owner_canonical_user_id_for_schedule,
     prepare_schedule_for_add,
     schedule_claim_scope_for_agent,
+    schedule_stopped_reason,
 )
 from custom_agents.schedule_management import (
     ScheduleMutationAuthorityMode,
@@ -2061,6 +2063,12 @@ async def _fire_claimed_schedule(
             raise ValueError(
                 f"ScheduledMessage {schedule_id} could not be reconstructed."
             )
+        # Control changes keep the claim, so a pause or turn-off after the
+        # claim must still stop a run that has not started.
+        stopped = schedule_stopped_reason(scheduled_message, datetime.now(timezone.utc))
+        if stopped is not None:
+            await _release_stopped_claim(agent, schedule_id, claim_token, stopped)
+            return
         from custom_agents.schedule_occurrences import prepare_occurrence
 
         admission = prepare_occurrence(agent, scheduled_message, claim_token)
@@ -2108,13 +2116,33 @@ async def _fire_claimed_schedule(
         await sleep_fn(1)
 
 
+async def _release_stopped_claim(agent: Any, schedule_id: str, claim_token: Optional[str], reason: str) -> None:
+    """Skip the run of a schedule paused, turned off or ended after it was claimed, and release the claim."""
+    agent._logger.info(
+        "A claimed schedule was paused, turned off or ended before its run started; the run is skipped "
+        "and the claim released. event=scheduled_run_skipped_schedule_stopped agent_id=%s schedule_id=%s reason=%s",
+        agent.id,
+        schedule_id,
+        reason,
+    )
+    if claim_token:
+        await agent.task_manager.operations_runtime.run(
+            agent._schedule_store.release_claim,
+            schedule_id,
+            claim_token=claim_token,
+            claimer_agent_id=agent.id,
+        )
+
+
 async def _advance_after_admission(agent: Any, claimed_schedule: dict[str, Any]) -> None:
-    """Move the schedule past the occurrence just admitted; a move that did not apply is an anomaly.
+    """Move the schedule past the occurrence just admitted, and log a move that did not apply.
 
     The move is tied to this agent's claim and the claimed run time
-    (``ScheduleStore.update_after_fire``). When it does not apply, the
-    occurrence may stay due: a typed root job's occurrence receipt keeps it
-    from running again, other schedules may run it again.
+    (``ScheduleStore.update_after_fire``, which logs moves that applied and
+    storage failures). A schedule removed or given a new run time during the
+    run is normal (info). Another agent holding the claim is an anomaly
+    (warning): the occurrence may stay due, and only a typed root job's
+    occurrence receipt keeps it from running again.
     """
     schedule_id = claimed_schedule["schedule_id"]
     due_at = claimed_schedule.get("next_fire_at")
@@ -2125,15 +2153,21 @@ async def _advance_after_admission(agent: Any, claimed_schedule: dict[str, Any])
         claimer_agent_id=agent.id,
         due_at=due_at,
     )
-    if not outcome.applied:
-        agent._logger.warning(
-            "A scheduled run was admitted, but its schedule was not moved on to its next run. "
-            "event=schedule_advance_not_applied agent_id=%s schedule_id=%s due_at=%s outcome=%s",
-            agent.id,
-            schedule_id,
-            due_at,
-            outcome.value,
-        )
+    if outcome.applied or outcome is AdvanceOutcome.FAILED:
+        return
+    log = agent._logger.info if outcome in _EXPECTED_ADVANCE_MISSES else agent._logger.warning
+    log(
+        "A scheduled run was admitted, but its schedule was not moved on to its next run. "
+        "event=schedule_advance_not_applied agent_id=%s schedule_id=%s due_at=%s outcome=%s",
+        agent.id,
+        schedule_id,
+        due_at,
+        outcome.value,
+    )
+
+
+# Not moving on after these is normal: the schedule was removed, or given a new run time, during the run.
+_EXPECTED_ADVANCE_MISSES = frozenset({AdvanceOutcome.NOT_FOUND, AdvanceOutcome.DUE_CHANGED})
 
 
 async def _idle_sleep_seconds(agent: Any, can_claim_scheduled_work: bool) -> float:

@@ -354,6 +354,40 @@ def _update_controls(candidate: ScheduledMessage, update: ScheduleUpdateV1, chan
         changes["expires_at_utc"] = candidate.expires_at_utc
 
 
+def memory_policy_edit(update: ScheduleUpdateV1) -> Optional[Callable[[ScheduleTaskMemory], dict[str, Any]]]:
+    """The edit an update makes to the run notes' policy (notify, evidence, kind), or None.
+
+    The store applies it to the notes as stored when the change is saved
+    (``ScheduleStore.update(memory_edit=...)``), so notes a run wrote after the
+    schedule was read stay. Clearing or replacing the notes is a whole-notes
+    change and has no edit.
+    """
+
+    if update.clear_schedule_memory or update.schedule_memory_json.strip():
+        return None
+    if not (
+        update.schedule_kind.strip()
+        or update.notify.strip()
+        or update.evidence_required.strip()
+        or update.notify_on_failure is not None
+    ):
+        return None
+
+    def edit(memory: ScheduleTaskMemory) -> dict[str, Any]:
+        memory_changes = apply_schedule_policy_update(
+            memory,
+            notify=update.notify,
+            evidence_required=update.evidence_required,
+            notify_on_failure=update.notify_on_failure,
+        )
+        if update.schedule_kind.strip():
+            memory.schedule_kind = update.schedule_kind.strip()
+            memory_changes["schedule_kind"] = memory.schedule_kind
+        return memory_changes
+
+    return edit
+
+
 def _update_memory(candidate: ScheduledMessage, update: ScheduleUpdateV1, changes: dict[str, Any]) -> None:
     if update.clear_schedule_memory:
         candidate.schedule_memory = None
@@ -369,23 +403,11 @@ def _update_memory(candidate: ScheduledMessage, update: ScheduleUpdateV1, change
         )
         changes["schedule_memory"] = "replaced"
         return
-    if not (
-        update.schedule_kind.strip()
-        or update.notify.strip()
-        or update.evidence_required.strip()
-        or update.notify_on_failure is not None
-    ):
+    edit = memory_policy_edit(update)
+    if edit is None:
         return
     memory = candidate.schedule_memory = candidate.schedule_memory or ScheduleTaskMemory()
-    memory_changes = apply_schedule_policy_update(
-        memory,
-        notify=update.notify,
-        evidence_required=update.evidence_required,
-        notify_on_failure=update.notify_on_failure,
-    )
-    if update.schedule_kind.strip():
-        memory.schedule_kind = update.schedule_kind.strip()
-        memory_changes["schedule_kind"] = memory.schedule_kind
+    memory_changes = edit(memory)
     if memory_changes:
         memory.updated_at = schedule_memory_now()
         changes["schedule_memory"] = memory_changes
@@ -493,6 +515,10 @@ class _Commit:
         if self.request.update.repeat_count >= 0:
             # Setting the repeat count starts the count again.
             update_kwargs["remaining_count"] = self.candidate.repeat_count
+        edit = memory_policy_edit(self.request.update)
+        if edit is not None:
+            # A policy change to the run notes applies to the notes as stored.
+            update_kwargs["memory_edit"] = edit
         self.store.update(
             self.candidate,
             base=self.schedule,

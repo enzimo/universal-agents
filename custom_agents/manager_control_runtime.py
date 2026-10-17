@@ -72,7 +72,9 @@ from custom_messages.contracts.routing_v1 import (
     MessageMeta,
 )
 from custom_messages.contracts.schedule_v1 import (
+    SCHEDULE_CHANGED_SINCE_LISTED,
     SYSTEM_SCHEDULE_CHANGE_NOT_ALLOWED,
+    SYSTEM_SCHEDULE_CHANGE_REFUSED,
     ManagerScheduleCommand,
     ScheduledMessage,
     ScheduleWorkerAssignmentV1,
@@ -464,9 +466,10 @@ async def handle_manager_schedule_command(
                     agent, store, command, scheduled_message, person
                 )
             except (ScheduleWriteConflict, SystemScheduleMutationDenied) as exc:
+                changed = isinstance(exc, ScheduleWriteConflict)
                 agent._logger.warning(
-                    "[%s] A gateway schedule change was refused because the schedule changed meanwhile. "
-                    "event=gateway_schedule_change_conflict schedule_id=%s action=%s person_id=%s reason=%s",
+                    "[%s] A gateway schedule change was refused. event=gateway_schedule_change_refused "
+                    "schedule_id=%s action=%s person_id=%s reason=%s",
                     agent.id,
                     command.schedule_id,
                     command.action,
@@ -474,7 +477,7 @@ async def handle_manager_schedule_command(
                     exc.reason_code,
                 )
                 response.success = False
-                response.message = "schedule_changed"
+                response.message = SCHEDULE_CHANGED_SINCE_LISTED if changed else SYSTEM_SCHEDULE_CHANGE_REFUSED
         if response.success and getattr(agent, "_scheduler_wake", None) is not None:
             agent._scheduler_wake.set()
     await _send_durable_response(

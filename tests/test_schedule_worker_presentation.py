@@ -13,13 +13,13 @@ from custom_agents.manager_control_runtime import (
 )
 from custom_agents.schedule_management import schedule_control_state_digest
 from custom_agents.schedule_store import ScheduleStore
-from custom_messages.contracts.common_v1 import contract_sha256
 from custom_messages.contracts.routing_v1 import (
     GatewayContext,
     MessageHeader,
     MessageMeta,
 )
 from custom_messages.contracts.schedule_v1 import (
+    schedule_listing_digest,
     ManagerScheduleCommand,
     ScheduledMessage,
     ScheduleWorkerAssignmentV1,
@@ -187,9 +187,7 @@ async def test_owner_scoped_assignment_reaches_website_without_changing_control_
         projected.worker_assignment.model_dump(exclude={"schema_version"})
         == assignment.model_dump()
     )
-    assert projected.record_digest == contract_sha256(
-        store.get_scheduled_message("job").model_dump(mode="json")
-    )
+    assert projected.record_digest == schedule_listing_digest(store.get_scheduled_message("job"))
     assert schedules.list_with_worker_assignments.call_args.kwargs["owner_wide"] is True
     # Memory review timers are managed by the runtime: no controls for this person.
     assert bool(projected.available_actions) is (memory_kind is None)

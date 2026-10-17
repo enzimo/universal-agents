@@ -51,6 +51,7 @@ from custom_messages.contracts.schedule_v1 import ScheduledMessage, ScheduleTask
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ScheduleManagementClass, SystemScheduleKind
 from storage.config import resolve_storage_settings
+from storage.schedule_repository import RowWrite
 
 OWNER = "person_a"
 TEAM = "team"
@@ -270,6 +271,22 @@ def test_an_edit_keeps_the_run_time_count_and_notes_a_run_wrote_after_the_read(s
     assert saved.schedule_memory.state.summary == "run notes"
 
 
+def test_a_notify_policy_change_keeps_run_notes_written_after_the_read(store):
+    schedule = _schedule(schedule_memory=ScheduleTaskMemory())
+    store.add(schedule)
+    request = ScheduleChangeRequestV1(
+        schedule_id=schedule.schedule_id, action="update", update=ScheduleUpdateV1(notify="always")
+    )
+    prepared = prepare_schedule_change(store, request, person_id=OWNER)
+    store.edit_schedule_memory(schedule.schedule_id, _add_note)  # a run writes its notes
+
+    prepared.commit(None)
+
+    memory = store.get_scheduled_message(schedule.schedule_id).schedule_memory
+    assert memory.policy.notify == "always"
+    assert (memory.state.summary, memory.ledger.total_notifications) == ("run notes", 1)
+
+
 def test_an_edit_that_sets_timing_or_the_count_writes_them(store):
     schedule_id = _due(store, repeat_count=5)
     claimed = _claim(store)
@@ -348,7 +365,10 @@ def test_a_person_acts_only_on_the_schedule_they_saw_listed(store, action):
     schedule = _schedule()
     store.add(schedule)
     listed = schedule_record_digest(store.get_scheduled_message(schedule.schedule_id))
-    store.edit_schedule_memory(schedule.schedule_id, _add_note)  # it changed after it was listed
+    base = store.get_scheduled_message(schedule.schedule_id)
+    edited = base.model_copy(deep=True)
+    edited.payload.problem_statement = "Check another feed"
+    store.update(edited, base=base)  # someone changed what the person saw
     calls = {
         "disable": lambda digest: store.set_enabled(schedule.schedule_id, False, expected_record_digest=digest),
         "pause": lambda digest: store.set_paused_until(
@@ -365,6 +385,19 @@ def test_a_person_acts_only_on_the_schedule_they_saw_listed(store, action):
 
     current = schedule_record_digest(store.get_scheduled_message(schedule.schedule_id))
     assert calls[action](current) is True
+
+
+def test_a_schedule_that_ran_after_it_was_listed_can_still_be_paused(store):
+    """The listed digest leaves out the next run time and run notes, which runs change by themselves."""
+    schedule_id = _due(store, repeat_count=5)
+    listed = schedule_record_digest(store.get_scheduled_message(schedule_id))
+    claimed = _claim(store)
+    store.edit_schedule_memory(schedule_id, _add_note)
+    store.update_after_fire(
+        schedule_id, claim_token=claimed["claim_token"], claimer_agent_id="worker_b", due_at=claimed["next_fire_at"]
+    )
+
+    assert store.set_paused_until(schedule_id, (_now() + HOUR).isoformat(), expected_record_digest=listed) is True
 
 
 def test_two_first_saves_of_one_schedule_never_collide(store):
@@ -434,6 +467,29 @@ def test_a_new_run_time_set_during_a_run_wins_and_the_claim_is_released(store):
     assert row["claimed_by_agent_id"] is None
 
 
+@pytest.mark.parametrize(("repeat_count", "remaining"), [(3, 2), (1, None)])
+def test_a_run_re_timed_during_its_run_still_counts_against_its_series(store, repeat_count, remaining):
+    schedule_id = _due(store, repeat_count=repeat_count)
+    claimed = _claim(store)
+    base = store.get_scheduled_message(schedule_id)
+    candidate = base.model_copy(deep=True)
+    candidate.next_fire_at = (_now() + timedelta(days=2)).isoformat()
+    store.update(candidate, base=base)
+
+    outcome = store.update_after_fire(
+        schedule_id, claim_token=claimed["claim_token"], claimer_agent_id="worker_b", due_at=claimed["next_fire_at"]
+    )
+
+    if remaining is None:
+        # That was the series' last run; the schedule is finished.
+        assert outcome is AdvanceOutcome.FINISHED
+        assert store.get_row(schedule_id) is None
+    else:
+        assert outcome is AdvanceOutcome.DUE_CHANGED
+        row = store.get_row(schedule_id)
+        assert (row["remaining_count"], row["next_fire_at"]) == (remaining, candidate.next_fire_at)
+
+
 def test_an_advance_by_an_agent_that_lost_its_claim_is_refused(store):
     schedule_id = _due(store)
     claimed = _claim(store)
@@ -446,8 +502,10 @@ def test_an_advance_by_an_agent_that_lost_its_claim_is_refused(store):
     assert store.get_row(schedule_id)["next_fire_at"] == claimed["next_fire_at"]
 
 
-def test_a_one_time_schedule_saved_with_runs_left_finishes_after_one_run_with_a_warning(store, caplog):
-    schedule_id = _due(store, interval_ms=None, repeat_count=None)
+@pytest.mark.parametrize(("repeat_count", "warned"), [(1, False), (None, True)])
+def test_a_one_time_schedule_finishes_after_its_run_and_a_count_left_is_logged(store, caplog, repeat_count, warned):
+    """repeat_count=1 is a normal one-time run; a stored one with runs left (an older update made them) is logged."""
+    schedule_id = _due(store, interval_ms=None, repeat_count=repeat_count)
     claimed = _claim(store)
 
     with caplog.at_level(logging.WARNING, logger=schedule_store_module.__name__):
@@ -457,24 +515,21 @@ def test_a_one_time_schedule_saved_with_runs_left_finishes_after_one_run_with_a_
 
     assert outcome is AdvanceOutcome.FINISHED
     assert store.get_row(schedule_id) is None
-    assert "event=schedule_one_time_count_ignored" in caplog.text
-
-
-def test_a_one_time_schedule_finishes_after_its_run_without_a_warning(store, caplog):
-    schedule_id = _due(store, interval_ms=None, repeat_count=1)
-    claimed = _claim(store)
-
-    with caplog.at_level(logging.WARNING, logger=schedule_store_module.__name__):
-        outcome = store.update_after_fire(
-            schedule_id, claim_token=claimed["claim_token"], claimer_agent_id="worker_b", due_at=claimed["next_fire_at"]
-        )
-
-    assert outcome is AdvanceOutcome.FINISHED
-    assert "schedule_one_time_count_ignored" not in caplog.text
+    assert ("event=schedule_one_time_count_ignored" in caplog.text) is warned
 
 
 @pytest.mark.asyncio
-async def test_the_scheduler_logs_an_advance_that_did_not_apply(caplog):
+@pytest.mark.parametrize(
+    ("outcome", "level"),
+    [
+        (AdvanceOutcome.DUE_CHANGED, logging.INFO),
+        (AdvanceOutcome.NOT_FOUND, logging.INFO),
+        (AdvanceOutcome.CLAIM_LOST, logging.WARNING),
+        (AdvanceOutcome.FAILED, None),  # the store logged it with its traceback
+        (AdvanceOutcome.ADVANCED, None),
+    ],
+)
+async def test_the_scheduler_logs_an_advance_that_did_not_apply_once(caplog, outcome, level):
     from custom_agents.scheduled_runtime import _advance_after_admission
 
     calls = []
@@ -484,7 +539,7 @@ async def test_the_scheduler_logs_an_advance_that_did_not_apply(caplog):
 
     def update_after_fire(schedule_id, **kwargs):
         calls.append((schedule_id, kwargs))
-        return AdvanceOutcome.DUE_CHANGED
+        return outcome
 
     agent = SimpleNamespace(
         id="worker_b",
@@ -494,14 +549,37 @@ async def test_the_scheduler_logs_an_advance_that_did_not_apply(caplog):
     )
     claimed = {"schedule_id": "sched_1", "claim_token": "token_1", "next_fire_at": "2026-10-17T09:00:00+00:00"}
 
-    with caplog.at_level(logging.WARNING, logger="schedule-advance-test"):
+    with caplog.at_level(logging.DEBUG, logger="schedule-advance-test"):
         await _advance_after_admission(agent, claimed)
 
     assert calls == [
         ("sched_1", {"claim_token": "token_1", "claimer_agent_id": "worker_b", "due_at": "2026-10-17T09:00:00+00:00"})
     ]
-    assert "event=schedule_advance_not_applied" in caplog.text
-    assert "schedule_id=sched_1" in caplog.text and "outcome=due_changed" in caplog.text
+    logged = [record for record in caplog.records if "event=schedule_advance_not_applied" in record.getMessage()]
+    assert [record.levelno for record in logged] == ([level] if level is not None else [])
+    if logged:
+        assert "schedule_id=sched_1" in logged[0].getMessage()
+        assert f"outcome={outcome.value}" in logged[0].getMessage()
+
+
+def test_every_deletion_by_the_store_ends_the_schedules_access(store, monkeypatch):
+    """Removing a finished schedule after its run, and pruning an ended one, end its access like remove does."""
+    ended = []
+    monkeypatch.setattr(store, "_end_schedule_access", ended.append)
+    finished_id = _due(store, interval_ms=None, repeat_count=1)
+    claimed = _claim(store)
+    store.update_after_fire(
+        finished_id, claim_token=claimed["claim_token"], claimer_agent_id="worker_b", due_at=claimed["next_fire_at"]
+    )
+    ended_schedule = _schedule(expires_at_utc=(_now() + timedelta(seconds=1)).isoformat())
+    store.add(ended_schedule)
+    removed = _schedule()
+    store.add(removed)
+
+    assert store.prune_expired(now=_now() + timedelta(minutes=1)) == 1
+    assert store.remove(removed.schedule_id)
+
+    assert ended == [finished_id, ended_schedule.schedule_id, removed.schedule_id]
 
 
 # -- finding 4: a missed one-time run is turned off only while it still waits -------------
@@ -520,6 +598,19 @@ def test_a_missed_run_is_turned_off_only_while_it_is_still_waiting_unclaimed(sto
     assert store.release_claim(schedule_id, claim_token=claimed["claim_token"], claimer_agent_id="worker_b")
     assert store.turn_off_missed_run(schedule_id, due_at=due, now=now) is True
     assert not store.get_row(schedule_id)["enabled"]
+
+
+@pytest.mark.parametrize("change", ["count_raised", "paused"])
+def test_a_missed_run_is_not_turned_off_when_its_count_was_raised_or_it_was_paused(store, change):
+    schedule_id = _due(store, interval_ms=None, repeat_count=1, claim_named_agent_type="TeamArchitect")
+    due = store.get_row(schedule_id)["next_fire_at"]
+    if change == "count_raised":
+        store._repository.write_locked(schedule_id, lambda _row: RowWrite(columns={"remaining_count": 2}))
+    else:
+        assert store.set_paused_until(schedule_id, (_now() + HOUR).isoformat())
+
+    assert store.turn_off_missed_run(schedule_id, due_at=due, now=_now()) is False
+    assert store.get_row(schedule_id)["enabled"]
 
 
 def test_a_missed_run_whose_claim_expired_is_turned_off(store):
@@ -566,6 +657,56 @@ def test_a_daily_run_in_the_repeated_hour_runs_once_when_clocks_go_back(zone, cr
     )
 
     assert computed == next_run
+
+
+def _runs_from(cron: str, start: str, count: int, zone: str = "America/New_York") -> list[str]:
+    """The next ``count`` run times as the scheduler chains them, each computed after the previous run."""
+
+    previous = datetime.fromisoformat(start)
+    found = []
+    for _ in range(count):
+        run = compute_next_fire_at(
+            cron_expression=cron,
+            cron_timezone=zone,
+            from_time=previous + timedelta(seconds=5),
+            previous_fire_at=previous,
+        )
+        found.append(run)
+        previous = datetime.fromisoformat(run)
+    return found
+
+
+@pytest.mark.parametrize(
+    ("cron", "runs"),
+    [
+        # Wildcard hours run every real hour, the repeated 01:xx (05:xx and 06:xx UTC) included.
+        ("0 * * * *", ["04:00", "05:00", "06:00", "07:00"]),
+        ("15 * * * *", ["04:15", "05:15", "06:15", "07:15"]),
+        ("*/30 * * * *", ["04:00", "04:30", "05:00", "05:30", "06:00", "06:30"]),
+    ],
+)
+def test_wildcard_and_step_schedules_run_every_real_hour_when_clocks_go_back(cron, runs):
+    # New York goes back from 02:00 EDT to 01:00 EST at 06:00 UTC on 2026-11-01.
+    found = _runs_from(cron, "2026-11-01T03:59:00+00:00", len(runs))
+
+    assert [run[11:16] for run in found] == runs
+    assert all(run.startswith("2026-11-01") for run in found)
+
+
+@pytest.mark.parametrize(
+    ("cron", "runs"),
+    [
+        # Two fixed times in the repeated hour: each once that night, then the next day.
+        (
+            "0,30 1 * * *",
+            ["2026-11-01T05:00:00+00:00", "2026-11-01T05:30:00+00:00", "2026-11-02T06:00:00+00:00"],
+        ),
+        # Weekly on Sunday 01:30: 2026-11-01 is a Sunday.
+        ("30 1 * * 0", ["2026-11-01T05:30:00+00:00", "2026-11-08T06:30:00+00:00"]),
+    ],
+)
+def test_fixed_time_schedules_run_once_per_time_when_clocks_go_back(cron, runs):
+    assert _runs_from(cron, "2026-11-01T04:00:00+00:00", len(runs)) == runs
 
 
 def test_a_daily_run_in_the_skipped_hour_runs_at_the_first_time_after_it_when_clocks_go_forward():

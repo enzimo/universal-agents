@@ -1186,3 +1186,41 @@ def test_builtin_policy_has_live_calibrated_token_headroom() -> None:
     assert policy.custom_profiles.budget_bounds.minimum.active_seconds == 300
     assert policy.custom_profiles.budget_bounds.maximum.active_seconds == 28_800
     assert policy.custom_profiles.budget_bounds.maximum.total_tokens == 3_000_000
+
+
+def test_a_failed_objective_work_schedule_replacement_is_rolled_back_with_a_guarded_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rollback saves the earlier schedule against the installed one as read (2026-10-17)."""
+
+    manager = _manager(tmp_path, policy=True, focused_profile=True)
+    task, objective = _objective(manager)
+    _agent, schedule_store = _tool_agent(manager, task.task_id, monkeypatch)
+    first = yaml.safe_load(
+        objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the daily profile.", profile_name="daily", confirmed=True)
+    )
+    assert "error" not in first, first
+    [daily_row] = schedule_store.get_all()
+    daily = schedule_store.get_scheduled_message(daily_row["schedule_id"])
+    updates = []
+    real_update = schedule_store.update
+
+    def record_update(candidate, **kwargs):
+        updates.append(kwargs["base"].schedule_id)
+        return real_update(candidate, **kwargs)
+
+    def fail_link(*_args, **_kwargs):
+        raise RuntimeError("Injected Objective link failure")
+
+    monkeypatch.setattr(schedule_store, "update", record_update)
+    monkeypatch.setattr(manager, "link_schedule_to_objective", fail_link)
+    replaced = yaml.safe_load(
+        objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the focused profile.", profile_name="focused", confirmed=True)
+    )
+
+    assert "error" in json.dumps(replaced)
+    assert updates == [daily.schedule_id]
+    restored = schedule_store.get_scheduled_message(daily.schedule_id)
+    assert (restored.cron_expression, restored.interval_ms) == (daily.cron_expression, daily.interval_ms)
+    assert restored.payload.problem_statement == daily.payload.problem_statement

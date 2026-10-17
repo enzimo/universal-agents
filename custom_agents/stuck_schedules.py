@@ -40,6 +40,7 @@ from custom_agents.schedule_repair_guidance import (
 )
 from custom_agents.schedule_store import (
     DEFAULT_SCHEDULE_CLAIM_TTL_SECONDS,
+    is_final_run,
     owner_canonical_user_id_for_schedule,
 )
 from custom_agents.stuck_work import (
@@ -103,12 +104,6 @@ def not_running(store: Any, schedule: Any, *, now: datetime) -> tuple[str, str] 
     if not row or not overdue_unclaimed(row, team_id=str(schedule.claim_team_id or ""), now=now):
         return None
     return str(row["next_fire_at"]), schedule_block_reason(store, schedule)
-
-
-def _final_run(schedule: Any, row: dict[str, Any]) -> bool:
-    remaining = row.get("remaining_count")
-    recurring = bool(schedule.interval_ms or schedule.cron_expression)
-    return remaining == 1 or (not recurring and remaining is None)
 
 
 def _label(schedule: Any) -> str:
@@ -228,7 +223,7 @@ class StuckSchedules:
             if (
                 schedule is None
                 or is_system_managed_schedule(schedule)
-                or not _final_run(schedule, row)
+                or not is_final_run(row)
             ):
                 continue
             due_text = str(row["next_fire_at"])

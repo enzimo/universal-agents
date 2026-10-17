@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -261,6 +262,61 @@ def test_a_refusal_releases_the_claim_so_the_schedule_is_retried(world, caplog) 
         deadlines = asyncio.run(scenario())
 
     _assert_not_started_and_released(world, deadlines, caplog, "owner_inactive")
+
+
+@pytest.mark.parametrize("control", ["pause", "turn_off"])
+def test_a_schedule_paused_or_turned_off_after_its_claim_does_not_run_and_frees_the_claim(world, caplog, control) -> None:
+    """Control changes keep the claim (2026-10-17), so the worker checks the schedule before its run starts."""
+    record_ann(world, PersonStanding.ACTIVE)
+    save_schedule(world)
+
+    async def scenario():
+        await subscribe(world)
+        claimed = claim(world)
+        if control == "pause":
+            assert world.store.set_paused_until(SCHEDULE_ID, (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat())
+        else:
+            assert world.store.set_enabled(SCHEDULE_ID, False)
+        return await fire(world, claimed)
+
+    with caplog.at_level(logging.INFO, logger="test.worker"):
+        asyncio.run(scenario())
+
+    assert queued(world) == [], "no run was started"
+    assert claim_row(world) == (None, None), "the claim was released"
+    assert "event=scheduled_run_skipped_schedule_stopped" in caplog.text
+    assert f"schedule_id={SCHEDULE_ID}" in caplog.text
+    assert not world.bus.published, "the manager was not asked to sign a run that does not start"
+
+
+def test_the_manager_refuses_a_run_paused_after_the_workers_check(world, caplog) -> None:
+    record_ann(world, PersonStanding.ACTIVE)
+    save_schedule(world)
+
+    async def scenario():
+        await subscribe(world)
+        claimed = claim(world)
+        world.manager._schedule_store = _PausedOnRead(world)
+        return await fire(world, claimed)
+
+    with caplog.at_level(logging.INFO, logger="custom_agents.scheduled_run_contexts"):
+        deadlines = asyncio.run(scenario())
+
+    _assert_not_started_and_released(world, deadlines, caplog, "schedule_stopped")
+
+
+class _PausedOnRead:
+    """The manager's schedule store, where the person pauses the schedule just before the manager reads it."""
+
+    def __init__(self, world) -> None:
+        self._world = world
+
+    def __getattr__(self, name):
+        return getattr(self._world.store, name)
+
+    def get_scheduled_message(self, schedule_id):
+        self._world.store.set_paused_until(schedule_id, (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat())
+        return self._world.store.get_scheduled_message(schedule_id)
 
 
 class _StandingChangesOnRead:
