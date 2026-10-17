@@ -1,5 +1,5 @@
 #!/bin/sh
-# Refuses commits that add personal details to staged files or that use a
-# commit identity not listed in .personal-details-allowlist.
+# Refuses commits that add personal details to staged files or whose author or
+# committer email is not anonymized (for example a GitHub noreply address).
 # Enable once per clone: git config core.hooksPath .githooks
 exec python3 scripts/check_personal_details.py --staged

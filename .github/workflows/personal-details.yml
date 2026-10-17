@@ -1,10 +1,10 @@
 name: Personal details
 
-# Checks tracked files and the full commit history for personal details:
-# addresses, phone numbers, home folder paths and commit identities. Runs on
-# every change, including documentation-only edits. See CONTRIBUTING.md
-# ("Personal details"). Findings are printed without their values so the log
-# does not repeat them.
+# Checks tracked files, and the commits each push or pull request adds, for
+# personal details: addresses, phone numbers, home folder paths and commit
+# emails. Runs on every change, including documentation-only edits. A manual
+# run checks the whole history. See CONTRIBUTING.md ("Personal details").
+# Findings are printed without their values so the log does not repeat them.
 
 on:
   push:
@@ -34,12 +34,13 @@ jobs:
         run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history, and the pull request's own commits rather than
-          # GitHub's temporary merge commit.
+          # Full history, so the commit the new ones start from is present,
+          # and the pull request's own commits rather than GitHub's temporary
+          # merge commit.
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Test the checker
         run: python3 -m unittest discover -s tests -p 'test_check_personal_details.py' -v
-      - name: Check tracked files and history
-        run: python3 scripts/check_personal_details.py --redact
+      - name: Check tracked files and new commits
+        run: python3 scripts/check_personal_details.py --github-event --redact

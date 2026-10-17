@@ -8,12 +8,16 @@ Sample values are assembled at run time so the scan of this file stays clean.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +31,7 @@ _spec.loader.exec_module(checker)
 AT = "@"
 REAL_ADDRESS = f"pat{AT}mailbox.co"
 MAINTAINER = ("example-owner", f"1000+example-owner{AT}users.noreply.github.com")
-ALLOWLIST = checker.Allowlist.parse(f"identity: {MAINTAINER[0]} <{MAINTAINER[1]}>\n")
+ALLOWLIST = checker.Allowlist()
 
 
 class DetectorTests(unittest.TestCase):
@@ -35,7 +39,7 @@ class DetectorTests(unittest.TestCase):
         samples = [
             f"write to {REAL_ADDRESS}",
             f"Pat <pat.lee+ci{AT}corp.example.co.uk>",
-            f"1234+pat{AT}users.noreply.github.com",
+            f"1234+pat{AT}users.noreply.github.com.mailbox.co",
             "call +49 30 " + "1234 5678",
             "text +1 (312) " + "867-5309",
             "cd /home/" + "pat/projects",
@@ -57,6 +61,7 @@ class DetectorTests(unittest.TestCase):
             f"Signed-off-by: dependabot[bot] <support{AT}github.com>",
             f"Co-authored-by: dependabot[bot] <49699333+dependabot[bot]{AT}users.noreply.github.com>",
             f"maintained as {MAINTAINER[1]}",
+            f"Co-authored-by: pat <1234+pat{AT}users.noreply.github.com>, legacy pat{AT}users.noreply.github.com",
             "+15551234567, +1 555 000 0001, +1 415-555-0132",
             "version +1.2.3, offset +05:00, count +12345, date 2026-10-14T12:00:00+00:00",
             "/home/node/app, /home/runner/work, /Users/Shared, /Users/developer/project, /home/<user>/repo",
@@ -79,34 +84,73 @@ class DetectorTests(unittest.TestCase):
         self.assertNotEqual(checker.personal_details(f"other{AT}mailbox.co", allowlist), [])
 
 
-class IdentityTests(unittest.TestCase):
-    def test_github_and_listed_identities_pass(self):
+class EmailTests(unittest.TestCase):
+    def test_anonymized_emails_pass(self):
         allowed = [
-            ("GitHub", f"noreply{AT}github.com"),
-            ("dependabot[bot]", f"49699333+dependabot[bot]{AT}users.noreply.github.com"),
-            ("github-actions[bot]", f"41898282+github-actions[bot]{AT}users.noreply.github.com"),
-            MAINTAINER,
-            (MAINTAINER[0], MAINTAINER[1].upper()),
+            f"noreply{AT}github.com",  # GitHub's own web merges and edits.
+            f"49699333+dependabot[bot]{AT}users.noreply.github.com",
+            f"41898282+github-actions[bot]{AT}users.noreply.github.com",
+            MAINTAINER[1],
+            MAINTAINER[1].upper(),
+            f"1234+pat{AT}users.noreply.github.com",  # Any contributor's noreply address.
+            f"pat{AT}users.noreply.github.com",  # GitHub's older noreply form.
+            f"noreply{AT}vendor.com",
         ]
-        for name, email in allowed:
-            with self.subTest(name=name):
-                self.assertTrue(checker.identity_allowed(name, email, ALLOWLIST))
+        for email in allowed:
+            with self.subTest(email=email):
+                self.assertTrue(checker.is_anonymized_email(email))
 
-    def test_other_identities_fail(self):
+    def test_other_emails_fail(self):
         refused = [
-            ("pat", REAL_ADDRESS),
-            ("Pat Lee", MAINTAINER[1]),  # A real name with the listed address.
-            ("pat", f"1234+pat{AT}users.noreply.github.com"),  # Another login's noreply address.
-            ("pat", f"49699333+dependabot[bot]{AT}users.noreply.github.com"),
+            REAL_ADDRESS,
+            f"1234+pat{AT}users.noreply.github.com.mailbox.co",
+            f"noreply.pat{AT}mailbox.co",
+            f"pat{AT}github.com",
+            "noreply",
+            "",
         ]
-        for name, email in refused:
-            with self.subTest(name=name, email=email):
-                self.assertFalse(checker.identity_allowed(name, email, ALLOWLIST))
+        for email in refused:
+            with self.subTest(email=email):
+                self.assertFalse(checker.is_anonymized_email(email))
 
     def test_malformed_allowlist_lines_are_rejected(self):
-        for text in ("identity: no-address", "owner: someone", "text:", "account:"):
+        for text in ("owner: someone", "text:", "account:"):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 checker.Allowlist.parse(text)
+
+    def test_old_identity_lines_are_rejected_with_a_fix(self):
+        with self.assertRaisesRegex(ValueError, "no longer used.*Remove this line"):
+            checker.Allowlist.parse(f"identity: {MAINTAINER[0]} <{MAINTAINER[1]}>\n")
+
+
+class EventScopeTests(unittest.TestCase):
+    TIP = "a" * 40
+
+    def test_pull_request_checks_commits_after_its_base(self):
+        scope = checker.event_scope("pull_request", {"pull_request": {"base": {"sha": self.TIP}}})
+        self.assertEqual(scope.since, self.TIP)
+
+    def test_push_checks_commits_after_the_previous_tip(self):
+        scope = checker.event_scope("push", {"before": self.TIP, "ref": "refs/heads/main"})
+        self.assertEqual(scope.since, self.TIP)
+
+    def test_new_branch_checks_commits_not_on_the_default_branch(self):
+        event = {"before": "0" * 40, "ref": "refs/heads/topic", "repository": {"default_branch": "main"}}
+        self.assertEqual(checker.event_scope("push", event).since, "origin/main")
+
+    def test_first_push_of_the_default_branch_checks_everything(self):
+        event = {"before": "0" * 40, "ref": "refs/heads/main", "repository": {"default_branch": "main"}}
+        scope = checker.event_scope("push", event)
+        self.assertIsNone(scope.since)
+        self.assertFalse(scope.nothing)
+
+    def test_deletion_adds_no_commits(self):
+        self.assertTrue(checker.event_scope("push", {"deleted": True, "before": self.TIP}).nothing)
+
+    def test_manual_and_scheduled_runs_check_everything(self):
+        for name in ("workflow_dispatch", "schedule", ""):
+            with self.subTest(name=name):
+                self.assertIsNone(checker.event_scope(name, {}).since)
 
 
 class MessageTests(unittest.TestCase):
@@ -179,10 +223,13 @@ class RepositoryTests(unittest.TestCase):
             [finding.where for finding in checker.scan_staged_files(self.repo, ALLOWLIST)],
             ["notes.md (staged):1"],
         )
-        self.assertEqual(checker.scan_next_commit_identity(self.repo, ALLOWLIST), [])
+        self.assertEqual(checker.scan_next_commit_email(self.repo), [])
+
+        self.use_identity("Contributor", MAINTAINER[1])  # Names are not checked.
+        self.assertEqual(checker.scan_next_commit_email(self.repo), [])
 
         self.use_identity("pat", REAL_ADDRESS)
-        findings = checker.scan_next_commit_identity(self.repo, ALLOWLIST)
+        findings = checker.scan_next_commit_email(self.repo)
         self.assertEqual([finding.where for finding in findings], ["next commit author", "next commit committer"])
 
     def test_history_keeps_details_that_later_commits_deleted(self):
@@ -198,7 +245,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertRegex(findings[0].where, r"^commit [0-9a-f]{12} readme\.md:2$")
 
-    def test_history_checks_identities_and_messages(self):
+    def test_history_checks_emails_and_messages(self):
         self.use_identity("pat", REAL_ADDRESS)
         self.write("a.md", "a\n")
         self.commit(f"Start\n\nThanks {REAL_ADDRESS}", "a.md")
@@ -206,8 +253,60 @@ class RepositoryTests(unittest.TestCase):
         kinds = sorted((finding.where.split(" ", 2)[2], finding.kind) for finding in checker.scan_commits(self.repo, ["HEAD"], ALLOWLIST))
         self.assertEqual(
             kinds,
-            [("author", "commit identity"), ("committer", "commit identity"), ("message:3", "email address")],
+            [("author", checker.COMMIT_EMAIL), ("committer", checker.COMMIT_EMAIL), ("message:3", "email address")],
         )
+
+    def test_history_accepts_any_name_with_an_anonymized_email(self):
+        self.use_identity("Pat Lee", f"1234+pat{AT}users.noreply.github.com")
+        self.write("a.md", "a\n")
+        self.commit("Start", "a.md")
+        self.assertEqual(checker.scan_commits(self.repo, ["HEAD"], ALLOWLIST), [])
+
+    def make_history_with_an_old_detail(self) -> str:
+        """Commit a detail, then a clean commit; return the first commit's SHA."""
+        self.write("a.md", f"a {REAL_ADDRESS}\n")
+        self.commit("Published before the rules existed", "a.md")
+        old = self.git("rev-parse", "HEAD")
+        self.write("a.md", "a\n")
+        self.commit("Remove the detail", "a.md")
+        return old
+
+    def scan_event(self, event_name: str, event: dict) -> tuple[list, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), unittest.mock.patch.dict(os.environ, {"GITHUB_ACTIONS": ""}):
+            findings = checker.scan_github_event(self.repo, event_name, event, ALLOWLIST)
+        return findings, out.getvalue(), err.getvalue()
+
+    def test_github_event_checks_only_new_commits(self):
+        old = self.make_history_with_an_old_detail()
+        for event_name, event in (
+            ("push", {"before": old, "ref": "refs/heads/main"}),
+            ("pull_request", {"pull_request": {"base": {"sha": old}}}),
+        ):
+            with self.subTest(event_name=event_name):
+                findings, out, err = self.scan_event(event_name, event)
+                self.assertEqual(findings, [])
+                self.assertIn(old, out)
+                self.assertEqual(err, "")
+
+        self.write("b.md", f"b {REAL_ADDRESS}\n")
+        self.commit("New detail", "b.md")
+        findings, _, _ = self.scan_event("push", {"before": old, "ref": "refs/heads/main"})
+        self.assertEqual(len(findings), 2)  # The new file, and the commit that added it.
+
+    def test_github_event_with_a_missing_base_warns_and_checks_everything(self):
+        self.make_history_with_an_old_detail()
+        findings, _, err = self.scan_event("push", {"before": "b" * 40, "ref": "refs/heads/main"})
+        self.assertEqual([finding.kind for finding in findings], ["email address"])
+        self.assertIn("Warning:", err)
+        self.assertIn("b" * 40, err)
+
+    def test_manual_github_event_checks_everything(self):
+        self.make_history_with_an_old_detail()
+        findings, out, err = self.scan_event("workflow_dispatch", {})
+        self.assertEqual([finding.kind for finding in findings], ["email address"])
+        self.assertIn("every commit", out)
+        self.assertEqual(err, "")
 
     def test_pushed_mode_skips_commits_already_on_a_remote(self):
         remote = Path(self._tmp.name) / "remote.git"
@@ -229,16 +328,38 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual([finding.kind for finding in findings], ["email address"])
 
     def test_main_reports_findings_through_the_exit_code(self):
-        self.write(checker.ALLOWLIST_FILE, f"identity: {MAINTAINER[0]} <{MAINTAINER[1]}>\n")
-        self.write("a.md", "clean\n")
+        self.write(checker.ALLOWLIST_FILE, "account: jane\n")
+        self.write("a.md", "clean /home/" + "jane\n")
         self.commit("Start", checker.ALLOWLIST_FILE, "a.md")
-        self.assertEqual(self.run_script(), 0)
+        self.assertEqual(self.run_script().returncode, 0)
 
         self.write("a.md", f"clean\n{REAL_ADDRESS}\n")
-        self.assertEqual(self.run_script(), 1)
+        self.assertEqual(self.run_script().returncode, 1)
 
-    def run_script(self) -> int:
-        return subprocess.run([sys.executable, str(SCRIPT), "--redact"], cwd=self.repo, capture_output=True).returncode
+    def test_main_explains_an_old_identity_line(self):
+        self.write(checker.ALLOWLIST_FILE, f"identity: {MAINTAINER[0]} <{MAINTAINER[1]}>\n")
+        self.commit("Start", checker.ALLOWLIST_FILE)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Remove this line", result.stderr)
+
+    def test_main_github_event_mode_reads_the_event_file(self):
+        old = self.make_history_with_an_old_detail()
+        event_file = Path(self._tmp.name) / "event.json"
+        event_file.write_text(json.dumps({"before": old, "ref": "refs/heads/main"}), encoding="utf-8")
+        environment = {"GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_PATH": str(event_file)}
+        self.assertEqual(self.run_script("--github-event", environment=environment).returncode, 0)
+        environment["GITHUB_EVENT_NAME"] = "workflow_dispatch"
+        self.assertEqual(self.run_script("--github-event", environment=environment).returncode, 1)
+
+    def run_script(self, *args: str, environment: dict | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--redact", *args],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "GITHUB_ACTIONS": "", **(environment or {})},
+        )
 
 
 class ThisRepositoryTests(unittest.TestCase):

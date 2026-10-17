@@ -74,7 +74,8 @@ secret values:
 2. Delete the repository on GitHub (Settings → Danger zone, or
    `gh repo delete <owner>/<repo>`).
 3. Create an empty repository with the same name, visibility and description.
-4. Build the first commit from tracked files only, with an allowed identity:
+4. Build the first commit from tracked files only, with an anonymized commit
+   email such as a GitHub noreply address:
 
    ```sh
    mkdir ../<repo>-fresh
