@@ -100,7 +100,7 @@ def _build_world(db_path: str) -> SimpleNamespace:
         _scheduler_wake=None,
         paused=False,
         is_executing=True,  # queue the review instead of starting a model turn
-        # The wake-up reaches a mock drain, so the review stays queued for the test.
+        # The review's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the review stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
         _continue_pending_work=AsyncMock(),

@@ -15,10 +15,14 @@ message, scheduler enqueues and outbox retries each started their own drain).
   request and the drain runs passes while one is recorded. While another
   holder has the slot the request stays recorded, and that holder's release
   starts the next pass (``wake_after_slot_release``, the slot's release
-  callback).
+  callback). A pass that ends on a failed waiting message stops the drain; the
+  request stays recorded for the next real wake-up, so a message whose
+  handler records a wake-up before failing cannot repeat in a tight loop.
 - ``wake_pending_work_after`` wakes the drain at a later time with a timer.
 - ``start_owned_task`` runs short work that is safe to stop (its durable state
-  is saved before it starts; see each caller).
+  is saved before it starts; see each caller). ``run_as_owned_task`` does the
+  same for work submitted from another thread, such as a sync tool's send,
+  and lets its failure reach the caller.
 - ``close_pending_work`` runs first in shutdown cleanup: it sets the exit flag,
   so nothing new starts, then cancels and joins all of the above.
 """
@@ -28,6 +32,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Coroutine
 from typing import Any
+
+
+class AgentStopping(RuntimeError):
+    """Work was refused because the agent is stopping."""
 
 
 def schedule_pending_work(agent: Any) -> None:
@@ -47,34 +55,56 @@ def schedule_pending_work(agent: Any) -> None:
 
 
 async def _drain_pending_work(agent: Any) -> None:
-    """Run passes while a wake-up is recorded.
-
-    A failed pass is logged and ends the drain; a recorded request then waits
-    for the next wake-up instead of repeating the failure in a tight loop.
-    """
+    """Run passes while a wake-up is recorded."""
     while agent._pending_work_requested and not (agent.paused or agent._should_exit.is_set()):
         if agent.is_executing:
             return  # the holder's release starts the next pass
         agent._pending_work_requested = False
-        try:
-            await agent._continue_pending_work()
-        except Exception:
-            agent._logger.exception(
-                "Pending task processing failed. event=pending_work_failed agent_id=%s",
-                agent.id,
-            )
+        if not await _run_pass(agent):
             return
 
 
+async def _run_pass(agent: Any) -> bool:
+    """Run one pass; False ends the drain until the next wake-up.
+
+    A pass that fails, or ends on a waiting message that failed and was kept,
+    stops the drain instead of repeating the failure in a tight loop: a
+    recorded request waits for the next real wake-up.
+    """
+    try:
+        finished = await agent._continue_pending_work()
+    except Exception:
+        agent._logger.exception(
+            "Pending task processing failed. event=pending_work_failed agent_id=%s",
+            agent.id,
+        )
+        return False
+    if not finished:
+        agent._logger.warning(
+            "A waiting message failed and was kept; the queue drain waits for the next wake-up. "
+            "event=pending_work_stopped_after_failure agent_id=%s wake_up_recorded=%s",
+            agent.id,
+            agent._pending_work_requested,
+        )
+        return False
+    if agent.is_executing:
+        # Another holder took the slot before this pass made all its checks;
+        # its release starts the next pass.
+        agent._pending_work_requested = True
+        return False
+    return True
+
+
 def wake_after_slot_release(agent: Any, owner: asyncio.Task[Any]) -> None:
-    """The execution slot's release callback: run a pass after another holder.
+    """The execution slot's release callback: run a recorded wake-up after another holder.
 
     A delivery, a parent resume or the scheduler's orphaned-slot check may hold
-    the slot while work is saved or freed; the drain waits for this release.
-    The drain's own releases start nothing: it continues by itself, and a pass
-    started from them could repeat a failing step without end.
+    the slot while work is saved; its wake-up is recorded and the drain waits
+    for this release. A release with no recorded wake-up starts nothing, so an
+    idle scheduler pass costs no drain pass. The drain's own releases start
+    nothing either: it continues by itself.
     """
-    if owner is agent._pending_work_task:
+    if owner is agent._pending_work_task or not agent._pending_work_requested:
         return
     schedule_pending_work(agent)
 
@@ -131,10 +161,43 @@ async def _run_owned(agent: Any, coroutine: Coroutine[Any, Any, Any], name: str)
         )
 
 
+async def run_as_owned_task(agent: Any, coroutine: Coroutine[Any, Any, Any], *, name: str) -> Any:
+    """Run ``coroutine`` in the current task as owned work and return its result.
+
+    For work submitted from outside the agent's own tasks, such as a sync
+    tool's send from a worker thread. It is refused once the agent is
+    stopping, and shutdown cancels and joins it like any owned task. Unlike
+    ``start_owned_task``, its failure reaches the caller.
+    """
+    if agent._should_exit.is_set():
+        coroutine.close()
+        agent._logger.warning(
+            "The agent is stopping, so this work was not started. "
+            "event=owned_task_refused agent_id=%s task_name=%s",
+            agent.id,
+            name,
+        )
+        raise AgentStopping(f"The agent is stopping, so {name} was not started.")
+    task = asyncio.current_task()
+    if task is None:
+        raise RuntimeError("Owned work must run in an asyncio task.")
+    owned: set[asyncio.Task[Any]] = agent._owned_tasks
+    owned.add(task)
+    try:
+        return await coroutine
+    finally:
+        owned.discard(task)
+
+
 async def close_pending_work(agent: Any) -> None:
-    """Stop new background work, then cancel and join what is running."""
+    """Stop new background work, then cancel and join what is running.
+
+    A cancelled drain may stop a model turn halfway; its task stays saved and
+    restart recovery queues it again.
+    """
     agent._should_exit.set()
     timers: set[asyncio.TimerHandle] = agent._pending_work_timers
+    timer_count = len(timers)
     for handle in timers:
         handle.cancel()
     timers.clear()
@@ -142,8 +205,15 @@ async def close_pending_work(agent: Any) -> None:
     running = [
         task
         for task in (agent._pending_work_task, *agent._owned_tasks)
-        if task is not None and task is not current
+        if task is not None and task is not current and not task.done()
     ]
+    agent._logger.info(
+        "Stopping the agent's background work. event=pending_work_closed agent_id=%s "
+        "cancelled_tasks=%s cancelled_timers=%s",
+        agent.id,
+        len(running),
+        timer_count,
+    )
     for task in running:
         task.cancel()
     await asyncio.gather(*running, return_exceptions=True)

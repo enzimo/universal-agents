@@ -63,6 +63,7 @@ from custom_tools.providers._runtime import (
     _require_manager_tool,
     _resolve_objective_id_for_tool,
     _schedule_store,
+    _wake_agent_scheduler,
 )
 from custom_tools.providers._user_scope import _private_user_scope
 from custom_tools.providers.diagnostics import (
@@ -273,8 +274,7 @@ def _install_objective_work_schedule(
                     rollback_exc,
                 )
         raise
-    if getattr(agent, "_scheduler_wake", None):
-        agent._scheduler_wake.set()
+    _wake_agent_scheduler(agent)
     return policy
 
 

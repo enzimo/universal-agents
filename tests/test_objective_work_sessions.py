@@ -518,7 +518,7 @@ def test_protected_schedule_fire_opens_session_and_resumes_plan(tmp_path: Path) 
         task_manager=manager,
         paused=False,
         is_executing=True,
-        # The wake-up reaches a mock drain, so the run stays queued for the test.
+        # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
         _continue_pending_work=AsyncMock(),

@@ -381,3 +381,26 @@ async def test_gate_release_callback_runs_once_per_outer_hold_even_when_cancelle
         await stopped
     assert released == [owner, stopped]
     assert not gate.busy
+
+
+@pytest.mark.asyncio
+async def test_a_failing_release_callback_is_logged_and_keeps_the_holders_outcome(caplog):
+    def broken_callback(_owner):
+        raise RuntimeError("callback bug")
+
+    gate = AgentExecutionGate(on_release=broken_callback)
+
+    async def holder_that_fails():
+        async with gate.hold():
+            raise ValueError("the holder's own error")
+
+    async def holder_that_succeeds():
+        async with gate.hold():
+            return "done"
+
+    with caplog.at_level(logging.ERROR, logger="runtime_hosting.agent_execution"):
+        with pytest.raises(ValueError, match="the holder's own error"):
+            await asyncio.create_task(holder_that_fails())
+        assert await asyncio.create_task(holder_that_succeeds()) == "done"
+    assert caplog.text.count("event=execution_gate_release_callback_failed") == 2
+    assert not gate.busy

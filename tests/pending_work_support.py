@@ -73,6 +73,8 @@ class QueueHold:
 class FakeTaskManager:
     """The task-manager calls a drain pass and the scheduler enqueue make."""
 
+    current_task_id: str | None = None  # no task holds the slot
+
     def __init__(self) -> None:
         self.operations_runtime = TaskOperationRuntime()
         self.queue: list[str] = []
@@ -220,3 +222,24 @@ async def settled(agent: DrainAgent) -> None:
         if task is not None:
             await asyncio.wait_for(asyncio.shield(task), 5)
         await asyncio.sleep(0.05)
+
+
+def call_tool_on_agent_loop(agent: Any, tool: Any, *args: Any, **kwargs: Any) -> Any:
+    """Call a sync tool as Strands does: in a worker thread while the agent loop runs.
+
+    A tool's send runs on the agent loop as owned work, so the stand-in gets
+    the loop and the owned-work fields of a running agent for the call.
+    """
+
+    async def scenario() -> Any:
+        agent._runtime_loop = asyncio.get_running_loop()
+        agent._should_exit = asyncio.Event()
+        agent._owned_tasks = set()
+        if not hasattr(agent, "_logger"):
+            agent._logger = logging.getLogger("tests.pending_work_support")
+        try:
+            return await asyncio.to_thread(tool, *args, **kwargs)
+        finally:
+            agent._runtime_loop = None
+
+    return asyncio.run(scenario())

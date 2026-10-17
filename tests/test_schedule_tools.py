@@ -56,6 +56,7 @@ from custom_tools.providers.schedules import (
     update_scheduled_job,
 )
 from custom_tools.runtime_context import set_agent_ref
+from tests.pending_work_support import call_tool_on_agent_loop
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
 
@@ -440,17 +441,17 @@ def test_schedule_tools_create_pause_resume_disable_and_remove(tmp_path: Path):
     assert agent.task_manager.history_entries[-1][0] == "task_current"
     assert "Created dedicated conversation" in agent.task_manager.history_entries[-1][1]
 
-    paused = json.loads(pause_scheduled_job(schedule_id, duration_minutes=30))
+    paused = json.loads(call_tool_on_agent_loop(agent, pause_scheduled_job, schedule_id, duration_minutes=30))
     assert paused["schedule_id"] == schedule_id
     assert paused["paused"] is True
 
-    resumed = json.loads(resume_scheduled_job(schedule_id))
+    resumed = json.loads(call_tool_on_agent_loop(agent, resume_scheduled_job, schedule_id))
     assert resumed["resumed"] is True
 
-    disabled = json.loads(disable_scheduled_job(schedule_id))
+    disabled = json.loads(call_tool_on_agent_loop(agent, disable_scheduled_job, schedule_id))
     assert disabled["disabled"] is True
 
-    removed = json.loads(remove_scheduled_job(schedule_id))
+    removed = json.loads(call_tool_on_agent_loop(agent, remove_scheduled_job, schedule_id))
     assert removed["removed"] is True
 
 
@@ -500,7 +501,9 @@ def test_update_scheduled_job_mutates_fields_and_reports_to_manager(tmp_path: Pa
     expires_at = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
 
     updated = json.loads(
-        update_scheduled_job(
+        call_tool_on_agent_loop(
+            agent,
+            update_scheduled_job,
             schedule_id,
             schedule_name="updated schedule",
             instruction="Updated scheduled instruction.",
@@ -557,7 +560,9 @@ def test_update_scheduled_job_mutates_schedule_memory_policy(tmp_path: Path):
     schedule_id = created["schedule_id"]
 
     updated = json.loads(
-        update_scheduled_job(
+        call_tool_on_agent_loop(
+            agent,
+            update_scheduled_job,
             schedule_id,
             notify="never",
             evidence_required="authoritative_source",
@@ -841,7 +846,7 @@ def test_aar_batch_review_schedule_queues_hydrated_manager_task(tmp_path: Path):
         task_manager=task_manager,
         paused=False,
         is_executing=True,
-        # The wake-up reaches a mock drain, so the run stays queued for the test.
+        # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
         _continue_pending_work=AsyncMock(),
@@ -1016,7 +1021,7 @@ def test_fired_scheduled_task_carries_objective_link(tmp_path: Path):
         task_manager=task_manager,
         paused=False,
         is_executing=True,
-        # The wake-up reaches a mock drain, so the run stays queued for the test.
+        # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
         _continue_pending_work=AsyncMock(),
@@ -1093,7 +1098,7 @@ def test_gateway_cron_schedule_fire_keeps_stored_conversation_id(tmp_path: Path)
         task_manager=task_manager,
         paused=False,
         is_executing=True,
-        # The wake-up reaches a mock drain, so the run stays queued for the test.
+        # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
         _continue_pending_work=AsyncMock(),
@@ -1188,7 +1193,7 @@ def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: 
         task_manager=task_manager,
         paused=False,
         is_executing=True,
-        # The wake-up reaches a mock drain, so the run stays queued for the test.
+        # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
         _continue_pending_work=AsyncMock(),
@@ -1290,7 +1295,7 @@ def test_recurring_fired_schedule_keeps_history_without_followup_delivery_obliga
         task_manager=task_manager,
         paused=False,
         is_executing=True,
-        # The wake-up reaches a mock drain, so the run stays queued for the test.
+        # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
         _continue_pending_work=AsyncMock(),

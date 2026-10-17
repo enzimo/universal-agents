@@ -50,7 +50,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         task_manager=tasks,
         paused=False,
         is_executing=True,  # queue the run instead of starting a model turn
-        # The wake-up reaches a mock drain, so the run stays queued for the test.
+        # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
         _continue_pending_work=AsyncMock(),

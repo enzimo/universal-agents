@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator, Callable
 from typing import Any
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class AgentExecutionGate:
@@ -18,7 +21,8 @@ class AgentExecutionGate:
     ``on_release`` is called with the owning task each time an outer hold ends,
     including when the owner is cancelled. The agent uses it to start a queue
     drain after another holder (``pending_work_runtime.wake_after_slot_release``).
-    It must not block.
+    It must not block. A failure in it is logged and never replaces the
+    holder's own result or exception.
     """
 
     def __init__(self, on_release: Callable[[asyncio.Task[Any]], None] | None = None) -> None:
@@ -49,5 +53,16 @@ class AgentExecutionGate:
         finally:
             self._owner = None
             self._lock.release()
-            if self.on_release is not None:
-                self.on_release(owner)
+            self._run_release_callback(owner)
+
+    def _run_release_callback(self, owner: asyncio.Task[Any]) -> None:
+        if self.on_release is None:
+            return
+        try:
+            self.on_release(owner)
+        except Exception:
+            _LOGGER.exception(
+                "The execution slot's release callback failed. "
+                "event=execution_gate_release_callback_failed owner_task=%s",
+                owner.get_name(),
+            )

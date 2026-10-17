@@ -2,12 +2,13 @@
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, Optional
 
 from access_control.entities import PersonPrincipal
 from access_control.identity import IdentityRejected
 from access_control.ownership import PRIVATE_UPDATE, named_task_access, objective_access
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
+from custom_agents.pending_work_runtime import run_as_owned_task
 from custom_agents.task_manager_objectives import ObjectiveSaveFailed
 from custom_agents.schedule_store import (
     ScheduleStore,
@@ -57,34 +58,77 @@ async def _send_control_instruction_payload(
     return routing_key
 
 
+def _on_event_loop_thread() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def _refuse_tool_send(agent: "UniversalAgent", coroutine: Any, reason: str) -> NoReturn:
+    coroutine.close()
+    logger.error(
+        "An agent tool could not send: it must run in a worker thread of a running agent. "
+        "event=agent_tool_send_refused agent_id=%s reason=%s",
+        getattr(agent, "id", None),
+        reason,
+    )
+    raise RuntimeError(f"The tool's message was not sent ({reason}).")
+
+
 def _run_agent_coroutine(
     agent: "UniversalAgent", coroutine: Any, *, timeout: float = 15.0
 ) -> None:
     """Run an agent coroutine from a sync tool's worker thread and wait for it.
 
     Strands runs sync tools in a worker thread, so a send has finished, or
-    failed, before the tool reports it. On the event loop thread the send could
-    only be left running unowned, where shutdown does not wait for it, so that
-    call is refused.
+    failed, before the tool reports it. The send runs on the agent's loop as
+    owned work (``pending_work_runtime.run_as_owned_task``): it is refused once
+    the agent is stopping, and shutdown cancels and joins it, so a tool whose
+    turn was cancelled cannot publish after shutdown started. A send that does
+    not finish within ``timeout`` is cancelled, never left running while the
+    tool reports a failure. A call from the event loop thread, or with no
+    running agent loop, is refused: the send could only run unowned, or on a
+    private loop without the agent's connection.
     """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        pass
-    else:
-        coroutine.close()
-        logger.error(
-            "An agent tool was called on the event loop thread; it must run in a worker thread. "
-            "event=agent_tool_loop_thread_refused agent_id=%s",
-            getattr(agent, "id", None),
-        )
-        raise RuntimeError("Agent tools run in a worker thread; this call came from the event loop.")
+    if _on_event_loop_thread():
+        _refuse_tool_send(agent, coroutine, "event_loop_thread")
     runtime_loop = getattr(agent, "_runtime_loop", None)
-    if runtime_loop is not None and runtime_loop.is_running():
-        future = asyncio.run_coroutine_threadsafe(coroutine, runtime_loop)
+    if runtime_loop is None or not runtime_loop.is_running():
+        _refuse_tool_send(agent, coroutine, "agent_not_running")
+    future = asyncio.run_coroutine_threadsafe(
+        run_as_owned_task(agent, coroutine, name=f"tool-send:{getattr(agent, 'id', None)}"),
+        runtime_loop,
+    )
+    try:
         future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()
+        logger.warning(
+            "An agent tool's send did not finish in time and was cancelled. "
+            "event=agent_tool_send_timed_out agent_id=%s timeout_seconds=%s",
+            getattr(agent, "id", None),
+            timeout,
+        )
+        raise
+
+
+def _wake_agent_scheduler(agent: "UniversalAgent") -> None:
+    """Wake the agent's scheduler loop from a tool's worker thread or from the agent loop.
+
+    ``asyncio.Event`` is not thread-safe, so from another thread the event is
+    set on the agent loop. Without a running agent loop no scheduler waits on
+    the event and nothing can race with setting it directly.
+    """
+    wake = getattr(agent, "_scheduler_wake", None)
+    if wake is None:
         return
-    asyncio.run(coroutine)
+    runtime_loop = getattr(agent, "_runtime_loop", None)
+    if runtime_loop is None or not runtime_loop.is_running() or _on_event_loop_thread():
+        wake.set()
+        return
+    runtime_loop.call_soon_threadsafe(wake.set)
 
 
 def _require_manager_tool(agent: "UniversalAgent", tool_name: str) -> Optional[str]:

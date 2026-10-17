@@ -78,6 +78,7 @@ from custom_tools.providers._runtime import (
     _objective_to_link,
     _run_agent_coroutine,
     _schedule_store,
+    _wake_agent_scheduler,
 )
 from custom_tools.providers._user_scope import _private_user_scope
 from custom_tools.providers.schedule_workers import (
@@ -193,8 +194,8 @@ def _run_change(agent: "UniversalAgent", request: ScheduleChangeRequestV1, *, ac
         )
     report = result.pop(REPORT_KEY, None)
     if report is not None:
-        if result.get(flag) and getattr(agent, "_scheduler_wake", None):
-            agent._scheduler_wake.set()
+        if result.get(flag):
+            _wake_agent_scheduler(agent)
         result["manager_report"] = (
             _report_schedule_mutation_to_manager(agent, action=action, schedule_id=request.schedule_id, **report)
             if result.get(flag)
@@ -612,8 +613,7 @@ def create_scheduled_job(
             user_visible=True,
             reason="Scheduled job created from objective-linked task context.",
         )
-        if getattr(agent, "_scheduler_wake", None):
-            agent._scheduler_wake.set()
+        _wake_agent_scheduler(agent)
         return json.dumps(
             {
                 **objective_link_fields,

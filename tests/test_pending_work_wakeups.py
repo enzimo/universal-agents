@@ -120,23 +120,67 @@ async def test_drain_keeps_the_request_while_another_holder_runs():
     await close_pending_work(agent)
 
 
+class _StoreFailsAfterAdmission:
+    """The runtime state store accepts the admission, then fails every later commit."""
+
+    def __init__(self) -> None:
+        self.saves = 0
+
+    def save_deferred_messages(self, **_kwargs):
+        self.saves += 1
+        if self.saves > 1:
+            raise RuntimeError("runtime state store unavailable")
+
+    def clear_deferred_messages(self, *_args):
+        raise RuntimeError("runtime state store unavailable")
+
+
 @pytest.mark.asyncio
-async def test_a_failing_deferred_dispatch_does_not_repeat_by_itself():
+@pytest.mark.parametrize("failure", ["handler_fails", "store_fails_after_dispatch"])
+async def test_a_failing_waiting_message_does_not_repeat_even_if_it_records_a_wake_up(failure, caplog):
+    """A handler may queue work and wake the drain before it fails; the drain must still stop.
+
+    Before, the recorded wake-up started another pass at once, which retried
+    the kept message thousands of times a second.
+    """
     agent = DrainAgent()
     attempts = []
 
-    async def failing_dispatch(**_kwargs):
+    async def dispatch(**_kwargs):
         attempts.append(True)
-        raise RuntimeError("store unavailable")
+        schedule_pending_work(agent)  # e.g. a resume that queues work and wakes the drain
+        if failure == "handler_fails":
+            raise RuntimeError("handler failed after waking the drain")
 
-    agent._dispatch_message = failing_dispatch
+    agent._dispatch_message = dispatch
+    if failure == "store_fails_after_dispatch":
+        agent.deferred_inbox.repository = _StoreFailsAfterAdmission()
     await agent.deferred_inbox.admit(subtask_result(agent, "task_child_result").envelope)
-    schedule_pending_work(agent)
-    await settled(agent)
-    assert attempts == [True]  # the drain's own slot releases start no new pass
+    with caplog.at_level("WARNING", logger="tests.pending_work_support"):
+        schedule_pending_work(agent)
+        await asyncio.sleep(0.3)
+    assert attempts == [True]
     assert len(agent.deferred_inbox) == 1  # kept for the next wake-up
     assert agent._pending_work_task.done()
+    assert agent._pending_work_requested is True  # the recorded wake-up waits for a real one
+    assert "event=pending_work_stopped_after_failure" in caplog.text
     await close_pending_work(agent)
+
+
+@pytest.mark.asyncio
+async def test_a_release_with_no_recorded_wake_up_starts_no_pass():
+    agent = DrainAgent()
+    agent.task_manager.enqueue_task("task_queued")
+
+    async def holder():
+        async with agent._execution_scope():
+            await asyncio.sleep(0)
+
+    await asyncio.create_task(holder())
+    assert await turn_failure_runtime.release_orphaned_slot_when_idle(agent) is False
+    await settled(agent)
+    assert agent._pending_work_task is None  # an idle scheduler pass costs no drain pass
+    assert agent.task_manager.queue_checks == 0
 
 
 @pytest.mark.asyncio

@@ -213,7 +213,7 @@ def test_heartbeat_checks_its_objective_before_any_run_state_changes(
     agent._conversation_store = None
     agent.paused = False
     agent.is_executing = True
-    # The wake-up reaches a mock drain, so the run stays queued for the test.
+    # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
     agent._should_exit = asyncio.Event()
     agent._pending_work_task = None
     agent._continue_pending_work = AsyncMock()

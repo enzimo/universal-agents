@@ -4592,11 +4592,13 @@ class UniversalAgent(BaseModel):
     def _can_continue_pending_work(self) -> bool:
         return not (self.paused or self.is_executing or self._should_exit.is_set())
 
-    async def _continue_pending_work(self) -> None:
+    async def _continue_pending_work(self) -> bool:
         """Run one drain pass. Only the retained drain calls this.
 
         ``pending_work_runtime`` keeps that drain in one task, so passes never
-        overlap. Nothing new starts once the agent is stopping.
+        overlap. Nothing new starts once the agent is stopping. Returns False
+        when a waiting message failed and was kept, so the drain stops instead
+        of retrying it at once.
         """
         while self._can_continue_pending_work():
             if self._pending_interrupt_responses:
@@ -4609,7 +4611,7 @@ class UniversalAgent(BaseModel):
                     available=self._can_continue_pending_work,
                 )
                 if not drained:
-                    break
+                    return False
                 continue
             retried_outbox = await self._drain_due_turn_action_outbox()
             if retried_outbox:
@@ -4623,6 +4625,7 @@ class UniversalAgent(BaseModel):
             if started:
                 continue
             break
+        return True
 
     async def _apply_runtime_content_defaults(
         self,
@@ -5053,9 +5056,19 @@ class UniversalAgent(BaseModel):
                 await self._activity_client.close()
             self._runtime_loop = None
 
+    def _cancel_scheduler_pass(self) -> None:
+        """Stop the scheduler's current pass; cleanup joins it.
+
+        A signal exit stops it together with the drain, as exit_agent does, so
+        it cannot claim or queue work while the drain is joined.
+        """
+        if self._scheduler_task is not None:
+            self._scheduler_task.cancel()
+
     async def _cleanup_nats_runtime_on_exit(
         self, adapter: NatsTransportAdapter
     ) -> None:
+        self._cancel_scheduler_pass()
         await close_pending_work(self)
         unregister_local_worker(self.id)
         if self._local_schedule_task is not None:

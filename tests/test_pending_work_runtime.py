@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from custom_agents.pending_work_runtime import (
+    AgentStopping,
     close_pending_work,
+    run_as_owned_task,
     schedule_pending_work,
     start_owned_task,
     wake_pending_work_after,
@@ -136,4 +138,52 @@ async def test_no_owned_task_starts_once_the_agent_is_stopping(caplog):
     with caplog.at_level(logging.WARNING, logger="test_pending_work_runtime"):
         assert start_owned_task(agent, make, name="send:late") is None
     assert created == []  # the coroutine is never created, so nothing is left unawaited
+    assert "event=owned_task_refused" in caplog.text and "send:late" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_shutdown_logs_what_it_cancelled(caplog):
+    agent = _agent()
+
+    async def send():
+        await asyncio.Event().wait()
+
+    start_owned_task(agent, send, name="send:open")
+    wake_pending_work_after(agent, 60)
+    await asyncio.sleep(0)
+    with caplog.at_level(logging.INFO, logger="test_pending_work_runtime"):
+        await close_pending_work(agent)
+    assert "event=pending_work_closed agent_id=lead cancelled_tasks=1 cancelled_timers=1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_work_run_as_owned_returns_its_result_and_failure():
+    agent = _agent()
+
+    async def answer():
+        assert asyncio.current_task() in agent._owned_tasks  # shutdown would cancel it
+        return 42
+
+    async def fails():
+        raise ConnectionError("broker unavailable")
+
+    assert await run_as_owned_task(agent, answer(), name="answer") == 42
+    with pytest.raises(ConnectionError):
+        await run_as_owned_task(agent, fails(), name="fails")
+    assert agent._owned_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_work_run_as_owned_is_refused_once_the_agent_is_stopping(caplog):
+    agent = _agent()
+    agent._should_exit.set()
+
+    async def send():
+        raise AssertionError("must not run")
+
+    coroutine = send()
+    with caplog.at_level(logging.WARNING, logger="test_pending_work_runtime"):
+        with pytest.raises(AgentStopping):
+            await run_as_owned_task(agent, coroutine, name="send:late")
+    assert coroutine.cr_frame is None  # closed, never left unawaited
     assert "event=owned_task_refused" in caplog.text and "send:late" in caplog.text

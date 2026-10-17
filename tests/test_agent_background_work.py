@@ -17,9 +17,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from custom_agents import scheduled_runtime
-from custom_agents.pending_work_runtime import close_pending_work
+from custom_agents.pending_work_runtime import close_pending_work, schedule_pending_work
 from custom_agents.strands_agent import UniversalAgent
-from custom_tools.providers._runtime import _run_agent_coroutine
+from custom_tools.providers._runtime import _run_agent_coroutine, _wake_agent_scheduler
+from tests.broker_access_support import forget_task_context_keys
 from tests.pending_work_support import DrainAgent, use_simple_queue_checks
 
 
@@ -40,6 +41,7 @@ def _stopping_agent(**extra):
         _logger=logging.getLogger("test_agent_background_work"),
         _refresh_self_agent_state=AsyncMock(),
     )
+    agent._cancel_scheduler_pass = lambda: UniversalAgent._cancel_scheduler_pass(agent)
     for key, value in extra.items():
         setattr(agent, key, value)
     return agent
@@ -103,12 +105,21 @@ async def test_provider_retry_wakes_the_retained_drain(monkeypatch):
     await close_pending_work(agent)
 
 
-def test_a_fired_schedule_wakes_the_retained_drain(tmp_path, monkeypatch):
+@pytest.fixture
+def scheduled_world(tmp_path, monkeypatch):
+    """A manager and a worker sharing a schedule store; the cached signing keys are forgotten after."""
+    from tests import scheduled_run_support as runs
+
+    yield runs.build_world(tmp_path, monkeypatch)
+    forget_task_context_keys()
+
+
+def test_a_fired_schedule_wakes_the_retained_drain(scheduled_world):
     from tests import scheduled_run_support as runs
     from custom_agents.schedule_permits import renew_schedule_permits
     from custom_messages.contracts.access_v2 import PersonStanding
 
-    world = runs.build_world(tmp_path, monkeypatch)
+    world = scheduled_world
     runs.record_people(world, (runs.ANN, PersonStanding.ACTIVE, ("member",)))
     runs.save_schedule(world)
     renew_schedule_permits(world.manager, signer=world.signer)
@@ -159,26 +170,189 @@ async def test_memory_review_dispatch_is_owned_and_stopped_at_shutdown(caplog):
     assert "event=owned_task_refused" in caplog.text and "memory-review-dispatch:review_1" in caplog.text
 
 
+def _tool_agent(loop):
+    return SimpleNamespace(
+        id="agent_tools",
+        _runtime_loop=loop,
+        _should_exit=asyncio.Event(),
+        _pending_work_task=None,
+        _pending_work_timers=set(),
+        _owned_tasks=set(),
+        _logger=logging.getLogger("test_agent_background_work"),
+    )
+
+
+async def _send_from_tool_thread(agent, coroutine, **kwargs):
+    """Call the send helper from a worker thread, as Strands runs a sync tool."""
+    return await asyncio.to_thread(_run_agent_coroutine, agent, coroutine, **kwargs)
+
+
 @pytest.mark.asyncio
-async def test_agent_tools_refuse_to_leave_sends_running_from_the_event_loop(caplog):
+async def test_a_tool_send_runs_on_the_agent_loop_and_finishes_first():
     sent = []
 
     async def send():
         sent.append(True)
 
-    agent = SimpleNamespace(id="agent_tools", _runtime_loop=asyncio.get_running_loop())
+    await _send_from_tool_thread(_tool_agent(asyncio.get_running_loop()), send())
+    assert sent == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_send_failure_reaches_the_tool():
+    async def send():
+        raise ConnectionError("broker unavailable")
+
+    with pytest.raises(ConnectionError, match="broker unavailable"):
+        await _send_from_tool_thread(_tool_agent(asyncio.get_running_loop()), send())
+
+
+@pytest.mark.asyncio
+async def test_a_tool_send_is_refused_from_the_event_loop_or_without_a_running_agent(caplog):
+    async def send():
+        raise AssertionError("must not run")
+
+    agent = _tool_agent(asyncio.get_running_loop())
     coroutine = send()
     with caplog.at_level(logging.ERROR, logger="custom_tools.providers._runtime"):
-        with pytest.raises(RuntimeError, match="worker thread"):
+        with pytest.raises(RuntimeError, match="event_loop_thread"):
             _run_agent_coroutine(agent, coroutine)
-    assert coroutine.cr_frame is None  # closed, never left unawaited
-    assert "event=agent_tool_loop_thread_refused" in caplog.text
+        assert coroutine.cr_frame is None  # closed, never left unawaited
+        stopped = _tool_agent(None)  # no running agent loop: no private loop either
+        with pytest.raises(RuntimeError, match="agent_not_running"):
+            await _send_from_tool_thread(stopped, send())
+    assert caplog.text.count("event=agent_tool_send_refused") == 2
 
-    # From a tool's worker thread the send runs on the agent loop and finishes first.
-    worker = threading.Thread(target=_run_agent_coroutine, args=(agent, send()))
-    worker.start()
-    await asyncio.to_thread(worker.join, 5)
-    assert sent == [True]
+
+@pytest.mark.asyncio
+async def test_a_tool_send_after_shutdown_started_is_refused(caplog):
+    """A sync tool keeps running after its turn is cancelled; its send must not publish."""
+    from custom_agents.pending_work_runtime import AgentStopping
+
+    agent = _tool_agent(asyncio.get_running_loop())
+    await close_pending_work(agent)
+    sent = []
+
+    async def send():
+        sent.append("published after exit")
+
+    with caplog.at_level(logging.WARNING, logger="test_agent_background_work"):
+        with pytest.raises(AgentStopping):
+            await _send_from_tool_thread(agent, send())
+    assert sent == [] and agent._owned_tasks == set()
+    assert "event=owned_task_refused" in caplog.text and "tool-send:agent_tools" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_and_joins_a_tool_send_in_progress():
+    import concurrent.futures
+
+    agent = _tool_agent(asyncio.get_running_loop())
+    sending, stopped = asyncio.Event(), []
+
+    async def slow_send():
+        sending.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stopped.append(True)
+            raise
+
+    def tool() -> type[BaseException] | None:
+        try:
+            _run_agent_coroutine(agent, slow_send())
+        except Exception as exc:  # what the tool's own error handling receives
+            return type(exc)
+        return None
+
+    seen = asyncio.create_task(asyncio.to_thread(tool))
+    await asyncio.wait_for(sending.wait(), 5)
+    assert len(agent._owned_tasks) == 1
+    await close_pending_work(agent)
+    assert stopped == [True] and agent._owned_tasks == set()
+    assert await seen is concurrent.futures.CancelledError  # the tool reports the send as not done
+
+
+@pytest.mark.asyncio
+async def test_a_tool_send_that_times_out_is_cancelled(caplog):
+    agent = _tool_agent(asyncio.get_running_loop())
+    stopped = asyncio.Event()
+
+    async def stuck_send():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stopped.set()
+            raise
+
+    with caplog.at_level(logging.WARNING, logger="custom_tools.providers._runtime"):
+        with pytest.raises(TimeoutError):
+            await _send_from_tool_thread(agent, stuck_send(), timeout=0.05)
+    await asyncio.wait_for(stopped.wait(), 5)  # not left running after the tool gave up
+    assert "event=agent_tool_send_timed_out" in caplog.text
+    await asyncio.sleep(0)
+    assert agent._owned_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_wakes_the_scheduler_on_the_agent_loop():
+    loop_thread = threading.get_ident()
+    set_on = []
+
+    class Wake:
+        def set(self):
+            set_on.append(threading.get_ident())
+
+    agent = SimpleNamespace(_scheduler_wake=Wake(), _runtime_loop=asyncio.get_running_loop())
+    await asyncio.to_thread(_wake_agent_scheduler, agent)  # from a tool's worker thread
+    await asyncio.sleep(0)
+    _wake_agent_scheduler(agent)  # from the agent loop itself
+    assert set_on == [loop_thread, loop_thread]
+
+    idle = SimpleNamespace(_scheduler_wake=Wake(), _runtime_loop=None)
+    await asyncio.to_thread(_wake_agent_scheduler, idle)  # no loop runs a scheduler yet
+    assert len(set_on) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_signal_exit_stops_the_scheduler_pass_while_the_drain_is_joined():
+    events: list[str] = []
+    drain_stopping, let_drain_finish = asyncio.Event(), asyncio.Event()
+
+    async def turn_that_unwinds_slowly():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            drain_stopping.set()
+            await let_drain_finish.wait()
+            events.append("drain_stopped")
+            raise
+
+    async def scheduler_pass():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("scheduler_stopped")
+            raise
+
+    agent = _stopping_agent(_continue_pending_work=turn_that_unwinds_slowly)
+    agent._pending_work_requested = False
+    agent._scheduler_task = asyncio.create_task(scheduler_pass())
+    schedule_pending_work(agent)
+    await asyncio.sleep(0)
+
+    async def close_transport():
+        events.append("transport_closed")
+
+    cleanup = asyncio.create_task(
+        UniversalAgent._cleanup_nats_runtime_on_exit(agent, SimpleNamespace(close=close_transport))
+    )
+    await asyncio.wait_for(drain_stopping.wait(), 5)
+    await asyncio.sleep(0)
+    assert events == ["scheduler_stopped"]  # stopped while the drain is still being joined
+    let_drain_finish.set()
+    await asyncio.wait_for(cleanup, 5)
+    assert events == ["scheduler_stopped", "drain_stopped", "transport_closed"]
 
 
 def test_the_agent_runs_a_drain_pass_when_another_holder_releases_the_slot(tmp_path):
@@ -188,11 +362,15 @@ def test_the_agent_runs_a_drain_pass_when_another_holder_releases_the_slot(tmp_p
     object.__setattr__(agent, "_continue_pending_work", AsyncMock())
 
     async def scenario():
-        async def other_holder():
+        async def other_holder(wake_up: bool):
             async with agent._execution_gate.hold():
+                if wake_up:
+                    schedule_pending_work(agent)  # work saved while the slot is held
                 await asyncio.sleep(0)
 
-        await asyncio.create_task(other_holder())
+        await asyncio.create_task(other_holder(wake_up=False))
+        assert agent._pending_work_task is None  # a release with nothing recorded starts no pass
+        await asyncio.create_task(other_holder(wake_up=True))
         assert agent._pending_work_task is not None
         await asyncio.wait_for(agent._pending_work_task, 5)
 
