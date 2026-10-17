@@ -40,6 +40,7 @@ from custom_agents.task_manager_objectives import ObjectiveSaveFailed
 from custom_agents.schedule_store import (
     schedule_claim_scope_for_agent,
 )
+from custom_messages.contracts.control_v1 import OBJECTIVE_PART_POLICY, OBJECTIVE_PART_RECORD
 from custom_messages.contracts.routing_v1 import MessageHeader
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
@@ -602,10 +603,10 @@ def _status_payload(agent: "UniversalAgent", outcome: ObjectiveLifecycleOutcome)
             agent.task_manager.render_objective_markdown, objective.objective_id
         ),
     }
-    if outcome.incomplete:
-        payload["lifecycle_warnings"] = [
-            _lifecycle_warning(objective.objective_id, item) for item in outcome.incomplete
-        ]
+    warnings = [_lifecycle_warning(objective.objective_id, item) for item in outcome.incomplete]
+    warnings += [_skipped_link_warning(objective.objective_id, item) for item in outcome.skipped]
+    if warnings:
+        payload["lifecycle_warnings"] = warnings
     return payload
 
 
@@ -696,7 +697,9 @@ def _change_status_in_operation(
         return None
     if stored.status in _PERSON_DELETION_STATUSES:
         raise ValueError(
-            f"Objective {objective_id} is {stored.status.value} by its person and can no longer change."
+            f"Objective {objective_id} "
+            + ("was deleted" if stored.status == ObjectiveStatus.DELETED else "is being deleted")
+            + " by its person, so it can no longer change."
         )
     return apply_objective_lifecycle(
         agent.task_manager, objective_id, change, _AgentLinkSwitch(agent)
@@ -707,12 +710,12 @@ def _lifecycle_warning(objective_id: str, incomplete: str) -> str:
     """Plain words for one control the status change did not finish."""
 
     kind, _, item_id = incomplete.partition(":")
-    if kind == "objective":
+    if kind == OBJECTIVE_PART_RECORD:
         return (
             f"Objective {objective_id} could not record which schedules and heartbeat items it "
             "paused or resumed, so resuming it will not restart the ones it paused. Tell the person."
         )
-    if kind == "policy":
+    if kind == OBJECTIVE_PART_POLICY:
         return (
             f"The bounded work-session setting of Objective {objective_id} did not follow the new "
             "status; check it with objective_work_sessions(action=\"status\") and tell the person."
@@ -720,6 +723,17 @@ def _lifecycle_warning(objective_id: str, incomplete: str) -> str:
     return (
         f"The linked {kind} {item_id} could not be turned on or off with Objective "
         f"{objective_id}; operator review is required."
+    )
+
+
+def _skipped_link_warning(objective_id: str, skipped: str) -> str:
+    """Plain words for a linked item the team lead's rules left as it was."""
+
+    _kind, _, item_id = skipped.partition(":")
+    return (
+        f"Schedule {item_id} is managed by the system, so this status change of Objective "
+        f"{objective_id} left it as it was. It changes only through a system schedule change "
+        "(apply_change) or the person's Runtime controls; tell the person if it should follow."
     )
 
 

@@ -1341,10 +1341,14 @@ def _owned_objective_with_schedule(tmp_path: Path):
     return task_manager, schedule_store, objective, agent
 
 
-async def _owner_control(agent, objective_id: str, action: str, *, digest: str | None = None):
+async def _owner_control(
+    agent, objective_id: str, action: str, *, digest: str | None = None, command_id: str | None = None
+):
     command = ManagerRuntimeWorkCommand(
         action=action, scope="objective", target_objective_id=objective_id, expected_objective_digest=digest
     )
+    if command_id:
+        command.command_id = command_id
     response = command.model_copy(deep=True)
     await manager_control_runtime._apply_objective_control(
         agent,
@@ -1364,7 +1368,8 @@ async def test_objective_control_refuses_an_action_the_status_does_not_offer(tmp
     response = await _owner_control(agent, objective.objective_id, "resume_objective")
 
     assert (response.success, response.message) == (False, "objective_action_unavailable:satisfied")
-    assert response.objective_status == ObjectiveStatus.SATISFIED
+    # Nothing changed, so the reply names no status the gateway would report as new.
+    assert response.objective_status is None
     assert task_manager.get_objective(objective.objective_id) == before
 
 
@@ -1408,3 +1413,88 @@ async def test_objective_control_checks_and_changes_in_one_task_operation(tmp_pa
 
     assert (response.success, response.message) == (True, "objective_paused")
     assert operations == ["_control_objective_in_operation"]
+
+
+def _fail_first_schedule_switch(schedule_store) -> None:
+    """The first schedule switch fails (as when the database is busy); later ones work."""
+    switch = schedule_store.set_enabled
+    calls: list[str] = []
+
+    def fail_first(schedule_id, *args, **kwargs):
+        calls.append(schedule_id)
+        if len(calls) == 1:
+            return False
+        return switch(schedule_id, *args, **kwargs)
+
+    schedule_store.set_enabled = fail_first
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "stored_status"),
+    [("pause_objective", ObjectiveStatus.PAUSED), ("abandon_objective", ObjectiveStatus.ABANDONED)],
+)
+async def test_an_incomplete_pause_or_abandon_can_be_retried(
+    tmp_path: Path, action: str, stored_status: ObjectiveStatus
+) -> None:
+    """The status is stored before a schedule fails to switch, so the retry finds it set.
+
+    Paused and abandoned Objectives do not offer pause or abandon, and the
+    retry used to be refused while the schedule kept running.
+    """
+    task_manager, schedule_store, objective, agent = _owned_objective_with_schedule(tmp_path)
+    task_manager.complete_task("task_control_source", "2026-10-17T09:00:00+00:00")
+    _fail_first_schedule_switch(schedule_store)
+
+    first = await _owner_control(agent, objective.objective_id, action)
+
+    assert (first.success, first.message) == (
+        False,
+        "objective_control_incomplete:schedule:objective_owner_schedule",
+    )
+    assert first.objective_status == stored_status
+    assert schedule_store.get_scheduled_message("objective_owner_schedule").enabled is True
+    stored = task_manager.get_objective(objective.objective_id)
+    assert stored.schedule_links[0].disabled_by_objective_pause is False
+    events_before = len(stored.event_log)
+
+    retried = await _owner_control(agent, objective.objective_id, action)
+
+    assert (retried.success, retried.message) == (True, f"objective_{stored_status.value}")
+    assert schedule_store.get_scheduled_message("objective_owner_schedule").enabled is False
+    stored = task_manager.get_objective(objective.objective_id)
+    assert stored.status == stored_status
+    assert stored.schedule_links[0].disabled_by_objective_pause is True
+    assert len(stored.event_log) == events_before
+
+
+@pytest.mark.asyncio
+async def test_an_incomplete_deletion_waits_and_keeps_its_first_operation_on_retry(tmp_path: Path) -> None:
+    task_manager, schedule_store, objective, agent = _owned_objective_with_schedule(tmp_path)
+    task_manager.complete_task("task_control_source", "2026-10-17T09:00:00+00:00")
+    _fail_first_schedule_switch(schedule_store)
+
+    first = await _owner_control(agent, objective.objective_id, "delete_objective", command_id="cmd_delete_first")
+
+    assert (first.success, first.message) == (
+        False,
+        "objective_deletion_incomplete:schedule:objective_owner_schedule",
+    )
+    assert first.objective_status == ObjectiveStatus.DELETING
+    waiting = task_manager.get_objective(objective.objective_id)
+    assert waiting.status == ObjectiveStatus.DELETING
+    assert waiting.deletion_operation_id == "cmd_delete_first"
+    assert waiting.deletion_requested_at is not None
+    assert waiting.deletion_summary == (
+        "Deletion is waiting for controls to finish: schedule:objective_owner_schedule"
+    )
+
+    retried = await _owner_control(agent, objective.objective_id, "delete_objective", command_id="cmd_delete_retry")
+
+    assert (retried.success, retried.message) == (True, "objective_deleted")
+    deleted = task_manager.get_objective(objective.objective_id)
+    assert deleted.status == ObjectiveStatus.DELETED
+    assert deleted.deletion_operation_id == "cmd_delete_first"
+    assert deleted.deletion_requested_at == waiting.deletion_requested_at
+    assert deleted.deleted_at is not None
+    assert schedule_store.get_scheduled_message("objective_owner_schedule").enabled is False

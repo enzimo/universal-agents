@@ -15,11 +15,12 @@ from assistant_gateway.application.request_context import (
     GatewayRequesterPresentation,
     GatewayRequestRoute,
 )
+from assistant_gateway.application.objective_control_text import objective_control_text
 from assistant_gateway.domain.sessions import SessionRecord
 from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand, RuntimeWorkCancellationReceipt, RuntimeWorkSummary, SystemStatusMessage
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
-from custom_messages.enums import ProgressState
+from custom_messages.enums import ObjectiveStatus, ProgressState
 
 
 class _FixedIds:
@@ -366,3 +367,78 @@ def test_scheduled_work_summary_is_compact(item_count, objective_ids, expected) 
     channel_text = GatewayOperationalControlApplication._render_runtime_work_response(response)
     assert "/schedules" in channel_text
     assert "/webchat" not in channel_text
+
+
+def test_a_refused_objective_control_is_explained_and_not_reported_as_done() -> None:
+    """A refusal changed nothing: no "is now" line, and the reason in plain words."""
+    response = ManagerRuntimeWorkCommand(
+        action="resume_objective",
+        scope="objective",
+        target_objective_id="objective_1",
+        success=False,
+        message="objective_action_unavailable:satisfied",
+    )
+
+    rendered = GatewayOperationalControlApplication._render_runtime_work_response(response)
+
+    assert rendered.splitlines()[0] == (
+        "Objective objective_1 is satisfied, so it can't be resumed. Nothing was changed."
+    )
+    assert "is now" not in rendered
+    assert "objective_action_unavailable" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("action", "message", "status", "expected"),
+    [
+        (
+            "pause_objective",
+            "objective_control_incomplete:schedule:sched_1,policy:policy_1",
+            ObjectiveStatus.PAUSED,
+            "Not every part finished: schedule sched_1, work-session setting policy_1. "
+            "Send /pause objective objective_1 again to retry them.",
+        ),
+        (
+            "delete_objective",
+            "objective_deletion_incomplete:task:task_1,objective:objective_1",
+            ObjectiveStatus.DELETING,
+            "Objective objective_1 is still being deleted; these did not finish: task (its stop was "
+            "not confirmed) task_1, recording which links it changed. Send /delete objective "
+            "objective_1 again to finish it.",
+        ),
+        (
+            "pause_objective",
+            "objective_changed",
+            None,
+            "Objective objective_1 changed since you last looked at it, so nothing was done. "
+            "Check /objectives and try again.",
+        ),
+    ],
+)
+def test_objective_control_outcomes_are_worded_for_people(action, message, status, expected) -> None:
+    response = ManagerRuntimeWorkCommand(
+        action=action,
+        scope="objective",
+        target_objective_id="objective_1",
+        success=False,
+        message=message,
+        objective_status=status,
+    )
+
+    rendered = GatewayOperationalControlApplication._render_runtime_work_response(response)
+
+    assert expected in rendered.splitlines()
+    assert "Control incomplete:" not in rendered
+
+
+def test_the_web_page_shows_a_finished_objective_control_in_words() -> None:
+    response = ManagerRuntimeWorkCommand(
+        action="pause_objective",
+        scope="objective",
+        target_objective_id="objective_1",
+        success=True,
+        message="objective_paused",
+        objective_status=ObjectiveStatus.PAUSED,
+    )
+
+    assert objective_control_text(response) == "Objective objective_1 is now paused."

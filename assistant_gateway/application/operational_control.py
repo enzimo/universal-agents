@@ -13,6 +13,7 @@ from assistant_gateway.application.manager_commands import (
     GatewayManagerCommandRequest,
     GatewayManagerCommandService,
 )
+from assistant_gateway.application.objective_control_text import objective_control_text
 from assistant_gateway.application.ports import GatewayIdGenerator
 from assistant_gateway.application.request_context import (
     GatewayCommandPerson,
@@ -154,6 +155,10 @@ def _append_control_failure(
     response: ManagerRuntimeWorkCommand,
 ) -> None:
     if response.success is not False:
+        return
+    objective_text = objective_control_text(response)
+    if objective_text:
+        lines.append(objective_text)
         return
     detail = " ".join(str(response.message or "control incomplete").split())
     lines.append(f"Control incomplete: {detail}")

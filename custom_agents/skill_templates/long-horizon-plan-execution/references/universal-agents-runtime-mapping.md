@@ -231,9 +231,10 @@ also cancels current Objective work at a safe boundary; abandon retains a
 terminal record; delete disables linked future work, stops active work, and
 creates a recoverable tombstone while retaining Plans, evidence, checkpoints,
 and audit history. Each status offers only some of these (a satisfied Objective
-can only be deleted), and the runtime refuses the rest. A task that ends while
-its Objective is paused or being deleted leaves it paused or deleting; nothing
-re-reviews it when the person resumes. User controls resolve canonical-user
+can only be deleted), and Runtime Controls refuse the rest; repeating the
+control that set the current status retries the parts that did not finish. A
+task that ends while its Objective is paused or being deleted leaves it paused
+or deleting; nothing re-reviews it when the person resumes. User controls resolve canonical-user
 ownership and may adopt legacy same-team TeamArchitect custody before acting.
 Never attempt to bypass, forge, or weaken these authenticated controls.
 
@@ -241,9 +242,12 @@ Never attempt to bypass, forge, or weaken these authenticated controls.
 controls: pausing or closing an Objective also pauses its bounded work sessions
 and the schedules and heartbeat items it manages, and `active` resumes only
 what an Objective control paused, never a work-session setting the person
-turned off. Read `lifecycle_warnings` in its reply and tell the person about
-any control that did not finish. It refuses `deleting` and `deleted`, and
-leaves an Objective its person is deleting alone: only the person deletes.
+turned off. It leaves system-managed schedules as they are. Read
+`lifecycle_warnings` in its reply and tell the person about any control that
+did not finish and any schedule it left alone. It does not limit statuses the
+way Runtime Controls do, so set a finished Objective active again only when the
+person asks. It refuses `deleting` and `deleted`, and leaves an Objective its
+person is deleting alone: only the person deletes.
 
 Runtime Controls also exposes owner-scoped schedules and authorized MCP
 lifecycle actions. Treat a user pause, disable, detach, stop, remove, abandon,

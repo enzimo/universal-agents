@@ -379,6 +379,11 @@ def test_objective_lifecycle_cannot_disable_linked_system_schedule(
 
     restored = agent._schedule_store.get_scheduled_message(schedule_id)
     assert paused["objective"]["status"] == "paused"
+    assert paused["lifecycle_warnings"] == [
+        f"Schedule {schedule_id} is managed by the system, so this status change of Objective "
+        f"{objective_id} left it as it was. It changes only through a system schedule change "
+        "(apply_change) or the person's Runtime controls; tell the person if it should follow."
+    ]
     assert restored is not None
     assert restored.enabled is True
     objective = manager.get_objective(objective_id)
@@ -735,7 +740,7 @@ def test_the_status_tool_leaves_an_objective_its_person_is_deleting(tmp_path: Pa
 
     refused = json.loads(objectives(action="update_status", status="active", objective_id=objective_id))
 
-    assert "is deleting by its person" in refused["error"]
+    assert refused["error"].endswith("is being deleted by its person, so it can no longer change.")
     assert manager.get_objective(objective_id).status.value == "deleting"
 
 
@@ -757,3 +762,70 @@ def test_the_status_tool_reports_a_linked_heartbeat_item_that_is_gone(tmp_path: 
     ]
     # Not recorded as paused by the Objective, so a resume does not claim it either.
     assert [link.disabled_by_objective_pause for link in manager.get_objective(objective_id).heartbeat_links] == [False]
+
+
+def test_the_status_tool_reports_a_schedule_it_could_not_switch(tmp_path: Path, caplog) -> None:
+    """An error while switching a link is reported; the saved status and the other links stand.
+
+    The error used to escape after the status was saved: the tool answered
+    with an error and the link stayed unmarked, so a resume would not undo it.
+    """
+    manager = _task_manager(tmp_path)
+    _add_current_task(manager)
+    agent = _FakeAgent(manager)
+    set_agent_ref(agent)
+    objective_id, schedule_id = _recurring_objective_with_schedule(manager, agent)
+    heartbeat_item_id = json.loads(add_heartbeat_item(instruction="Check.", title="Check"))["heartbeat_item_id"]
+    store = agent._schedule_store
+
+    def unavailable(*_args, **_kwargs):
+        raise ValueError("ScheduleStore not initialized on this agent.")
+
+    store.set_enabled = unavailable
+
+    with caplog.at_level("WARNING", logger="custom_agents.objective_lifecycle"):
+        paused = json.loads(objectives(action="update_status", status="paused", objective_id=objective_id))
+
+    assert paused["objective"]["status"] == "paused"
+    assert paused["lifecycle_warnings"] == [
+        f"The linked schedule {schedule_id} could not be turned on or off with Objective "
+        f"{objective_id}; operator review is required."
+    ]
+    assert (
+        f"event=objective_control_link_switch_failed objective_id={objective_id} "
+        f"kind=schedule item_id={schedule_id}"
+    ) in caplog.text
+    stored = manager.get_objective(objective_id)
+    assert [link.disabled_by_objective_pause for link in stored.schedule_links] == [False]
+    assert [link.disabled_by_objective_pause for link in stored.heartbeat_links] == [True]
+    assert HeartbeatStore(db_path=manager._db_path, storage_settings=manager.storage_settings).get_item(
+        heartbeat_item_id
+    ).enabled is False
+
+
+def test_the_status_tool_warns_when_switched_links_are_not_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _task_manager(tmp_path)
+    _add_current_task(manager)
+    agent = _FakeAgent(manager)
+    set_agent_ref(agent)
+    objective_id, schedule_id = _recurring_objective_with_schedule(manager, agent)
+    save = manager.objective_repository.save_objective
+
+    def fail_when_recording_links(record) -> None:
+        if any(link.disabled_by_objective_pause for link in record.schedule_links):
+            raise sqlite3.OperationalError("disk I/O error")
+        save(record)
+
+    monkeypatch.setattr(manager.objective_repository, "save_objective", fail_when_recording_links)
+
+    paused = json.loads(objectives(action="update_status", status="paused", objective_id=objective_id))
+
+    assert paused["objective"]["status"] == "paused"
+    assert paused["lifecycle_warnings"] == [
+        f"Objective {objective_id} could not record which schedules and heartbeat items it "
+        "paused or resumed, so resuming it will not restart the ones it paused. Tell the person."
+    ]
+    assert agent._schedule_store.get_scheduled_message(schedule_id).enabled is False
+    assert manager.get_objective(objective_id).schedule_links[0].disabled_by_objective_pause is False

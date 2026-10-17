@@ -56,6 +56,22 @@ from custom_agents.schedule_store import ScheduleStore, owner_canonical_user_id_
 from custom_agents.task_manager_objectives import ObjectiveSaveFailed
 from custom_messages.contracts.common_v1 import contract_sha256
 from custom_messages.contracts.control_v1 import (
+    ABANDON_OBJECTIVE,
+    DELETE_OBJECTIVE,
+    OBJECTIVE_ACTION_UNAVAILABLE,
+    OBJECTIVE_ALREADY_DELETED,
+    OBJECTIVE_CHANGED,
+    OBJECTIVE_CONTROL_INCOMPLETE,
+    OBJECTIVE_CONTROL_WORDS,
+    OBJECTIVE_DELETED,
+    OBJECTIVE_DELETION_INCOMPLETE,
+    OBJECTIVE_NOT_FOUND,
+    OBJECTIVE_OWNER_MISMATCH,
+    OBJECTIVE_PART_TASK,
+    OBJECTIVE_UPDATE_FAILED,
+    PAUSE_OBJECTIVE,
+    RESUME_OBJECTIVE,
+    STOP_OBJECTIVE,
     ManagerMemoryCommand,
     ManagerRuntimeWorkCommand,
     ManagerTopicCommand,
@@ -1035,20 +1051,24 @@ async def _runtime_work_schedules(
 
 
 def _objective_available_actions(status: ObjectiveStatus) -> list[str]:
+    """The control words a person is offered for an Objective in ``status``."""
+
     if status == ObjectiveStatus.DELETED:
-        return []
-    if status == ObjectiveStatus.DELETING:
-        return ["delete"]
-    if status == ObjectiveStatus.PAUSED:
-        return ["resume", "stop", "abandon", "delete"]
-    if status in {
+        controls: tuple[str, ...] = ()
+    elif status == ObjectiveStatus.DELETING:
+        controls = (DELETE_OBJECTIVE,)
+    elif status == ObjectiveStatus.PAUSED:
+        controls = (RESUME_OBJECTIVE, STOP_OBJECTIVE, ABANDON_OBJECTIVE, DELETE_OBJECTIVE)
+    elif status in {
         ObjectiveStatus.SATISFIED,
         ObjectiveStatus.FAILED,
         ObjectiveStatus.CANCELLED,
         ObjectiveStatus.ABANDONED,
     }:
-        return ["delete"]
-    return ["pause", "stop", "abandon", "delete"]
+        controls = (DELETE_OBJECTIVE,)
+    else:
+        controls = (PAUSE_OBJECTIVE, STOP_OBJECTIVE, ABANDON_OBJECTIVE, DELETE_OBJECTIVE)
+    return [OBJECTIVE_CONTROL_WORDS[control] for control in controls]
 
 
 def _objective_work_policy(agent: Any, objective: Any) -> Any:
@@ -1150,23 +1170,25 @@ async def _runtime_user_objectives(
     return [await _runtime_objective_summary(agent, item) for item in objectives]
 
 
-# Each person's Objective control: the word ``_objective_available_actions``
-# offers for it, the status it sets, and the summary it records. The manager
-# enforces the list it publishes, so a stale page or a typed command cannot,
-# for example, make a satisfied Objective active again.
-_OBJECTIVE_CONTROLS: dict[str, tuple[str, ObjectiveStatus, str]] = {
-    "pause_objective": ("pause", ObjectiveStatus.PAUSED, "Paused by authenticated user control."),
-    "stop_objective": ("stop", ObjectiveStatus.PAUSED, "Stopped by authenticated user control."),
-    "resume_objective": ("resume", ObjectiveStatus.ACTIVE, "Resumed by authenticated user control."),
-    "abandon_objective": ("abandon", ObjectiveStatus.ABANDONED, "Abandoned by authenticated user control."),
-    "delete_objective": (
-        "delete",
+# Each person's Objective control: the status it sets and the summary it
+# records. The manager enforces the actions it publishes
+# (``_objective_available_actions``), so a stale page or a typed command
+# cannot, for example, make a satisfied Objective active again. A control
+# whose status is already stored is a retry and is accepted: a pause or
+# abandon whose schedule did not switch must be repeatable, and the lifecycle
+# step records nothing new and switches only the links not yet switched.
+_OBJECTIVE_CONTROLS: dict[str, tuple[ObjectiveStatus, str]] = {
+    PAUSE_OBJECTIVE: (ObjectiveStatus.PAUSED, "Paused by authenticated user control."),
+    STOP_OBJECTIVE: (ObjectiveStatus.PAUSED, "Stopped by authenticated user control."),
+    RESUME_OBJECTIVE: (ObjectiveStatus.ACTIVE, "Resumed by authenticated user control."),
+    ABANDON_OBJECTIVE: (ObjectiveStatus.ABANDONED, "Abandoned by authenticated user control."),
+    DELETE_OBJECTIVE: (
         ObjectiveStatus.DELETING,
         "Recoverable deletion requested by authenticated user control.",
     ),
 }
 _OBJECTIVE_CONTROLS_THAT_STOP_WORK = frozenset(
-    {"stop_objective", "abandon_objective", "delete_objective"}
+    {STOP_OBJECTIVE, ABANDON_OBJECTIVE, DELETE_OBJECTIVE}
 )
 
 
@@ -1248,10 +1270,13 @@ class _PersonLinkSwitch:
 
 @dataclass(frozen=True)
 class _ObjectiveControlResult:
-    """What one control's task operation found or changed (data only)."""
+    """What one control's task operation found or changed (data only).
+
+    A refusal changed nothing, so it carries no status: the gateway would
+    otherwise tell the person the Objective "is now" that status.
+    """
 
     refusal: Optional[str] = None
-    status: Optional[ObjectiveStatus] = None
     already_deleted: bool = False
     outcome: Optional[ObjectiveLifecycleOutcome] = None
 
@@ -1281,23 +1306,24 @@ def _control_objective_in_operation(
         adopt_live_custody=True,
     )
     if objective is None:
-        return _ObjectiveControlResult(refusal="objective_not_found")
+        return _ObjectiveControlResult(refusal=OBJECTIVE_NOT_FOUND)
     decision = private_access(
         person_id=person.canonical_user_id,
         owner_id=objective.owner_canonical_user_id,
         resource_type=RESOURCE_OBJECTIVE,
         resource_id=objective.objective_id,
-        action=PRIVATE_DELETE if command.action == "delete_objective" else PRIVATE_UPDATE,
+        action=PRIVATE_DELETE if command.action == DELETE_OBJECTIVE else PRIVATE_UPDATE,
     )
     if not decision.allowed:
-        return _ObjectiveControlResult(refusal="objective_owner_mismatch")
+        return _ObjectiveControlResult(refusal=OBJECTIVE_OWNER_MISMATCH)
     expected_digest = str(command.expected_objective_digest or "").strip()
     if expected_digest and expected_digest != contract_sha256(objective.model_dump(mode="json")):
-        return _ObjectiveControlResult(refusal="objective_changed")
+        return _ObjectiveControlResult(refusal=OBJECTIVE_CHANGED)
     if objective.status == ObjectiveStatus.DELETED:
-        return _ObjectiveControlResult(status=objective.status, already_deleted=True)
-    action_word, target_status, summary = _OBJECTIVE_CONTROLS[command.action]
-    if action_word not in _objective_available_actions(objective.status):
+        return _ObjectiveControlResult(already_deleted=True)
+    target_status, summary = _OBJECTIVE_CONTROLS[command.action]
+    offered = OBJECTIVE_CONTROL_WORDS[command.action] in _objective_available_actions(objective.status)
+    if not offered and target_status != objective.status:
         agent._logger.info(
             "Refused an Objective control its status does not offer. "
             "event=objective_control_action_unavailable objective_id=%s action=%s status=%s",
@@ -1306,10 +1332,9 @@ def _control_objective_in_operation(
             objective.status.value,
         )
         return _ObjectiveControlResult(
-            refusal=f"objective_action_unavailable:{objective.status.value}",
-            status=objective.status,
+            refusal=f"{OBJECTIVE_ACTION_UNAVAILABLE}:{objective.status.value}",
         )
-    deleting = command.action == "delete_objective"
+    deleting = command.action == DELETE_OBJECTIVE
     outcome = apply_objective_lifecycle(
         task_manager,
         objective.objective_id,
@@ -1323,8 +1348,8 @@ def _control_objective_in_operation(
         _PersonLinkSwitch(agent, person),
     )
     if outcome is None:
-        return _ObjectiveControlResult(refusal="objective_not_found")
-    return _ObjectiveControlResult(status=outcome.objective.status, outcome=outcome)
+        return _ObjectiveControlResult(refusal=OBJECTIVE_NOT_FOUND)
+    return _ObjectiveControlResult(outcome=outcome)
 
 
 async def _finish_objective_deletion(
@@ -1355,7 +1380,7 @@ async def _finish_objective_deletion(
             partial(task_manager.objective_coordinator.change_objective, objective_id, note_waiting)
         )
         response.success = False
-        response.message = "objective_deletion_incomplete:" + ",".join(incomplete)
+        response.message = f"{OBJECTIVE_DELETION_INCOMPLETE}:" + ",".join(incomplete)
         response.objective_status = ObjectiveStatus.DELETING
         return
     deleted = await task_manager.operations_runtime.run(
@@ -1371,7 +1396,7 @@ async def _finish_objective_deletion(
     if deleted is None:
         raise ObjectiveSaveFailed(objective_id)
     response.success = True
-    response.message = "objective_deleted"
+    response.message = OBJECTIVE_DELETED
     response.objective_status = ObjectiveStatus.DELETED
 
 
@@ -1554,19 +1579,16 @@ async def _apply_objective_control(
             command.action,
         )
         response.success = False
-        response.message = "objective_update_failed"
+        response.message = OBJECTIVE_UPDATE_FAILED
         return
     if result.already_deleted:
-        response.success = command.action == "delete_objective"
-        response.message = (
-            "objective_deleted" if response.success else "objective_already_deleted"
-        )
+        response.success = command.action == DELETE_OBJECTIVE
+        response.message = OBJECTIVE_DELETED if response.success else OBJECTIVE_ALREADY_DELETED
         response.objective_status = ObjectiveStatus.DELETED
         return
     if result.outcome is None:
         response.success = False
-        response.message = result.refusal or "objective_update_failed"
-        response.objective_status = result.status
+        response.message = result.refusal or OBJECTIVE_UPDATE_FAILED
         return
 
     outcome = result.outcome
@@ -1595,15 +1617,15 @@ async def _apply_objective_control(
         for receipt in response.cancellation_receipts
         if not receipt.confirmed
     ]
-    incomplete = list(outcome.incomplete) + [f"task:{task_id}" for task_id in unconfirmed]
-    if command.action == "delete_objective":
+    incomplete = list(outcome.incomplete) + [f"{OBJECTIVE_PART_TASK}:{task_id}" for task_id in unconfirmed]
+    if command.action == DELETE_OBJECTIVE:
         try:
             await _finish_objective_deletion(
                 agent, outcome.objective.objective_id, incomplete=incomplete, response=response
             )
         except ObjectiveSaveFailed:
             response.success = False
-            response.message = "objective_update_failed"
+            response.message = OBJECTIVE_UPDATE_FAILED
             response.objective_status = ObjectiveStatus.DELETING
         return
 
@@ -1611,7 +1633,7 @@ async def _apply_objective_control(
     response.message = (
         f"objective_{outcome.objective.status.value}"
         if response.success
-        else "objective_control_incomplete:" + ",".join(incomplete)
+        else f"{OBJECTIVE_CONTROL_INCOMPLETE}:" + ",".join(incomplete)
     )
 
 
@@ -1686,13 +1708,7 @@ async def handle_manager_runtime_work_command(
         )
         return
 
-    if command.action in {
-        "pause_objective",
-        "resume_objective",
-        "stop_objective",
-        "abandon_objective",
-        "delete_objective",
-    }:
+    if command.action in _OBJECTIVE_CONTROLS:
         await _apply_objective_control(
             agent,
             command=command,

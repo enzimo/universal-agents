@@ -33,6 +33,12 @@ from enum import StrEnum
 from typing import Any, Optional, Protocol
 
 from custom_agents.task_manager_objectives import ObjectiveSaveFailed
+from custom_messages.contracts.control_v1 import (
+    OBJECTIVE_PART_HEARTBEAT,
+    OBJECTIVE_PART_POLICY,
+    OBJECTIVE_PART_RECORD,
+    OBJECTIVE_PART_SCHEDULE,
+)
 from custom_messages.enums import ObjectiveStatus
 from custom_messages.records.objectives import (
     ObjectiveHeartbeatLink,
@@ -54,10 +60,6 @@ _FUTURE_WORK_ENABLED: dict[ObjectiveStatus, bool] = {
     ObjectiveStatus.DELETING: False,
 }
 
-_SCHEDULE = "schedule"
-_HEARTBEAT = "heartbeat"
-_POLICY = "policy"
-_OBJECTIVE = "objective"
 
 
 class LinkSwitchResult(StrEnum):
@@ -65,7 +67,7 @@ class LinkSwitchResult(StrEnum):
 
     SWITCHED = "switched"  # it is now in the requested state
     MISSING = "missing"  # it no longer exists
-    SKIPPED = "skipped"  # the caller's rules leave it alone; not a failure
+    SKIPPED = "skipped"  # the caller's rules leave it alone; reported in ``skipped``
     FAILED = "failed"  # it could not be changed
 
 
@@ -109,12 +111,16 @@ class ObjectiveLifecycleOutcome:
 
     ``incomplete`` names each control that did not finish, as
     ``policy:<id>``, ``schedule:<id>``, ``heartbeat:<id>`` or
-    ``objective:<id>`` (the Objective could not record which links changed,
-    so a later resume would not undo them).
+    ``objective:<id>`` (the parts are ``control_v1.OBJECTIVE_PART_*``;
+    ``objective`` means the Objective could not record which links changed,
+    so a later resume would not undo them). ``skipped`` names linked items
+    the caller's rules left as they were (``schedule:<id>``), so the caller
+    can say so.
     """
 
     objective: ObjectiveRecord
     incomplete: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
     links_switched: bool = False
 
 
@@ -151,12 +157,12 @@ def apply_objective_lifecycle(
     incomplete = _control_work_policy(
         task_manager, objective_id, enabled=enabled, person_id=change.policy_person_id
     )
-    switched, failures = _switch_links(
+    switched, failures, skipped = _switch_links(
         updated, links, enabled=enabled, tolerate_missing=change.tolerate_missing_links
     )
     incomplete.extend(failures)
     if switched and not _record_switched_links(task_manager, objective_id, switched):
-        incomplete.append(f"{_OBJECTIVE}:{objective_id}")
+        incomplete.append(f"{OBJECTIVE_PART_RECORD}:{objective_id}")
     if incomplete:
         logger.warning(
             "An Objective lifecycle change did not finish every control. "
@@ -167,7 +173,10 @@ def apply_objective_lifecycle(
         )
     final = task_manager.get_objective(objective_id) or updated
     return ObjectiveLifecycleOutcome(
-        objective=final, incomplete=tuple(incomplete), links_switched=bool(switched)
+        objective=final,
+        incomplete=tuple(incomplete),
+        skipped=tuple(skipped),
+        links_switched=bool(switched),
     )
 
 
@@ -196,7 +205,7 @@ def _control_work_policy(
             "event=objective_control_policy_read_failed objective_id=%s",
             objective_id,
         )
-        return [f"{_POLICY}:{objective_id}"]
+        return [f"{OBJECTIVE_PART_POLICY}:{objective_id}"]
     try:
         if enabled:
             coordinator.enable_policy_after_objective_control(
@@ -214,15 +223,15 @@ def _control_work_policy(
             policy.policy_id,
             enabled,
         )
-        return [f"{_POLICY}:{policy.policy_id}"]
+        return [f"{OBJECTIVE_PART_POLICY}:{policy.policy_id}"]
     return []
 
 
 def _links(objective: ObjectiveRecord) -> list[tuple[str, str, Any]]:
     """Every schedule and heartbeat link of the Objective, as (kind, item id, link)."""
 
-    return [(_SCHEDULE, link.schedule_id, link) for link in objective.schedule_links] + [
-        (_HEARTBEAT, link.heartbeat_item_id, link) for link in objective.heartbeat_links
+    return [(OBJECTIVE_PART_SCHEDULE, link.schedule_id, link) for link in objective.schedule_links] + [
+        (OBJECTIVE_PART_HEARTBEAT, link.heartbeat_item_id, link) for link in objective.heartbeat_links
     ]
 
 
@@ -240,18 +249,20 @@ def _switch_links(
     *,
     enabled: bool,
     tolerate_missing: bool,
-) -> tuple[dict[tuple[str, str], bool], list[str]]:
-    """Turn the managed links on or off; return the new ``disabled_by_objective_pause`` flags and failures."""
+) -> tuple[dict[tuple[str, str], bool], list[str], list[str]]:
+    """Turn the managed links on or off.
+
+    Returns the new ``disabled_by_objective_pause`` flags of the links that
+    switched, the items that failed and the items the caller's rules skipped.
+    """
 
     switched: dict[tuple[str, str], bool] = {}
     failures: list[str] = []
+    skipped: list[str] = []
     for kind, item_id, link in _links(objective):
         if not _link_needs_switch(link, enabled=enabled):
             continue
-        if kind == _SCHEDULE:
-            result = links.switch_schedule(objective.objective_id, link, enabled)
-        else:
-            result = links.switch_heartbeat(objective.objective_id, link, enabled)
+        result = _switch_one(objective.objective_id, links, kind, item_id, link, enabled)
         if result is LinkSwitchResult.MISSING:
             logger.warning(
                 "An Objective control found a linked item missing. "
@@ -267,7 +278,43 @@ def _switch_links(
             switched[(kind, item_id)] = not enabled
         elif result is LinkSwitchResult.FAILED:
             failures.append(f"{kind}:{item_id}")
-    return switched, failures
+        else:
+            skipped.append(f"{kind}:{item_id}")
+    return switched, failures, skipped
+
+
+def _switch_one(
+    objective_id: str,
+    links: ObjectiveLinkSwitch,
+    kind: str,
+    item_id: str,
+    link: Any,
+    enabled: bool,
+) -> LinkSwitchResult:
+    """One switch under the caller's rules; an error counts as a failure.
+
+    The status is already saved when links switch, so an error here must not
+    escape: the item is reported in ``incomplete`` and its link keeps saying
+    the control did not turn it off.
+    """
+
+    try:
+        if kind == OBJECTIVE_PART_SCHEDULE:
+            return links.switch_schedule(objective_id, link, enabled)
+        return links.switch_heartbeat(objective_id, link, enabled)
+    except Exception as exc:
+        logger.warning(
+            "An Objective control could not switch a linked item. "
+            "event=objective_control_link_switch_failed objective_id=%s kind=%s item_id=%s "
+            "enabled=%s error_type=%s",
+            objective_id,
+            kind,
+            item_id,
+            enabled,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return LinkSwitchResult.FAILED
 
 
 def _record_switched_links(

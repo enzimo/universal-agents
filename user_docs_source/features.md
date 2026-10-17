@@ -986,10 +986,17 @@ Objective controls have distinct meanings:
   `deleted` tombstone with Plans, evidence, checkpoints, and audit history.
   Only you can delete your Objective; the team lead cannot.
 
-Each Objective shows only the controls its current status allows, and the team
-lead refuses any other: for example, a satisfied Objective can only be deleted.
-Asking the team lead in chat to pause or resume an Objective has the same effect
-on its schedules and work sessions as these controls.
+Each Objective shows only the controls its current status allows, and these
+controls refuse any other: for example, a satisfied Objective can only be
+deleted. Repeating the control that set the current status is allowed: if a
+pause or abandon reports that a schedule did not switch, send the same command
+again to retry the parts that did not finish.
+
+Asking the team lead in chat to pause or resume an Objective also pauses or
+resumes its work sessions and the schedules and heartbeat items it manages,
+except schedules the system manages: the team lead leaves those as they are and
+says so. Unlike these controls, the team lead can still set a finished
+Objective back to active when you ask it to.
 
 Delete and abandon require a second confirmation click. Every Web mutation is
 bound to the signed-in browser, same origin, an in-memory CSRF token, canonical

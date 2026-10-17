@@ -484,13 +484,22 @@ bounded work policy and the managed schedules and heartbeat items off, or back
 on after an earlier control, and records which links changed. Each caller
 passes its own rules for switching schedules (the person's gateway-signed
 permit, or the agent rule that leaves system-managed schedules to
-`apply_change`). Runtime controls check ownership, the page's record digest
-and the actions the current status offers in the same operation, so they never
-act on a record the person did not see. A repeated control records nothing new.
-The team lead cannot set `deleting` or `deleted`: deletion is the person's
-control. A task that ends while its Objective is paused or being deleted keeps
-that status. Objective changes from the host command line were removed, because
-they wrote the record from another process while the team lead ran.
+`apply_change`); a schedule the agent rule leaves alone, or a switch that
+fails, is reported instead of recorded as switched. Runtime controls check
+ownership and the actions the current status offers in the same operation as
+the change, and refuse other actions with a plain reply and no new status. A
+record digest in the request is checked in that operation too. The Web page
+sends the digest of the record it showed, so a change made after the person
+looked is refused; a chat command takes the digest just before it sends, which
+guards only against a change in that moment; a trusted stop (a departing
+person's Objectives) sends none. A control whose status is already stored is
+accepted as a retry: it records no new status or policy event and switches only
+the links that did not switch before, so a pause or abandon whose schedule
+failed can be repeated. The team lead cannot set `deleting` or `deleted`:
+deletion is the person's control. A task that ends while its Objective is
+paused or being deleted keeps that status. Objective changes from the host
+command line were removed, because they wrote the record from another process
+while the team lead ran.
 
 The memory system has the five stores the README lists, which agents recall
 from (conversation history, user memory, team memory, the memory graph and the
