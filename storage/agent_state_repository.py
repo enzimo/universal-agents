@@ -36,7 +36,7 @@ class AgentStateRepository(Protocol):
 
     def remove(self, agent_id: str) -> bool: ...
 
-    def remove_by_team_id(self, team_id: str) -> bool: ...
+    def remove_unseen(self, agent_id: str, last_seen_at: Optional[str]) -> bool: ...
 
     def get_by_id(self, agent_id: str) -> Optional[AgentStatus]: ...
 
@@ -119,14 +119,32 @@ class _RelationalAgentStateRepository:
             self._logger.error(f"Failed to remove agent state {agent_id}: {exc}")
             return False
 
-    def remove_by_team_id(self, team_id: str) -> bool:
+    def remove_unseen(self, agent_id: str, last_seen_at: Optional[str]) -> bool:
+        """Delete one agent's row only if it still holds the heartbeat the caller read.
+
+        The team lead prunes rows of agents that are gone
+        (``agent_liveness.prune_departed_agent_rows``). An agent that reported in
+        between that read and this delete keeps its row.
+        """
+        bind = self._dialect.bind
+        params: tuple[str, ...]
+        if last_seen_at is None:
+            statement, params = f"DELETE FROM agent_states WHERE agent_id = {bind} AND last_seen_at IS NULL", (agent_id,)
+        else:
+            statement, params = (
+                f"DELETE FROM agent_states WHERE agent_id = {bind} AND last_seen_at = {bind}",
+                (agent_id, last_seen_at),
+            )
         try:
             with self._connect() as conn:
-                cursor = conn.execute(f"DELETE FROM agent_states WHERE team_id = {self._dialect.bind}", (team_id,))
+                cursor = conn.execute(statement, params)
                 conn.commit()
                 return cursor.rowcount > 0
-        except Exception as exc:
-            self._logger.error(f"Failed to remove agents for team {team_id}: {exc}")
+        except Exception:
+            self._logger.exception(
+                "Could not remove an agent status row. event=agent_status_row_remove_failed agent_id=%s",
+                agent_id,
+            )
             return False
 
     def get_by_id(self, agent_id: str) -> Optional[AgentStatus]:

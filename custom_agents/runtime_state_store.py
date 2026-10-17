@@ -45,6 +45,7 @@ class RuntimeStateStore:
         team_id: Optional[str],
         owner_named_agent_type: Optional[str],
         runtime_state_json: str,
+        expect_existing: bool,
         schedule_admission: ScheduleOccurrenceV1 | None = None,
     ) -> None:
         self._repository.save_task_runtime(
@@ -53,6 +54,7 @@ class RuntimeStateStore:
             team_id=team_id,
             owner_named_agent_type=owner_named_agent_type,
             runtime_state_json=runtime_state_json,
+            expect_existing=expect_existing,
             schedule_admission=schedule_admission,
         )
 
@@ -104,6 +106,7 @@ class RuntimeStateStore:
         team_id: Optional[str],
         owner_named_agent_type: Optional[str],
         messages_json: str,
+        expect_existing: bool,
     ) -> None:
         self._repository.save_deferred_messages(
             owner_agent_id=owner_agent_id,
@@ -111,6 +114,7 @@ class RuntimeStateStore:
             team_id=team_id,
             owner_named_agent_type=owner_named_agent_type,
             messages_json=messages_json,
+            expect_existing=expect_existing,
         )
 
     def clear_deferred_messages(self, owner_agent_id: str) -> None:

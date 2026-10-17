@@ -190,6 +190,7 @@ def exercise_agent_state_store(
         tools=["search"],
         team_id="team_live_pg",
         agent_role="Manager",
+        last_seen_at="2026-10-17T00:00:00+00:00",
     )
     second = AgentStatus(
         status_type=MessageMetaType.RESPONSE,
@@ -212,7 +213,9 @@ def exercise_agent_state_store(
     assert len(all_rows) == 2
     assert store.get_by_id("agent_live_1") is not None
     assert store.remove("agent_live_2") is True
-    assert store.remove_by_team_id("team_live_pg") is True
+    # A row is pruned only while it still holds the heartbeat that was read.
+    assert store.remove_unseen("agent_live_1", "2026-10-16T00:00:00+00:00") is False
+    assert store.remove_unseen("agent_live_1", first.last_seen_at) is True
     assert store.get_all() == []
     record_check(report, "agent_state_store", {"inserted": 2, "removed": 2})
 
@@ -229,6 +232,7 @@ def exercise_runtime_state_store(
 
     runtime_payload = snapshot_json("task_live_1")
     store.save_task_runtime(
+        expect_existing=False,
         owner_agent_id="agent_runtime_1",
         owner_agent_name="Live Runtime",
         team_id="team_live_pg",
@@ -248,6 +252,7 @@ def exercise_runtime_state_store(
 
     deferred_payload = json.dumps([{"message_id": "msg_1", "content": "deferred"}])
     store.save_deferred_messages(
+        expect_existing=False,
         owner_agent_id="agent_runtime_2",
         owner_agent_name="Live Deferred",
         team_id="team_live_pg",

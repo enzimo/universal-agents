@@ -1,4 +1,8 @@
-"""Recovery custody across actual transactions, contenders, and process death."""
+"""Recovery custody across actual transactions, contenders, and process death.
+
+The last tests cover a previous owner that is still running after a takeover:
+its saves are refused (``RuntimeCustodyLost``) instead of claiming the work again.
+"""
 
 import json
 import os
@@ -14,6 +18,7 @@ from tests.runtime_snapshot_fixtures import snapshot_json
 
 from storage.config import resolve_storage_settings
 from storage.runtime_state_repository import (
+    RuntimeCustodyLost,
     RuntimeRecoveryConflict,
     create_runtime_state_repository,
 )
@@ -42,6 +47,7 @@ def seed(repo, kind, owner):
     payload = "runtime_state_json" if kind == "task_runtime" else "messages_json"
     getattr(repo, f"save_{kind}")(
         owner_agent_id=owner,
+        expect_existing=False,
         owner_agent_name="Original",
         team_id="recovery_tests",
         owner_named_agent_type="Worker",
@@ -132,3 +138,90 @@ os._exit(19)
     expected_owner = owners[1] if death_at == "after_commit" else owners[0]
     assert len(load(expected_owner)) == 1
     assert sum(len(load(owner)) for owner in owners) == 1
+
+
+# -- a previous owner that is still running cannot save taken-over work -------------
+
+
+def save_again(repo, kind, owner, *, expect_existing):
+    payload = "runtime_state_json" if kind == "task_runtime" else "messages_json"
+    getattr(repo, f"save_{kind}")(
+        owner_agent_id=owner,
+        owner_agent_name="Original",
+        team_id="recovery_tests",
+        owner_named_agent_type="Worker",
+        expect_existing=expect_existing,
+        **{payload: snapshot_json() if kind == "task_runtime" else '[{"work":2}]'},
+    )
+
+
+@pytest.mark.parametrize("kind", ["task_runtime", "deferred_messages"])
+def test_a_former_owner_cannot_recreate_custody_with_a_full_save(recovery_store, kind):
+    """Before 2026-10-17 this save wrote the old owner's row again: two owners, one task."""
+    repo, _, owners = recovery_store
+    sources = seed(repo, kind, owners[0])
+    getattr(repo, f"commit_{kind}_recovery")(
+        sources=sources, replacement=replace(sources[0], owner_agent_id=owners[1])
+    )
+    with pytest.raises(RuntimeCustodyLost) as refused:
+        save_again(repo, kind, owners[0], expect_existing=True)
+    assert (refused.value.owner_agent_id, refused.value.store.value) == (owners[0], kind)
+    load = getattr(repo, f"load_{kind}_by_owner")
+    assert load(owners[0]) == []
+    assert len(load(owners[1])) == 1
+
+
+@pytest.mark.parametrize("kind", ["task_runtime", "deferred_messages"])
+def test_a_first_save_still_creates_custody(recovery_store, kind):
+    repo, _, owners = recovery_store
+    save_again(repo, kind, owners[0], expect_existing=False)
+    save_again(repo, kind, owners[0], expect_existing=True)
+    assert len(getattr(repo, f"load_{kind}_by_owner")(owners[0])) == 1
+
+
+@pytest.mark.parametrize("kind", ["task_runtime", "deferred_messages"])
+def test_custody_check_and_takeover_serialize(recovery_store, kind):
+    """The owner's save and a takeover race; exactly one wins and one agent holds the work."""
+    repo, config, owners = recovery_store
+    sources = seed(repo, kind, owners[0])
+    barrier = Barrier(2)
+
+    def owner_saves():
+        contender = create_runtime_state_repository(resolve_storage_settings(config))
+        barrier.wait()
+        try:
+            save_again(contender, kind, owners[0], expect_existing=True)
+        except RuntimeCustodyLost:
+            return "refused"
+        return "saved"
+
+    def replacement_takes_over():
+        contender = create_runtime_state_repository(resolve_storage_settings(config))
+        barrier.wait()
+        try:
+            getattr(contender, f"commit_{kind}_recovery")(
+                sources=sources, replacement=replace(sources[0], owner_agent_id=owners[1])
+            )
+        except RuntimeRecoveryConflict:
+            return "conflict"
+        return "took_over"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        saved = executor.submit(owner_saves)
+        taken = executor.submit(replacement_takes_over)
+        outcome = (saved.result(timeout=30), taken.result(timeout=30))
+    assert outcome in {("saved", "conflict"), ("refused", "took_over")}
+    load = getattr(repo, f"load_{kind}_by_owner")
+    assert sum(len(load(owner)) for owner in owners[:2]) == 1
+
+
+def test_a_history_write_without_a_row_reports_custody_lost(recovery_store):
+    repo, _, owners = recovery_store
+    from custom_messages.contracts.runtime_snapshot_v3 import decode_runtime_snapshot
+
+    [task] = decode_runtime_snapshot(snapshot_json()).tasks
+    with pytest.raises(RuntimeCustodyLost):
+        repo.save_task_runtime_task(
+            owner_agent_id=owners[0], task=task, task_plan_links={},
+            task_objective_links={}, plan_objective_links={},
+        )

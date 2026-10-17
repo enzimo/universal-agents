@@ -30,6 +30,7 @@ from custom_messages.skill_catalog import ManagedSkillCatalogChangedV1
 from custom_messages.contracts.worker_handback_v1 import WorkerTaskHandbackV1
 from storage.runtime_state_repository import (
     DeferredMessageSnapshotRow,
+    RuntimeCustodyLost,
     RuntimeStateRepository,
 )
 from default_values import AGENT_DEFAULTS
@@ -54,6 +55,11 @@ class DeferredMessageInbox:
 
     The repository must commit or raise. Local queue changes become visible only
     after persistence succeeds; the inbox never receives an agent host object.
+
+    Like the task snapshot, the inbox remembers whether it holds a saved row.
+    When a save finds that row gone (``RuntimeCustodyLost``: another agent took
+    these messages over), the inbox forgets its messages and tells
+    ``on_custody_lost`` (``custom_agents.custody_loss``).
     """
 
     owner: DeferredInboxOwner
@@ -66,6 +72,9 @@ class DeferredMessageInbox:
     _warning_active: bool = field(default=False, init=False)
     _mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _io: BlockingIOLane = field(default_factory=BlockingIOLane, init=False)
+    _holds_row: bool = field(default=False, init=False)
+    # Called on the event loop with the number of forgotten messages.
+    on_custody_lost: Callable[[int], None] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if self.capacity < 1:
@@ -100,20 +109,58 @@ class DeferredMessageInbox:
                 team_id=row.team_id,
                 owner_named_agent_type=row.owner_named_agent_type,
                 messages_json=row.messages_json,
+                expect_existing=self._holds_row,
             )
+            self._holds_row = True
         else:
             self.repository.clear_deferred_messages(row.owner_agent_id)
+            self._holds_row = False
 
     def _adopt(self, messages: Sequence[MessageEnvelope]) -> None:
         self._messages = deque(messages)
         self._check_backlog()
 
+    def _adopt_recovered(self, messages: Sequence[MessageEnvelope]) -> None:
+        # The recovery commit inserted this owner's row.
+        self._holds_row = True
+        self._adopt(messages)
+
     async def _commit(self, messages: Sequence[MessageEnvelope]) -> None:
-        await self._io.run(
-            self._write_snapshot,
-            self._snapshot(messages),
-            committed=lambda _: self._adopt(messages),
+        try:
+            await self._io.run(
+                self._write_snapshot,
+                self._snapshot(messages),
+                committed=lambda _: self._adopt(messages),
+            )
+        except RuntimeCustodyLost as lost:
+            self._release_lost_custody(lost)
+            raise
+
+    def _release_lost_custody(self, lost: RuntimeCustodyLost) -> None:
+        """Forget every message: its saved row now belongs to another agent."""
+        released = len(self._messages)
+        self._messages = deque()
+        self._holds_row = False
+        self._check_backlog()
+        self.logger.warning(
+            "Another agent took this agent's deferred messages over; dropped them from memory. "
+            "event=runtime_custody_lost owner_agent_id=%s store=%s deferred_count=%s",
+            lost.owner_agent_id,
+            lost.store.value,
+            released,
         )
+        if self.on_custody_lost is None:
+            return
+        try:
+            self.on_custody_lost(released)
+        except Exception:
+            # The refusal itself must still reach the caller; the messages are already released.
+            self.logger.exception(
+                "Could not tell the agent about released messages. event=custody_listener_failed "
+                "owner_agent_id=%s store=%s",
+                lost.owner_agent_id,
+                lost.store.value,
+            )
 
     async def admit(self, envelope: MessageEnvelope) -> None:
         """Return only after this message is durable, including ACK redelivery."""
@@ -229,7 +276,7 @@ class DeferredMessageInbox:
             self.repository.commit_deferred_messages_recovery,
             sources=sources,
             replacement=self._snapshot(messages),
-            committed=lambda _: self._adopt(messages),
+            committed=lambda _: self._adopt_recovered(messages),
         )
         self.logger.info(
             "Restored durable deferred messages",

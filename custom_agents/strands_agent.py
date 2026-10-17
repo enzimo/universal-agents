@@ -57,6 +57,8 @@ from custom_agents.deferred_message_runtime import (
 )
 from custom_agents.agent_team_runtime import LocalAgentTeamRuntime, unregister_local_worker
 from custom_agents.liveness_observation import LivenessObservation, NATS_PRESENCE_HEARTBEAT_SECONDS
+from custom_agents.agent_liveness import own_process_identity
+from custom_agents.custody_loss import install_custody_listeners
 from custom_agents.runtime_paths import (
     agent_layout,
     fill_missing_instance_paths,
@@ -175,8 +177,6 @@ from custom_agents.runtime_budget_policy import (
 from custom_agents.runtime_recovery import (
     discard_runtime_state_for_team_change,
     fail_recovered_executing_task,
-    filter_stale_role_takeover_owner_ids,
-    lookup_owner_status,
     recover_runtime_after_restart,
     should_fail_stale_executing_recovery,
 )
@@ -189,6 +189,7 @@ from custom_agents.scheduled_runtime import (
 )
 from custom_agents.heartbeat_store import is_heartbeat_launcher
 from custom_agents.control_runtime import (
+    _interrupt_active_execution,
     cancel_task_tree_locally,
     request_subtask_stop,
     resolve_control_target_task_info,
@@ -1181,6 +1182,12 @@ class UniversalAgent(BaseModel):
     # Next time the lead looks for dead agents holding unfinished work
     # (orphaned_work_takeover.take_over_orphaned_work).
     _orphaned_work_check_after: float = PrivateAttr(default=0.0)
+    # Next time the lead removes status rows of agents that are gone
+    # (agent_liveness.prune_departed_agent_rows).
+    _agent_row_prune_after: float = PrivateAttr(default=0.0)
+    # Saved work this agent released after another agent took it over
+    # (custom_agents.custody_loss); set when the agent connects.
+    _custody_release: Any = PrivateAttr(default=None)
     _active_execution_task_id: Optional[str] = PrivateAttr(default=None)
     _stop_reasons_by_task_id: Dict[str, str] = PrivateAttr(default_factory=dict)
     # Set once this worker loses its launch lease; see lease_loss_wind_down.
@@ -1801,9 +1808,6 @@ class UniversalAgent(BaseModel):
             and not self.is_executing
             and self.task_manager.can_start_new_task()
         )
-
-    def _role_takeover_liveness_grace_seconds(self) -> float:
-        return max(1.0, float(self.subtask_watchdog_interval_seconds or 15.0) * 2.0)
 
     def _recovery_retry_deadline_seconds(self) -> Optional[float]:
         raw = self.restart_executing_task_grace_seconds
@@ -2520,14 +2524,6 @@ class UniversalAgent(BaseModel):
             self._logger.warning(
                 f"[{self.id}] Failed to refresh self AgentState row: {exc}"
             )
-
-    def _lookup_owner_status(self, owner_agent_id: str) -> Optional[AgentStatus]:
-        return lookup_owner_status(self, owner_agent_id)
-
-    async def _filter_stale_role_takeover_owner_ids(
-        self, owner_agent_ids: List[str]
-    ) -> List[str]:
-        return await filter_stale_role_takeover_owner_ids(self, owner_agent_ids)
 
     async def _resume_parent_task_if_ready(self, *args, **kwargs):
         async with self._execution_scope():
@@ -4875,6 +4871,13 @@ class UniversalAgent(BaseModel):
             # Prepare shared schedule state first; start the scheduler only after
             # bootstrap below, and retain any store opened by earlier setup.
             self._ensure_schedule_store()
+            # Before any subscription: the lead stores presence as it arrives,
+            # including the replay of every agent's last status at subscribe.
+            self._agent_state_store = AgentStateStore(
+                db_path=self.task_manager._db_path,
+                logger=self._logger,
+                storage_settings=self.task_manager.storage_settings,
+            )
             self._scheduler_wake = asyncio.Event()
             direct_durable = self._nats_mapper().durable_name(f"agent_{self.id}")
             await adapter.subscribe_route(
@@ -4974,11 +4977,6 @@ class UniversalAgent(BaseModel):
                     )
             if self.named_agent_type == INTERNAL_IMPROVEMENT_AGENT_TYPE:
                 await publish_internal_improvement_schedule_ensure(self)
-            self._agent_state_store = AgentStateStore(
-                db_path=self.task_manager._db_path,
-                logger=self._logger,
-                storage_settings=self.task_manager.storage_settings,
-            )
             await self._refresh_self_agent_state()
 
             # Before recovery, which can end tasks: their delegated work stops too,
@@ -4991,6 +4989,7 @@ class UniversalAgent(BaseModel):
 
             register_parent_end_stops(self)
             register_delegated_task_endings(self)
+            install_custody_listeners(self, interrupt_turn=_interrupt_active_execution)
             await self._recover_runtime_after_restart()
             # Delegated tasks this agent holds after a restart, or took over
             # from a worker that is gone: tell each requester who holds them.
@@ -5065,22 +5064,12 @@ class UniversalAgent(BaseModel):
         # starts. Join them before releasing their provider and state resources.
         await adapter.close()
 
-        if self._agent_state_store:
-            try:
-                if self.is_team_lead and self.team_id:
-                    await self.task_manager.operations_runtime.run(
-                        self._agent_state_store.remove_by_team_id, self.team_id
-                    )
-                else:
-                    self._logger.info(
-                        "[%s] Exiting agent, leaving state in AgentStateStore.", self.id
-                    )
-            except Exception as exc:
-                self._logger.warning(
-                    "[%s] Failed to clean AgentStateStore during NATS shutdown: %s",
-                    self.id,
-                    exc,
-                )
+        # Every agent, the lead included, marks only its own status row as
+        # exiting, after its last delivery settled. The lead used to delete the
+        # whole team's rows here, so startup agents that keep running through a
+        # manager-only restart looked gone; old rows are now removed by
+        # agent_liveness.prune_departed_agent_rows.
+        await self._refresh_self_agent_state(is_exiting=True)
 
     async def _publish_presence_status(self, *, is_exiting: bool) -> None:
         if not self.team_id:
@@ -5412,6 +5401,7 @@ class UniversalAgent(BaseModel):
                 "tool_result_budget_fill_ratio"
             ),
             last_seen_at=datetime.now(timezone.utc).isoformat(),
+            process_identity=own_process_identity(self),
             status_type=MessageMetaType.RESPONSE,
             info_type=info_type,
             tools=[] if is_exiting else tool_names,
@@ -5608,8 +5598,16 @@ class UniversalAgent(BaseModel):
             f"[{self.id}] Received status update for agent '{agent_name}' ({agent_id})."
         )
 
-        # Store/update the AgentStatus object
-        agent_status.last_seen_at = datetime.now(timezone.utc).isoformat()
+        # Keep the time the sender wrote. Presence is replayed when the lead
+        # subscribes, so stamping the receipt time made agents that had just
+        # crashed look alive (agent_liveness, rule 3).
+        if not agent_status.last_seen_at:
+            agent_status.last_seen_at = datetime.now(timezone.utc).isoformat()
+            self._logger.warning(
+                "An agent status arrived without the time it was sent; storing the time it "
+                "arrived. event=agent_status_without_sent_time agent_id=%s",
+                agent_id,
+            )
         self.known_agents.agent_map[agent_id] = agent_status
 
         self._resolve_pending_agent_status_probes(
@@ -6108,7 +6106,6 @@ class UniversalAgent(BaseModel):
     async def exit_agent(self):
         """Performs cleanup and signals the agent to stop."""
         self._logger.info(f"[{self.id}] Stopping agent as per control message.")
-        await self._refresh_self_agent_state(is_exiting=True)
 
         # Cancel the scheduler background task
         if self._scheduler_task and not self._scheduler_task.done():

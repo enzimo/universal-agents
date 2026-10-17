@@ -1,6 +1,7 @@
 """Real storage contention, admission rollback and policy revision fencing."""
 
 from concurrent.futures import ThreadPoolExecutor
+import json
 import os
 from dataclasses import replace
 from datetime import timedelta
@@ -27,7 +28,7 @@ from custom_messages.enums import MessageMetaType, ScheduleManagementClass
 
 from storage.agent_launch_repository import AgentLaunchRepository, LaunchCapacity, LaunchConflict
 from storage.config import resolve_storage_settings
-from storage.runtime_state_repository import create_runtime_state_repository
+from storage.runtime_state_repository import RuntimeCustodyLost, create_runtime_state_repository
 from storage.schedule_worker_repository import ScheduleWorkerConflict
 from tests.runtime_snapshot_fixtures import snapshot_json
 
@@ -131,6 +132,7 @@ def claim_occurrence(store, schedule, agent_id="worker"):
 
 def admit(runtime, occurrence):
     runtime.save_task_runtime(
+        expect_existing=False,
         owner_agent_id=occurrence.agent_id,
         owner_agent_name="worker",
         team_id="team",
@@ -391,6 +393,7 @@ def test_coalesced_occurrence_commits_against_existing_task_custody(stores):
         update={"coalesced_into_task_id": "active-task"}
     )
     runtime.save_task_runtime(
+        expect_existing=False,
         owner_agent_id="worker",
         owner_agent_name="worker",
         team_id="team",
@@ -445,3 +448,28 @@ def test_excluding_blocked_first_schedule_allows_later_due_work(stores):
         exclude_schedule_ids=(first.schedule_id,),
     )
     assert claim["schedule_id"] == "second"
+
+
+def test_a_refused_save_records_no_outcome_and_keeps_the_receipt_with_the_new_owner(stores):
+    """A previous owner still running after a takeover finishes the run: nothing is written."""
+    store, runtime, _ = stores
+    occurrence = claim_occurrence(store, seed_schedule(store))
+    admit(runtime, occurrence)
+    sources = runtime.load_task_runtime_by_owner("worker")
+    runtime.commit_task_runtime_recovery(
+        sources=sources, replacement=replace(sources[0], owner_agent_id="replacement")
+    )
+    finished = json.loads(snapshot_json(occurrence.task_id))
+    finished["tasks"][0]["state"] = "completed"
+    with pytest.raises(RuntimeCustodyLost):
+        runtime.save_task_runtime(
+            expect_existing=True,
+            owner_agent_id="worker",
+            owner_agent_name="worker",
+            team_id="team",
+            owner_named_agent_type="Worker",
+            runtime_state_json=json.dumps(finished),
+        )
+    receipt = store.worker_records.get_occurrence(occurrence.occurrence_id, "team")
+    assert (receipt.agent_id, receipt.state, receipt.finished_at_utc) == ("replacement", "admitted", None)
+    assert runtime.load_task_runtime_by_owner("worker") == []

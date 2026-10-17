@@ -1677,6 +1677,10 @@ class TaskManager(
             schedule_admission=schedule_admission
         )
 
+    def set_custody_lost_listener(self, listener: Optional[Callable[[tuple[str, ...]], None]]) -> None:
+        """Hear about saved work another agent took over (``custom_agents.custody_loss``)."""
+        self.runtime_snapshot_coordinator.set_custody_lost_listener(listener)
+
     def get_stored_runtime_team_id(self) -> Optional[str]:
         return self.runtime_snapshot_coordinator.get_stored_runtime_team_id()
 

@@ -29,6 +29,7 @@ def test_operator_deferred_failure_keeps_custody_until_archive_commits(
         msg_meta=MessageMeta(),
     )
     repository.save_deferred_messages(
+        expect_existing=False,
         owner_agent_id="worker",
         owner_agent_name="Worker",
         team_id="team",
@@ -77,6 +78,7 @@ def test_operator_missing_task_does_not_remove_snapshot(tmp_path):
     )
     repository = create_runtime_state_repository(settings)
     repository.save_task_runtime(
+        expect_existing=False,
         owner_agent_id="worker",
         owner_agent_name="Worker",
         team_id="team",

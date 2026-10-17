@@ -17,6 +17,7 @@ from storage.runtime_snapshot_layout import (
 )
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 from typing import List, Optional, Protocol, Sequence
 
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
@@ -57,6 +58,30 @@ class RuntimeRecoveryConflict(RuntimeError):
     """A source changed or another runtime completed this recovery first."""
 
 
+class CustodyStore(StrEnum):
+    """The two kinds of saved work an agent holds a row for."""
+
+    TASK_RUNTIME = "task_runtime"
+    DEFERRED_MESSAGES = "deferred_messages"
+
+
+class RuntimeCustodyLost(RuntimeRecoveryConflict):
+    """The saving agent's row is gone: another agent took its saved work over.
+
+    Takeover (``commit_task_runtime_recovery`` and
+    ``commit_deferred_messages_recovery``) deletes the previous owner's row in
+    the same transaction that gives the work to its new owner. A save that
+    expects its own row and finds none is refused before it writes anything,
+    so a previous owner that is still running cannot claim the work a second
+    time (``custom_agents.custody_loss`` then releases it in memory).
+    """
+
+    def __init__(self, owner_agent_id: str, store: CustodyStore) -> None:
+        super().__init__(f"Saved {store.value} of {owner_agent_id} now belongs to another agent.")
+        self.owner_agent_id = owner_agent_id
+        self.store = store
+
+
 @dataclass(frozen=True)
 class RuntimeTaskCancellationRow:
     """Durable task-level member of a cancelled execution graph."""
@@ -93,6 +118,7 @@ class RuntimeStateRepository(Protocol):
         team_id: Optional[str],
         owner_named_agent_type: Optional[str],
         runtime_state_json: str,
+        expect_existing: bool,
         schedule_admission: ScheduleOccurrenceV1 | None = None,
     ) -> None: ...
 
@@ -115,6 +141,7 @@ class RuntimeStateRepository(Protocol):
         team_id: Optional[str],
         owner_named_agent_type: Optional[str],
         messages_json: str,
+        expect_existing: bool,
     ) -> None: ...
 
     def clear_deferred_messages(self, owner_agent_id: str) -> None: ...
@@ -154,8 +181,13 @@ class _RelationalRuntimeStateRepository:
     """Shared record operations for runtime snapshot persistence."""
 
     _dialect: SqlDialect
+    _logger: logging.Logger
 
     _recovery_lock_clause = ""
+
+    def _begin_recovery(self, conn: Any) -> None:
+        """Start the locking transaction (each backend overrides this)."""
+        raise NotImplementedError
 
 
     def commit_task_runtime_recovery(
@@ -331,9 +363,16 @@ class _RelationalRuntimeStateRepository:
 
     def save_task_runtime(
         self, *, owner_agent_id: str, owner_agent_name: Optional[str], team_id: Optional[str],
-        owner_named_agent_type: Optional[str], runtime_state_json: str,
+        owner_named_agent_type: Optional[str], runtime_state_json: str, expect_existing: bool,
         schedule_admission: ScheduleOccurrenceV1 | None = None,
     ) -> None:
+        """Save an owner's whole snapshot; ``expect_existing`` when it already saved one.
+
+        An owner that saved before must still find its row. If another agent
+        took the work over meanwhile, the row is gone and the save is refused
+        with ``RuntimeCustodyLost`` before any record, terminal outcome or
+        schedule admission is written.
+        """
         parts = split_snapshot(decode_runtime_snapshot(runtime_state_json))
         if schedule_admission is not None and (
             ("tasks", schedule_admission.coalesced_into_task_id or schedule_admission.task_id) not in parts.records
@@ -350,6 +389,8 @@ class _RelationalRuntimeStateRepository:
                     f"SELECT runtime_state_json FROM active_task_runtime WHERE owner_agent_id = {bind}{self._recovery_lock_clause}",
                     (owner_agent_id,),
                 ).fetchone()
+                if previous is None and expect_existing:
+                    raise RuntimeCustodyLost(owner_agent_id, CustodyStore.TASK_RUNTIME)
                 if previous is not None:
                     parse_storage_header(previous[0])
                 conn.execute(
@@ -366,9 +407,20 @@ class _RelationalRuntimeStateRepository:
                 if schedule_admission is not None:
                     ScheduleWorkerRepository.commit_admission(conn, self._dialect, schedule_admission)
                 conn.commit()
+        except RuntimeCustodyLost as lost:
+            self._log_custody_refused(lost)
+            raise
         except Exception:
             self._logger.exception("Failed to persist active runtime state", extra={"owner_agent_id": owner_agent_id})
             raise
+
+    def _log_custody_refused(self, lost: RuntimeCustodyLost) -> None:
+        self._logger.warning(
+            "Refused a save: another agent took this agent's saved work over. "
+            "event=runtime_custody_refused owner_agent_id=%s store=%s",
+            lost.owner_agent_id,
+            lost.store.value,
+        )
 
     def save_task_runtime_task(
         self, *, owner_agent_id: str, task: TaskSnapshotRecord,
@@ -394,12 +446,17 @@ class _RelationalRuntimeStateRepository:
                     f"SELECT runtime_state_json FROM active_task_runtime WHERE owner_agent_id = {bind}{self._recovery_lock_clause}",
                     (owner_agent_id,),
                 ).fetchone()
-                if row is None or task.task_id not in parse_storage_header(row[0])["task_order"]:
+                if row is None:
+                    raise RuntimeCustodyLost(owner_agent_id, CustodyStore.TASK_RUNTIME)
+                if task.task_id not in parse_storage_header(row[0])["task_order"]:
                     raise RuntimeRecoveryConflict("Task history requires existing durable task custody")
                 self._write_task_records(conn, owner_agent_id, records, replace_all=False)
                 conn.execute(f"UPDATE active_task_runtime SET updated_at = {bind} WHERE owner_agent_id = {bind}",
                              (datetime.now(timezone.utc).isoformat(), owner_agent_id))
                 conn.commit()
+        except RuntimeCustodyLost as lost:
+            self._log_custody_refused(lost)
+            raise
         except Exception:
             self._logger.exception("Failed to persist task history", extra={"owner_agent_id": owner_agent_id, "task_id": task.task_id})
             raise
@@ -505,14 +562,24 @@ class _RelationalRuntimeStateRepository:
         team_id: Optional[str],
         owner_named_agent_type: Optional[str],
         messages_json: str,
+        expect_existing: bool,
     ) -> None:
+        """Save an owner's deferred messages; refused like ``save_task_runtime`` once taken over."""
+        bind = self._dialect.bind
         try:
             with self._connect() as conn:
+                self._begin_recovery(conn)
+                previous = conn.execute(
+                    f"SELECT owner_agent_id FROM agent_deferred_messages WHERE owner_agent_id = {bind}{self._recovery_lock_clause}",
+                    (owner_agent_id,),
+                ).fetchone()
+                if previous is None and expect_existing:
+                    raise RuntimeCustodyLost(owner_agent_id, CustodyStore.DEFERRED_MESSAGES)
                 conn.execute(
                     f"""
                     INSERT INTO agent_deferred_messages
                         (owner_agent_id, owner_agent_name, team_id, owner_named_agent_type, messages_json, updated_at)
-                    VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
+                    VALUES ({bind}, {bind}, {bind}, {bind}, {bind}, {bind})
                     ON CONFLICT(owner_agent_id) DO UPDATE SET
                         owner_agent_name = excluded.owner_agent_name,
                         team_id = excluded.team_id,
@@ -530,6 +597,9 @@ class _RelationalRuntimeStateRepository:
                     ),
                 )
                 conn.commit()
+        except RuntimeCustodyLost as lost:
+            self._log_custody_refused(lost)
+            raise
         except Exception:
             self._logger.exception("Failed to persist deferred messages", extra={"owner_agent_id": owner_agent_id})
             raise

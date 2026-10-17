@@ -9,33 +9,24 @@ worker per dead owner holding unfinished work; the replacement's own startup
 takeover adopts the work through the existing transactional custody transfer
 (``commit_task_runtime_recovery``), so two agents can never both adopt it.
 
-When an owner counts as gone (``owner_gone_by_launch``, also used by takeover
-itself): its launch record decides when it has one. A record that ended
-(``retired``/``failed``, written after the worker's thread ended) or whose
-process is provably gone (``inspect_launch`` "absent", ``runtime_hosting.process_run``)
-means gone; any other record means the worker may still run, however stale its
-heartbeat. Before this, takeover trusted a 30-second heartbeat alone, so a
-slow but live worker could lose its work to a replacement. Only owners with no
-launch record (startup agents, pruned records) fall back to the heartbeat.
+When an owner counts as gone is decided by the one rule in
+``custom_agents.agent_liveness`` (start record, then the owner's own process,
+then its heartbeat after ``owner_gone_after_seconds``), the same rule the
+replacement's startup takeover applies, so the lead never starts a replacement
+that would then refuse the work, and a live startup agent keeps its work.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from functools import partial
 from typing import Any
 
 from custom_messages.contracts.runtime_snapshot_v3 import decode_runtime_snapshot
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
-from custom_agents.agent_liveness import (
-    latest_launch,
-    lookup_owner_status,
-    owner_gone_by_launch,
-    parse_utc,
-)
-from custom_agents.liveness_observation import heartbeat_checks_deferred
+from custom_agents.agent_liveness import latest_launch, owner_liveness
 
 logger = logging.getLogger(__name__)
 
@@ -58,22 +49,6 @@ def _unfinished_tasks(row: Any) -> list[Any]:
     ]
 
 
-def _owner_gone(agent: Any, row: Any, gone_after: timedelta, now: datetime) -> bool:
-    """The launch record decides; without one, the heartbeat (``agent_liveness``)."""
-    gone = owner_gone_by_launch(agent, row.owner_agent_id)
-    if gone is not None:
-        return gone
-    status = lookup_owner_status(agent, row.owner_agent_id)
-    if status is not None and status.is_exiting:
-        return True
-    if heartbeat_checks_deferred(agent):
-        return False
-    if status is None:
-        return True
-    since = parse_utc(status.last_seen_at) or parse_utc(row.updated_at) or now
-    return now - since >= gone_after
-
-
 def _person_for(agent: Any, owner_agent_id: str, unfinished: list[Any]) -> str | None:
     """Whom the replacement's start is recorded for: the dead start's owner, else a task's person."""
     from custom_agents.stuck_tasks import StuckTasks, stuck_task_settings
@@ -85,7 +60,7 @@ def _person_for(agent: Any, owner_agent_id: str, unfinished: list[Any]) -> str |
     return next((person for person in (people.person_of(r.meta) for r in unfinished) if person), None)
 
 
-def _orphaned_owners(agent: Any, gone_after: timedelta, now: datetime) -> list[dict[str, Any]]:
+def _orphaned_owners(agent: Any, now: datetime) -> list[dict[str, Any]]:
     """Dead owners of the team that hold unfinished work (storage lane)."""
 
     found = []
@@ -94,7 +69,7 @@ def _orphaned_owners(agent: Any, gone_after: timedelta, now: datetime) -> list[d
         if row.owner_agent_id == agent.id or not agent_type or agent_type == TEAM_ARCHITECT_AGENT_TYPE:
             continue
         unfinished = _unfinished_tasks(row)
-        if not unfinished or not _owner_gone(agent, row, gone_after, now):
+        if not unfinished or not owner_liveness(agent, row.owner_agent_id, now=now).gone:
             continue
         found.append(
             {
@@ -133,11 +108,8 @@ async def take_over_orphaned_work(agent: Any, *, now: datetime | None = None, cl
     if moment < getattr(agent, "_orphaned_work_check_after", 0.0):
         return 0
     agent._orphaned_work_check_after = moment + TAKEOVER_CHECK_SECONDS
-    from custom_agents.stuck_tasks import stuck_task_settings
-
-    gone_after = timedelta(seconds=stuck_task_settings(agent).owner_gone_after_seconds)
     run = agent.task_manager.operations_runtime.run
-    owners = await run(partial(_orphaned_owners, agent, gone_after, now or datetime.now(timezone.utc)))
+    owners = await run(partial(_orphaned_owners, agent, now or datetime.now(timezone.utc)))
     requested = 0
     for owner in owners:
         if not owner["person"]:

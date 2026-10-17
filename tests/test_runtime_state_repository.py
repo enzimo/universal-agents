@@ -48,6 +48,7 @@ def test_runtime_state_repository_claims_deferred_rows_by_owner(tmp_path: Path) 
     repo = create_runtime_state_repository(settings, logger=logging.getLogger("test"))
 
     repo.save_deferred_messages(
+        expect_existing=False,
         owner_agent_id="agent_a",
         owner_agent_name="Agent A",
         team_id="team_1",
@@ -73,6 +74,7 @@ def test_recovery_commit_failure_preserves_the_original_snapshot(tmp_path, monke
     payload_field = "runtime_state_json" if state_kind == "task_runtime" else "messages_json"
     getattr(repo, f"save_{state_kind}")(
         owner_agent_id="original", owner_agent_name="Original", team_id="team", owner_named_agent_type="Worker",
+        expect_existing=False,
         **{payload_field: snapshot_json() if state_kind == "task_runtime" else '{"work":1}'},
     )
     load = getattr(repo, f"load_{state_kind}_by_owner")

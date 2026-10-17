@@ -126,6 +126,7 @@ async def test_only_the_committed_replacement_exposes_recovered_messages(inbox):
 @pytest.mark.asyncio
 async def test_malformed_recovery_keeps_its_original_durable_owner(inbox):
     inbox.repository.save_deferred_messages(
+        expect_existing=False,
         owner_agent_id="worker",
         owner_agent_name="Worker",
         team_id="team",

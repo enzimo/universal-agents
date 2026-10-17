@@ -317,8 +317,9 @@ task monitor also observes its own scheduler cadence
 60-second scheduler wait plus one 20-second heartbeat interval, it gives
 workers 60 active seconds to refresh their heartbeats. During that window,
 heartbeat-only takeover waits and task incidents remain unchanged; launch
-records and explicit exits still allow replacement. This prevents host sleep
-from making a live startup worker look dead before its next heartbeat. Signed
+records, process evidence and explicit exits still decide. Host sleep cannot
+make a live startup agent look dead in any case: it is judged by its process,
+not its heartbeat (see below). Signed
 work for no person is labelled as system work or maintenance. A cleared warning
 reports that the condition ended, without claiming new task progress.
 The same pass also frees a work slot held by a task whose turn is gone
@@ -329,10 +330,19 @@ Four repairs keep work from getting stuck in the first place:
 
 - The team lead starts a replacement worker for a dead agent that still holds
   unfinished work (`custom_agents.orphaned_work_takeover`); the replacement's
-  startup takeover adopts it in one transaction. An agent counts as gone only
-  when its worker start ended or its process is proven gone; agents without a
-  start record fall back to their heartbeat. Takeover itself uses the same rule,
-  so a slow but live worker keeps its work.
+  startup takeover adopts it in one transaction. One rule
+  (`custom_agents.agent_liveness`) decides whether an agent is gone, for
+  takeover, replacements, schedule coalescing and stuck-task notices alike. A
+  worker started inside another process is gone when its start record ended or
+  its process is proven gone. A startup agent or the team lead reports its own
+  process in its status (`AgentStatus.process_identity`) and is gone only when
+  that process is proven gone (`runtime_hosting.process_run`); while it runs it
+  keeps its work, however old its heartbeat. Only an agent with neither record
+  is judged by its heartbeat, after
+  `agent.schedule_maintenance.stuck_tasks.owner_gone_after_seconds`. Each agent
+  marks only its own status row as exiting when it stops; the team lead removes
+  rows of agents that are gone on its own timer, so a manager-only restart no
+  longer makes running startup agents look gone.
 - A worker stays up while it holds any unfinished task, waiting ones included
   (`strands_team.worker_holds_work`); replies to a waiting task are addressed to
   it.
@@ -612,9 +622,14 @@ the sanitized prompt metadata.
 
 Runtime snapshots and idempotent admission let processes recover queued work,
 waiting subtasks, deferred messages, and recent in-flight Tasks. Outboxes record
-ordered actions before external effects. Leases and fencing prevent a stale
-worker from committing after another worker takes over. Repairs and fallback
-paths are logged rather than hidden.
+ordered actions before external effects. Execution attempts and worker starts
+use leases and fencing, so a stale holder cannot commit after another takes
+over. Saved runtime snapshots move only from an agent that counts as gone, in
+one transaction that deletes its row; a previous owner that is still running
+finds its row gone at its next save, which is refused
+(`RuntimeCustodyLost`). It then drops that work from memory without replying
+and keeps running (`custom_agents.custody_loss`), so one task never has two
+owners. Repairs and fallback paths are logged rather than hidden.
 
 Transport contracts, workflow records, and snapshot codecs have separate owners.
 Shared subsystem configuration lives in `runtime_settings/`; the gateway composes

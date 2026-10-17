@@ -12,11 +12,11 @@ from custom_agents.task_runtime_state import ObjectiveRuntimeState
 from custom_agents.task_runtime_state import PlanRuntimeState
 from custom_agents.task_runtime_state import TaskRuntimeState
 import logging
-from storage.runtime_state_repository import RuntimeStateRepository
+from storage.runtime_state_repository import RuntimeCustodyLost, RuntimeRecoveryConflict, RuntimeStateRepository
 from custom_agents.task_runtime_state import WorkflowRuntimeState
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 
 from custom_agents.runtime_state_store import TaskRuntimeSnapshotRow
@@ -26,7 +26,17 @@ from custom_messages.enums import TaskActivityStage, TaskActivityType
 
 
 class RuntimeSnapshotCoordinator:
-    """Persist and restore TaskManager active-runtime snapshots."""
+    """Persist and restore TaskManager active-runtime snapshots.
+
+    It remembers whether this owner holds a saved row (``_holds_custody``):
+    after its first save or an adopted recovery it does, after it clears its
+    row it does not. A save made while holding one must find the row; when it
+    is gone another agent took the work over (``RuntimeCustodyLost``). The
+    coordinator then drops every task from memory in the same task-lane
+    operation, so nothing here can run or save them again, and tells the
+    custody listener (``custom_agents.custody_loss``), which stops a running
+    turn of that work.
+    """
 
     def __init__(
         self,
@@ -51,6 +61,41 @@ class RuntimeSnapshotCoordinator:
         self.state = WorkflowRuntimeState(
             task_state, plan_state, objective_state, execution_state
         )
+        self._holds_custody = False
+        self._custody_lost_listener: Optional[Callable[[tuple[str, ...]], None]] = None
+
+    def set_custody_lost_listener(self, listener: Optional[Callable[[tuple[str, ...]], None]]) -> None:
+        """Called with the released task ids when a save finds the work taken over."""
+        self._custody_lost_listener = listener
+
+    def _release_lost_custody(self, lost: RuntimeCustodyLost) -> None:
+        """Forget all work in memory: its saved row now belongs to another agent."""
+        released = tuple(sorted(self.task_state.tasks))
+        self.state.restore(
+            WorkflowRuntimeState(
+                TaskRuntimeState(), PlanRuntimeState(), ObjectiveRuntimeState(), ExecutionRuntimeState()
+            )
+        )
+        self._holds_custody = False
+        self._logger.warning(
+            "Another agent took this agent's saved work over; dropped it from memory without "
+            "saving or replying. event=runtime_custody_lost owner_agent_id=%s store=%s task_ids=%s",
+            lost.owner_agent_id,
+            lost.store.value,
+            list(released),
+        )
+        if self._custody_lost_listener is None:
+            return
+        try:
+            self._custody_lost_listener(released)
+        except Exception:
+            # The refusal itself must still reach the caller; the work is already released.
+            self._logger.exception(
+                "Could not tell the agent about released work. event=custody_listener_failed "
+                "owner_agent_id=%s store=%s",
+                lost.owner_agent_id,
+                lost.store.value,
+            )
 
 
     def _export_runtime_state(self) -> Dict[str, Any]:
@@ -69,6 +114,7 @@ class RuntimeSnapshotCoordinator:
         try:
             if not self.task_state.tasks:
                 self.runtime_state_store.clear_task_runtime(self.identity.owner_agent_id)
+                self._holds_custody = False
                 return
 
             runtime_state_json = json.dumps(self._export_runtime_state())
@@ -78,8 +124,13 @@ class RuntimeSnapshotCoordinator:
                 team_id=self.identity.team_id,
                 owner_named_agent_type=self.identity.owner_named_agent_type,
                 runtime_state_json=runtime_state_json,
+                expect_existing=self._holds_custody,
                 **({"schedule_admission": schedule_admission} if schedule_admission is not None else {}),
             )
+            self._holds_custody = True
+        except RuntimeCustodyLost as lost:
+            self._release_lost_custody(lost)
+            raise
         except Exception as e:
             self._logger.error(f"Failed to persist active runtime state: {e}")
             raise
@@ -87,13 +138,22 @@ class RuntimeSnapshotCoordinator:
     def persist_task_history(self, task_id: str) -> None:
         if not self.identity.owner_agent_id:
             return
-        self.runtime_state_store.save_task_runtime_task(
-            owner_agent_id=self.identity.owner_agent_id,
-            task=capture_task(self.task_state.tasks[task_id]),
-            task_plan_links=self.plan_state.task_to_plan_id if self.operations.plans_enabled() else {},
-            task_objective_links=self.objective_state.task_to_objective_id if self.operations.objectives_enabled() else {},
-            plan_objective_links=self.objective_state.plan_to_objective_id if self.operations.objectives_enabled() else {},
-        )
+        try:
+            self.runtime_state_store.save_task_runtime_task(
+                owner_agent_id=self.identity.owner_agent_id,
+                task=capture_task(self.task_state.tasks[task_id]),
+                task_plan_links=self.plan_state.task_to_plan_id if self.operations.plans_enabled() else {},
+                task_objective_links=self.objective_state.task_to_objective_id if self.operations.objectives_enabled() else {},
+                plan_objective_links=self.objective_state.plan_to_objective_id if self.operations.objectives_enabled() else {},
+            )
+            return
+        except RuntimeCustodyLost as lost:
+            if self._holds_custody:
+                self._release_lost_custody(lost)
+                raise
+        # Never saved: the task was not admitted durably, so nothing was taken
+        # over. Raised outside the handler so no custody loss travels with it.
+        raise RuntimeRecoveryConflict("Task history requires existing durable task custody")
 
     def get_stored_runtime_team_id(self) -> Optional[str]:
         if not self.identity.owner_agent_id:
@@ -135,6 +195,7 @@ class RuntimeSnapshotCoordinator:
                 ),
             )
             committed = True
+            self._holds_custody = True
             self._reconcile_restored_plans()
             self._persist_runtime_state()
             self._logger.info("Restored %s active tasks for %s", len(restored.task_state.tasks), self.identity.owner_agent_id)

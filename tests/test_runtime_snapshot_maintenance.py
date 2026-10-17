@@ -71,6 +71,7 @@ def seeded_store(request, tmp_path):
             ("old_a", "tasks", "opaque", '{"private":"payload"}', "original_digest"),
         )
     repo.save_task_runtime(
+        expect_existing=False,
         owner_agent_id="current",
         owner_agent_name="Manager",
         team_id="nova",
@@ -78,6 +79,7 @@ def seeded_store(request, tmp_path):
         runtime_state_json=snapshot_json("current_work"),
     )
     repo.save_deferred_messages(
+        expect_existing=False,
         owner_agent_id="old_a",
         owner_agent_name="Manager",
         team_id="nova",
@@ -123,6 +125,7 @@ def seed_old_creation_result(settings, repo):
         }
     }
     repo.save_task_runtime(
+        expect_existing=False,
         owner_agent_id="old_result",
         owner_agent_name="Lead",
         team_id="nova",
@@ -199,6 +202,7 @@ def test_preview_cannot_authorize_retirement_after_snapshot_becomes_valid(seeded
         for row in maintenance.inspect_runtime_snapshots(settings, team_id="nova")
     }
     repo.save_task_runtime(
+        expect_existing=False,
         owner_agent_id="old_result",
         owner_agent_name="Lead",
         team_id="nova",
