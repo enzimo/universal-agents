@@ -396,22 +396,22 @@ def test_a_refused_objective_control_is_explained_and_not_reported_as_done() -> 
             "objective_control_incomplete:schedule:sched_1,policy:policy_1",
             ObjectiveStatus.PAUSED,
             "Not every part finished: schedule sched_1, work-session setting policy_1. "
-            "Send /pause objective objective_1 again to retry them.",
+            "Send /pause objective objective_1 again to retry.",
         ),
         (
             "delete_objective",
             "objective_deletion_incomplete:task:task_1,objective:objective_1",
             ObjectiveStatus.DELETING,
-            "Objective objective_1 is still being deleted; these did not finish: task (its stop was "
-            "not confirmed) task_1, recording which links it changed. Send /delete objective "
-            "objective_1 again to finish it.",
+            "Objective objective_1 is still being deleted; these did not finish: task task_1 (its "
+            "stop was not confirmed), recording which links it changed. Send /delete objective "
+            "objective_1 again to retry.",
         ),
         (
             "pause_objective",
             "objective_changed",
             None,
-            "Objective objective_1 changed since you last looked at it, so nothing was done. "
-            "Check /objectives and try again.",
+            "Objective objective_1 has changed since the version this request was based on, so "
+            "nothing was done. Check /objectives and try again.",
         ),
     ],
 )
@@ -442,3 +442,87 @@ def test_the_web_page_shows_a_finished_objective_control_in_words() -> None:
     )
 
     assert objective_control_text(response) == "Objective objective_1 is now paused."
+
+
+def test_the_status_line_matches_what_the_control_did() -> None:
+    """An unfinished deletion reads "being deleted"; an unfinished pause promises nothing."""
+    deleting = ManagerRuntimeWorkCommand(
+        action="delete_objective",
+        scope="objective",
+        target_objective_id="objective_1",
+        success=False,
+        message="objective_deletion_incomplete:schedule:sched_1",
+        objective_status=ObjectiveStatus.DELETING,
+    )
+    unfinished_pause = ManagerRuntimeWorkCommand(
+        action="pause_objective",
+        scope="objective",
+        target_objective_id="objective_1",
+        success=False,
+        message="objective_control_incomplete:schedule:sched_1",
+        objective_status=ObjectiveStatus.PAUSED,
+    )
+
+    deleting_text = GatewayOperationalControlApplication._render_runtime_work_response(deleting)
+    pause_text = GatewayOperationalControlApplication._render_runtime_work_response(unfinished_pause)
+
+    assert deleting_text.splitlines()[0] == "Objective objective_1 is now being deleted."
+    assert "deleting" not in deleting_text
+    assert pause_text.splitlines()[0] == "Objective objective_1 is now paused."
+    assert "Future managed runs are paused" not in pause_text
+
+
+def test_a_pause_sent_for_a_deleted_objective_reports_only_the_deletion() -> None:
+    response = ManagerRuntimeWorkCommand(
+        action="pause_objective",
+        scope="objective",
+        target_objective_id="objective_1",
+        success=False,
+        message="objective_already_deleted",
+    )
+
+    rendered = GatewayOperationalControlApplication._render_runtime_work_response(response)
+
+    assert rendered.splitlines()[0] == "Objective objective_1 was already deleted."
+    assert "is now" not in rendered
+    assert "Future managed runs are paused" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("action", "message", "expected"),
+    [
+        (
+            "pause_objective",
+            "objective_control_incomplete:schedule:sched_1",
+            "Not every part finished: schedule sched_1. In chat, send /pause objective objective_1 to retry.",
+        ),
+        (
+            "abandon_objective",
+            "objective_control_incomplete:heartbeat:hb_1",
+            "Not every part finished: heartbeat item hb_1. In chat, send /abandon objective objective_1 to retry.",
+        ),
+        (
+            "delete_objective",
+            "objective_deletion_incomplete:schedule:sched_1",
+            "Objective objective_1 is still being deleted; these did not finish: schedule sched_1. "
+            "Choose Delete again to retry.",
+        ),
+        (
+            "pause_objective",
+            "objective_changed",
+            "Objective objective_1 has changed since the version this request was based on, so "
+            "nothing was done. Refresh the page and try again.",
+        ),
+    ],
+)
+def test_the_web_page_words_the_next_step_for_the_page(action, message, expected) -> None:
+    """The page has no Pause or Abandon button for those Objectives, so their retry goes through chat."""
+    response = ManagerRuntimeWorkCommand(
+        action=action,
+        scope="objective",
+        target_objective_id="objective_1",
+        success=False,
+        message=message,
+    )
+
+    assert objective_control_text(response, for_web=True) == expected

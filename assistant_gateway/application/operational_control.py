@@ -13,7 +13,10 @@ from assistant_gateway.application.manager_commands import (
     GatewayManagerCommandRequest,
     GatewayManagerCommandService,
 )
-from assistant_gateway.application.objective_control_text import objective_control_text
+from assistant_gateway.application.objective_control_text import (
+    objective_control_text,
+    objective_status_words,
+)
 from assistant_gateway.application.ports import GatewayIdGenerator
 from assistant_gateway.application.request_context import (
     GatewayCommandPerson,
@@ -30,10 +33,10 @@ from assistant_gateway.application.session_service import (
     GatewaySessionService,
 )
 from assistant_gateway.domain.sessions import SessionRecord
-from custom_messages.contracts.control_v1 import ControlInstruction, Instruction, ManagerRuntimeWorkCommand, RuntimeWorkSummary, SystemStatusMessage
+from custom_messages.contracts.control_v1 import PAUSE_OBJECTIVE, ControlInstruction, Instruction, ManagerRuntimeWorkCommand, RuntimeWorkSummary, SystemStatusMessage
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.enums import ControlType, RequesterType, RoutingType
+from custom_messages.enums import ControlType, ObjectiveStatus, RequesterType, RoutingType
 
 
 @dataclass(frozen=True)
@@ -105,8 +108,13 @@ def _append_objective_control_status(
     if response.objective_status is None or not response.target_objective_id:
         return
     state = str(getattr(response.objective_status, "value", response.objective_status))
-    lines.append(f"Objective {response.target_objective_id} is now {state}.")
-    if response.action == "pause_objective":
+    lines.append(f"Objective {response.target_objective_id} is now {objective_status_words(state)}.")
+    # Only a pause that finished stops every future managed run.
+    if (
+        response.action == PAUSE_OBJECTIVE
+        and response.success
+        and response.objective_status == ObjectiveStatus.PAUSED
+    ):
         lines.append(
             "Future managed runs are paused; any currently executing task "
             "must be cancelled separately with /stop."

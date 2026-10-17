@@ -990,7 +990,9 @@ Each Objective shows only the controls its current status allows, and these
 controls refuse any other: for example, a satisfied Objective can only be
 deleted. Repeating the control that set the current status is allowed: if a
 pause or abandon reports that a schedule did not switch, send the same command
-again to retry the parts that did not finish.
+in chat again (for example `/pause objective <id>`) to retry the parts that did
+not finish. An unfinished deletion is retried with Delete or
+`/delete objective <id>`.
 
 Asking the team lead in chat to pause or resume an Objective also pauses or
 resumes its work sessions and the schedules and heartbeat items it manages,

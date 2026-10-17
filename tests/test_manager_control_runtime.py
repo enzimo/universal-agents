@@ -1498,3 +1498,24 @@ async def test_an_incomplete_deletion_waits_and_keeps_its_first_operation_on_ret
     assert deleted.deletion_requested_at == waiting.deletion_requested_at
     assert deleted.deleted_at is not None
     assert schedule_store.get_scheduled_message("objective_owner_schedule").enabled is False
+
+
+@pytest.mark.asyncio
+async def test_a_control_for_a_deleted_objective_reports_a_status_only_for_delete(tmp_path: Path) -> None:
+    task_manager, _schedule_store, objective, agent = _owned_objective_with_schedule(tmp_path)
+    task_manager.update_objective_status(objective.objective_id, ObjectiveStatus.DELETING)
+    task_manager.update_objective_status(objective.objective_id, ObjectiveStatus.DELETED)
+
+    paused = await _owner_control(agent, objective.objective_id, "pause_objective")
+    deleted = await _owner_control(agent, objective.objective_id, "delete_objective")
+
+    assert (paused.success, paused.message, paused.objective_status) == (
+        False,
+        "objective_already_deleted",
+        None,
+    )
+    assert (deleted.success, deleted.message, deleted.objective_status) == (
+        True,
+        "objective_deleted",
+        ObjectiveStatus.DELETED,
+    )

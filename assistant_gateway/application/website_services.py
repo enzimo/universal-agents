@@ -1238,7 +1238,7 @@ class WebsiteOperationsApplication:
                 else "unknown"
             ),
             success=bool(response.success),
-            message=objective_control_text(response) or response.message,
+            message=objective_control_text(response, for_web=True) or response.message,
             cancellation_receipts=tuple(
                 item.model_dump(mode="json") for item in response.cancellation_receipts
             ),

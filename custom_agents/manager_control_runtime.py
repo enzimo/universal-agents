@@ -1543,6 +1543,28 @@ async def _cancel_runtime_work_roots(
     return receipts
 
 
+def _answer_unchanged_objective(
+    result: _ObjectiveControlResult,
+    *,
+    command: ManagerRuntimeWorkCommand,
+    response: ManagerRuntimeWorkCommand,
+) -> None:
+    """Answer a control that changed nothing: a refusal, or an already deleted Objective.
+
+    Only a deletion reports the deleted status as its outcome; any other
+    control carries no status, so the gateway never reports one as new.
+    """
+
+    if result.already_deleted:
+        response.success = command.action == DELETE_OBJECTIVE
+        response.message = OBJECTIVE_DELETED if response.success else OBJECTIVE_ALREADY_DELETED
+        if response.success:
+            response.objective_status = ObjectiveStatus.DELETED
+        return
+    response.success = False
+    response.message = result.refusal or OBJECTIVE_UPDATE_FAILED
+
+
 async def _apply_objective_control(
     agent: Any,
     *,
@@ -1581,14 +1603,8 @@ async def _apply_objective_control(
         response.success = False
         response.message = OBJECTIVE_UPDATE_FAILED
         return
-    if result.already_deleted:
-        response.success = command.action == DELETE_OBJECTIVE
-        response.message = OBJECTIVE_DELETED if response.success else OBJECTIVE_ALREADY_DELETED
-        response.objective_status = ObjectiveStatus.DELETED
-        return
     if result.outcome is None:
-        response.success = False
-        response.message = result.refusal or OBJECTIVE_UPDATE_FAILED
+        _answer_unchanged_objective(result, command=command, response=response)
         return
 
     outcome = result.outcome
