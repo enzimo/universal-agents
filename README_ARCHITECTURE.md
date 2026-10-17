@@ -374,7 +374,9 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
    TeamLead as a `WorkerTaskHandbackV1` message, one task per message with a
    deterministic handback id. The running turn is interrupted without a
    cancellation record, so the task can run elsewhere. New requests that still
-   reach the worker go to the TeamLead the same way.
+   reach the worker go to the TeamLead the same way. A running task whose final
+   answer the outbox already sent is completed by this worker instead; handing
+   it back made another worker run it again and send a second answer.
 3. It keeps tasks that already started and now wait on a person or subtask,
    because replies are addressed to this worker's id. They may finish until
    `agent.schedule_workers.lease_loss_wait_timeout_seconds` (default 30 minutes)

@@ -242,6 +242,78 @@ async def test_wind_down_hands_back_running_and_unstarted_work_then_exits(
     assert agent.exited
 
 
+def test_only_a_sent_final_answer_counts_as_answered(manager):
+    _add(manager, "t1", ProgressState.IN_PROGRESS)
+    outbox = manager.execution_state.turn_action_outbox
+    record = TurnActionOutboxRecord(
+        action_id="a", batch_id="b", source_task_id="t1", action_index=0,
+        action_type="task_response", payload_json={}, status="dispatching",
+    )
+    outbox["a"] = record
+    assert not wind_down._final_answer_sent(manager, "t1")  # publish outcome unknown
+    outbox["a"] = record.model_copy(update={"status": "dispatched"})
+    assert wind_down._final_answer_sent(manager, "t1")
+    outbox["a"] = record.model_copy(update={"status": "retry_scheduled", "phase": "post_publish_finalize"})
+    assert wind_down._final_answer_sent(manager, "t1")
+    outbox["a"] = record.model_copy(update={"status": "dispatched", "action_type": "notify_user"})
+    assert not wind_down._final_answer_sent(manager, "t1")
+
+
+@pytest.mark.asyncio
+async def test_a_running_task_whose_answer_was_sent_is_finished_not_handed_back(
+    manager, monkeypatch
+):
+    """Regression (2026-10-17): a task finishing up after its final answer went out
+    (FINALIZING_PLAN, answer dispatched) was handed back and run again by another
+    worker, which sent a second answer."""
+
+    _add(manager, "unanswered")
+    _add(manager, "answered", ProgressState.IN_PROGRESS)
+    manager.update_main_task_state("answered", ProgressState.FINALIZING_PLAN, NOW())
+    manager.execution_state.turn_action_outbox["act_answered"] = TurnActionOutboxRecord(
+        action_id="act_answered",
+        batch_id="batch_answered",
+        source_task_id="answered",
+        action_index=0,
+        action_type="task_response",
+        payload_json={"answer": "Here is the summary."},
+        status="dispatched",
+    )
+    agent = _worker(manager, monkeypatch=monkeypatch)
+
+    async def complete_after_dispatch(*, task_id, after_action_report_sent=False):
+        manager.complete_task(task_id, NOW())
+        return True
+
+    agent._complete_local_task_finalization_after_dispatch = complete_after_dispatch
+    turn_cancelled = asyncio.Event()
+
+    async def finishing_turn():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await handle_interrupted_turn(
+                agent, task_id="answered", task_info=manager.get_task_info("answered")
+            )
+            turn_cancelled.set()
+            raise
+
+    agent._active_execution_task = asyncio.create_task(finishing_turn())
+    agent._active_execution_task_id = "answered"
+    await asyncio.sleep(0)
+
+    wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+    await _wait_for_exit(agent)
+
+    assert turn_cancelled.is_set()
+    agent._cancel_task_tree_locally.assert_not_awaited()
+    # Only the task that has not started goes back to the lead.
+    assert [item.handed_back.task_id for item in agent.team_comms.handbacks()] == ["unanswered"]
+    archived = manager.get_task_from_db("answered")
+    assert archived is not None and archived["status"] == ProgressState.COMPLETED.value
+    assert not manager.is_execution_cancelled("answered")
+
+
 @pytest.mark.asyncio
 async def test_diverted_delivery_is_acked_when_handed_back_and_refused_on_failure(
     manager, monkeypatch
