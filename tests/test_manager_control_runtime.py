@@ -1292,3 +1292,119 @@ async def test_objective_deletion_that_was_not_saved_is_not_reported_done(
     assert stored.status == ObjectiveStatus.DELETED
     assert stored.deleted_at is not None
     assert "Future execution is disabled" in stored.deletion_summary
+
+
+# -- each Objective control is one task operation on the stored record ---------------
+
+
+def _owned_objective_with_schedule(tmp_path: Path):
+    config = _config(tmp_path)
+    task_manager = TaskManager(
+        storage_settings=config.manager_storage_settings,
+        logger=logging.getLogger("test.objective_control_operation"),
+    )
+    task_manager.set_owner_identity("manager_1", "Manager", config.gateway.team_id, config.gateway.named_agent_type)
+    owner_context = GatewayContext(canonical_user_id="Owner", session_key="session_owner")
+    source = Task(task_id="task_control_source", task_type=MessageMetaType.REQUEST, problem_statement="Work.")
+    assert task_manager.add_task(
+        source,
+        MessageHeader(from_agent_id="gateway"),
+        MessageMeta(conversation_id="conv_owner", gateway_context=owner_context),
+        owner_person_id="Owner",
+    )
+    objective = task_manager.create_objective(
+        task_id=source.task_id,
+        title="Check every minute",
+        desired_outcome="Checked.",
+        why="Asked.",
+        horizon=ObjectiveHorizon.RECURRING,
+    )
+    schedule_store = ScheduleStore(storage_settings=config.manager_storage_settings)
+    schedule_store.add(
+        ScheduledMessage(
+            schedule_id="objective_owner_schedule",
+            schedule_name="objective:owner",
+            objective_id=objective.objective_id,
+            payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Check."),
+            payload_meta=MessageMeta(gateway_context=owner_context),
+            interval_ms=60_000,
+        )
+    )
+    task_manager.link_schedule_to_objective(objective.objective_id, "objective_owner_schedule")
+    agent = SimpleNamespace(
+        id="manager_1",
+        task_manager=task_manager,
+        _logger=logging.getLogger("test.objective_control_operation"),
+        _ensure_schedule_store=lambda: schedule_store,
+        _scheduler_wake=SimpleNamespace(set=lambda: None),
+    )
+    return task_manager, schedule_store, objective, agent
+
+
+async def _owner_control(agent, objective_id: str, action: str, *, digest: str | None = None):
+    command = ManagerRuntimeWorkCommand(
+        action=action, scope="objective", target_objective_id=objective_id, expected_objective_digest=digest
+    )
+    response = command.model_copy(deep=True)
+    await manager_control_runtime._apply_objective_control(
+        agent,
+        command=command,
+        person=manager_control_runtime.CommandPerson("Owner", agent.task_manager.identity.team_id, ("owner",)),
+        response=response,
+    )
+    return response
+
+
+@pytest.mark.asyncio
+async def test_objective_control_refuses_an_action_the_status_does_not_offer(tmp_path: Path) -> None:
+    task_manager, schedule_store, objective, agent = _owned_objective_with_schedule(tmp_path)
+    task_manager.update_objective_status(objective.objective_id, ObjectiveStatus.SATISFIED, summary="Done.")
+    before = task_manager.get_objective(objective.objective_id)
+
+    response = await _owner_control(agent, objective.objective_id, "resume_objective")
+
+    assert (response.success, response.message) == (False, "objective_action_unavailable:satisfied")
+    assert response.objective_status == ObjectiveStatus.SATISFIED
+    assert task_manager.get_objective(objective.objective_id) == before
+
+
+@pytest.mark.asyncio
+async def test_objective_control_keeps_changes_stored_while_its_links_switch(tmp_path: Path) -> None:
+    task_manager, schedule_store, objective, agent = _owned_objective_with_schedule(tmp_path)
+    switch = schedule_store.set_enabled
+
+    def switch_while_another_change_lands(*args, **kwargs):
+        task_manager.update_objective_progress(objective.objective_id, progress_summary="Half checked.")
+        return switch(*args, **kwargs)
+
+    schedule_store.set_enabled = switch_while_another_change_lands
+
+    response = await _owner_control(agent, objective.objective_id, "pause_objective")
+
+    assert (response.success, response.message) == (True, "objective_paused")
+    stored = task_manager.get_objective(objective.objective_id)
+    assert stored.status == ObjectiveStatus.PAUSED
+    assert stored.progress_summary == "Half checked."
+    assert stored.schedule_links[0].disabled_by_objective_pause is True
+    assert schedule_store.get_scheduled_message("objective_owner_schedule").enabled is False
+
+
+@pytest.mark.asyncio
+async def test_objective_control_checks_and_changes_in_one_task_operation(tmp_path: Path) -> None:
+    """The digest and allowed-action checks see the record the change starts from."""
+    task_manager, _schedule_store, objective, agent = _owned_objective_with_schedule(tmp_path)
+    digest = contract_sha256(task_manager.get_objective(objective.objective_id).model_dump(mode="json"))
+    operations: list[str] = []
+    run = task_manager.operations_runtime.run
+
+    async def record(operation, *args, **kwargs):
+        target = getattr(operation, "func", operation)
+        operations.append(getattr(target, "__name__", str(target)))
+        return await run(operation, *args, **kwargs)
+
+    task_manager.operations_runtime.run = record
+
+    response = await _owner_control(agent, objective.objective_id, "pause_objective", digest=digest)
+
+    assert (response.success, response.message) == (True, "objective_paused")
+    assert operations == ["_control_objective_in_operation"]

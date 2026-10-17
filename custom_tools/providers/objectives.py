@@ -16,7 +16,9 @@ inputs of their own stay separate: ``create_objective``,
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 
@@ -27,6 +29,13 @@ from custom_agents.schedule_management import (
     ScheduleMutationOperation,
     is_system_managed_schedule,
 )
+from custom_agents.heartbeat_store import HeartbeatStore
+from custom_agents.objective_lifecycle import (
+    LinkSwitchResult,
+    ObjectiveLifecycleOutcome,
+    ObjectiveStatusChange,
+    apply_objective_lifecycle,
+)
 from custom_agents.task_manager_objectives import ObjectiveSaveFailed
 from custom_agents.schedule_store import (
     schedule_claim_scope_for_agent,
@@ -35,6 +44,7 @@ from custom_messages.contracts.routing_v1 import MessageHeader
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task
+from custom_messages.records.objectives import ObjectiveHeartbeatLink, ObjectiveScheduleLink
 from custom_messages.enums import (
     MessageMetaType,
     ObjectiveHealthDisposition,
@@ -73,6 +83,8 @@ from custom_tools.providers._runtime import (
     _require_manager_tool,
     _resolve_objective_id_for_tool,
     _schedule_store,
+    _task_person,
+    _UnverifiedTask,
 )
 from custom_tools.providers.diagnostics import (
     _build_initial_recovery_context,
@@ -89,9 +101,7 @@ from custom_tools.providers.diagnostics import (
     _parse_plan_item_status,
     _parse_unknown_status,
 )
-from custom_tools.providers.heartbeat import (
-    _objective_heartbeat_store_for_cascade,
-)
+from custom_tools.providers.heartbeat import _heartbeat_store
 
 logger = logging.getLogger(__name__)
 
@@ -515,6 +525,7 @@ def _update_status(
     Change a durable Objective lifecycle status.
 
     Marking a user-confirmed Objective satisfied requires user_confirmation_summary.
+    Deletion is the person's own control, so ``deleting`` and ``deleted`` are refused.
     """
     agent = get_agent_ref()
     if agent is None:
@@ -523,14 +534,9 @@ def _update_status(
     if manager_error:
         return json.dumps({"error": manager_error, "manager_only": True})
 
-    parsed_status = _parse_objective_status(status)
-    if parsed_status is None:
-        return json.dumps(
-            {
-                "error": f"Unknown objective status: {status}",
-                "allowed_statuses": [item.value for item in ObjectiveStatus],
-            }
-        )
+    parsed_status = _settable_status(status)
+    if isinstance(parsed_status, dict):
+        return json.dumps(parsed_status)
     task_refusal = _named_task_refusal(agent, task_id)
     if task_refusal:
         return json.dumps({"error": task_refusal})
@@ -544,39 +550,177 @@ def _update_status(
             {"error": "No objective could be resolved from the supplied context."}
         )
     try:
-        objective = agent.task_manager.operations_runtime.run_sync(
-            agent.task_manager.update_objective_status,
-            resolved_objective_id,
-            parsed_status,
-            summary=summary or None,
-            user_confirmation_summary=user_confirmation_summary or None,
-            satisfied_by_task_id=(
-                resolved_task_id
-                if _coerce_tool_bool(satisfied_by_current_task)
-                else None
-            ),
-            task_id=resolved_task_id or None,
-            plan_id=plan_id or None,
-            user_visible=_coerce_tool_bool(user_visible),
+        person = _task_person(agent)
+    except _UnverifiedTask:
+        return json.dumps({"error": "No objective could be resolved from the supplied context."})
+    change = ObjectiveStatusChange(
+        status=parsed_status,
+        summary=summary or None,
+        user_confirmation_summary=user_confirmation_summary or None,
+        satisfied_by_task_id=(
+            resolved_task_id if _coerce_tool_bool(satisfied_by_current_task) else None
+        ),
+        task_id=resolved_task_id or None,
+        plan_id=plan_id or None,
+        user_visible=_coerce_tool_bool(user_visible),
+        policy_person_id=person.person_id if person is not None else None,
+    )
+    try:
+        outcome = agent.task_manager.operations_runtime.run_sync(
+            partial(_change_status_in_operation, agent), resolved_objective_id, change
         )
     except (ValueError, ObjectiveSaveFailed) as exc:
         return json.dumps({"error": str(exc)})
 
-    if objective is None:
+    if outcome is None:
         return json.dumps(
             {"error": f"Failed to update objective {resolved_objective_id}"}
         )
-    objective, lifecycle_warnings = _apply_objective_lifecycle_cascade(agent, objective)
-    payload = {
+    if outcome.links_switched and getattr(agent, "_scheduler_wake", None):
+        agent._scheduler_wake.set()
+    return json.dumps(_status_payload(agent, outcome), default=str)
+
+
+def _settable_status(status: str) -> ObjectiveStatus | dict[str, Any]:
+    """The status the team lead asked for, or the refusal to return instead."""
+
+    parsed = _parse_objective_status(status)
+    allowed = list(_AGENT_SETTABLE_STATUSES)
+    if parsed is None:
+        return {"error": f"Unknown objective status: {status}", "allowed_statuses": allowed}
+    if parsed in _PERSON_DELETION_STATUSES:
+        return {"error": _PERSON_DELETION_REFUSAL, "allowed_statuses": allowed}
+    return parsed
+
+
+def _status_payload(agent: "UniversalAgent", outcome: ObjectiveLifecycleOutcome) -> dict[str, Any]:
+    objective = outcome.objective
+    payload: dict[str, Any] = {
         "objective_id": objective.objective_id,
         "objective": objective.model_dump(mode="json"),
         "markdown": agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.render_objective_markdown, objective.objective_id
         ),
     }
-    if lifecycle_warnings:
-        payload["lifecycle_warnings"] = list(lifecycle_warnings)
-    return json.dumps(payload, default=str)
+    if outcome.incomplete:
+        payload["lifecycle_warnings"] = [
+            _lifecycle_warning(objective.objective_id, item) for item in outcome.incomplete
+        ]
+    return payload
+
+
+# Deletion is the person's control (``/delete objective`` or Settings ->
+# Runtime): it stops active work and turns off links in its own steps, which
+# a status change from the team lead would skip.
+_PERSON_DELETION_STATUSES = frozenset({ObjectiveStatus.DELETING, ObjectiveStatus.DELETED})
+_PERSON_DELETION_REFUSAL = (
+    "Only the person can delete an Objective: they use /delete objective <id> or "
+    "Settings > Runtime. Use paused, abandoned or cancelled to stop it."
+)
+_AGENT_SETTABLE_STATUSES = tuple(
+    item.value for item in ObjectiveStatus if item not in _PERSON_DELETION_STATUSES
+)
+
+
+@dataclass
+class _AgentLinkSwitch:
+    """Turns an Objective's linked items on or off under the team lead's rules.
+
+    A system-managed schedule changes only through ``apply_change``
+    (``custom_agents.system_schedule_changes``), so this leaves it alone and
+    logs that it did.
+    """
+
+    agent: "UniversalAgent"
+    _heartbeats: Optional[HeartbeatStore] = None
+
+    def switch_schedule(
+        self, objective_id: str, link: ObjectiveScheduleLink, enabled: bool
+    ) -> LinkSwitchResult:
+        store = _schedule_store(self.agent)
+        schedule = store.get_scheduled_message(link.schedule_id)
+        if schedule is None:
+            return LinkSwitchResult.MISSING
+        if is_system_managed_schedule(schedule):
+            logger.warning(
+                "Objective lifecycle change left a protected system schedule alone. "
+                "event=objective_system_schedule_mutation_skipped objective_id=%s "
+                "schedule_id=%s requested_enabled=%s",
+                objective_id,
+                link.schedule_id,
+                enabled,
+            )
+            return LinkSwitchResult.SKIPPED
+        changed = store.set_enabled(
+            link.schedule_id,
+            enabled,
+            operation=(
+                ScheduleMutationOperation.ENABLE if enabled else ScheduleMutationOperation.DISABLE
+            ),
+        )
+        return LinkSwitchResult.SWITCHED if changed else LinkSwitchResult.FAILED
+
+    def switch_heartbeat(
+        self, objective_id: str, link: ObjectiveHeartbeatLink, enabled: bool
+    ) -> LinkSwitchResult:
+        try:
+            if self._heartbeats is None:
+                self._heartbeats = _heartbeat_store(self.agent)
+            item = self._heartbeats.set_item_enabled(link.heartbeat_item_id, enabled)
+        except Exception as exc:
+            logger.warning(
+                "Objective lifecycle change could not switch a heartbeat item. "
+                "event=objective_heartbeat_switch_failed objective_id=%s heartbeat_item_id=%s "
+                "error_type=%s",
+                objective_id,
+                link.heartbeat_item_id,
+                type(exc).__name__,
+                exc_info=True,
+            )
+            return LinkSwitchResult.FAILED
+        return LinkSwitchResult.SWITCHED if item is not None else LinkSwitchResult.MISSING
+
+
+def _change_status_in_operation(
+    agent: "UniversalAgent", objective_id: str, change: ObjectiveStatusChange
+) -> Optional[ObjectiveLifecycleOutcome]:
+    """Change the status and everything that follows it in one task operation.
+
+    Runs inside the manager's operation lane, so it calls the manager
+    directly. A deletion in progress or finished is the person's, so the
+    Objective is left alone.
+    """
+
+    stored = agent.task_manager.get_objective(objective_id)
+    if stored is None:
+        return None
+    if stored.status in _PERSON_DELETION_STATUSES:
+        raise ValueError(
+            f"Objective {objective_id} is {stored.status.value} by its person and can no longer change."
+        )
+    return apply_objective_lifecycle(
+        agent.task_manager, objective_id, change, _AgentLinkSwitch(agent)
+    )
+
+
+def _lifecycle_warning(objective_id: str, incomplete: str) -> str:
+    """Plain words for one control the status change did not finish."""
+
+    kind, _, item_id = incomplete.partition(":")
+    if kind == "objective":
+        return (
+            f"Objective {objective_id} could not record which schedules and heartbeat items it "
+            "paused or resumed, so resuming it will not restart the ones it paused. Tell the person."
+        )
+    if kind == "policy":
+        return (
+            f"The bounded work-session setting of Objective {objective_id} did not follow the new "
+            "status; check it with objective_work_sessions(action=\"status\") and tell the person."
+        )
+    return (
+        f"The linked {kind} {item_id} could not be turned on or off with Objective "
+        f"{objective_id}; operator review is required."
+    )
 
 
 @tool
@@ -1258,117 +1402,6 @@ def start_isolated_recovery(
     )
 
 
-def _save_cascaded_links(agent: "UniversalAgent", objective: Any) -> tuple[str, ...]:
-    """Save which links a cascade paused or resumed; a warning when the Objective could not.
-
-    The schedules and heartbeat items already changed. An Objective that does
-    not remember pausing them does not restart them when it resumes.
-    """
-
-    try:
-        agent.task_manager.operations_runtime.run_sync(
-            agent.task_manager._save_objective, objective
-        )
-    except ObjectiveSaveFailed:
-        return (
-            f"Objective {objective.objective_id} could not record which schedules and heartbeat "
-            "items it paused or resumed, so resuming it will not restart the ones it paused. "
-            "Tell the person.",
-        )
-    return ()
-
-
-def _apply_objective_lifecycle_cascade(
-    agent: "UniversalAgent", objective: Any
-) -> tuple[Any, tuple[str, ...]]:
-    """Apply Objective pause/resume/terminal state to managed schedules and heartbeat items."""
-    disable_statuses = {
-        ObjectiveStatus.PAUSED,
-        ObjectiveStatus.SATISFIED,
-        ObjectiveStatus.FAILED,
-        ObjectiveStatus.CANCELLED,
-        ObjectiveStatus.ABANDONED,
-    }
-    should_disable = objective.status in disable_statuses
-    should_resume = objective.status == ObjectiveStatus.ACTIVE
-    changed = False
-
-    schedule_store = getattr(agent, "_schedule_store", None)
-    if schedule_store is not None:
-        for link in getattr(objective, "schedule_links", []) or []:
-            if not getattr(link, "managed_by_objective", True):
-                continue
-            if should_disable and not getattr(
-                link, "disabled_by_objective_pause", False
-            ):
-                linked_schedule = schedule_store.get_scheduled_message(link.schedule_id)
-                if is_system_managed_schedule(linked_schedule):
-                    getattr(agent, "_logger", logger).warning(
-                        "Objective lifecycle cascade skipped protected system schedule. "
-                        "event=objective_system_schedule_mutation_skipped objective_id=%s "
-                        "schedule_id=%s requested_operation=disable",
-                        objective.objective_id,
-                        link.schedule_id,
-                    )
-                    continue
-                updated = schedule_store.set_enabled(
-                    link.schedule_id,
-                    False,
-                    operation=ScheduleMutationOperation.DISABLE,
-                )
-                if updated:
-                    link.disabled_by_objective_pause = True
-                    changed = True
-            elif should_resume and getattr(link, "disabled_by_objective_pause", False):
-                linked_schedule = schedule_store.get_scheduled_message(link.schedule_id)
-                if is_system_managed_schedule(linked_schedule):
-                    getattr(agent, "_logger", logger).warning(
-                        "Objective lifecycle cascade skipped protected system schedule. "
-                        "event=objective_system_schedule_mutation_skipped objective_id=%s "
-                        "schedule_id=%s requested_operation=enable",
-                        objective.objective_id,
-                        link.schedule_id,
-                    )
-                    continue
-                updated = schedule_store.set_enabled(
-                    link.schedule_id,
-                    True,
-                    operation=ScheduleMutationOperation.ENABLE,
-                )
-                if updated:
-                    link.disabled_by_objective_pause = False
-                    changed = True
-        if changed and getattr(agent, "_scheduler_wake", None):
-            agent._scheduler_wake.set()
-
-    heartbeat_links = getattr(objective, "heartbeat_links", []) or []
-    heartbeat_store, warnings = _objective_heartbeat_store_for_cascade(
-        agent, objective, heartbeat_links
-    )
-    if heartbeat_store is not None:
-        for link in heartbeat_links:
-            if not getattr(link, "managed_by_objective", True):
-                continue
-            if should_disable and not getattr(
-                link, "disabled_by_objective_pause", False
-            ):
-                heartbeat_store.set_item_enabled(link.heartbeat_item_id, False)
-                link.disabled_by_objective_pause = True
-                changed = True
-            elif should_resume and getattr(link, "disabled_by_objective_pause", False):
-                heartbeat_store.set_item_enabled(link.heartbeat_item_id, True)
-                link.disabled_by_objective_pause = False
-                changed = True
-
-    if changed:
-        warnings = (*warnings, *_save_cascaded_links(agent, objective))
-        refreshed = agent.task_manager.operations_runtime.run_sync(
-            agent.task_manager.get_objective, objective.objective_id
-        )
-        return refreshed or objective, tuple(warnings)
-    return objective, tuple(warnings)
-
-
 # -- action tools ----------------------------------------------------------------------
 
 ObjectivesAction = Literal["get", "list", "update_progress", "update_status"]
@@ -1418,7 +1451,9 @@ def objectives(
       (`criterion_updates_json`, a JSON list of criterion update objects).
     - `update_status`: change its lifecycle `status`, with a `summary`. Marking a user-confirmed
       Objective satisfied needs `user_confirmation_summary`; `satisfied_by_current_task` records this
-      task as what satisfied it.
+      task as what satisfied it. Pausing or closing it also pauses its bounded work sessions and the
+      schedules and heartbeat items it manages; `active` resumes only what an Objective control
+      paused. `deleting` and `deleted` are refused: only the person deletes an Objective.
 
     Updates are shown to the person unless `user_visible` is false.
 

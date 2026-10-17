@@ -145,33 +145,6 @@ def _heartbeat_runtime_state(agent: "UniversalAgent", source_id: str) -> dict[st
     return state
 
 
-def _objective_heartbeat_store_for_cascade(
-    agent: "UniversalAgent",
-    objective: Any,
-    heartbeat_links: list[Any],
-) -> tuple[HeartbeatStore | None, tuple[str, ...]]:
-    if not heartbeat_links:
-        return None, ()
-    try:
-        return _heartbeat_store(agent), ()
-    except Exception as exc:
-        warning = (
-            "Objective status changed, but linked heartbeat items could not be "
-            "reconciled; operator review is required."
-        )
-        getattr(agent, "_logger", logger).warning(
-            "Objective heartbeat lifecycle cascade could not resolve its store. "
-            "event=objective_heartbeat_cascade_store_failed objective_id=%s "
-            "status=%s linked_heartbeat_count=%s error_type=%s",
-            objective.objective_id,
-            objective.status.value,
-            len(heartbeat_links),
-            type(exc).__name__,
-            exc_info=True,
-        )
-        return None, (warning,)
-
-
 @tool
 def list_heartbeat_items(source_id: str = "", include_disabled: bool = True) -> str:
     """List canonical heartbeat items for the current source or an explicit source id."""
