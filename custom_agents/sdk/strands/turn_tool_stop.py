@@ -11,23 +11,32 @@ invocation the turn's ToolStop (as ``cancel_signal`` and in
 ``invocation_state``). When the invocation ends by cancellation (a person's
 stop, a delegated stop, a lease-loss handback, shutdown) or by an error while
 tool calls still run, it asks the turn's commands to stop and waits up to
-``TOOL_STOP_GRACE_SECONDS`` for those calls to end before passing the outcome
-on. So everything that waits for the turn also waits for its commands, without
-each stop path waiting on its own.
+``TOOL_STOP_GRACE_SECONDS`` for those calls to end. On a stop it then ends the
+processes the turn's commands left running in their process groups
+(``server &``): SIGTERM, then SIGKILL after ``BACKGROUND_TERM_GRACE_SECONDS``.
+Only then does it pass the outcome on. So everything that waits for the turn
+also waits for its commands, without each stop path waiting on its own. A turn
+that ends normally leaves background processes alone, as before.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import signal
+import time
 from typing import Any
 
 from custom_tools.tool_stop import (
+    BACKGROUND_TERM_GRACE_SECONDS,
     TOOL_STOP_GRACE_SECONDS,
     TOOL_STOP_STATE_KEY,
+    EndedGroup,
     RunningToolCall,
     ToolStop,
 )
+
+_POLL_SECONDS = 0.05
 
 # Why a turn's commands were stopped: short codes for the ToolStop and its logs.
 # A person's or a delegating agent's stop (control_runtime.stop_task_execution).
@@ -79,11 +88,15 @@ async def invoke_with_tool_stop(
 
 
 async def stop_tool_calls(tool_stop: ToolStop, logger: logging.Logger, *, reason: str) -> None:
-    """Ask the turn's commands to stop and wait, bounded, until its tool calls end."""
+    """Ask the turn's commands to stop, wait (bounded) for its tool calls, then end leftovers."""
 
     tool_stop.request(reason)
-    if not tool_stop.running():
-        return
+    if tool_stop.running():
+        await _wait_for_tool_calls(tool_stop, logger)
+    await _end_leftover_processes(tool_stop, logger)
+
+
+async def _wait_for_tool_calls(tool_stop: ToolStop, logger: logging.Logger) -> None:
     still_running = await tool_stop.wait_until_idle(TOOL_STOP_GRACE_SECONDS)
     if still_running:
         # A process the supervisor started is ended within seconds, so what is
@@ -106,6 +119,33 @@ async def stop_tool_calls(tool_stop: ToolStop, logger: logging.Logger, *, reason
         tool_stop.agent_id,
         tool_stop.task_id,
         tool_stop.reason,
+    )
+
+
+async def _end_leftover_processes(tool_stop: ToolStop, logger: logging.Logger) -> None:
+    """End processes the turn's commands left running in their process groups."""
+
+    terminated = tool_stop.signal_process_groups(signal.SIGTERM)
+    if not terminated:
+        return
+    deadline = time.monotonic() + BACKGROUND_TERM_GRACE_SECONDS
+    while tool_stop.live_process_groups() and time.monotonic() < deadline:
+        await asyncio.sleep(_POLL_SECONDS)
+    killed = tool_stop.signal_process_groups(signal.SIGKILL)
+    logger.info(
+        "Ended processes that a stopped turn's commands left running. "
+        "event=tool_background_processes_ended agent_id=%s task_id=%s reason=%s groups=%s killed_after_grace=%s",
+        tool_stop.agent_id,
+        tool_stop.task_id,
+        tool_stop.reason,
+        _describe_groups(terminated),
+        _describe_groups(killed) or "-",
+    )
+
+
+def _describe_groups(groups: tuple[EndedGroup, ...]) -> str:
+    return ",".join(
+        f"{group.tool_name}:pgid={group.pgid}:pids={'/'.join(str(pid) for pid in group.pids)}" for group in groups
     )
 
 

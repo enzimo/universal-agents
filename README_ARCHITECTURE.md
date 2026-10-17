@@ -439,9 +439,11 @@ Known limits of the lease-loss handling:
   delivered anywhere; the requester already received a failed result.
 - The handback waits at most 10 seconds for the interrupted turn's tool calls.
   A call the process supervisor cannot end (an HTTP request, OpenShell sandbox
-  creation, a process that left its process group) may still run after the
-  handback; it is logged as `event=tool_work_outlived_turn`, and none of the
-  stopped turn's remaining commands start.
+  creation) may still run after the handback; it is logged as
+  `event=tool_work_outlived_turn`, and none of the stopped turn's remaining
+  commands start. A process that moved itself into a new session or process
+  group (`setsid`, daemonizing) is not ended at all, and is logged only while it
+  keeps its command's output open (the call then counts as still running).
 
 Abandoned memory-review claims become inactive review records after a grace period
 and checks for live or saved work. InternalImprovementAgent reviews their metadata
@@ -911,6 +913,12 @@ follows them. `shell(parallel=true)` runs its commands in a thread pool, and
 pool threads do not inherit context variables, so each command runs in a copy
 of the calling thread's context; without it, parallel commands ran as if no
 agent were present, with the network open and without the person's folder.
+A command with no agent behind it is now refused (`event=code_refused_without_agent`)
+instead of running with that open fallback: nothing would decide what it may
+reach. Only code that embeds the tools on purpose (tests, scripts) may run
+such commands, inside `custom_agents.code_access.embedded_commands()`, and
+never in a process the supervisor started (`UA_PROCESS_RUN_ID` set,
+`runtime_hosting/process_run.py`), where a missing agent is always a fault.
 
 Running a command outside the sandbox is its own catalog tool,
 `code:unconfined`, so network access never implies host access:
@@ -943,20 +951,41 @@ owns (`custom_tools/tool_stop.py`). The turn passes it to Strands as the
 invocation's `cancel_signal` and to the tools through `invocation_state`.
 Strands' own `agent.cancel_signal` cannot carry the stop: Strands clears it as
 soon as the invocation ends, and a stopped turn ends before a tool thread looks.
+Every turn also passes `callback_handler` to Strands as an extra keyword, so
+Strands hands tools the turn's `invocation_state` one level down; tools read
+it through `custom_tools.runtime_context.caller_invocation_state`, which
+handles both shapes.
+
 A stop sets the signal before it cancels the turn. The process supervisor then
-ends the command's whole process group (SIGTERM, then SIGKILL a second later)
-and starts none of the turn's remaining commands. The cancelled turn waits up
-to 10 seconds for its running tool calls to end
+ends the running command's whole process group (SIGTERM, then SIGKILL a second
+later) and starts none of the turn's remaining commands; a tool call that
+starts after the stop does nothing. A command can leave processes running in
+its group after it returns (`server &`), so each command's process group is
+recorded; on a stop, the groups that still have processes get SIGTERM, then
+SIGKILL a second later (`event=tool_background_processes_ended`). A group is
+signalled only while its number still belongs to that command: the number
+cannot be reused while any member lives, and a process holding it with a
+different start time is a reuse and left alone. A turn that ends normally
+leaves its background processes running, as before. A tool call keeps the task
+it started for until it returns (`runtime_context.bind_tool_call_task`), so a
+call that outlives its turn never picks up the next task's person and folders.
+
+The cancelled turn waits up to 10 seconds for its running tool calls to end,
+then up to one second for leftover processes
 (`custom_agents/sdk/strands/turn_tool_stop.py`), so the stop reply, the
 cancellation record, the next queued task, the lease-loss handback and shutdown
-all come after its commands ended. The wait sits in the turn rather than in each
-stop path because the code that runs the turn archives the task and frees the
-execution slot as soon as the turn ends, whoever stopped it. A tool call still
-running after the wait is logged (`event=tool_work_outlived_turn`) and the stop
-goes ahead; it can only be work the supervisor cannot end, such as an HTTP
-request, OpenShell sandbox creation, or a process that left its process group.
-In OpenShell mode the supervisor ends the local `openshell sandbox exec` client;
-whether that ends the command inside the sandbox has not yet been verified.
+all come after its commands ended. The stop path's own wait is that plus two
+seconds, 13 seconds in all, within the gateway's 15-second control timeout. The
+wait sits in the turn rather than in each stop path because the code that runs
+the turn archives the task and frees the execution slot as soon as the turn
+ends, whoever stopped it. A tool call still running after the wait is logged
+(`event=tool_work_outlived_turn`) and the stop goes ahead; it can only be work
+the supervisor cannot end, such as an HTTP request or OpenShell sandbox
+creation, or a process that moved itself into a new session or group and still
+holds its command's output open. Such a process that closed its output is not
+seen at all. In OpenShell mode the supervisor ends the local
+`openshell sandbox exec` client; whether that ends the command inside the
+sandbox has not yet been verified.
 
 Who a task works for is signed, not claimed. The gateway signs a task context
 (Ed25519) naming the person and their current team roles when it admits a

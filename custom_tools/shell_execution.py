@@ -102,6 +102,7 @@ class ProcessRunner(Protocol):
         *,
         cancel_event: CancelSignal | None = None,
         on_chunk: Callable[[ProcessStreamChunk], None] | None = None,
+        on_spawn: Callable[[int], None] | None = None,
     ) -> ProcessResult: ...
 
 
@@ -159,12 +160,14 @@ def run_process(
     *,
     cancel_event: CancelSignal | None = None,
     on_chunk: Callable[[ProcessStreamChunk], None] | None = None,
+    on_spawn: Callable[[int], None] | None = None,
 ) -> ProcessResult:
     """Run a child with closed stdin, streamed pipes, and process-tree cleanup.
 
     ``cancel_event`` is checked before the child starts, so a command asked to
     stop before it began never runs, and every 50 ms while it runs, when the
-    whole process group is stopped.
+    whole process group is stopped. ``on_spawn`` gets the child's process id,
+    which on POSIX is also its new process group's id, right after it starts.
     """
 
     if not request.argv:
@@ -261,6 +264,9 @@ def run_process(
                 callback_error = exc
 
     try:
+        if on_spawn is not None:
+            # Inside the try, so the child is stopped if the callback fails.
+            on_spawn(process.pid)
         while open_streams or process.poll() is None:
             try:
                 stream_name, data = stream_queue.get(timeout=0.05)

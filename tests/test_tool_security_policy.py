@@ -55,8 +55,8 @@ def layout(tmp_path, monkeypatch) -> InstanceLayout:
 
 
 @pytest.fixture
-def workspace(layout) -> Path:
-    """The default folder of a task that works for no person."""
+def workspace(layout, commands_without_agent) -> Path:
+    """The default folder of a task that works for no person; commands run without an agent."""
 
     return layout.agents_dir
 

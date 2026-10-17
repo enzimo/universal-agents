@@ -185,7 +185,9 @@ def test_wait_timeout_setting_defaults_to_thirty_minutes_and_is_bounded():
 
 
 @pytest.mark.asyncio
-async def test_a_running_command_ends_before_its_task_is_handed_back(manager, monkeypatch, tmp_path):
+async def test_a_running_command_ends_before_its_task_is_handed_back(
+    manager, monkeypatch, tmp_path, commands_without_agent
+):
     """Another worker reruns a handed-back task; the old command must not still be running."""
 
     from custom_agents.sdk.strands.turn_tool_stop import HANDBACK_REASON, invoke_with_tool_stop
@@ -196,6 +198,7 @@ async def test_a_running_command_ends_before_its_task_is_handed_back(manager, mo
         long_command,
         process_alive,
         shell_agent,
+        turn_invoke_kwargs,
         wait_for_pid,
     )
 
@@ -218,7 +221,11 @@ async def test_a_running_command_ends_before_its_task_is_handed_back(manager, mo
         agent._active_tool_stop = ToolStop(agent_id=agent.id, task_id="running")
         try:
             await invoke_with_tool_stop(
-                sdk, "go", tool_stop=agent._active_tool_stop, invoke_kwargs={}, logger=agent._logger
+                sdk,
+                "go",
+                tool_stop=agent._active_tool_stop,
+                invoke_kwargs=turn_invoke_kwargs("running"),
+                logger=agent._logger,
             )
         except asyncio.CancelledError:
             await handle_interrupted_turn(agent, task_id="running", task_info=manager.get_task_info("running"))

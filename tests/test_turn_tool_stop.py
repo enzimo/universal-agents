@@ -43,6 +43,7 @@ from tests.turn_tool_stop_support import (
     long_command,
     process_alive,
     shell_agent,
+    turn_invoke_kwargs,
     wait_for_pid,
 )
 
@@ -76,7 +77,11 @@ def make_host(sdk: Agent) -> Host:
         tool_stop = UniversalAgent._set_active_execution_context(host, content.task_id)
         try:
             await invoke_with_tool_stop(
-                host._strands_agent, "go", tool_stop=tool_stop, invoke_kwargs={}, logger=LOGGER
+                host._strands_agent,
+                "go",
+                tool_stop=tool_stop,
+                invoke_kwargs=turn_invoke_kwargs(content.task_id),
+                logger=LOGGER,
             )
             return Task(task_id=content.task_id, task_type=MessageMetaType.RESPONSE, answer="done")
         finally:
@@ -91,7 +96,7 @@ def task(task_id: str = "task-1") -> Task:
 
 
 @pytest.fixture
-def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands_without_agent):
     set_agent_ref(None)
     folder = agents_folder(tmp_path, monkeypatch)
     yield folder
@@ -277,7 +282,7 @@ async def test_an_invocation_that_fails_while_a_tool_call_runs_stops_it_first() 
             raise RuntimeError("hook failed")
 
     with pytest.raises(RuntimeError, match="hook failed"):
-        await invoke_with_tool_stop(BrokenModel(), "go", tool_stop=stop, invoke_kwargs={}, logger=LOGGER)
+        await invoke_with_tool_stop(BrokenModel(), "go", tool_stop=stop, invoke_kwargs=turn_invoke_kwargs(), logger=LOGGER)
 
     assert saw_stop.is_set()
     assert stop.running() == ()
@@ -307,3 +312,80 @@ def test_a_resumed_turn_replaces_the_earlier_turns_stop_in_place() -> None:
     assert kwargs["cancel_signal"] is resumed.event
     assert kwargs["invocation_state"] is state
     assert state[TOOL_STOP_STATE_KEY] is resumed and state["request_state"] == {"kept": True}
+
+
+@pytest.mark.asyncio
+async def test_a_stop_ends_a_command_of_a_turn_run_by_the_production_turn_executor(work_dir: Path, caplog) -> None:
+    """The invocation keywords come from the real LLMTurnExecutor._prepare_invocation.
+
+    They include the per-turn callback_handler, which makes Strands hand the
+    tool the turn's invocation_state one level down. The first version of the
+    fix read only the top level, found no stop on every real turn, and left
+    the command running.
+    """
+
+    from collections import deque
+    from dataclasses import replace
+
+    from tests.test_runtime_owner_boundaries import build_turn_owner
+
+    caplog.set_level(logging.WARNING)
+    pid_file = work_dir / "cmd.pid"
+    sdk = shell_agent([long_command(pid_file)], work_dir)
+    production_kwargs: dict = {}
+
+    async def invoke(prompt, **kwargs):
+        production_kwargs.update(kwargs)
+        return await sdk.invoke_async(prompt, **kwargs)
+
+    executor, _ = build_turn_owner(invoke=invoke, guidance=deque([""]), committed=[], cleared=[])
+    stops: list[ToolStop] = []
+
+    def set_active_execution_context(task_id):
+        stops.append(ToolStop(agent_id="independent", task_id=task_id))
+        return stops[-1]
+
+    executor.effects = replace(executor.effects, set_active_execution_context=set_active_execution_context)
+    turn_task = Task(task_id="production-turn", task_type=MessageMetaType.REQUEST, problem_statement="run it")
+    running = asyncio.create_task(executor.process_llm_interaction(turn_task, MessageHeader(), MessageMeta()))
+    pid = await wait_for_pid(pid_file)
+    [stop] = stops
+
+    assert {"callback_handler", "cancel_signal", "invocation_state", "structured_output_model", "structured_output_prompt"} <= set(production_kwargs)
+    assert production_kwargs["cancel_signal"] is stop.event
+    assert [call.tool_name for call in stop.running()] == ["shell"]
+    host = SimpleNamespace(
+        id="independent",
+        _active_execution_task=running,
+        _active_execution_task_id=turn_task.task_id,
+        _active_tool_stop=stop,
+        _logger=LOGGER,
+    )
+    await _interrupt_active_execution(
+        host, root_task_id=turn_task.task_id, graph_task_ids={turn_task.task_id}, reason=TASK_STOPPED_REASON
+    )
+
+    assert not process_alive(pid)
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert "event=tool_stop_missing" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_ends_normally_leaves_its_background_processes_running(work_dir: Path) -> None:
+    """Only a stop ends what a command left running; normal completion is unchanged."""
+
+    pid_file = work_dir / "bg.pid"
+    command = f"sh -c 'echo $$ > {pid_file.name}; exec sleep 60' > /dev/null 2>&1 & sleep 0.3; echo started"
+    stop = ToolStop(agent_id="agent", task_id="task-1")
+    kwargs = turn_invoke_kwargs()
+    # Without the structured-output keywords the scripted model's text reply ends the turn normally.
+    kwargs.pop("structured_output_model")
+    kwargs.pop("structured_output_prompt")
+
+    await invoke_with_tool_stop(shell_agent([command], work_dir), "go", tool_stop=stop, invoke_kwargs=kwargs, logger=LOGGER)
+    pid = await wait_for_pid(pid_file)
+    await asyncio.sleep(0.5)
+
+    assert process_alive(pid)
+    assert not stop.is_requested()

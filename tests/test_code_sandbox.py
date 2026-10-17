@@ -42,7 +42,7 @@ requires_landlock = pytest.mark.skipif(
 
 
 @pytest.fixture
-def instance(tmp_path: Path, monkeypatch) -> dict[str, Path]:
+def instance(tmp_path: Path, monkeypatch, commands_without_agent) -> dict[str, Path]:
     """An instance whose ``workspaces/`` folders are the only area code may use.
 
     ``workspace`` is the default folder of work that has no person

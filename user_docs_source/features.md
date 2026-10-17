@@ -382,11 +382,15 @@ anything until you choose an explicit scope:
 - `/stop all` cancels all current nonterminal work owned by you across sessions
   and conversations.
 
-Stopping work also ends any command an agent is running for it, such as a
-build, a test run or a script. The command is asked to stop and is ended a
+Stopping work also ends the commands an agent is running for it, such as a
+build, a test run or a script, and the background processes those commands
+started, such as a development server. Each is asked to stop and is ended a
 second later if it keeps going, and no further command of that work starts.
-Each agent marks its part of the work as stopped only after its commands have
-ended, which can take a few seconds.
+Not ended: a process that detaches itself completely (for example with
+`setsid` or by turning itself into a daemon), and a background process started
+by an earlier step of the work that had already finished. Each agent marks its
+part of the work as stopped only after its commands have ended, which can take
+a few seconds.
 
 Future schedules remain separate from every stop scope. Pause an Objective or
 use its schedule controls when you also need to prevent later runs.

@@ -29,7 +29,7 @@ def _python_wrapper(workspace: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _no_agent_reference():
+def _no_agent_reference(commands_without_agent):
     set_agent_ref(None)
     yield
     set_agent_ref(None)

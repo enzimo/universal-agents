@@ -4,6 +4,12 @@ A scripted model asks for the real ``shell`` tool; Strands runs it in a worker
 thread exactly as in production (``asyncio.to_thread``), and the commands go
 through the real sandbox and process supervisor. Each command writes its
 process id to a file first, so a test can check whether it still runs.
+
+``turn_invoke_kwargs`` gives the invocation the keywords a real turn passes
+(``LLMTurnExecutor._prepare_invocation``), including the per-turn
+``callback_handler`` that makes Strands hand tools the turn's invocation_state
+one level down. Tests must not call Strands with a bare ``invoke_kwargs={}``,
+a shape production never uses.
 """
 
 from __future__ import annotations
@@ -16,10 +22,32 @@ from pathlib import Path
 from typing import Any
 
 from strands import Agent
+from strands.handlers.callback_handler import CompositeCallbackHandler
 from strands.models.model import Model
 
+from custom_agents.context_debug_dump import ContextDebugDumpPlugin
+from custom_agents.runtime_guardrails import RuntimeGuardrailsPlugin
+from custom_agents.structured_llm_messages import (
+    MODEL_WORKER_TURN_DECISION_FORCE_PROMPT,
+    ModelWorkerTurnDecision,
+)
 from custom_tools.non_interactive_shell import shell
 from runtime_settings.instance_layout import InstanceLayout
+
+
+def turn_invoke_kwargs(task_id: str = "task-1") -> dict[str, Any]:
+    """Invocation keywords shaped like those LLMTurnExecutor._prepare_invocation builds."""
+
+    context = {"agent_id": "agent", "task_id": task_id, "correlation_id": None, "conversation_id": None}
+    return {
+        "structured_output_model": ModelWorkerTurnDecision,
+        "structured_output_prompt": MODEL_WORKER_TURN_DECISION_FORCE_PROMPT,
+        "invocation_state": {
+            RuntimeGuardrailsPlugin._TURN_DECISION_CONTEXT_KEY: dict(context, expected_tool_name="turn_decision"),
+            ContextDebugDumpPlugin.INVOCATION_CONTEXT_KEY: dict(context),
+        },
+        "callback_handler": CompositeCallbackHandler(lambda **_: None),
+    }
 
 
 def agents_folder(root: Path, monkeypatch: Any) -> Path:

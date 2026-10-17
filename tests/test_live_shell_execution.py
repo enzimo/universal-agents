@@ -42,7 +42,7 @@ def _load_live_configuration() -> None:
 
 
 def test_live_host_shell_execution_boundary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands_without_agent
 ) -> None:
     """Exercise real RTK, stream separation, stdin closure, and timeout cleanup."""
 
@@ -100,7 +100,7 @@ def test_live_host_shell_execution_boundary(
     reason="set UA_RUN_OPENSHELL_LIVE=1 for a provisioned OpenShell sandbox",
 )
 def test_live_openshell_shell_execution_boundary(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, commands_without_agent
 ) -> None:
     """Exercise RTK rewriting and separated streams through a real OpenShell sandbox."""
 
