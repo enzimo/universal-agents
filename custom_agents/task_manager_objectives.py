@@ -7,6 +7,7 @@ from custom_agents.task_runtime_state import RuntimeOwnerIdentity
 from custom_agents.task_runtime_state import ObjectiveRuntimeState
 from custom_agents.task_runtime_state import PlanRuntimeState
 from custom_agents.task_runtime_state import TaskRuntimeState
+from custom_agents.task_runtime_state import cache_plan_objective, cache_task_objective
 import logging
 from storage.durable_owner_scope_repository import DurableOwnerScopeRepository
 from storage.objective_repository import ObjectiveRepository, ObjectiveView
@@ -120,14 +121,14 @@ class ObjectiveCoordinator:
                 exc,
             )
             raise ObjectiveSaveFailed(objective.objective_id) from exc
-        if objective.current_plan_id:
-            self.objective_state.plan_to_objective_id[objective.current_plan_id] = objective.objective_id
-        for plan_id in objective.plan_ids:
+        # Only links of tasks and plans this agent holds: the Objective lists
+        # finished ones too (task_runtime_state.TASK_SCOPED_FIELDS).
+        for plan_id in [objective.current_plan_id, *objective.plan_ids]:
             if plan_id:
-                self.objective_state.plan_to_objective_id[plan_id] = objective.objective_id
+                cache_plan_objective(self.plan_state, self.objective_state, plan_id, objective.objective_id)
         for task_id in objective.related_task_ids + objective.recovery_task_ids:
             if task_id:
-                self.objective_state.task_to_objective_id[task_id] = objective.objective_id
+                cache_task_objective(self.task_state, self.objective_state, task_id, objective.objective_id)
 
     def _save_objective_logged(self, objective: ObjectiveRecord, *, step: str) -> bool:
         """Write the Objective for a step that goes on without it; False when the write failed.
@@ -208,10 +209,12 @@ class ObjectiveCoordinator:
             self._logger.error("Failed to load objective for plan %s: %s", plan_id, exc)
             return None
         if objective is not None:
-            self.objective_state.plan_to_objective_id[plan_id] = objective.objective_id
+            cache_plan_objective(self.plan_state, self.objective_state, plan_id, objective.objective_id)
         return objective
 
-    def _get_task_objective_id_from_context(self, task_id: Optional[str]) -> Optional[str]:
+    def _get_task_objective_id_from_context(
+        self, task_id: Optional[str], *, search_repository: bool = True
+    ) -> Optional[str]:
         if not task_id or not self.operations.objectives_enabled():
             return None
         existing_objective_id = self.objective_state.task_to_objective_id.get(task_id)
@@ -221,7 +224,7 @@ class ObjectiveCoordinator:
         task_info = self.operations.get_task_info(task_id)
         meta_objective_id = getattr(task_info.meta, "objective_id", None) if task_info else None
         if meta_objective_id:
-            self.objective_state.task_to_objective_id[task_id] = meta_objective_id
+            cache_task_objective(self.task_state, self.objective_state, task_id, meta_objective_id)
             return meta_objective_id
 
         parent_task_id = None
@@ -229,22 +232,24 @@ class ObjectiveCoordinator:
             parent_task_id = task_info.task.parent_task_id
         parent_task_id = parent_task_id or self.task_state.subtask_to_parent_map.get(task_id)
         if parent_task_id:
-            parent_objective_id = self._get_task_objective_id_from_context(parent_task_id)
+            parent_objective_id = self._get_task_objective_id_from_context(
+                parent_task_id, search_repository=search_repository
+            )
             if parent_objective_id:
-                self.objective_state.task_to_objective_id[task_id] = parent_objective_id
+                cache_task_objective(self.task_state, self.objective_state, task_id, parent_objective_id)
                 return parent_objective_id
 
         plan_id = self.plan_state.task_to_plan_id.get(task_id)
         if plan_id:
             objective_id = self.objective_state.plan_to_objective_id.get(plan_id)
             if objective_id:
-                self.objective_state.task_to_objective_id[task_id] = objective_id
+                cache_task_objective(self.task_state, self.objective_state, task_id, objective_id)
                 return objective_id
             objective = self._get_objective_for_plan_id(plan_id)
             if objective is not None:
-                self.objective_state.task_to_objective_id[task_id] = objective.objective_id
+                cache_task_objective(self.task_state, self.objective_state, task_id, objective.objective_id)
                 return objective.objective_id
-        if self.identity.owner_agent_id:
+        if search_repository and self.identity.owner_agent_id:
             try:
                 objective = self.objective_repository.get_objective_by_task(
                     task_id,
@@ -254,11 +259,12 @@ class ObjectiveCoordinator:
                 self._logger.error("Failed to load objective for task %s: %s", task_id, exc)
                 objective = None
             if objective is not None:
-                self.objective_state.task_to_objective_id[task_id] = objective.objective_id
-                if objective.current_plan_id:
-                    self.objective_state.plan_to_objective_id[objective.current_plan_id] = objective.objective_id
-                for objective_plan_id in objective.plan_ids:
-                    self.objective_state.plan_to_objective_id[objective_plan_id] = objective.objective_id
+                cache_task_objective(self.task_state, self.objective_state, task_id, objective.objective_id)
+                for objective_plan_id in [objective.current_plan_id, *objective.plan_ids]:
+                    if objective_plan_id:
+                        cache_plan_objective(
+                            self.plan_state, self.objective_state, objective_plan_id, objective.objective_id
+                        )
                 return objective.objective_id
         return None
 
@@ -534,6 +540,16 @@ class ObjectiveCoordinator:
     def get_task_objective_id(self, task_id: str) -> Optional[str]:
         return self._get_task_objective_id_from_context(task_id)
 
+    def objective_id_for_task_end(self, task_id: str) -> Optional[str]:
+        """The Objective a task works for, read from its links before it is archived.
+
+        The terminal paths call this before archiving, because archiving
+        forgets the task's links (task_runtime_state.forget_task_records), and
+        pass the id to ``review_objective_after_task_terminal``. It never
+        searches Objective records by task id text.
+        """
+        return self._get_task_objective_id_from_context(task_id, search_repository=False)
+
     def link_incoming_task_to_objective(
         self,
         task_id: str,
@@ -683,7 +699,7 @@ class ObjectiveCoordinator:
             objective.current_plan_id = plan_id
             changed = True
         for related_task_id in plan.related_task_ids:
-            self.objective_state.task_to_objective_id[related_task_id] = objective.objective_id
+            cache_task_objective(self.task_state, self.objective_state, related_task_id, objective.objective_id)
             if related_task_id not in objective.related_task_ids:
                 objective.related_task_ids.append(related_task_id)
                 changed = True
@@ -1396,10 +1412,11 @@ class ObjectiveCoordinator:
         task_id: str,
         terminal_state: ProgressState | str,
         *,
+        objective_id: Optional[str],
         timestamp: Optional[str] = None,
         summary: Optional[str] = None,
     ) -> Optional[ObjectiveRecord]:
-        objective = self._get_task_objective_record(task_id)
+        objective = self._get_objective_record(objective_id)
         if objective is None:
             return None
         objective_owned_task_ids = set(objective.related_task_ids or []) | set(objective.recovery_task_ids or [])

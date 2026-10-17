@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from custom_agents.runtime_snapshot_codec import SnapshotSource, capture_runtime_snapshot, capture_task, restore_snapshot_state
+from custom_agents.runtime_snapshot_codec import (
+    FINISHED_BY_ANOTHER_AGENT,
+    HELD_BY_ANOTHER_AGENT,
+    SnapshotSource,
+    capture_runtime_snapshot,
+    capture_task,
+    restore_snapshot_state,
+)
 from custom_messages.contracts.runtime_snapshot_v3 import decode_runtime_snapshot
 
 from custom_agents.task_manager_ports import RuntimeSnapshotCoordinatorOperations
@@ -20,6 +27,7 @@ from typing import Any, Dict, List, Optional
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 
 from custom_agents.runtime_state_store import TaskRuntimeSnapshotRow
+from storage.task_custody_repository import TaskCustodyTakeover
 from custom_messages.enums import TaskActivityStage, TaskActivityType
 
 
@@ -60,7 +68,12 @@ class RuntimeSnapshotCoordinator:
             objectives_enabled=self.operations.objectives_enabled(),
         ).model_dump(mode="json")
 
-    def _persist_runtime_state(self, *, schedule_admission: "ScheduleOccurrenceV1 | None" = None) -> None:
+    def _persist_runtime_state(
+        self,
+        *,
+        schedule_admission: "ScheduleOccurrenceV1 | None" = None,
+        custody_takeover: TaskCustodyTakeover | None = None,
+    ) -> None:
         if not self.identity.owner_agent_id:
             if schedule_admission is not None:
                 raise ValueError("Schedule admission requires durable runtime identity")
@@ -72,13 +85,19 @@ class RuntimeSnapshotCoordinator:
                 return
 
             runtime_state_json = json.dumps(self._export_runtime_state())
+            # Only the options in use are passed, so stores without them still work.
+            options: Dict[str, Any] = {}
+            if schedule_admission is not None:
+                options["schedule_admission"] = schedule_admission
+            if custody_takeover is not None:
+                options["custody_takeover"] = custody_takeover
             self.runtime_state_store.save_task_runtime(
                 owner_agent_id=self.identity.owner_agent_id,
                 owner_agent_name=self.identity.owner_agent_name,
                 team_id=self.identity.team_id,
                 owner_named_agent_type=self.identity.owner_named_agent_type,
                 runtime_state_json=runtime_state_json,
-                **({"schedule_admission": schedule_admission} if schedule_admission is not None else {}),
+                **options,
             )
         except Exception as e:
             self._logger.error(f"Failed to persist active runtime state: {e}")
@@ -122,6 +141,7 @@ class RuntimeSnapshotCoordinator:
             restored = restore_snapshot_state(
                 sources, cancelled=cancelled, plans_enabled=self.operations.plans_enabled(),
                 objectives_enabled=self.operations.objectives_enabled(), logger=self._logger,
+                taken_elsewhere=self._taken_by_other_agents(sources, {row.owner_agent_id for row in rows}),
             )
             self.state.restore(restored)
             self.runtime_state_store.commit_task_runtime_recovery(
@@ -153,6 +173,34 @@ class RuntimeSnapshotCoordinator:
                        "custody_committed": committed},
             )
             raise
+
+    def _taken_by_other_agents(self, sources: List[SnapshotSource], source_owner_ids: set[str]) -> dict[str, str]:
+        """Saved tasks another agent of the team holds or finished; recovery must not adopt them.
+
+        That agent took the task over after this snapshot's owner stopped
+        (``custom_agents.task_custody``), and runs or ran it; adopting the
+        saved copy as well ran it twice (2026-10-17). Returns task id -> reason.
+        """
+        team_id = self.identity.team_id
+        if not team_id:
+            return {}
+        executed = sorted({
+            item.task_id for source in sources for item in source.snapshot.tasks
+            if item.task_id not in source.snapshot.subtask_to_parent_map
+        })
+        allowed = source_owner_ids | {self.identity.owner_agent_id}
+        taken = {
+            task_id: HELD_BY_ANOTHER_AGENT
+            for task_id, row in self.runtime_state_store.get_task_custody(team_id, executed).items()
+            if row.holder_agent_id not in allowed
+        }
+        for task_id in executed:
+            if task_id in taken:
+                continue
+            archived = self.operations.get_task_from_db(task_id, include_all_agents=True)
+            if archived is not None and archived.get("team_id") == team_id and archived.get("owner_agent_id") not in allowed:
+                taken[task_id] = FINISHED_BY_ANOTHER_AGENT
+        return taken
 
     def _reconcile_restored_plans(self) -> None:
         if not self.operations.plans_enabled():

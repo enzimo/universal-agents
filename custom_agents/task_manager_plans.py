@@ -7,6 +7,7 @@ from custom_agents.task_runtime_state import RuntimeOwnerIdentity
 from custom_agents.task_runtime_state import ObjectiveRuntimeState
 from custom_agents.task_runtime_state import PlanRuntimeState
 from custom_agents.task_runtime_state import TaskRuntimeState
+from custom_agents.task_runtime_state import cache_task_objective
 import logging
 from custom_agents.objective_work_sessions import ObjectiveWorkSessionCoordinator
 from storage.plan_repository import PlanRepository
@@ -282,7 +283,9 @@ class PlanCoordinator:
             for related_task_id in related_task_ids:
                 if related_task_id not in objective.related_task_ids:
                     objective.related_task_ids.append(related_task_id)
-                    self.objective_state.task_to_objective_id[related_task_id] = objective.objective_id
+                    cache_task_objective(
+                        self.task_state, self.objective_state, related_task_id, objective.objective_id
+                    )
                     changed = True
             if changed:
                 self.operations.save_objective(objective, step="plan_followed_task")
@@ -536,13 +539,6 @@ class PlanCoordinator:
 
     def get_recovery_link(self, recovery_task_id: str) -> Optional[RecoveryTaskLink]:
         return self.plan_state.recovery_links.get(recovery_task_id)
-
-    def get_recovery_links_for_original(self, original_task_id: str) -> List[RecoveryTaskLink]:
-        return [
-            link
-            for link in self.plan_state.recovery_links.values()
-            if link.original_task_id == original_task_id
-        ]
 
     def is_plan_step_task(self, task_id: str) -> bool:
         """Return whether a task is an internal manager PlanStep execution task."""

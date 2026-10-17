@@ -17,6 +17,18 @@ remain in NATS for redelivery. A duplicate already owned by the inbox can still 
 acknowledged. Lowering the limit preserves an existing backlog during recovery,
 logs a warning, and prevents new admission until the backlog falls below the limit.
 
+A task NATS delivers a second time runs once. A copy of a task another agent of
+the team still holds is dropped while that agent runs, with
+`event=task_copy_dropped_held_elsewhere`, and a copy of a task already finished is
+dropped with `event=duplicate_archived_delivery_ignored`. When the holder has
+stopped, the agent that received the copy runs it and logs
+`event=task_custody_takeover`. No setting controls this.
+
+After upgrading to a release with this check, each agent's first start may log one
+`event=runtime_snapshot_orphans_dropped` warning per saved snapshot. Earlier
+releases left records of finished tasks in saved snapshots; they are dropped when
+the snapshot is read. No action is needed.
+
 The active task snapshot layout now uses strict version-3 records and does not read
 the previous monolithic layout. Before deploying this change, finish or explicitly
 abandon in-flight work and stop affected runtimes. Back up the database before

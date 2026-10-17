@@ -962,7 +962,11 @@ def test_start_isolated_recovery_tool_queues_fresh_manager_task(tmp_path):
     assert result["user_notice_recorded"] is True
     assert result["checkpoint_schedule"] == {"scheduled": True}
 
-    recovery_links = task_manager.get_recovery_links_for_original(task.task_id)
+    recovery_links = [
+        link
+        for link in task_manager.plan_state.recovery_links.values()
+        if link.original_task_id == task.task_id
+    ]
     assert len(recovery_links) == 1
     recovery_task_id = recovery_links[0].recovery_task_id
     assert recovery_links[0].original_plan_id == task_manager.get_task_plan_id(task.task_id)

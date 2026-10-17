@@ -31,6 +31,7 @@ class TaskManagerTerminalizationMixin:
     merge_plan_step_result_and_continue: Callable[..., Any]
     _save_completed_task: Callable[[str, ProgressState], Any]
     review_objective_after_task_terminal: Callable[..., Any]
+    objective_id_for_task_end: Callable[[str], Optional[str]]
 
     def fail_task(self, task_id: str, error_msg: str, timestamp: str) -> bool:
         """Mark a task failed and emit terminal effects after a successful CAS."""
@@ -111,10 +112,12 @@ class TaskManagerTerminalizationMixin:
             ProgressState.FAILED,
             timestamp=timestamp,
         )
+        objective_id = self.objective_id_for_task_end(task_id)
         self._save_completed_task(task_id, ProgressState.FAILED)
         self.review_objective_after_task_terminal(
             task_id,
             ProgressState.FAILED,
+            objective_id=objective_id,
             timestamp=timestamp,
             summary=error_msg,
         )
@@ -192,11 +195,13 @@ class TaskManagerTerminalizationMixin:
             ProgressState.CANCELLED,
             timestamp=timestamp,
         )
+        objective_id = self.objective_id_for_task_end(task_id) if review_objective else None
         self._save_completed_task(task_id, ProgressState.CANCELLED)
         if review_objective:
             self.review_objective_after_task_terminal(
                 task_id,
                 ProgressState.CANCELLED,
+                objective_id=objective_id,
                 timestamp=timestamp,
                 summary=reason,
             )

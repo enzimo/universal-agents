@@ -11,6 +11,8 @@ from typing import Any
 from custom_messages.contracts.runtime_snapshot_v3 import TaskSnapshotRecord, decode_runtime_snapshot
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 from storage.schedule_worker_repository import ScheduleWorkerRepository
+from storage import task_custody_repository as custody
+from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyRow, TaskCustodyTakeover
 from storage.runtime_snapshot_layout import (
     assemble_snapshot, canonical_json, parse_storage_header,
     payload_digest, split_snapshot,
@@ -94,9 +96,12 @@ class RuntimeStateRepository(Protocol):
         owner_named_agent_type: Optional[str],
         runtime_state_json: str,
         schedule_admission: ScheduleOccurrenceV1 | None = None,
+        custody_takeover: TaskCustodyTakeover | None = None,
     ) -> None: ...
 
     def clear_task_runtime(self, owner_agent_id: str) -> None: ...
+
+    def get_task_custody(self, team_id: str, task_ids: Sequence[str]) -> dict[str, TaskCustodyRow]: ...
 
     def get_task_runtime_team_id(self, owner_agent_id: str) -> Optional[str]: ...
 
@@ -215,6 +220,7 @@ class _RelationalRuntimeStateRepository:
                 conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})", values)
                 if parts is not None:
                     self._write_task_records(conn, replacement.owner_agent_id, parts.records, replace_all=True)
+                    self._transfer_task_custody(conn, sources=list(expected), replacement=replacement, records=parts.records)
                     ScheduleWorkerRepository.transfer_custody(
                         conn, self._dialect, sources=tuple(expected),
                         replacement_agent_id=replacement.owner_agent_id,
@@ -229,6 +235,26 @@ class _RelationalRuntimeStateRepository:
                        "source_owner_ids": sorted(expected), "destination_owner_id": replacement.owner_agent_id},
             )
             raise
+
+    def _transfer_task_custody(
+        self, conn: Any, *, sources: list[str], replacement: TaskRuntimeSnapshotRow | DeferredMessageSnapshotRow,
+        records: dict[tuple[str, str], str],
+    ) -> None:
+        if not isinstance(replacement, TaskRuntimeSnapshotRow) or not replacement.team_id:
+            return
+        try:
+            custody.transfer_on_recovery(
+                conn, self._dialect, team_id=replacement.team_id, source_owner_ids=sources,
+                replacement_agent_id=replacement.owner_agent_id,
+                replacement_named_agent_type=replacement.owner_named_agent_type,
+                adopted_task_ids=custody.executed_task_ids(records),
+            )
+        except TaskCustodyConflict as exc:
+            # The caller left out tasks another agent held when it read them;
+            # custody changed since. Same outcome as a concurrent recovery.
+            raise RuntimeRecoveryConflict(
+                f"Task {exc.task_id} was taken by agent {exc.holder_agent_id} during recovery."
+            ) from exc
 
     @staticmethod
     def _snapshot_values(
@@ -245,6 +271,7 @@ class _RelationalRuntimeStateRepository:
             ensure_storage_parent_dir(self._db_path)
             with self._connect() as conn:
                 ScheduleWorkerRepository.ensure_occurrence_schema(conn)
+                custody.ensure_schema(conn)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS active_task_runtime (
@@ -333,7 +360,14 @@ class _RelationalRuntimeStateRepository:
         self, *, owner_agent_id: str, owner_agent_name: Optional[str], team_id: Optional[str],
         owner_named_agent_type: Optional[str], runtime_state_json: str,
         schedule_admission: ScheduleOccurrenceV1 | None = None,
+        custody_takeover: TaskCustodyTakeover | None = None,
     ) -> None:
+        """Replace the owner's snapshot; tasks entering or leaving it claim or release custody.
+
+        ``custody_takeover`` lets the save replace that holder's row for that
+        task (``custom_agents.task_custody``); any other held row refuses the
+        save with ``TaskCustodyConflict``.
+        """
         parts = split_snapshot(decode_runtime_snapshot(runtime_state_json))
         if schedule_admission is not None and (
             ("tasks", schedule_admission.coalesced_into_task_id or schedule_admission.task_id) not in parts.records
@@ -350,8 +384,7 @@ class _RelationalRuntimeStateRepository:
                     f"SELECT runtime_state_json FROM active_task_runtime WHERE owner_agent_id = {bind}{self._recovery_lock_clause}",
                     (owner_agent_id,),
                 ).fetchone()
-                if previous is not None:
-                    parse_storage_header(previous[0])
+                previous_task_ids = set(parse_storage_header(previous[0])["task_order"]) if previous is not None else set()
                 conn.execute(
                     f"""INSERT INTO active_task_runtime
                         (owner_agent_id, owner_agent_name, team_id, owner_named_agent_type, runtime_state_json, updated_at)
@@ -365,7 +398,15 @@ class _RelationalRuntimeStateRepository:
                 self._write_task_records(conn, owner_agent_id, parts.records, replace_all=True)
                 if schedule_admission is not None:
                     ScheduleWorkerRepository.commit_admission(conn, self._dialect, schedule_admission)
+                if team_id:
+                    self._sync_task_custody(
+                        conn, parts.records, previous_task_ids, owner_agent_id=owner_agent_id,
+                        team_id=team_id, owner_named_agent_type=owner_named_agent_type,
+                        takeover=custody_takeover,
+                    )
                 conn.commit()
+        except TaskCustodyConflict:
+            raise  # an expected refusal; the admitting caller logs it
         except Exception:
             self._logger.exception("Failed to persist active runtime state", extra={"owner_agent_id": owner_agent_id})
             raise
@@ -436,8 +477,30 @@ class _RelationalRuntimeStateRepository:
                     ScheduleWorkerRepository.record_terminal_task(conn, self._dialect,
                         agent_id=owner_agent_id, task_id=record_id, outcome=state)
 
+    def _sync_task_custody(
+        self, conn: Any, records: dict[tuple[str, str], str], previous_task_ids: set[str], *,
+        owner_agent_id: str, team_id: str, owner_named_agent_type: Optional[str],
+        takeover: TaskCustodyTakeover | None,
+    ) -> None:
+        """Claim custody of executed tasks entering the snapshot; release tasks that left."""
+        current_task_ids = {key for section, key in records if section == "tasks"}
+        custody.claim_entering(
+            conn, self._dialect, team_id=team_id, owner_agent_id=owner_agent_id,
+            owner_named_agent_type=owner_named_agent_type,
+            task_ids=custody.executed_task_ids(records) - previous_task_ids, takeover=takeover,
+        )
+        custody.release_leaving(
+            conn, self._dialect, team_id=team_id, owner_agent_id=owner_agent_id,
+            task_ids=previous_task_ids - current_task_ids,
+        )
+
     def clear_task_runtime(self, owner_agent_id: str) -> None:
         self._delete_rows("active_task_runtime", [owner_agent_id], "active task runtime")
+
+    def get_task_custody(self, team_id: str, task_ids: Sequence[str]) -> dict[str, TaskCustodyRow]:
+        """Who holds each of these tasks (``storage.task_custody_repository``)."""
+        with self._connect() as conn:
+            return custody.read_rows(conn, self._dialect, team_id, task_ids)
 
     def get_task_runtime_team_id(self, owner_agent_id: str) -> Optional[str]:
         try:
@@ -755,13 +818,14 @@ class _RelationalRuntimeStateRepository:
             raise
 
     @staticmethod
-    def _delete_rows_with_connection(conn: sqlite3.Connection, table: str, owner_agent_ids: List[str]) -> None:
+    def _delete_rows_with_connection(conn: Any, table: str, owner_agent_ids: List[str]) -> None:
         unique_owner_ids = [owner_id for owner_id in dict.fromkeys(owner_agent_ids) if owner_id]
         if not unique_owner_ids:
             return
         placeholders = ",".join([f"{conn.dialect.bind}"] * len(unique_owner_ids))
         if table == "active_task_runtime":
             conn.execute(f"DELETE FROM active_task_runtime_records WHERE owner_agent_id IN ({placeholders})", unique_owner_ids)
+            custody.release_owners(conn, conn.dialect, unique_owner_ids)
         conn.execute(
             f"DELETE FROM {table} WHERE owner_agent_id IN ({placeholders})",
             unique_owner_ids,

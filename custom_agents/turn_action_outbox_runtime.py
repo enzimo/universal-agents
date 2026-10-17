@@ -135,8 +135,19 @@ def _comms_message_from_turn_action(self, action: TurnAction) -> Optional[CommsM
             is_response_requested=action.is_response_requested,
             manager_escalation=action.manager_escalation,
         )
+        # A delegation is always a new task, so its id is generated, never taken
+        # from the model: task ids are team-wide keys (one custody row per task,
+        # and a copy of a finished task is dropped), and a reused id would make
+        # a new task look like a copy of an earlier one.
+        if action.task.task_id:
+            self._logger.info(
+                "A delegated task gets a generated id instead of the one the model gave. "
+                "event=delegated_task_id_generated agent_id=%s model_task_id=%s",
+                self.id,
+                action.task.task_id,
+            )
         return CommsMessage(
-            msg_content=action.task.to_task(),
+            msg_content=action.task.model_copy(update={"task_id": None}).to_task(),
             msg_meta=meta
             if meta.model_dump(exclude_none=True, exclude_defaults=True)
             else None,

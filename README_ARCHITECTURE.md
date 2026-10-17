@@ -172,6 +172,21 @@ each. They run in parallel on as many workers as the team allows:
   claim back into "waiting" with no holder, so stops withdrew nothing and never
   reached the worker (fixed 2026-10-17). A record that has a holder never goes
   back to "waiting" except through a handback by that holder.
+- **One holder per task.** NATS hands a task out again when its acknowledgement
+  does not arrive in time: the worker that took it stopped after saving it, or
+  NATS was unreachable for longer than the wait. Each task an agent executes has
+  one team-wide custody row (`runtime_task_custody`,
+  `storage/task_custody_repository.py`), claimed in the transaction that saves
+  the task and released when it leaves the agent's saved work. A worker that
+  receives a copy another agent holds drops it while that agent is alive, and
+  takes it over when the holder is gone or handed it back after losing its
+  lease (`custom_agents/task_custody.py`, `event=task_copy_dropped_held_elsewhere`
+  or `event=task_custody_takeover`). A copy of a task any agent of the team
+  already finished is dropped too, and a replacement taking over a gone worker's
+  saved work leaves out tasks another agent holds or finished. Before
+  2026-10-17 each agent checked only its own records, so such a task ran twice.
+  Every delegation gets a generated task id, never one the model chose, so a
+  new task can never look like a copy of an earlier one.
 - **Worker pool controller** (`custom_agents/worker_pool_controller.py`, trusted
   code in the team host loop). For each worker type it reads waiting tasks, idle
   workers asking and the oldest wait from NATS, plus running, starting and
@@ -627,6 +642,20 @@ waiting subtasks, deferred messages, and recent in-flight Tasks. Outboxes record
 ordered actions before external effects. Leases and fencing prevent a stale
 worker from committing after another worker takes over. Repairs and fallback
 paths are logged rather than hidden.
+
+Task-scoped records (resume notes, pause records, tool-call overrides, blockers,
+Plan and Objective links, outbox and mailbox records) have one owner:
+`TASK_SCOPED_FIELDS` in `custom_agents/task_runtime_state.py` names the tasks
+each entry belongs to. Removing a task forgets its entries through that table,
+also when a task leaves without ending (a lease-loss handback), and restore
+keeps a saved entry by the same rule, taking a task's entries only from the
+snapshot whose task record it kept. Before 2026-10-17 removal cleared only some
+of them: finished tasks' records stayed in every later snapshot, and a takeover
+could attach one snapshot's leftover note to the same task restored from
+another. Restore drops leftovers in older snapshots with one
+`event=runtime_snapshot_orphans_dropped` warning per snapshot. The Objective
+review after a task ends gets the Objective id read before the task is archived,
+never by searching Objective records for the task id.
 
 Transport contracts, workflow records, and snapshot codecs have separate owners.
 Shared subsystem configuration lives in `runtime_settings/`; the gateway composes

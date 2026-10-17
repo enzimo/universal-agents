@@ -1914,9 +1914,11 @@ async def test_live_manager_isolated_recovery_uses_fresh_context_and_plan_link()
                 assert tool_result["metadata_hidden"] is True
                 assert tool_result["recovery_task_payload_has_plan_id"] is False
                 assert "recovery_task_id" not in tool_result
-                recovery_links = manager.task_manager.get_recovery_links_for_original(
-                    original_task_id
-                )
+                recovery_links = [
+                    link
+                    for link in manager.task_manager.plan_state.recovery_links.values()
+                    if link.original_task_id == original_task_id
+                ]
                 assert len(recovery_links) == 1
                 recovery_task_id = recovery_links[0].recovery_task_id
                 assert recovery_links[0].original_plan_id == plan_id

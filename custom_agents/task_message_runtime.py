@@ -7,12 +7,15 @@ from custom_messages.records.task_results import TaskResultUpdate
 import asyncio
 import json
 from datetime import datetime, timezone
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 
 from custom_agents.control_runtime import handle_interrupted_turn
 from custom_agents.lease_loss_wind_down import may_start_next_task
 from custom_agents.delegated_work_runtime import send_task_claim
+from custom_agents.task_custody import CUSTODY_TAKEN_MEANWHILE, CustodyDecision, log_dropped_copy
+from custom_agents.task_custody import check_admission as check_task_custody
+from storage.task_custody_repository import TaskCustodyConflict
 from custom_agents.worker_handback_runtime import apply_redispatch_notice
 from custom_agents.conversation_delivery_runtime import handle_delivery_receipt
 from custom_agents.conversation_runtime import (
@@ -1124,6 +1127,40 @@ async def _handle_task_query_message(
         )
 
 
+async def _custody_for_new_task(
+    self: Any, task_request: Task, msg_header: MessageHeader, msg_meta: MessageMeta,
+    source_queue_name: Optional[str],
+) -> Optional[CustodyDecision]:
+    """Whether this agent may take a task another agent may hold or finished; None drops it.
+
+    Finished by any agent of the team: a copy delivered again after the first
+    one completed (team-wide since 2026-10-17). Held by a live agent: a copy
+    delivered again while it runs (``custom_agents.task_custody``).
+    """
+    archived = await self.task_manager.operations_runtime.run(
+        self.task_manager.get_task_from_db,
+        task_request.task_id,
+        include_all_agents=True,
+    )
+    if archived is not None and (
+        archived.get("owner_agent_id") == self.id
+        or (self.team_id and archived.get("team_id") == self.team_id)
+    ):
+        self._logger.warning(
+            "[%s] event=duplicate_archived_delivery_ignored task_id=%s message_id=%s "
+            "idempotency_key=%s queue=%s finished_by=%s",
+            self.id,
+            task_request.task_id,
+            getattr(msg_header, "message_id", None),
+            getattr(msg_header, "idempotency_key", None),
+            source_queue_name,
+            archived.get("owner_agent_id"),
+        )
+        return None
+    custody = await check_task_custody(self, task_request.task_id, msg_meta)
+    return custody if custody.admit else None
+
+
 async def _handle_task_request(
     self,
     task_request: Task,
@@ -1165,23 +1202,8 @@ async def _handle_task_request(
             source_queue_name,
         )
         return
-    if (
-        await self.task_manager.operations_runtime.run(
-            self.task_manager.get_task_from_db,
-            task_request.task_id,
-            owner_agent_id=self.id,
-        )
-        is not None
-    ):
-        self._logger.warning(
-            "[%s] event=duplicate_archived_delivery_ignored task_id=%s message_id=%s "
-            "idempotency_key=%s queue=%s",
-            self.id,
-            task_request.task_id,
-            getattr(msg_header, "message_id", None),
-            getattr(msg_header, "idempotency_key", None),
-            source_queue_name,
-        )
+    custody = await _custody_for_new_task(self, task_request, msg_header, msg_meta, source_queue_name)
+    if custody is None:
         return
 
     if await self.task_manager.operations_runtime.run(self.task_manager.is_buffer_full):
@@ -1221,15 +1243,22 @@ async def _handle_task_request(
             )
             return
 
-    if not await self.task_manager.operations_runtime.run(
-        self.task_manager.add_task,
-        task_request,
-        msg_header,
-        normalized_meta,
-        owner_person_id=owner_person_id,
-        handled_at=message_handled_at,
-        handled_queue_name=source_queue_name,
-    ):
+    try:
+        admitted = await self.task_manager.operations_runtime.run(
+            self.task_manager.add_task,
+            task_request,
+            msg_header,
+            normalized_meta,
+            owner_person_id=owner_person_id,
+            handled_at=message_handled_at,
+            handled_queue_name=source_queue_name,
+            custody_takeover_from=custody.takeover_from,
+        )
+    except TaskCustodyConflict as conflict:
+        # Another agent claimed it between the check and the save.
+        log_dropped_copy(self, task_request.task_id, CUSTODY_TAKEN_MEANWHILE, conflict.holder_agent_id)
+        return
+    if not admitted:
         await report_failed_admission(
             self, task_request, msg_header, normalized_meta, conversation_admitted=True,
         )

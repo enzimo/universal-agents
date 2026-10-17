@@ -353,6 +353,7 @@ class RuntimeSnapshotCoordinatorOperations:
     plans_enabled: PlansEnabledOperation
     sync_plan_from_task: SyncPlanFromTaskOperation
     is_execution_cancelled: IsExecutionCancelledOperation
+    get_task_from_db: GetTaskFromDbOperation
 
 
 @dataclass(frozen=True, slots=True)

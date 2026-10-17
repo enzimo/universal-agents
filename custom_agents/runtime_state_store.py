@@ -16,6 +16,7 @@ from storage.runtime_state_repository import (
     TaskRuntimeSnapshotRow,
     create_runtime_state_repository,
 )
+from storage.task_custody_repository import TaskCustodyRow, TaskCustodyTakeover
 
 
 class RuntimeStateStore:
@@ -46,6 +47,7 @@ class RuntimeStateStore:
         owner_named_agent_type: Optional[str],
         runtime_state_json: str,
         schedule_admission: ScheduleOccurrenceV1 | None = None,
+        custody_takeover: TaskCustodyTakeover | None = None,
     ) -> None:
         self._repository.save_task_runtime(
             owner_agent_id=owner_agent_id,
@@ -54,7 +56,11 @@ class RuntimeStateStore:
             owner_named_agent_type=owner_named_agent_type,
             runtime_state_json=runtime_state_json,
             schedule_admission=schedule_admission,
+            custody_takeover=custody_takeover,
         )
+
+    def get_task_custody(self, team_id: str, task_ids: Sequence[str]) -> dict[str, TaskCustodyRow]:
+        return self._repository.get_task_custody(team_id, task_ids)
 
     def save_task_runtime_task(
         self, *, owner_agent_id: str, task: TaskSnapshotRecord,
