@@ -202,7 +202,10 @@ each. They run in parallel on as many workers as the team allows:
 - **When the requester wakes.** Its model runs again when every delegated task
   ended, at once when one failed with a typed reason, or when a
   `check_back_after_minutes` set on the delegation passed
-  (`custom_agents/delegation_wake.py`). Meanwhile trusted code sends the person
+  (`custom_agents/delegation_wake.py`). An early wake-up holds the agent's
+  execution slot and moves the waiting task to running with a compare-and-set,
+  so it never runs a second turn for a task that a delegated result handled
+  meanwhile already resumed or finished. Meanwhile trusted code sends the person
   counts ("9 of 24 done, 4 running, 11 waiting for a free worker") at most every
   `progress_notices.interval_minutes`.
 - **One named worker.** A delegation that also names a worker

@@ -6,6 +6,8 @@ Real TaskManager and SQLite delegated-task records; the model turn
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -13,7 +15,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from custom_agents import delegation_wake
+from custom_agents import delegation_wake, subtask_watchdog_runtime
+from custom_agents.task_resume_runtime import resume_task_with_directive as real_resume_task_with_directive
 from custom_agents.delegated_work_runtime import delegated_tasks, record_publication
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.delegated_work_v1 import TaskFailureCategory, TaskFailureV1
@@ -28,6 +31,29 @@ NOW = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
 
 def _iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class _ExecutionGate:
+    """Owner-aware like runtime_hosting.agent_execution: a nested holder passes through."""
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.owner: asyncio.Task | None = None
+        self.waiting = asyncio.Event()
+
+    @contextlib.asynccontextmanager
+    async def scope(self):
+        me = asyncio.current_task()
+        if self.owner is me:
+            yield
+            return
+        self.waiting.set()
+        async with self.lock:
+            self.owner = me
+            try:
+                yield
+            finally:
+                self.owner = None
 
 
 def _lead(tmp_path, monkeypatch, *, children: int, interactive: bool = True):
@@ -53,6 +79,8 @@ def _lead(tmp_path, monkeypatch, *, children: int, interactive: bool = True):
         team_comms=SimpleNamespace(send_message=AsyncMock()),
         _logger=logging.getLogger("delegation-wake-test"),
     )
+    agent._execution_gate = _ExecutionGate()
+    agent._execution_scope = agent._execution_gate.scope
     for index in range(children):
         child_id = f"child_{index}"
         manager.add_subtask(
@@ -156,3 +184,60 @@ async def test_an_untyped_failure_or_a_running_request_does_not_wake(tmp_path, m
         agent, parent_task_id="root", directive="x", reason="test"
     )
     resume.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_wake_skips_a_parent_another_path_resumed_while_it_waited(tmp_path, monkeypatch):
+    """Regression (2026-10-17): the check-back wake read the parent before taking the
+    execution slot; the last child's result, holding the slot, resumed and completed
+    the parent, and the wake then ran a second model turn for a finished task."""
+
+    agent, _ = _lead(tmp_path, monkeypatch, children=1)
+    monkeypatch.setattr(
+        "custom_agents.task_resume_runtime.resume_task_with_directive", real_resume_task_with_directive
+    )
+    manager = agent.task_manager
+    gate = agent._execution_gate
+    turns: list[tuple[str, str]] = []
+
+    async def process_llm_interaction(msg_content, msg_header, msg_meta):
+        async with agent._execution_scope():
+            info = manager.get_task_info(msg_content.task_id)
+            turns.append((asyncio.current_task().get_name(), info.state.value if info else "gone"))
+            return Task(task_id=msg_content.task_id, task_type=MessageMetaType.RESPONSE, answer="done")
+
+    async def complete(task_id, timestamp):
+        await manager.operations_runtime.run(manager.complete_task, task_id, timestamp)
+
+    agent.process_llm_interaction = process_llm_interaction
+    agent._complete_task_and_schedule_aar_review = complete
+    agent._refresh_self_agent_state = AsyncMock()
+    agent._notify_context_after_turn = AsyncMock()
+    agent._conversation_store = agent._conversation_compactor = None
+    agent._conversation_artifact_offloader = agent._conversation_summary_generator = None
+    agent._strands_agent = SimpleNamespace(messages=[])
+    agent.named_agent_type = "TeamArchitect"
+    delegated_tasks(agent).set_check_back(
+        team_id="team", parent_task_id="root", requester_agent_id="lead", at=NOW
+    )
+
+    async def result_delivery():
+        # A TaskResponse delivery holds the execution slot while it is handled.
+        async with agent._execution_scope():
+            gate.waiting.clear()
+            await gate.waiting.wait()  # the wake is now waiting for the slot
+            manager.try_transition_task_state(
+                "child_0", allowed_from={ProgressState.ACCEPTED, ProgressState.IN_PROGRESS},
+                to_state=ProgressState.COMPLETED, timestamp=_iso(), reason="result", source="test",
+            )
+            await subtask_watchdog_runtime._resume_parent_task_if_ready(agent, "root")
+
+    delivery = asyncio.create_task(result_delivery(), name="result_delivery")
+    await asyncio.sleep(0)
+    woken = await asyncio.create_task(
+        delegation_wake.wake_due_check_backs(agent, now=NOW + timedelta(minutes=1)), name="check_back"
+    )
+    await delivery
+    assert woken == 0
+    assert turns == [("result_delivery", "in_progress")]
+    assert manager.get_task_info("root") is None
