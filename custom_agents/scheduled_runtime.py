@@ -2092,12 +2092,7 @@ async def _fire_claimed_schedule(
         accepted = False
 
     if accepted:
-        await agent.task_manager.operations_runtime.run(
-            agent._schedule_store.update_after_fire,
-            schedule_id,
-            claim_token=claim_token,
-            claimer_agent_id=agent.id,
-        )
+        await _advance_after_admission(agent, claimed_schedule)
     else:
         # A blocked earliest job must not starve later eligible jobs.
         from custom_agents.agent_instantiation_service import current_worker_limits
@@ -2111,6 +2106,34 @@ async def _fire_claimed_schedule(
                 claimer_agent_id=agent.id,
             )
         await sleep_fn(1)
+
+
+async def _advance_after_admission(agent: Any, claimed_schedule: dict[str, Any]) -> None:
+    """Move the schedule past the occurrence just admitted; a move that did not apply is an anomaly.
+
+    The move is tied to this agent's claim and the claimed run time
+    (``ScheduleStore.update_after_fire``). When it does not apply, the
+    occurrence may stay due: a typed root job's occurrence receipt keeps it
+    from running again, other schedules may run it again.
+    """
+    schedule_id = claimed_schedule["schedule_id"]
+    due_at = claimed_schedule.get("next_fire_at")
+    outcome = await agent.task_manager.operations_runtime.run(
+        agent._schedule_store.update_after_fire,
+        schedule_id,
+        claim_token=claimed_schedule.get("claim_token"),
+        claimer_agent_id=agent.id,
+        due_at=due_at,
+    )
+    if not outcome.applied:
+        agent._logger.warning(
+            "A scheduled run was admitted, but its schedule was not moved on to its next run. "
+            "event=schedule_advance_not_applied agent_id=%s schedule_id=%s due_at=%s outcome=%s",
+            agent.id,
+            schedule_id,
+            due_at,
+            outcome.value,
+        )
 
 
 async def _idle_sleep_seconds(agent: Any, can_claim_scheduled_work: bool) -> float:

@@ -253,14 +253,25 @@ class StuckSchedules:
         return missed
 
 
-def _turn_off(store: Any, schedule_id: str) -> bool:
-    return bool(store.set_enabled(schedule_id, False))
+def _turn_off(store: Any, missed: MissedRun, now: datetime) -> bool:
+    """Turn the schedule off only if its missed run is still waiting, unclaimed (one conditional write).
+
+    The rows were read in an earlier step; a worker may have claimed and
+    started the run since. Then nothing changes and nobody is told it was missed.
+    """
+    return bool(store.turn_off_missed_run(missed.schedule_id, due_at=missed.due, now=now))
 
 
 async def _turn_off_missed_final_runs(agent: Any, source: StuckSchedules, now: datetime, late_after: timedelta) -> None:
     runtime = agent.task_manager.operations_runtime
     for missed in await runtime.run(partial(source.missed_final_runs, now, late_after)):
-        if not await runtime.run(_turn_off, source.store, missed.schedule_id):
+        if not await runtime.run(_turn_off, source.store, missed, now):
+            agent._logger.info(
+                "A missed final run was not turned off: it is running or changed meanwhile. "
+                "event=schedule_final_run_turn_off_skipped schedule_id=%s due=%s",
+                missed.schedule_id,
+                missed.due,
+            )
             continue
         owner, message = missed.owner, missed.message
         notice_id = f"missed_run:{missed.schedule_id}:{missed.due}"

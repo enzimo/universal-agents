@@ -391,6 +391,24 @@ def _update_memory(candidate: ScheduledMessage, update: ScheduleUpdateV1, change
         changes["schedule_memory"] = memory_changes
 
 
+def _repeat_count(candidate: ScheduledMessage, requested: int) -> Optional[int]:
+    """The stored repeat count for ``repeat_count`` in an update (as ``create_scheduled_job`` reads it).
+
+    For an interval or cron schedule, 0 means no limit and a positive number
+    that many runs. A schedule with neither runs once: 0 keeps it at one run,
+    and more than one is refused, because it has no time for a second run (an
+    unlimited one-time schedule used to stay due for good after its run).
+    """
+
+    if candidate.interval_ms is not None or candidate.cron_expression:
+        return requested if requested > 0 else None
+    if requested > 1:
+        raise ValueError(
+            "A one-time schedule runs once. To repeat it, give interval_seconds or cron_expression too."
+        )
+    return 1
+
+
 def _updated_candidate(
     schedule: ScheduledMessage, update: ScheduleUpdateV1, default_zone: Optional[str]
 ) -> tuple[ScheduledMessage, dict[str, Any]]:
@@ -399,7 +417,7 @@ def _updated_candidate(
     _update_identity(candidate, update, changes)
     _update_timing(candidate, update, changes, default_zone)
     if update.repeat_count >= 0:
-        candidate.repeat_count = update.repeat_count if update.repeat_count > 0 else None
+        candidate.repeat_count = _repeat_count(candidate, update.repeat_count)
         changes["repeat_count"] = candidate.repeat_count
     _update_controls(candidate, update, changes)
     _update_memory(candidate, update, changes)
@@ -429,11 +447,6 @@ def _candidate(
 
 
 # -- committing -------------------------------------------------------------------
-
-
-def _remaining_count(store: ScheduleStore, schedule_id: str) -> Any:
-    row = store.get_row(schedule_id) or {}
-    return row.get("remaining_count")
 
 
 class _Commit:
@@ -473,14 +486,17 @@ class _Commit:
 
     def _update(self, permit: Optional[ScheduleMutationPermit]) -> dict[str, Any]:
         assert self.candidate is not None and self.request.update is not None
-        remaining = (
-            self.candidate.repeat_count
-            if self.request.update.repeat_count >= 0
-            else _remaining_count(self.store, self.request.schedule_id)
-        )
-        self.store.add(
+        # Saved against the schedule as it was read: refused when it is gone or
+        # someone else changed it meanwhile; its run time, count and notes stay
+        # unless this change set them (ScheduleStore.update).
+        update_kwargs: dict[str, Any] = {}
+        if self.request.update.repeat_count >= 0:
+            # Setting the repeat count starts the count again.
+            update_kwargs["remaining_count"] = self.candidate.repeat_count
+        self.store.update(
             self.candidate,
-            remaining_count_override=remaining,
+            base=self.schedule,
+            **update_kwargs,
             system_mutation_permit=permit,
             system_mutation_operation=ScheduleMutationOperation.UPDATE,
             system_mutation_request_binding=self.binding,
@@ -526,22 +542,14 @@ class _Commit:
         return {"disabled": bool(disabled)}
 
     def _resume(self, permit: Optional[ScheduleMutationPermit]) -> dict[str, Any]:
-        if permit is None:
-            # A person's own schedule: two targeted updates keep the claim state.
-            cleared = self.store.set_paused_until(self.request.schedule_id, None)
-            enabled = self.store.set_enabled(self.request.schedule_id, True)
-            return {"resumed": bool(cleared or enabled)}
-        assert self.candidate is not None
-        # One exact permit covers one transition, so a protected schedule is
-        # resumed with a single replacement of its control state.
-        self.store.add(
-            self.candidate,
-            remaining_count_override=_remaining_count(self.store, self.request.schedule_id),
+        # One change clears the pause and turns the schedule on, so one exact
+        # permit covers a protected schedule's whole transition.
+        resumed = self.store.resume(
+            self.request.schedule_id,
             system_mutation_permit=permit,
-            system_mutation_operation=ScheduleMutationOperation.RESUME,
             system_mutation_request_binding=self.binding,
         )
-        return {"resumed": self.store.get_scheduled_message(self.request.schedule_id) is not None}
+        return {"resumed": bool(resumed)}
 
     def _remove(self, permit: Optional[ScheduleMutationPermit]) -> dict[str, Any]:
         removed = self.store.remove(

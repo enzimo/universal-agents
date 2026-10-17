@@ -44,10 +44,15 @@ from custom_agents.schedule_management import (
     ScheduleMutationPermit,
     ScheduleMutationAuthorityMode,
     ScheduleMutationOperation,
+    SystemScheduleMutationDenied,
     build_schedule_mutation_permit,
     is_system_managed_schedule,
 )
-from custom_agents.schedule_store import ScheduleStore, owner_canonical_user_id_for_schedule
+from custom_agents.schedule_store import (
+    ScheduleStore,
+    ScheduleWriteConflict,
+    owner_canonical_user_id_for_schedule,
+)
 from custom_agents.task_manager_objectives import ObjectiveSaveFailed
 from custom_messages.contracts.common_v1 import contract_sha256
 from custom_messages.contracts.control_v1 import (
@@ -293,6 +298,64 @@ def _schedule_worker_assignment(
     )
 
 
+async def _apply_gateway_schedule_change(
+    agent: Any,
+    store: Any,
+    command: ManagerScheduleCommand,
+    scheduled_message: Any,
+    person: CommandPerson,
+) -> tuple[bool, str]:
+    """Pause, resume, turn off or remove one schedule for the verified person: (applied, message)."""
+
+    schedule_id = command.schedule_id or ""
+    expected = command.expected_record_digest or None
+    run = agent.task_manager.operations_runtime.run
+    if command.action == "pause":
+        candidate = scheduled_message.model_copy(deep=True)
+        candidate.paused_until = command.paused_until
+        permit = _authenticated_gateway_schedule_permit(
+            scheduled_message, principal=person, operation=ScheduleMutationOperation.PAUSE, candidate=candidate
+        )
+        applied = await run(
+            store.set_paused_until,
+            schedule_id,
+            command.paused_until,
+            operation=ScheduleMutationOperation.PAUSE,
+            system_mutation_permit=permit,
+            expected_record_digest=expected,
+        )
+        return applied, "schedule_paused" if applied else "schedule_not_found"
+    if command.action == "resume":
+        candidate = scheduled_message.model_copy(deep=True)
+        candidate.paused_until = None
+        candidate.enabled = True
+        permit = _authenticated_gateway_schedule_permit(
+            scheduled_message, principal=person, operation=ScheduleMutationOperation.RESUME, candidate=candidate
+        )
+        applied = await run(store.resume, schedule_id, system_mutation_permit=permit, expected_record_digest=expected)
+        return applied, "schedule_resumed" if applied else "schedule_not_found"
+    if command.action == "disable":
+        candidate = scheduled_message.model_copy(deep=True)
+        candidate.enabled = False
+        permit = _authenticated_gateway_schedule_permit(
+            scheduled_message, principal=person, operation=ScheduleMutationOperation.DISABLE, candidate=candidate
+        )
+        applied = await run(
+            store.set_enabled,
+            schedule_id,
+            False,
+            operation=ScheduleMutationOperation.DISABLE,
+            system_mutation_permit=permit,
+            expected_record_digest=expected,
+        )
+        return applied, "schedule_disabled" if applied else "schedule_not_found"
+    permit = _authenticated_gateway_schedule_permit(
+        scheduled_message, principal=person, operation=ScheduleMutationOperation.DELETE
+    )
+    applied = await run(store.remove, schedule_id, system_mutation_permit=permit, expected_record_digest=expected)
+    return applied, "schedule_removed" if applied else "schedule_not_found"
+
+
 async def handle_manager_schedule_command(
     agent: Any,
     *,
@@ -393,105 +456,25 @@ async def handle_manager_schedule_command(
             )
             response.success = False
             response.message = SYSTEM_SCHEDULE_CHANGE_NOT_ALLOWED
-        elif (
-            command.expected_record_digest
-            and command.expected_record_digest
-            != contract_sha256(scheduled_message.model_dump(mode="json"))
-        ):
-            response.success = False
-            response.message = "schedule_changed"
-        elif command.action == "pause":
-            candidate = scheduled_message.model_copy(deep=True)
-            candidate.paused_until = command.paused_until
-            permit = _authenticated_gateway_schedule_permit(
-                scheduled_message,
-                principal=person,
-                operation=ScheduleMutationOperation.PAUSE,
-                candidate=candidate,
-            )
-            response.success = await agent.task_manager.operations_runtime.run(
-                store.set_paused_until,
-                command.schedule_id or "",
-                command.paused_until,
-                operation=ScheduleMutationOperation.PAUSE,
-                system_mutation_permit=permit,
-            )
-            response.message = (
-                "schedule_paused" if response.success else "schedule_not_found"
-            )
-        elif command.action == "resume":
-            pause_candidate = scheduled_message.model_copy(deep=True)
-            pause_candidate.paused_until = None
-            pause_permit = _authenticated_gateway_schedule_permit(
-                scheduled_message,
-                principal=person,
-                operation=ScheduleMutationOperation.RESUME,
-                candidate=pause_candidate,
-            )
-            cleared = await agent.task_manager.operations_runtime.run(
-                store.set_paused_until,
-                command.schedule_id or "",
-                None,
-                operation=ScheduleMutationOperation.RESUME,
-                system_mutation_permit=pause_permit,
-            )
-            resumed_message = await agent.task_manager.operations_runtime.run(
-                store.get_scheduled_message, command.schedule_id or ""
-            )
-            enabled = False
-            if resumed_message is not None:
-                enabled_candidate = resumed_message.model_copy(deep=True)
-                enabled_candidate.enabled = True
-                enabled_permit = _authenticated_gateway_schedule_permit(
-                    resumed_message,
-                    principal=person,
-                    operation=ScheduleMutationOperation.RESUME,
-                    candidate=enabled_candidate,
-                )
-                enabled = await agent.task_manager.operations_runtime.run(
-                    store.set_enabled,
-                    command.schedule_id or "",
-                    True,
-                    operation=ScheduleMutationOperation.RESUME,
-                    system_mutation_permit=enabled_permit,
-                )
-            response.success = bool(cleared or enabled)
-            response.message = (
-                "schedule_resumed" if response.success else "schedule_not_found"
-            )
-        elif command.action == "disable":
-            candidate = scheduled_message.model_copy(deep=True)
-            candidate.enabled = False
-            permit = _authenticated_gateway_schedule_permit(
-                scheduled_message,
-                principal=person,
-                operation=ScheduleMutationOperation.DISABLE,
-                candidate=candidate,
-            )
-            response.success = await agent.task_manager.operations_runtime.run(
-                store.set_enabled,
-                command.schedule_id or "",
-                False,
-                operation=ScheduleMutationOperation.DISABLE,
-                system_mutation_permit=permit,
-            )
-            response.message = (
-                "schedule_disabled" if response.success else "schedule_not_found"
-            )
         else:
-            permit = _authenticated_gateway_schedule_permit(
-                scheduled_message,
-                principal=person,
-                operation=ScheduleMutationOperation.DELETE,
-            )
-            response.success = await agent.task_manager.operations_runtime.run(
-                store.remove,
-                command.schedule_id or "",
-                system_mutation_permit=permit,
-            )
-            response.message = (
-                "schedule_removed" if response.success else "schedule_not_found"
-            )
+            # The listed schedule the person acted on (expected_record_digest)
+            # and the permit are checked in the store's write transaction.
+            try:
+                response.success, response.message = await _apply_gateway_schedule_change(
+                    agent, store, command, scheduled_message, person
+                )
+            except (ScheduleWriteConflict, SystemScheduleMutationDenied) as exc:
+                agent._logger.warning(
+                    "[%s] A gateway schedule change was refused because the schedule changed meanwhile. "
+                    "event=gateway_schedule_change_conflict schedule_id=%s action=%s person_id=%s reason=%s",
+                    agent.id,
+                    command.schedule_id,
+                    command.action,
+                    owner,
+                    exc.reason_code,
+                )
+                response.success = False
+                response.message = "schedule_changed"
         if response.success and getattr(agent, "_scheduler_wake", None) is not None:
             agent._scheduler_wake.set()
     await _send_durable_response(

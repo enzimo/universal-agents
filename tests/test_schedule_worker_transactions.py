@@ -326,6 +326,43 @@ def test_retarget_defers_behind_live_claim_and_preserves_due_count(stores):
         )
 
 
+def test_configuring_a_worker_keeps_run_notes_written_after_the_read(stores):
+    """The schedule's saved JSON used to come from the candidate, dropping newer run notes (2026-10-17)."""
+    store, _, _ = stores
+    schedule = seed_schedule(store)
+    base = store.get_scheduled_message(schedule.schedule_id)
+
+    def note(memory):
+        memory.state.summary = "written by a run"
+        return True
+
+    store.edit_schedule_memory(schedule.schedule_id, note)
+    binding = ScheduleWorkerBindingV1(
+        schedule_id=schedule.schedule_id,
+        team_id="team",
+        owner_canonical_user_id="owner",
+        target_agent_type="Replacement",
+        definition_digest="b" * 64,
+        execution_digest="c" * 64,
+        revision=1,
+        policy=ScheduleWorkerPolicySpecV1(),
+        actor_principal_id="lead",
+        authority_mode="agreement",
+    )
+
+    pending = store.worker_records.configure(
+        binding,
+        base.model_copy(update={"claim_named_agent_type": "Replacement"}),
+        expected_revision=0,
+        expected_control_digest=schedule_control_state_digest(base),
+    )
+
+    saved = store.get_scheduled_message(schedule.schedule_id)
+    assert not pending
+    assert saved.claim_named_agent_type == "Replacement"
+    assert saved.schedule_memory.state.summary == "written by a run"
+
+
 def test_retargeted_live_claim_keeps_its_prior_policy_until_admission(stores):
     store, runtime, _ = stores
     schedule = seed_schedule(store)

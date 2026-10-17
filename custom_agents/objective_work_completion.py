@@ -1,11 +1,14 @@
 """Close a checkpointed session using durable evidence and notification policy."""
 
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any
 
 from custom_agents.schedule_observations import record_run_observation
 from custom_agents.schedule_store import (
+    OwnerGuard,
     ScheduleStore,
+    ScheduleWriteConflict,
     owner_canonical_user_id_for_schedule,
 )
 from custom_agents.structured_llm_messages import (
@@ -112,14 +115,9 @@ def _owned_session_schedule(
     return schedule
 
 
-def _record_checkpoint_outcome(
-    store: ScheduleStore,
-    schedule: ScheduledMessage,
-    checkpoint: ObjectiveWorkCheckpoint,
-    answer: str,
-) -> bool:
-    """Count one checkpoint once, preserving the schedule's due time and count."""
-    memory = schedule.schedule_memory or ScheduleTaskMemory()
+def _count_checkpoint(memory: ScheduleTaskMemory, checkpoint: ObjectiveWorkCheckpoint, answer: str) -> bool:
+    """Record one checkpoint in the run notes once (a repeat returns its first answer); whether to notify."""
+
     previous = next(
         (
             run
@@ -151,15 +149,44 @@ def _record_checkpoint_outcome(
     memory.state.last_observed_at = now
     if changed:
         memory.state.last_changed_at = now
-    memory.updated_at = now
-    schedule.schedule_memory = memory
-    remaining = next(
-        row["remaining_count"]
-        for row in store.get_all()
-        if row["schedule_id"] == schedule.schedule_id
-    )
-    store.add(schedule, remaining_count_override=remaining)
     return should_notify
+
+
+def _record_checkpoint_outcome(
+    store: ScheduleStore,
+    schedule: ScheduledMessage,
+    checkpoint: ObjectiveWorkCheckpoint,
+    answer: str,
+    session: ObjectiveWorkSession,
+) -> bool:
+    """Count one checkpoint once in the schedule's run notes; whether to notify.
+
+    Only the run notes change (``ScheduleStore.edit_schedule_memory``), so the
+    schedule's due time, count, controls and claim stay as they are now.
+    """
+
+    record = partial(_count_checkpoint, checkpoint=checkpoint, answer=answer)
+    try:
+        should_notify = store.edit_schedule_memory(
+            schedule.schedule_id,
+            record,
+            owner_guard=OwnerGuard(owner_canonical_user_id_for_schedule(schedule)),
+        )
+    except ScheduleWriteConflict as exc:
+        raise ObjectiveWorkCompletionError(
+            "owner_mismatch",
+            "the recurring schedule changed hands while the session finished.",
+            session,
+            schedule.schedule_id,
+        ) from exc
+    if should_notify is None:
+        raise ObjectiveWorkCompletionError(
+            "schedule_missing",
+            "the linked recurring schedule was removed while the session finished.",
+            session,
+            schedule.schedule_id,
+        )
+    return bool(should_notify)
 
 
 def prepare_objective_work_completion(
@@ -194,7 +221,7 @@ def prepare_objective_work_completion(
     if meta.requester_type == RequesterType.TIMER_REQUESTER:
         schedule = _owned_session_schedule(agent, task, session)
         suppress = not _record_checkpoint_outcome(
-            agent._schedule_store, schedule, checkpoint, answer
+            agent._schedule_store, schedule, checkpoint, answer, session
         )
     return StructuredAgentTurnDecision(
         actions=[

@@ -655,12 +655,12 @@ async def test_slow_schedule_permission_keeps_loop_responsive_and_precedes_mutat
             assert store.get_scheduled_message(schedule.schedule_id) is not None
             assert not agent.team_comms.messages
         elif interruption == "schedule_changed":
-            from custom_agents.schedule_management import SystemScheduleMutationDenied
-
-            with pytest.raises(SystemScheduleMutationDenied, match="current state"):
-                await task
+            # The listed schedule is checked in the store's write transaction:
+            # the person is told it changed and nothing is removed.
+            await task
+            response = agent.team_comms.messages[-1].msg_content
+            assert (response.success, response.message) == (False, "schedule_changed")
             assert store.get_scheduled_message(schedule.schedule_id).paused_until == candidate.paused_until
-            assert not agent.team_comms.messages
         elif interruption == "decision_failed":
             with pytest.raises(RuntimeError, match="Permission evaluator failed"):
                 await task

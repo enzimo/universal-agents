@@ -317,7 +317,7 @@ def _clear_schedules(agent: Any, person_id: str, outcome: PersonWorkOutcomeV1) -
         if schedule is None or owner_canonical_user_id_for_schedule(schedule) != person_id:
             continue
         if _is_team_schedule(schedule):
-            _move_team_schedule(agent, store, schedule, row, person_id, moves, outcome)
+            _move_team_schedule(agent, store, schedule, person_id, moves, outcome)
         else:
             _delete_schedule(agent, store, schedule, person_id, outcome)
     outcome.team_schedules_moved.extend(moves.moved)
@@ -364,7 +364,6 @@ def _move_team_schedule(
     agent: Any,
     store: Any,
     schedule: Any,
-    row: dict[str, Any],
     person_id: str,
     moves: _ScheduleMoves,
     outcome: PersonWorkOutcomeV1,
@@ -408,7 +407,9 @@ def _move_team_schedule(
         candidate=candidate,
     )
     try:
-        store.add(candidate, remaining_count_override=row.get("remaining_count"), system_mutation_permit=permit)
+        # Saved against the schedule as read: refused (and retried by the next
+        # sweep) when it changed or went away meanwhile; never recreated.
+        store.update(candidate, base=schedule, system_mutation_permit=permit)
     except Exception:  # noqa: BLE001 - reported; it keeps its old owner and does not run
         logger.exception(
             "Could not move a team schedule to another administrator. event=team_schedule_move_failed "

@@ -24,7 +24,7 @@ from custom_agents.scheduled_runtime import (
     scheduler_loop,
 )
 from custom_agents.conversation_store import ConversationStore
-from custom_agents.schedule_store import ScheduleStore
+from custom_agents.schedule_store import AdvanceOutcome, ScheduleStore
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_records import ReportedWorkIdentity
 from custom_messages.contracts.routing_v1 import (
@@ -329,6 +329,7 @@ class _LoopScheduleStore:
         return {
             "schedule_id": self.scheduled_message.schedule_id,
             "claim_token": "claim_token_1",
+            "next_fire_at": self.scheduled_message.next_fire_at,
         }
 
     def get_all_enabled(self):
@@ -341,7 +342,7 @@ class _LoopScheduleStore:
 
     def update_after_fire(self, schedule_id: str, **kwargs):
         self.updated_with = {"schedule_id": schedule_id, **kwargs}
-        return False
+        return AdvanceOutcome.ADVANCED
 
     def release_claim(self, schedule_id: str, **kwargs):
         self.released_with = {"schedule_id": schedule_id, **kwargs}
@@ -627,6 +628,49 @@ def test_record_scheduled_run_updates_bounded_memory_and_notification_decision(
     assert memory.state.domain["last_event_id"] == "goal:gakpo:47"
 
 
+@pytest.mark.parametrize("concurrent", ["remove", "disable"])
+def test_record_scheduled_run_never_undoes_a_change_made_after_its_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, concurrent: str
+):
+    """The person deletes or turns off the schedule while a run records its notes (2026-10-17).
+
+    The tool used to save the whole schedule it had read, which recreated a
+    deleted schedule and turned a turned-off one back on.
+    """
+    import custom_tools.providers.schedules as schedule_tools
+
+    agent = _FakeAgent(str(tmp_path / "task_history.db"))
+    set_agent_ref(agent)
+    schedule_id = json.loads(
+        create_scheduled_job(instruction="Check match state.", schedule_name="match monitor", interval_seconds=60)
+    )["schedule_id"]
+    task_info = agent.task_manager._task_info
+    task_info.meta.requester_type = RequesterType.TIMER_REQUESTER
+    task_info.meta.gateway_context.scheduled_job_id = schedule_id
+    store = agent._schedule_store
+    read_schedule = schedule_tools._owned_or_denial
+
+    def read_then_person_acts(*args, **kwargs):
+        found = read_schedule(*args, **kwargs)
+        if concurrent == "remove":
+            assert store.remove(schedule_id)
+        else:
+            assert store.set_enabled(schedule_id, False)
+        return found
+
+    monkeypatch.setattr(schedule_tools, "_owned_or_denial", read_then_person_acts)
+    result = json.loads(record_scheduled_run(outcome="no_change", state_summary="Score unchanged."))
+
+    if concurrent == "remove":
+        assert result == {"schedule_id": schedule_id, "recorded": False, "error": schedule_tools.SCHEDULE_NOT_FOUND}
+        assert store.get_row(schedule_id) is None
+    else:
+        assert result["recorded"] is True
+        saved = store.get_scheduled_message(schedule_id)
+        assert saved.enabled is False
+        assert saved.schedule_memory.state.summary == "Score unchanged."
+
+
 def test_scheduler_loop_updates_schedule_with_claim_token_after_acceptance():
     scheduled_message = ScheduledMessage(
         schedule_id="sched_loop",
@@ -647,6 +691,7 @@ def test_scheduler_loop_updates_schedule_with_claim_token_after_acceptance():
         "schedule_id": "sched_loop",
         "claim_token": "claim_token_1",
         "claimer_agent_id": "manager_id",
+        "due_at": scheduled_message.next_fire_at,
     }
 
 
