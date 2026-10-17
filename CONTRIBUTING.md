@@ -157,6 +157,19 @@ records its arguments; they do not start real sandboxes.
 Run the relevant live NATS or PostgreSQL validation when a change affects
 messaging, persistence, routing, recovery, or deployment wiring.
 
+The PostgreSQL tests are the ones marked `postgres`: the knowledge store tests
+and the PostgreSQL variants of the storage, runtime recovery, snapshot and
+schedule-worker transaction tests. The CI PostgreSQL job runs exactly that
+marker, so a new PostgreSQL variant must carry it next to `live`
+(`tests/test_ci_workflows.py` fails otherwise). Run them against an isolated
+database created with UTF-8 encoding; on a `SQL_ASCII` database psycopg returns
+bytes and most of them fail:
+
+```bash
+LIVE_TEST_POSTGRES_DSN=postgresql://postgres@127.0.0.1:5432/ua_live_tests \
+  .venv/bin/pytest tests -m postgres -q
+```
+
 Credential-state or model-key changes also require the real Sealbox suite:
 
 ```bash

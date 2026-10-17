@@ -21,24 +21,81 @@ def ensure_storage_parent_dir(path: Optional[str]) -> None:
     directory.mkdir(parents=True, exist_ok=True)
 
 
+# Connection settings that may appear in logs and error messages. Every other
+# setting is hidden, so a setting that carries a secret (``password``,
+# ``sslpassword``, or one a later libpq adds) never shows just because nobody
+# listed it here.
+_SHOWN_POSTGRES_SETTINGS = frozenset(
+    {
+        "host",
+        "hostaddr",
+        "port",
+        "dbname",
+        "user",
+        "sslmode",
+        "connect_timeout",
+        "application_name",
+        "target_session_attrs",
+    }
+)
+_HIDDEN_VALUE = "***"
+# Shown instead of a connection string that cannot be read, because reading it
+# is what tells the redaction which parts are secret.
+UNREADABLE_POSTGRES_DSN = "<unreadable PostgreSQL connection string>"
+
+
 def redact_postgres_dsn(raw_dsn: str) -> str:
+    """The connection string with its password and other settings hidden, for logs and errors.
+
+    libpq accepts two forms and both are handled: a URL
+    (``postgresql://user:password@host/db?sslmode=require``) and keyword settings
+    (``host=db user=ua password=...``). The user, host, port and database stay
+    readable; a string that cannot be read is replaced as a whole.
+    """
+
     if not raw_dsn:
         return raw_dsn
-    parts = urlsplit(raw_dsn)
+    if "://" in raw_dsn:
+        return _redact_url_dsn(raw_dsn)
+    return _redact_keyword_dsn(raw_dsn)
+
+
+def _shown_setting(name: str, value: str) -> str:
+    return value if name.lower() in _SHOWN_POSTGRES_SETTINGS else _HIDDEN_VALUE
+
+
+def _redact_url_dsn(raw_dsn: str) -> str:
+    try:
+        parts = urlsplit(raw_dsn)
+        settings = parse_qsl(parts.query, keep_blank_values=True)
+    except ValueError:
+        return UNREADABLE_POSTGRES_DSN
     netloc = parts.netloc
     if "@" in netloc:
         userinfo, hostinfo = netloc.rsplit("@", 1)
         if ":" in userinfo:
-            username, _password = userinfo.split(":", 1)
-            userinfo = f"{username}:***"
+            userinfo = f"{userinfo.split(':', 1)[0]}:{_HIDDEN_VALUE}"
         netloc = f"{userinfo}@{hostinfo}"
     query = urlencode(
-        [
-            (key, "***" if "password" in key.lower() else value)
-            for key, value in parse_qsl(parts.query)
-        ]
+        [(name, _shown_setting(name, value)) for name, value in settings], safe="*"
     )
-    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+    return urlunsplit((parts.scheme, netloc, parts.path, query, ""))
+
+
+def _redact_keyword_dsn(raw_dsn: str) -> str:
+    # psycopg's parser applies libpq's own quoting rules, so a quoted password
+    # with spaces is recognised exactly as the connection itself reads it.
+    from psycopg import Error as PsycopgError
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    try:
+        settings = conninfo_to_dict(raw_dsn)
+        return make_conninfo(
+            "",
+            **{name: _shown_setting(name, str(value)) for name, value in settings.items()},
+        )
+    except PsycopgError:
+        return UNREADABLE_POSTGRES_DSN
 
 
 # A deployment that runs its own PostgreSQL (the Docker bundle) names that
