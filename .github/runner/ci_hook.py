@@ -62,9 +62,20 @@ def remove(path: Path) -> None:
         path.unlink()
     elif path.exists():
 
-        def writable(func, name, _error):
-            os.chmod(name, 0o700)
-            func(name)
+        def writable(func, name, error):
+            # A cancelled child's shutdown may remove its temporary lock after
+            # rmtree enumerates it. Missing entries already satisfy cleanup.
+            if isinstance(error[1], FileNotFoundError):
+                return
+            # Only retry deletions of read-only entries. Retrying a failed
+            # traversal would not resume rmtree and could hide its real error.
+            if not isinstance(error[1], PermissionError) or func not in (os.unlink, os.rmdir):
+                raise error[1]
+            try:
+                os.chmod(name, 0o700)
+                func(name)
+            except FileNotFoundError:
+                return
 
         shutil.rmtree(path, onerror=writable)
 

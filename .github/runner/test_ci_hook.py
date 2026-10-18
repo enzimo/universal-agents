@@ -116,6 +116,40 @@ class LifecycleTests(unittest.TestCase):
         ci_hook.cleanup(self.config)
         self.assertFalse(self.workspace.exists())
 
+    def test_cleanup_accepts_a_file_removed_after_enumeration(self):
+        self.begin()
+        lock = self.state / "cache" / "vanishing.lock"
+        lock.touch()
+        unlink = os.unlink
+
+        def disappear(name, *args, **kwargs):
+            result = unlink(name, *args, **kwargs)
+            if Path(name).name == lock.name:
+                raise FileNotFoundError(str(name))
+            return result
+
+        with patch.object(ci_hook.os, "unlink", side_effect=disappear):
+            ci_hook.cleanup(self.config)
+        self.assertFalse((self.state / "job.json").exists())
+        self.assertFalse((self.state / "cache").exists())
+
+    def test_cleanup_still_refuses_a_file_it_cannot_remove(self):
+        self.begin()
+        locked = self.state / "cache" / "locked-file"
+        locked.touch()
+        unlink = os.unlink
+
+        def denied(name, *args, **kwargs):
+            if Path(name).name == locked.name:
+                raise PermissionError(str(name))
+            return unlink(name, *args, **kwargs)
+
+        with patch.object(ci_hook.os, "unlink", side_effect=denied):
+            with self.assertRaises(PermissionError):
+                ci_hook.cleanup(self.config)
+        self.assertTrue((self.state / "job.json").exists())
+        self.assertTrue(locked.exists())
+
     def test_docker_cleanup_uses_only_exact_job_label_and_owned_builder(self):
         job = self.begin()
         (self.state / "cache" / "docker-used").touch()

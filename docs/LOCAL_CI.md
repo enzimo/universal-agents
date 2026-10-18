@@ -20,6 +20,11 @@ checks test and build the site without uploading it. Only a manual Pages deploym
 uploads the site, and that upload must succeed before deployment. Container builds
 and image publication do not require these stored artifacts.
 
+The fast job allows 60 minutes for setup and the complete hermetic suite. The
+suite exceeded the previous 45-minute limit while still making progress on the
+shared runner. It stops at the first failure so its traceback is reported before
+a later deadline can hide it, and reports the slowest tests after completion.
+
 The runtime produces Linux amd64 and arm64 container images that run under
 Docker on Windows, macOS, and Linux. Native desktop installers belong to the
 sibling Universal Agents Desktop repository. Linux CI can run inside WSL 2,
@@ -94,6 +99,11 @@ block new work. A minimum 30 GiB free-space gate protects the work and state
 filesystems; it is an admission check, not a per-job quota. Uploaded test evidence
 expires after seven days, while runner diagnostic logs older than seven days
 are removed at job start.
+
+Temporary files can disappear during a cancelled process's shutdown. Cleanup
+accepts an already-removed entry on Python 3.12 as well as newer Python versions.
+It retries deletion of read-only entries, but other errors retain the manifest
+and block the next job.
 
 WSL deletion reclaims space inside Linux. Enable `fstrim.timer` and verify sparse
 VHD support to return deleted blocks to Windows. Do not shut down unrelated WSL

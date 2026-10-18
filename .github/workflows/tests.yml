@@ -91,8 +91,9 @@ jobs:
   fast:
     if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
-    # Environment setup and the full suite exceeded 30 minutes at 95% complete.
-    timeout-minutes: 45
+    # Setup plus the full suite exceeded 45 minutes while still progressing
+    # on the shared runner. Keep a deadline that allows the suite to finish.
+    timeout-minutes: 60
     steps:
       - name: Require managed local runner
         run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
@@ -136,7 +137,8 @@ jobs:
       - name: Test runner resource lifecycle
         run: python -m unittest discover -s .github/runner -v
       - name: Run hermetic test profile
-        run: ./scripts/run_tests.sh fast -q
+        # Report the first failure before a later timeout can hide its details.
+        run: ./scripts/run_tests.sh fast -q -x --tb=short --durations=20
       # Verification above is mandatory. Archiving its evidence is optional.
       - name: Upload reviewed skill-installation evidence
         id: canary-evidence
