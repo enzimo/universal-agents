@@ -228,6 +228,64 @@ async def _no_orphan(_agent):
 
 
 @pytest.mark.asyncio
+async def test_a_backoff_retry_keeps_main_custody_rules_for_a_waiting_request(tmp_path, monkeypatch, caplog):
+    """The retry neither takes a waiting request early nor fails its custody check.
+
+    Real snapshot store and inbox: every save made during a dispatch checks
+    that the exact message is still in this agent's deferred row, and only the
+    request's own admission removes it (``DeferredHandoff``). The first
+    dispatch saves another task and fails, so the message stays; the backoff
+    retry saves again (the check passes), admits the request once and removes
+    the message.
+    """
+    from functools import partial
+
+    from custom_agents import pending_work_runtime
+    from custom_messages.enums import ProgressState
+    from tests.test_custody_loss import OLD, admit, deferred_ids, holders, inbox_for, manager, now
+    from tests.test_deferred_message_inbox import _envelope
+
+    monkeypatch.setattr(pending_work_runtime, "FAILURE_RETRY_FIRST_SECONDS", 0.3)
+    task_manager = manager(tmp_path, OLD)
+    admit(task_manager, "other")  # this agent holds a saved task row, so saves check custody
+    agent = DrainAgent(agent_id=OLD)
+    agent.deferred_inbox = inbox_for(OLD, task_manager)
+    await agent.deferred_inbox.admit(_envelope("m1"))
+    attempts: list[str] = []
+    first_failed = asyncio.Event()
+
+    async def dispatch(*, msg_content, **_kwargs):
+        attempts.append(msg_content.task_id)
+        await task_manager.operations_runtime.run(
+            task_manager.update_main_task_state, "other", ProgressState.IN_PROGRESS, now()
+        )
+        if len(attempts) == 1:
+            first_failed.set()
+            raise RuntimeError("database is locked")
+        await task_manager.operations_runtime.run(partial(admit, task_manager, msg_content.task_id))
+
+    agent._dispatch_message = dispatch
+    try:
+        with caplog.at_level("WARNING"):
+            schedule_pending_work(agent)
+            await asyncio.wait_for(first_failed.wait(), 5)
+            await settled(agent)
+            assert attempts == ["m1"]
+            assert deferred_ids(task_manager.runtime_state_store, OLD) == ["m1"]
+            assert holders(task_manager) == {OLD: ["other"]}
+            await _observe(0.6)  # the backoff retry
+            await settled(agent)
+    finally:
+        await asyncio.wait_for(close_pending_work(agent), timeout=5)
+    assert attempts == ["m1", "m1"]
+    assert deferred_ids(task_manager.runtime_state_store, OLD) == []
+    assert holders(task_manager) == {OLD: ["m1", "other"]}
+    assert len(agent.deferred_inbox) == 0 and agent._pending_work_failures == 0
+    for refusal in ("deferred_message_custody_refused", "runtime_custody_refused", "runtime_custody_lost"):
+        assert f"event={refusal}" not in caplog.text  # no check failed along the way
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("records_wake_up", [False, True])
 async def test_failure_retries_back_off_the_same_way_with_or_without_a_recorded_wake_up(
     records_wake_up, monkeypatch
