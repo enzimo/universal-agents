@@ -2321,8 +2321,12 @@ known to one process.
 ### Knowledge page
 
 People read and write the knowledge base from Web Chat (`/webchat?view=knowledge`,
-`knowledge_page.mjs`): Team and Personal lists with search and a Current pages /
-Archived pages filter, a page with its links
+`knowledge_page.mjs`): Team and Personal open their ordinary `home` article as
+an editable wiki landing page. Home is a page convention, not a separate
+setting or stored navigation tree, so normal ownership, revision checks,
+content review and transfer behavior apply. A missing Home offers explicit
+creation and browsing; reading never creates it. **All pages** reveals the
+searchable directory with a Current pages / Archived pages filter, and a page with its links
 in, open notes and history, an editor, revert and archive, and **My proposals**
 (the person's own pending team contributions, published or withdrawn by them).
 `GET /api/web-chat/knowledge/counts` answers only how many proposals wait for
@@ -2368,6 +2372,27 @@ publication copies the current page fields and changes only its status, with the
 same optimistic revision check as other writes. Archive proposals therefore have
 no edit option. The browser retains the displayed page's full space and slug for
 Refresh, and discards replies from a previous view or signed-in session.
+
+The directory reads at most 20 rows per request. Rows retain their full height
+inside one scrolling pane; the shared pagination controls and visible range
+stay in a separate footer. This avoids CSS grid compressing and clipping the
+list while its parent reports no overflow. When a removal empties the last
+page, the browser reads the last remaining page. The Home reader occupies the
+full width until the person opens All pages; proposals keep their list visible.
+`knowledge_navigation.mjs` reads and builds article addresses, including a full
+space/page reference and optional revision. Browser Back/Forward and reload
+read through the existing gateway routes; addresses convey no authority and
+personal always means the signed-in person's own space. A linked team article
+can be read while the Personal directory stays selected. Sign-out clears the
+article address and stops history navigation from fetching until sign-in.
+
+Every Web Chat module, including nested imports such as
+`knowledge_navigation.mjs`, belongs in `WEB_CHAT_MODULE_ASSETS` in
+`interactive_apps/website_support.py`. That registry supplies both public asset
+routes and the shell's content revision. A missing entry stops the browser's
+entire module load before sign-in can start, even when the independent background
+animation still runs. The operator UI HTTP test follows nested imports and
+checks that each file is served with `Cache-Control: no-store`.
 
 ## Deployment and observability
 

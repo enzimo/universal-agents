@@ -29,13 +29,39 @@ export async function verifyKnowledgePage() {
   const doc = win.document;
   const rect = selector => doc.querySelector(selector).getBoundingClientRect();
   try {
-    await until(() => doc.querySelectorAll(".knowledge-list-button").length === 3, "the team list");
+    await until(() => doc.querySelectorAll(".knowledge-list-button").length === 4 && doc.querySelector(".knowledge-body"), "Home and the team list");
+    check(doc.querySelector("#knowledge-directory").hidden, "the directory replaces the default wiki reader");
+    check(doc.querySelector("#knowledge-viewer-title").textContent === "Home", "the wiki does not start at Home");
+    const releaseLink = [...doc.querySelectorAll(".knowledge-page-link")].find(link => link.textContent === "Release process");
+    check(releaseLink, "Home does not link to its topics");
+    releaseLink.click();
+    await until(() => doc.querySelector("#knowledge-viewer-title").textContent === "Release process", "Home's topic link");
+    check(new URL(win.location.href).searchParams.get("page") === "team/release-process", "the article lacks its own address");
+    win.history.back();
+    await until(() => doc.querySelector("#knowledge-viewer-title").textContent === "Home" && doc.querySelector(".knowledge-body"), "Back to Home");
+    win.history.forward();
+    await until(() => doc.querySelector("#knowledge-viewer-title").textContent === "Release process", "Forward to the article");
+    results.push("Home links and browser Back and Forward open articles");
+    const bookmarked = document.createElement("iframe");
+    bookmarked.src = win.location.href;
+    document.body.append(bookmarked);
+    try {
+      await until(() => bookmarked.contentDocument?.querySelector("#knowledge-viewer-title")?.textContent === "Release process",
+        "the bookmarked article");
+      const reloaded = new Promise(resolve => bookmarked.addEventListener("load", resolve, { once: true }));
+      bookmarked.contentWindow.location.reload();
+      await reloaded;
+      await until(() => bookmarked.contentDocument.querySelector("#knowledge-viewer-title")?.textContent === "Release process",
+        "the article after reload");
+      results.push("an article bookmark survives a full page reload");
+    } finally { bookmarked.remove(); }
+    doc.querySelector("#knowledge-browse").click();
     const app = rect("#knowledge-app");
     const layout = rect(".knowledge-layout");
     check(app.bottom - layout.bottom < 60, "the panes do not fill the page");
     results.push("panes fill the page");
 
-    const row = doc.querySelector(".knowledge-list-button");
+    const row = [...doc.querySelectorAll(".knowledge-list-button")].find(button => button.textContent.startsWith("Release process"));
     const title = row.querySelector(".knowledge-list-title").getBoundingClientRect();
     check(title.left - row.getBoundingClientRect().left < 20, "list rows are not read from the left");
     results.push("list rows start at the left");
@@ -90,6 +116,10 @@ export async function verifyKnowledgePage() {
     const originalFetch = win.fetch.bind(win);
     const sample = await (await originalFetch("/api/web-chat/knowledge/pages/team/release-process?session_key=preview")).json();
     const pageRequests = [];
+    const current = Array.from({ length: 20 }, (_, index) => ({
+      ...sample.page, page: "topic-" + index, title: "Topic " + index,
+      summary: "A topic summary with enough text to wrap across several lines in the directory.",
+    }));
     const archived = Array.from({ length: 21 }, (_, index) => ({
       ...sample.page, page: "retired-" + index, title: "Retired page " + index,
       status: "archived", body: "Retired instructions " + index + ".", summary: "Retired instructions.", links: [],
@@ -110,6 +140,9 @@ export async function verifyKnowledgePage() {
         const offset = Number(path.searchParams.get("offset") || 0);
         const found = archived.filter(page => page.title.toLowerCase().includes(query.toLowerCase()));
         return response({ status: "ok", pages: found.slice(offset, offset + 20), total: found.length });
+      }
+      if (path.pathname === "/api/web-chat/knowledge/pages" && path.searchParams.get("space") === "team") {
+        return response({ status: "ok", pages: current, total: 3000 });
       }
       if (path.pathname === "/api/web-chat/knowledge/pages/personal/travel-preferences") {
         return response({ status: "ok", page: {
@@ -134,6 +167,7 @@ export async function verifyKnowledgePage() {
     };
 
     doc.querySelector("#knowledge-personal-tab").click();
+    doc.querySelector("#knowledge-browse").click();
     await until(() => doc.querySelector(".knowledge-list-button"), "the personal list");
     doc.querySelector(".knowledge-list-button").click();
     await until(() => doc.querySelector(".knowledge-page-link"), "the personal page's team link");
@@ -149,12 +183,41 @@ export async function verifyKnowledgePage() {
     results.push("refresh keeps a linked page's space");
 
     doc.querySelector("#knowledge-team-tab").click();
-    await until(() => doc.querySelectorAll(".knowledge-list-button").length === 3, "the current team list");
+    doc.querySelector("#knowledge-browse").click();
+    await until(() => doc.querySelectorAll(".knowledge-list-button").length === 20, "the current team list");
+    const list = doc.querySelector("#knowledge-list");
+    const pager = rect("#knowledge-pagination");
+    check(list.scrollHeight > list.clientHeight, "twenty rows are clipped instead of making the list scroll");
+    list.scrollTop = list.scrollHeight;
+    const lastRow = rect(".knowledge-list-item:last-child");
+    check(list.scrollTop > 0 && lastRow.bottom <= rect("#knowledge-list").bottom + 1,
+      "scrolling cannot reach the twentieth row");
+    check(pager.top >= rect("#knowledge-list").bottom - 1 && pager.bottom <= rect(".knowledge-list-pane").bottom,
+      "pagination is outside the visible directory footer");
+    check(doc.querySelectorAll(".knowledge-list-button").length === 20 && doc.querySelector("#knowledge-pagination").textContent.includes("3,000"),
+      "the directory does not keep a 3,000-page collection paginated");
+    results.push("twenty full-height rows scroll above visible pagination for 3,000 pages");
+    frame.style.width = "390px";
+    frame.style.height = "844px";
+    await until(() => win.innerWidth === 390, "the narrow directory");
+    list.scrollTop = list.scrollHeight;
+    check(doc.documentElement.scrollWidth <= win.innerWidth + 1, "the long directory scrolls sideways on mobile");
+    check(rect(".knowledge-list-item:last-child").bottom <= rect("#knowledge-list").bottom + 1,
+      "the narrow directory cannot reach its last row");
+    check(rect("#knowledge-pagination").bottom <= rect(".knowledge-list-pane").bottom + 1,
+      "the narrow directory clips its pagination");
+    check(rect("#knowledge-pagination").bottom <= rect(".knowledge-layout").bottom + 1,
+      "the narrow directory places pagination below the visible area");
+    results.push("the narrow directory keeps its rows and pagination reachable");
+    frame.style.width = "1440px";
+    frame.style.height = "900px";
+    await until(() => win.innerWidth === 1440, "the wide directory");
     const status = doc.querySelector("#knowledge-page-status");
     check(status.labels.length === 1 && status.labels[0].textContent === "Page status", "the page status filter lacks its label");
     status.value = "archived";
     status.dispatchEvent(new win.Event("change", { bubbles: true }));
-    await until(() => doc.querySelectorAll(".knowledge-list-button").length === 20, "the archived first page");
+    await until(() => doc.querySelectorAll(".knowledge-list-button").length === 20
+      && doc.querySelector(".knowledge-list-button").textContent.includes("Archived"), "the archived first page");
     check(doc.querySelector(".knowledge-list-button").textContent.includes("Archived"), "archived rows lack a status label");
     const nextPage = [...doc.querySelectorAll(".list-pagination button")].find(button => /next/i.test(button.getAttribute("aria-label") || button.textContent));
     check(nextPage, "archived pages lack pagination");

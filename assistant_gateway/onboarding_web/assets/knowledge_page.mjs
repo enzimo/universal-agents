@@ -2,6 +2,9 @@
  * The Knowledge page (`/webchat?view=knowledge`): the team's pages and the
  * person's own, written together with agents.
  *
+ * - Each space opens its ordinary `home` article. Home and article links are
+ *   the reading path; All pages reveals the searchable, paginated directory.
+ *   Article addresses survive reload and browser Back/Forward.
  * - **Team / Personal** list one space, 20 pages at a time, newest change
  *   first or by search match. A page shows its text (Web Chat's escaped
  *   Markdown renderer), pages that link to it, open notes and who changed it
@@ -31,6 +34,7 @@ import {
 import {
   CHANGE_WORDS, PROPOSAL_WORDS, SPACE_WORDS, diffBlock, fieldChanges, flagList, linkify, pageEditor, pageTypeWord,
 } from "./knowledge_render.mjs";
+import { HOME_PAGE, knowledgeAddress, readKnowledgeAddress } from "./knowledge_navigation.mjs";
 
 export const KNOWLEDGE_API = "/api/web-chat/knowledge";
 // How many proposals wait for the signed-in person: `{status, pending_proposals}`.
@@ -59,6 +63,7 @@ export const TEXT = Object.freeze({
   ARCHIVED: "This page is archived. Find it by selecting Archived pages in the list, or select Restore to make it current again.",
   LOAD_FAILED: "The Knowledge page could not be loaded. Refresh to try again.",
   COUNT_FAILED: "The number of waiting proposals could not be read.",
+  HOME_MISSING: "This space has no Home page yet. Create one with links to topic pages, or select All pages to browse and search.",
 });
 
 /** The proposal count from a counts answer; a malformed answer is an error, so the badge keeps its last number. */
@@ -151,17 +156,42 @@ const FLAGGED_CODES = new Set(["review_required", "sensitive_content"]);
  * browser's Web Chat thread that requests act in.
  */
 export function createKnowledgePage({
-  nodes, client, getSessionKey, renderMarkdown, browser = globalThis, formatTime = localTimeFormatter(),
+  nodes, client, getSessionKey, renderMarkdown, browser = globalThis, formatTime = localTimeFormatter(), signal,
 }) {
   const document = browser.document;
   const state = { tab: TABS.TEAM, pageStatus: "active", query: "", offset: 0, total: 0, rows: [],
-    selected: "", selectedPage: null, generation: 0, session: 0, view: 0 };
+    selected: "", selectedPage: null, generation: 0, session: 0, view: 0, directory: false, active: false };
   nodes.pageStatus.value = state.pageStatus;
 
   // -- small helpers -------------------------------------------------------------
 
   const setPageStatus = (message, isError) => setStatusLine(nodes.status, message, isError);
   const isProposals = () => state.tab === TABS.PROPOSALS;
+
+  function remember(address, mode = "push") {
+    if (mode === "none") return;
+    const url = knowledgeAddress(browser.location, { tab: state.tab, ...address });
+    if (url !== browser.location.href) browser.history[mode === "replace" ? "replaceState" : "pushState"](null, "", url);
+  }
+
+  function setDirectory(visible) {
+    state.directory = visible;
+    nodes.directory.hidden = !visible && !isProposals();
+    nodes.layout.classList.toggle("is-reading", nodes.directory.hidden);
+    nodes.browseButton.setAttribute("aria-expanded", String(visible));
+  }
+
+  function openHome({ history = "push" } = {}) {
+    setDirectory(false);
+    return openPage(state.tab, HOME_PAGE, { home: true, history });
+  }
+
+  function missingHome() {
+    const intro = element(document, "p", "knowledge-summary", TEXT.HOME_MISSING);
+    const create = button("Create Home page", "primary", () => openEditor(null, { home: true }));
+    const browse = button("All pages", "secondary", () => setDirectory(true));
+    replaceViewer("Home", SPACE_WORDS[state.tab], [create, browse], [intro]);
+  }
 
   function button(label, className, onClick) {
     const node = element(document, "button", "button " + className, label);
@@ -285,6 +315,9 @@ export function createKnowledgePage({
     });
     nodes.searchForm.hidden = isProposals();
     nodes.newButton.hidden = isProposals();
+    nodes.homeButton.hidden = isProposals();
+    nodes.browseButton.hidden = isProposals();
+    setDirectory(state.directory);
   }
 
   function listItem(label, detail, selectedKey, onOpen) {
@@ -334,8 +367,12 @@ export function createKnowledgePage({
     } else {
       children.push(element(document, "p", "permission-empty-state", emptyListText()));
     }
-    if (state.total > LIST_PAGE_SIZE) {
-      children.push(client.paginate({
+    nodes.pagination.replaceChildren();
+    nodes.pagination.hidden = state.total <= LIST_PAGE_SIZE;
+    if (!nodes.pagination.hidden) {
+      nodes.pagination.append(element(document, "p", "memory-meta knowledge-page-range",
+        `Showing ${state.offset + 1} to ${Math.min(state.offset + state.rows.length, state.total)} of ${state.total.toLocaleString()} ${isProposals() ? "proposals" : "pages"}.`));
+      nodes.pagination.append(client.paginate({
         total: state.total, offset: state.offset, pageSize: LIST_PAGE_SIZE,
         label: isProposals() ? "Proposal pages" : "Knowledge list pages", onPage: offset => loadList(offset),
       }));
@@ -353,11 +390,16 @@ export function createKnowledgePage({
         query: state.query, offset: String(offset) }, TEXT.LOAD_FAILED);
     return request.then(payload => {
       if (generation !== state.generation) return false;
+      // A restore, archive or withdrawn proposal can remove the final row of
+      // the last page. Read the last remaining page instead of stranding it.
+      const lastOffset = Math.max(0, Math.ceil(Number(payload.total || 0) / LIST_PAGE_SIZE) - 1) * LIST_PAGE_SIZE;
+      if (offset > lastOffset) return loadList(lastOffset);
       state.rows = (isProposals() ? payload.contributions : payload.pages) || [];
       state.total = Number(payload.total || 0);
       if (isProposals()) proposalCount.set(state.total);
       state.offset = offset;
       renderList();
+      nodes.list.scrollTop = 0;
       setPageStatus("", false);
       return true;
     }).catch(error => {
@@ -369,12 +411,16 @@ export function createKnowledgePage({
   function switchTab(tab) {
     if (state.tab === tab) return;
     state.generation += 1;
-    Object.assign(state, { pageStatus: "active", query: "", offset: 0, total: 0, rows: [], selected: "", selectedPage: null });
+    Object.assign(state, { pageStatus: "active", query: "", offset: 0, total: 0, rows: [], selected: "", selectedPage: null,
+      directory: false });
     nodes.searchInput.value = "";
     nodes.pageStatus.value = state.pageStatus;
     setTab(tab);
     renderList();
-    emptyViewer();
+    if (isProposals()) {
+      emptyViewer();
+      remember({});
+    } else openHome();
     loadList(0);
   }
 
@@ -528,7 +574,7 @@ export function createKnowledgePage({
   }
 
   function showPage(page, successMessage = "") {
-    state.selectedPage = { space: text(page.space), page: text(page.page) };
+    state.selectedPage = { space: text(page.space), page: text(page.page), revision: Number(page.shown_revision || 0) };
     state.selected = state.selectedPage.space + "/" + state.selectedPage.page;
     renderList();
     const message = element(document, "div", "knowledge-message");
@@ -546,15 +592,20 @@ export function createKnowledgePage({
     state.message = message;
   }
 
-  function openPage(space, page, { revision = 0 } = {}) {
-    state.selectedPage = { space, page };
+  function openPage(space, page, { revision = 0, home = false, history = "push" } = {}) {
+    state.selectedPage = { space, page, revision, home };
     state.selected = space + "/" + page;
+    remember({ space, page, revision }, history);
     const params = revision ? { revision: String(revision) } : {};
-    const isCurrent = replaceViewer("Loading…", "", [], []);
+    const isCurrent = replaceViewer(home ? "Home" : "Loading…", "", [], []);
     return get(pagePath(space, page), params, "The page could not be loaded.")
       .then(payload => { if (isCurrent()) showPage(payload.page); })
       .catch(error => {
         if (!isCurrent()) return;
+        if (home && error.code === "not_found") {
+          missingHome();
+          return;
+        }
         const message = element(document, "div", "knowledge-message");
         nodes.viewer.replaceChildren(message);
         nodes.viewerTitle.textContent = "The page could not be loaded";
@@ -652,16 +703,20 @@ export function createKnowledgePage({
   }
 
   /** Edit (or Restore) `page`, or write a new page when `page` is null. */
-  function openEditor(page) {
+  function openEditor(page, { home = false } = {}) {
     const creating = !page;
     const space = creating ? (state.tab === TABS.PERSONAL ? TABS.PERSONAL : TABS.TEAM) : page.space;
     const heading = creating ? (space === TABS.TEAM ? "New team page" : "New personal page") : "";
-    const editor = pageEditor(document, page || {}, { saveLabel: creating ? "Create page" : "Save", heading });
+    const initial = home ? { title: "Home", body: "## Start here\n\nAdd links to your topic pages here." } : {};
+    const editor = pageEditor(document, page || initial, { saveLabel: creating ? "Create page" : "Save", heading });
+    // The ordinary title-derived slug is `home`; editing its text later uses
+    // the same revision checks and permissions as any other article.
+    if (home) editor.title.readOnly = true;
     editor.baseRevision = creating ? 0 : Number(page.revision);
     const isCurrent = replaceViewer(creating ? heading : "Editing " + text(page.title),
       creating ? "The page's name is made from its title." : pageMeta(page), [], [editor.form]);
     editor.cancel.addEventListener("click", () => {
-      if (creating) emptyViewer();
+      if (creating) openHome();
       else openPage(page.space, page.page);
     });
     const save = confirmReview => {
@@ -675,6 +730,7 @@ export function createKnowledgePage({
         .then(payload => {
           if (!isCurrent()) return;
           showPage(payload.page, creating ? "Page created." : "Saved.");
+          remember({ space: payload.page.space, page: payload.page.page }, "replace");
           loadList(creating ? 0 : state.offset);
         })
         .catch(error => {
@@ -805,7 +861,8 @@ export function createKnowledgePage({
     isCurrent = replaceViewer(text(proposal.title), proposalMeta(proposal), proposalTools(proposal, message, current), content);
   }
 
-  function openProposal(contributionId) {
+  function openProposal(contributionId, { history = "push" } = {}) {
+    remember({ proposal: contributionId }, history);
     const isLoading = replaceViewer("Loading…", "", [], []);
     return get(`${KNOWLEDGE_API}/contributions/${encodeURIComponent(contributionId)}`, {}, "The proposal could not be loaded.")
       .then(payload => { if (isLoading()) showProposal(payload.contribution); })
@@ -832,6 +889,8 @@ export function createKnowledgePage({
   nodes.tabs.team.addEventListener("click", () => switchTab(TABS.TEAM));
   nodes.tabs.personal.addEventListener("click", () => switchTab(TABS.PERSONAL));
   nodes.tabs.proposals.addEventListener("click", () => switchTab(TABS.PROPOSALS));
+  nodes.homeButton.addEventListener("click", () => openHome());
+  nodes.browseButton.addEventListener("click", () => setDirectory(!state.directory));
   nodes.searchForm.addEventListener("submit", event => {
     event.preventDefault();
     state.query = String(nodes.searchInput.value || "").trim();
@@ -851,15 +910,51 @@ export function createKnowledgePage({
     if (!isProposals()) proposalCount.refresh();
     // An open editor keeps what the person typed; only the list reloads.
     if (editorOpen() || !state.selected) return;
-    if (state.selectedPage) openPage(state.selectedPage.space, state.selectedPage.page);
-    else if (isProposals()) openProposal(state.selected);
+    if (state.selectedPage) openPage(state.selectedPage.space, state.selectedPage.page, { ...state.selectedPage, history: "none" });
+    else if (isProposals()) openProposal(state.selected, { history: "none" });
   });
 
+  function restoreAddress() {
+    const address = readKnowledgeAddress(browser.location);
+    if (address.tab !== state.tab) {
+      state.generation += 1;
+      Object.assign(state, { query: "", pageStatus: "active", offset: 0, total: 0, rows: [], directory: false });
+      nodes.searchInput.value = "";
+      nodes.pageStatus.value = "active";
+      setTab(address.tab);
+      renderList();
+      loadList(0);
+    }
+    if (isProposals() && !address.article) {
+      state.selected = "";
+      state.selectedPage = null;
+      if (address.proposal) openProposal(address.proposal, { history: "none" });
+      else emptyViewer();
+    } else {
+      openPage(address.space, address.page, { revision: address.revision,
+        home: address.page === HOME_PAGE && !address.revision, history: "none" });
+    }
+  }
+
+  browser.addEventListener("popstate", () => { if (state.active) restoreAddress(); }, { signal });
+  // A page restored from the browser cache mounts fresh controls. Retire the
+  // old history listener and pending reads without changing its saved address.
+  signal?.addEventListener("abort", () => {
+    state.active = false;
+    state.session += 1;
+    state.generation += 1;
+    state.view += 1;
+    proposalCount.stop();
+    client.invalidateSession();
+  }, { once: true });
+
   return {
-    /** Opens the page on Team with the first page of the list, and keeps the proposals badge current. */
+    /** Opens the addressed article, or Home, and keeps the proposals badge current. */
     load() {
+      state.active = true;
+      state.tab = readKnowledgeAddress(browser.location).tab;
       setTab(state.tab);
-      emptyViewer();
+      restoreAddress();
       proposalCount.start();
       return loadList(0);
     },
@@ -869,18 +964,22 @@ export function createKnowledgePage({
     switchTab,
     /** Sign-out: back to Team with nothing shown. */
     clear() {
+      const wasActive = state.active;
       proposalCount.stop();
       client.invalidateSession();
       state.generation += 1;
       state.session += 1;
       Object.assign(state, { tab: TABS.TEAM, pageStatus: "active", query: "", offset: 0, total: 0, rows: [],
-        selected: "", selectedPage: null, message: null });
+        selected: "", selectedPage: null, message: null, directory: false, active: false });
       setTab(TABS.TEAM);
       nodes.list.replaceChildren();
+      nodes.pagination.replaceChildren();
+      nodes.pagination.hidden = true;
       nodes.searchInput.value = "";
       nodes.pageStatus.value = state.pageStatus;
       replaceViewer("Select a page", "", [], []);
       setPageStatus("", false);
+      if (wasActive) remember({ space: TABS.TEAM, page: HOME_PAGE }, "replace");
     },
   };
 }

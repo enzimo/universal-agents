@@ -19,6 +19,17 @@ from typing import Any
 KNOWLEDGE_PREFIX = "/api/web-chat/knowledge"
 
 _PAGES: dict[str, dict[str, Any]] = {
+    "home": {
+        "title": "Home",
+        "page_type": "reference",
+        "summary": "Start here to find the team's guides and references.",
+        "tags": [],
+        "revision": 1,
+        "body": "## Shipping software\n\n- [[release-process|Release process]]\n- [[ci-pipeline|CI pipeline]]\n\n"
+        "## Operations\n\n- [[on-call-handbook|On-call handbook]]",
+        "updated_at_utc": "2026-10-11T09:00:00Z",
+        "last_editor": {"kind": "person", "label": "You"},
+    },
     "release-process": {
         "title": "Release process",
         "page_type": "how-to",
