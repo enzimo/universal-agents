@@ -62,9 +62,20 @@ def remove(path: Path) -> None:
         path.unlink()
     elif path.exists():
 
-        def writable(func, name, _error):
-            os.chmod(name, 0o700)
-            func(name)
+        def writable(func, name, error):
+            # A cancelled child's shutdown may remove its temporary lock after
+            # rmtree enumerates it. Missing entries already satisfy cleanup.
+            if isinstance(error[1], FileNotFoundError):
+                return
+            # Only retry deletions of read-only entries. Retrying a failed
+            # traversal would not resume rmtree and could hide its real error.
+            if not isinstance(error[1], PermissionError) or func not in (os.unlink, os.rmdir):
+                raise error[1]
+            try:
+                os.chmod(name, 0o700)
+                func(name)
+            except FileNotFoundError:
+                return
 
         shutil.rmtree(path, onerror=writable)
 
@@ -95,13 +106,22 @@ def cleanup(config: dict, *, before_job: bool = False) -> None:
         selector = f"label={LABEL}={job_id}"
         for container in docker("ps", "-aq", "--filter", selector).split():
             docker("rm", "--force", "--volumes", container)
+        # --volumes on container removal removes anonymous volumes only. Named
+        # test volumes and private test networks need their own exact-job sweep.
+        for volume in docker("volume", "ls", "-q", "--filter", selector).split():
+            docker("volume", "rm", volume)
+        for network in docker("network", "ls", "-q", "--filter", selector).split():
+            docker("network", "rm", network)
         for image in set(docker("image", "ls", "-q", "--filter", selector).split()):
             docker("image", "rm", image)
         # Buildx has already run its post hook in the normal completion path.
         # After interruption, remove only the builder recorded for this job.
-        builders = docker("buildx", "ls", "--format", "{{.Name}}")
-        if f"ua-ci-{job_id}" in builders.splitlines():
-            docker("buildx", "rm", "--force", f"ua-ci-{job_id}")
+        # A non-build job need not have the Buildx plugin. Its private state
+        # contains this file only if the job actually created its owned builder.
+        builder = f"ua-ci-{job_id}"
+        instance = state / "cache" / "docker" / "buildx" / "instances" / builder
+        if instance.is_file():
+            docker("buildx", "rm", "--force", builder)
         if config.get("colima_profile"):
             run("colima", "--profile", config["colima_profile"], "ssh", "--",
                 "sudo", "fstrim", "/var/lib/docker", cwd="/")
@@ -181,6 +201,7 @@ def begin(config: dict) -> None:
         (cache / directory).mkdir()
     env = {
         "UA_CI_HOOK_VERSION": VERSION,
+        "UA_CI_DOCKER_RESOURCES_VERSION": "1",
         "UA_CI_PYTHON": sys.executable,
         "UA_CI_ID": job_id,
         "UA_CI_CACHE": str(cache),

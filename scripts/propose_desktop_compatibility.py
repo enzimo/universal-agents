@@ -15,8 +15,8 @@ order and are only ever appended. This script, run by
    request, reusing that branch and an open pull request when they exist.
 
 The launcher repository's own check verifies the digest against the release's
-``container-image.txt`` and that the UA files defining the contract did not
-change, then merges the pull request. Only that check decides compatibility;
+``container-image.txt`` and exercises the published image against the desktop
+contract on native AMD64 and ARM64, then merges the pull request. Only that check decides compatibility;
 this script just proposes the entry.
 
 All GitHub calls go through ``gh api``, which reads its token from
@@ -155,7 +155,7 @@ def pull_request_body(
         f"the newest listed version (UA {newest}).\n\n"
         "This repository's compatibility check verifies two things:\n\n"
         "- the image digest below matches the `container-image.txt` attached to the UA release;\n"
-        f"- the UA files that define host contract {contract} are unchanged since UA {newest}.\n\n"
+        f"- the published image passes host contract {contract} runtime tests on native AMD64 and ARM64.\n\n"
         "If both pass, the check merges this pull request automatically. If either fails, "
         "the pull request stays open for a person to review.\n\n"
         f"UA release: {release_url}\n\n"
