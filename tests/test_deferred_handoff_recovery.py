@@ -20,7 +20,7 @@ from custom_messages.enums import (
     TaskQueryDecision,
     TaskQueryReason,
 )
-from storage.runtime_state_repository import RuntimeCustodyLost
+from storage.runtime_custody import RuntimeCustodyLost
 from tests.test_custody_loss import OLD, NEW, admit, holders, inbox_for, manager
 from tests.test_deferred_message_inbox import _envelope
 from tests.test_turn_action_outbox import _add_active_parent_task, _make_agent, _make_task_manager

@@ -28,7 +28,8 @@ from custom_messages.enums import MessageMetaType, ScheduleManagementClass
 
 from storage.agent_launch_repository import AgentLaunchRepository, LaunchCapacity, LaunchConflict
 from storage.config import resolve_storage_settings
-from storage.runtime_state_repository import RuntimeCustodyLost, create_runtime_state_repository
+from storage.runtime_custody import RuntimeCustodyLost
+from storage.runtime_state_repository import create_runtime_state_repository
 from storage.schedule_worker_repository import ScheduleWorkerConflict
 from tests.runtime_snapshot_fixtures import snapshot_json
 

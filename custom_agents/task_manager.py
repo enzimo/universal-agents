@@ -101,7 +101,7 @@ from default_values import STORAGE_DEFAULTS
 from id_generation import new_id
 from storage.after_action_report_repository import create_after_action_report_repository
 from storage.config import StorageSettings, resolve_storage_settings
-from storage.runtime_state_repository import CustodyStore, RuntimeCustodyLost
+from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 from storage.durable_owner_scope_repository import (
     create_durable_owner_scope_repository,
 )

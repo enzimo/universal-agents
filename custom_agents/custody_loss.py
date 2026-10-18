@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from custom_agents.provider_error_runtime import iter_exception_chain
-from storage.runtime_state_repository import CustodyStore, RuntimeCustodyLost
+from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 
 
 # Stops a running turn: control_runtime._interrupt_active_execution, passed in by

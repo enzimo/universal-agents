@@ -34,7 +34,7 @@ from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import decode_runtime_snapshot
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState
-from storage.runtime_state_repository import CustodyStore, RuntimeCustodyLost, RuntimeRecoveryConflict
+from storage.runtime_custody import CustodyStore, RuntimeCustodyLost, RuntimeRecoveryConflict
 from tests.test_deferred_message_inbox import _envelope
 
 OLD, NEW = "startup_old", "replacement"

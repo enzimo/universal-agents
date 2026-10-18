@@ -17,11 +17,8 @@ import pytest
 from tests.runtime_snapshot_fixtures import seed_deferred, snapshot_json
 
 from storage.config import resolve_storage_settings
-from storage.runtime_state_repository import (
-    RuntimeCustodyLost,
-    RuntimeRecoveryConflict,
-    create_runtime_state_repository,
-)
+from storage.runtime_custody import RuntimeCustodyLost, RuntimeRecoveryConflict
+from storage.runtime_state_repository import create_runtime_state_repository
 
 
 @pytest.fixture(params=["sqlite", pytest.param("postgres", marks=[pytest.mark.live, pytest.mark.postgres])])

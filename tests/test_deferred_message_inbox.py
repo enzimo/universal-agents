@@ -17,10 +17,8 @@ from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
-from storage.runtime_state_repository import (
-    RuntimeRecoveryConflict,
-    SqliteRuntimeStateRepository,
-)
+from storage.runtime_custody import RuntimeRecoveryConflict
+from storage.runtime_state_repository import SqliteRuntimeStateRepository
 
 
 @pytest.mark.asyncio

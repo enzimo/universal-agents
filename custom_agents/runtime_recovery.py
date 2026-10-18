@@ -13,7 +13,7 @@ from custom_agents.task_human_interaction_blockers import (
 from custom_agents.task_manager import TaskInfo
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.enums import ProgressState, TaskHistoryImportance, TaskHistoryType, TaskQueryDecision
-from storage.runtime_state_repository import CustodyStore, RuntimeRecoveryConflict
+from storage.runtime_custody import CustodyStore, RuntimeRecoveryConflict
 
 
 def should_fail_stale_executing_recovery(
