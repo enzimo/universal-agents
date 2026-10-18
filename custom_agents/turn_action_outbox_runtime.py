@@ -1182,6 +1182,10 @@ async def _execute_turn_action_record(
         # Published on an earlier attempt; a later step failed. Only the steps
         # after publishing run again: publishing again could fail and end a
         # task a worker may already run (2026-10-18).
+        await self.task_manager.operations_runtime.run(
+            self.task_manager.mark_turn_action_record, record_id,
+            status="dispatching", phase="publish", increment_attempt=True,
+        )
         return await _complete_published_delegation(self, record=record, action=action)
 
     if isinstance(action, TaskResponseAction) and isinstance(incoming_content, Task):

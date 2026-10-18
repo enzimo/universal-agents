@@ -522,13 +522,17 @@ class _RelationalRuntimeStateRepository:
             with self._connect() as conn:
                 self._begin_recovery(conn)
                 row = conn.execute(
-                    f"SELECT runtime_state_json FROM active_task_runtime WHERE owner_agent_id = {bind}{self._recovery_lock_clause}",
+                    f"SELECT runtime_state_json, team_id FROM active_task_runtime WHERE owner_agent_id = {bind}{self._recovery_lock_clause}",
                     (owner_agent_id,),
                 ).fetchone()
                 if row is None:
                     raise RuntimeCustodyLost(owner_agent_id, CustodyStore.TASK_RUNTIME)
                 if task.task_id not in parse_storage_header(row[0])["task_order"]:
                     raise RuntimeRecoveryConflict("Task history requires existing durable task custody")
+                if row[1]:
+                    self._refuse_taken_over_tasks(
+                        conn, records, {task.task_id}, owner_agent_id=owner_agent_id, team_id=row[1],
+                    )
                 if deferred_message_id is not None:
                     check_deferred_message(
                         conn, self._dialect, DeferredMessageClaim(owner_agent_id, deferred_message_id),
@@ -538,6 +542,8 @@ class _RelationalRuntimeStateRepository:
                 conn.execute(f"UPDATE active_task_runtime SET updated_at = {bind} WHERE owner_agent_id = {bind}",
                              (datetime.now(timezone.utc).isoformat(), owner_agent_id))
                 conn.commit()
+        except TaskCustodyTakenOver:
+            raise  # the coordinator releases this task and logs the refusal
         except RuntimeCustodyLost as lost:
             # The coordinator knows whether this owner ever saved and logs which case it is.
             self._logger.warning(

@@ -183,7 +183,10 @@ each. They run in parallel on as many workers as the team allows:
   when a later step fails (for example storing the stream sequence), the retry
   runs only the steps after publishing and never publishes or cancels the task
   again; before 2026-10-18 a failed second publish could end with the cleanup
-  cancelling a task a worker was already running. As a safeguard, the
+  cancelling a task already waiting in NATS. Retrying the steps after publishing
+  still counts toward the automatic retry limit, so a persistent database error
+  goes to the normal recovery path without cancelling the published task.
+  As a safeguard, the
   watchdog checks and times out a "waiting" record without a stream sequence once
   no outbox action is still trying to publish it
   (`event=delegated_record_never_published`); the record's age alone misjudged a
@@ -218,6 +221,11 @@ each. They run in parallel on as many workers as the team allows:
   (`event=task_custody_released_elsewhere`). The old holder never claims such a
   task afresh, because that would run it beside the copy the lead sends again;
   a task an operator retired from the taker is abandoned on purpose.
+  Task-sized history and result writes check the same custody rule as full
+  snapshots, while requester-side delegation records remain the requester's
+  to update. A mutation whose save releases its task reports that it did not
+  commit; state changes then skip terminal callbacks and projection records,
+  so an old holder never recreates records or reports an ending for released work.
   The save checks this after its own-row check and before the deferred
   message's exact-message check, so a refused save consumes no deferred
   message; the save that follows, without the taken task, does. A released

@@ -399,7 +399,6 @@ def transfer_on_recovery(
     adopted = sorted(set(adopted_task_ids))
     now = _now()
     for task_id in adopted:
-        _refuse_finished(conn, dialect, team_id=team_id, task_id=task_id)
         # Rows from before custody existed are created here, so a recovered
         # task is protected from its first save on. The update applies only to
         # a row the sources or the replacement hold: an agent that claimed the
@@ -414,6 +413,10 @@ def transfer_on_recovery(
         if written.rowcount != 1:
             row = read_rows(conn, dialect, team_id, [task_id]).get(task_id)
             raise TaskCustodyConflict(task_id, row.holder_agent_id if row else "unknown")
+        # Acquire the custody row before reading completion. PostgreSQL may
+        # admit and finish a task while recovery waits to insert or update its
+        # row; a pre-acquisition read would miss that completed task.
+        _refuse_finished(conn, dialect, team_id=team_id, task_id=task_id)
     held = conn.execute(
         f"SELECT task_id FROM {CUSTODY_TABLE} WHERE team_id = {bind} AND holder_agent_id IN ({owner_binds})",
         (team_id, *owners),

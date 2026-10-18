@@ -23,6 +23,7 @@ from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import RuntimeSnapshotV3, TaskSnapshotRecord
 from custom_messages.contracts.task_v1 import Task
+from custom_messages.records.task_results import TaskResultUpdate
 from custom_messages.enums import MessageMetaType, ProgressState
 from storage.config import resolve_storage_settings
 from storage.runtime_snapshot_layout import canonical_json
@@ -435,6 +436,92 @@ def test_an_old_holder_drops_a_task_its_taker_already_gave_up(tmp_path, caplog, 
     expected = "event=task_custody_finished_elsewhere" if taker_finishes else "event=task_custody_released_elsewhere"
     assert expected in caplog.text
     assert original.runtime_state_store.get_task_custody("team", ["t"]) == {}  # never claimed again
+
+
+@pytest.mark.parametrize("taker_finished", [False, True])
+@pytest.mark.parametrize("operation", ["transition", "fail", "complete", "cancel", "history", "result"])
+def test_a_released_task_cannot_commit_a_mutation_or_terminal_effect(tmp_path, operation, taker_finished):
+    """Every task write detects transfer and tells its caller the write did not commit."""
+    original, taker = _manager(tmp_path, "original"), _manager(tmp_path, "taker")
+    _admit(original, "taken")
+    _admit(original, "kept")
+    _admit(taker, "taken", takeover_from="original")
+    if taker_finished:
+        taker.complete_task("taken", _iso())
+    ended, released = [], []
+    original.add_task_terminal_callback(lambda *args: ended.append(args))
+    original.set_custody_lost_listener(released.append)
+    operations = {
+        "transition": lambda: original.try_transition_task_state(
+            "taken", allowed_from={ProgressState.ACCEPTED}, to_state=ProgressState.WAITING,
+            timestamp=_iso(), reason="Wait for work",
+        ),
+        "fail": lambda: original.fail_task("taken", "Late failure", _iso()),
+        "complete": lambda: original.complete_task("taken", _iso()),
+        "cancel": lambda: original.cancel_task("taken", "Late cancellation", _iso()),
+        "history": lambda: original.append_history_entry("taken", "Late history"),
+        "result": lambda: original.update_task_result("taken", TaskResultUpdate(answer="Late answer")),
+    }
+    outcome = operations[operation]()
+    assert outcome == ([] if operation == "complete" else None if operation in {"history", "result"} else False)
+    assert released == [("taken",)] and ended == []
+    assert original.get_task_info("taken") is None and original.get_task_info("kept") is not None
+    saved = RuntimeSnapshotV3.model_validate_json(
+        original.runtime_state_store.load_task_runtime_by_owner("original")[0].runtime_state_json,
+    )
+    assert all(record.task_id != "taken" for record in saved.task_state_projection_records.values())
+    archived = original.get_task_from_db("taken", include_all_agents=True)
+    assert (archived["owner_agent_id"] if archived else None) == ("taker" if taker_finished else None)
+
+
+def test_a_partial_write_keeps_a_requesters_delegation_record(store):
+    """A requester records child progress while its worker holds that child's custody."""
+    requester, worker, _replacement = store.owners
+    parent, child = store.task("parent"), store.task("child")
+    _save(store, requester, _snapshot(parent, child, delegated={child: parent}))
+    _save(store, worker, _snapshot(child))
+    record = RuntimeSnapshotV3.model_validate_json(_snapshot(child)).tasks[0]
+    record.task.problem_statement = "Updated delegated work"
+    store.repo.save_task_runtime_task(
+        owner_agent_id=requester, task=record,
+        task_plan_links={}, task_objective_links={}, plan_objective_links={},
+    )
+    saved = RuntimeSnapshotV3.model_validate_json(store.repo.load_task_runtime_by_owner(requester)[0].runtime_state_json)
+    assert next(item for item in saved.tasks if item.task_id == child).task.problem_statement == "Updated delegated work"
+    assert _holder(store, child) == worker and _holder(store, parent) == requester
+
+
+@pytest.mark.parametrize("save_number", [1, 2])
+def test_transition_reports_a_transfer_during_either_full_save(tmp_path, monkeypatch, save_number):
+    """Transfer after the history save or after the transition, before projection commits."""
+    original, taker = _manager(tmp_path, "original"), _manager(tmp_path, "taker")
+    _admit(original, "taken")
+    _admit(original, "kept")
+    save = original._persist_runtime_state
+    calls = 0
+
+    def save_after_transfer(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == save_number:
+            _admit(taker, "taken", takeover_from="original")
+        return save(**kwargs)
+
+    monkeypatch.setattr(original, "_persist_runtime_state", save_after_transfer)
+    coordinator = original.runtime_operations_coordinator
+    monkeypatch.setattr(coordinator, "operations", replace(
+        coordinator.operations, persist_runtime_state=save_after_transfer,
+    ))
+    assert not original.try_transition_task_state(
+        "taken", allowed_from={ProgressState.ACCEPTED}, to_state=ProgressState.WAITING,
+        timestamp=_iso(), reason="Wait for work",
+    )
+    assert calls == save_number
+    assert original.get_task_info("taken") is None and original.get_task_info("kept") is not None
+    saved = RuntimeSnapshotV3.model_validate_json(
+        original.runtime_state_store.load_task_runtime_by_owner("original")[0].runtime_state_json,
+    )
+    assert all(record.task_id != "taken" for record in saved.task_state_projection_records.values())
 
 
 @pytest.mark.asyncio
@@ -855,6 +942,63 @@ async def test_a_copy_whose_holder_released_it_before_the_takeover_is_never_clai
     )
     if expected_event:
         assert any(expected_event in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.live
+@pytest.mark.postgres
+@pytest.mark.parametrize("store", ["postgres"], indirect=True)
+def test_postgres_recovery_checks_completion_after_acquiring_custody(store, monkeypatch):
+    """A taker can finish after recovery's archive read but before its upsert.
+
+    The real transactions use separate connections. Delay the upsert until the
+    taker has archived and released the task; recovery must then roll back.
+    """
+    from storage import task_custody_repository as custody
+    from storage.task_archive_repository import create_task_archive_repository
+
+    a, b, replacement = store.owners
+    work, next_work = store.task("work"), store.task("next")
+    archive = create_task_archive_repository(store.settings)
+    # A pre-custody snapshot has no task row for recovery to lock or move.
+    store.repo.save_task_runtime(
+        owner_agent_id=a, owner_agent_name=a, team_id=None, owner_named_agent_type="Worker",
+        runtime_state_json=_snapshot(work), expect_existing=False,
+    )
+    sources = store.repo.load_task_runtime_by_owner(a)
+    real_transfer = custody.transfer_on_recovery
+    raced = False
+
+    class DelayedClaim:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, query, params=()):
+            nonlocal raced
+            if not raced and query.startswith(f"INSERT INTO {custody.CUSTODY_TABLE}"):
+                raced = True
+                _save(store, b, _snapshot(work))
+                archive.save_completed_task(
+                    archive_id=f"archive_{work}", task_id=work, owner_agent_id=b,
+                    owner_agent_name=b, team_id=store.team,
+                    task_json=Task(
+                        task_id=work, task_type=MessageMetaType.REQUEST, problem_statement="w",
+                    ).model_dump_json(), status="completed",
+                )
+                _save(store, b, _snapshot(next_work))
+            return self.connection.execute(query, params)
+
+    def delayed_transfer(connection, dialect, **kwargs):
+        return real_transfer(DelayedClaim(connection), dialect, **kwargs)
+
+    monkeypatch.setattr(custody, "transfer_on_recovery", delayed_transfer)
+    with pytest.raises(RuntimeRecoveryConflict, match="already finished"):
+        store.repo.commit_task_runtime_recovery(
+            sources=sources, replacement=replace(sources[0], owner_agent_id=replacement, team_id=store.team),
+        )
+    assert raced
+    assert _holder(store, work) is None
+    assert store.repo.load_task_runtime_by_owner(a)
+    assert store.repo.load_task_runtime_by_owner(replacement) == []
 
 
 @pytest.mark.live

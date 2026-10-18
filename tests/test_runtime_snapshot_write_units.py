@@ -156,3 +156,31 @@ def test_former_owner_cannot_recreate_custody_with_a_history_write(manager):
         repo.load_task_runtime_by_owner(owner + "_replacement")[0].runtime_state_json
         == before[0].runtime_state_json
     )
+
+
+@pytest.mark.parametrize("taker_finished", [False, True])
+def test_partial_write_releases_only_a_task_that_moved_elsewhere(manager, taker_finished):
+    """Partial writes enforce per-task custody on both database backends."""
+    from datetime import datetime, timezone
+
+    owner = manager.identity.owner_agent_id
+    taker = TaskManager(storage_settings=manager.storage_settings, db_path=manager.storage_settings.sqlite_path or "unused.db")
+    taker.set_owner_identity(owner + "_taker", "Taker", manager.identity.team_id, "Worker")
+    info = manager.get_task_info("small")
+    released = []
+    manager.set_custody_lost_listener(released.append)
+    try:
+        assert taker.add_task(
+            info.task.model_copy(deep=True), info.header, info.meta,
+            owner_person_id=None, custody_takeover_from=owner,
+        )
+        if taker_finished:
+            taker.complete_task("small", datetime.now(timezone.utc).isoformat())
+        assert manager.append_history_entry("small", "A stale owner's late result") is None
+        assert released == [("small",)]
+        assert manager.get_task_info("small") is None
+        assert manager.get_task_info("large") is not None
+        saved = json.loads(manager.runtime_state_store.load_task_runtime_by_owner(owner)[0].runtime_state_json)
+        assert [task["task_id"] for task in saved["tasks"]] == ["large"]
+    finally:
+        taker.runtime_state_store.clear_task_runtime(taker.identity.owner_agent_id)

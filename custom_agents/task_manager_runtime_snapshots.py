@@ -261,9 +261,10 @@ class RuntimeSnapshotCoordinator:
                 taken.owner_agent_id, given_up,
             )
 
-    def persist_task_history(self, task_id: str) -> None:
+    def persist_task_history(self, task_id: str) -> bool:
+        """Save this task's mutation; False means it moved elsewhere and was released."""
         if not self.identity.owner_agent_id:
-            return
+            return True
         handoff = pending_deferred_handoff()
         try:
             if handoff is not None and isinstance(handoff.failure, RuntimeCustodyLost):
@@ -276,7 +277,11 @@ class RuntimeSnapshotCoordinator:
                 plan_objective_links=self.objective_state.plan_to_objective_id if self.operations.objectives_enabled() else {},
                 deferred_message_id=None if handoff is None else handoff.message_id,
             )
-            return
+            return True
+        except TaskCustodyTakenOver as taken:
+            self._release_taken_tasks(taken)
+            self._persist_runtime_state()
+            return False
         except RuntimeCustodyLost as lost:
             if handoff is not None:
                 handoff.failure = lost

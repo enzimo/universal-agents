@@ -399,7 +399,9 @@ class TaskManager(
             deep=True,
         )
         try:
-            self.runtime_snapshot_coordinator.persist_task_history(task_id)
+            if not self.runtime_snapshot_coordinator.persist_task_history(task_id):
+                info.task = previous
+                return None
         except Exception:
             info.task = previous
             raise
@@ -1806,7 +1808,9 @@ class TaskManager(
         entry.plan_id = plan_id
         task_info.task.execution_history.append(entry)
         try:
-            self.runtime_snapshot_coordinator.persist_task_history(task_id)
+            if not self.runtime_snapshot_coordinator.persist_task_history(task_id):
+                task_info.task.execution_history.remove(entry)
+                return None
         except Exception:
             task_info.task.execution_history.remove(entry)
             raise
@@ -3548,6 +3552,8 @@ class TaskManager(
             timestamp=timestamp,
             details={"from_state": previous_state.value, "to_state": new_state.value},
         )
+        if self.get_task_info(task_id) is not task_info:
+            return False
 
         is_top_level = task_info.task.parent_task_id is None
         is_locally_executable = self.is_locally_executable_task(task_id)
@@ -3606,6 +3612,10 @@ class TaskManager(
 
         self._sync_plan_from_task(task_id, create=False)
         self._persist_runtime_state()
+        # Saving may release just this task while successfully saving the rest.
+        # Its old holder must then skip terminal effects and report no transition.
+        if self.get_task_info(task_id) is not task_info:
+            return False
         if self.is_terminal_state(new_state) and not self.is_terminal_state(
             previous_state
         ):

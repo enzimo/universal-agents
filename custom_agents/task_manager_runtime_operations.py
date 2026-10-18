@@ -605,7 +605,7 @@ class RuntimeOperationsCoordinator:
         )
         self.execution_state.task_state_projection_records[projection.projection_id] = projection
         self.operations.persist_runtime_state()
-        return True
+        return self.operations.get_task_info(task_id) is task_info
 
     def project_task_state_after_batch(
         self,
