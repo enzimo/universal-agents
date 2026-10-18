@@ -1238,13 +1238,28 @@ that leads to it (owner's request 2026-10-12).
 `/webchat?view=knowledge` is **Knowledge**: the team's and the person's own
 knowledge pages. It applies the existing rules; it adds none.
 
-- Frame: the Workspace Files frame (brand lockup, kicker and title
-  out**, the reserved status slot), then Memories-style tabs **Team**,
-  **Personal** and **My proposals**, then the Workspace two-pane layout: a
-  search box and list on the left, one viewer on the right. Narrow screens
-  stack them as Workspace Files does. **My proposals** carries the count of
+- Frame: the Workspace Files frame with brand lockup, kicker and title,
+  **New page**, **Refresh**, **Log out** and the reserved status slot, then Memories-style tabs **Team**,
+  **Personal** and **My proposals** with **Home** and **All pages** navigation.
+  Each space opens its ordinary `home` article in a full-width reader. This
+  article is the editable wiki landing page; its topic links provide the main
+  reading path. If absent, explain how to create it and offer **Create Home
+  page** and **All pages**. Opening Knowledge never creates or rewrites content.
+  Home creation fixes the title to **Home** so its normal title-derived name
+  is `home`; it uses the ordinary page editor, permissions and revision checks.
+  **All pages** reveals the Workspace two-pane layout: a search box and page
+  directory on the left, one viewer on the right. It toggles closed without
+  replacing the article. **Home** closes the directory and opens that space's
+  landing article. Narrow screens stack the directory and viewer as Workspace
+  Files does. **My proposals** carries the count of
   proposals waiting for this person (see **Attention counts**).
-- Lists: 20 rows per page with the shared `pagination.js` controls, the
+- Lists: 20 rows per page with the shared `pagination.js` controls and a
+  visible range and total in a separate footer below the scrolling rows. Rows
+  must keep their full height; shrinking a grid child with `overflow: hidden`
+  clips the rows without making its parent scroll. Reaching the twentieth row
+  and the pagination footer must be checked in a real browser with long lists.
+  Page changes reset list scrolling; if a removal empties the final page, read
+  the last remaining page. Use the
   standard opaque row stripes, and the selected row marked by its left edge
   and `aria-current`. Each row shows the title, the summary or search snippet,
   and the local change time. Below search, a full-width select uses the existing
@@ -1260,6 +1275,12 @@ knowledge pages. It applies the existing rules; it adds none.
   "(no page yet)". Archived and
   frozen states, proposals waiting for this person, and "<old name> was merged
   into this page" are plain notice lines. Notes, revisions and links reuse the Memories row and tag styles.
+  Article addresses keep the selected space, full page reference and optional
+  revision in the URL. Reload and browser Back/Forward reopen that article
+  through the normal authenticated API. Creating an article preserves the
+  previous article in browser history; editing keeps the same entry. After
+  reverting, the address opens the new current revision. The URL names no person. Sign-out
+  clears the reader, directory and pagination and resets the address to Team Home.
 - Editing: the Memories inline editor (title, summary, tags, text) inside the
   viewer, with **Save**/**Create page** and **Cancel**. Results and refusals
   follow **Errors and Results**: at the top of the editor, scrolled into view,

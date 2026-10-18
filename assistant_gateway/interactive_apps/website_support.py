@@ -138,6 +138,7 @@ WEB_CHAT_MODULE_ASSETS = (
     "status_page.mjs",
     "knowledge_page.mjs",
     "knowledge_render.mjs",
+    "knowledge_navigation.mjs",
     "activity_mesh.mjs",
     "team_activity.mjs",
 )

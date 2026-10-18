@@ -162,7 +162,7 @@ export function pageEditor(document, page, { saveLabel = "Save", heading = "" } 
     actions,
   );
   return {
-    form, message, actions, save, cancel,
+    form, message, actions, save, cancel, title,
     values() {
       return {
         title: String(title.value || "").trim(), summary: String(summary.value || "").trim(),

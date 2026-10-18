@@ -202,7 +202,7 @@
         <div class="workspace-heading">
           <p class="page-kicker">Knowledge</p>
           <h1 id="knowledge-title">Knowledge</h1>
-          <p>Pages you and your agents write together: how-tos, decisions, lessons and references. Team pages are for everyone on the team; personal pages are only for you and the agents working for you.</p>
+          <p>Team pages are shared. Personal pages are for you and the agents working for you.</p>
         </div>
         <div class="workspace-actions">
           <button id="knowledge-new" class="button primary" type="button">New page</button>
@@ -213,13 +213,19 @@
       <div class="settings-status-slot workspace-status-slot">
         <p id="knowledge-status" class="settings-status" role="status" aria-live="polite" hidden></p>
       </div>
-      <nav class="permission-tabs knowledge-tabs" aria-label="Knowledge views" role="tablist">
-        <button id="knowledge-team-tab" class="permission-tab is-active" type="button" role="tab" aria-selected="true">Team</button>
-        <button id="knowledge-personal-tab" class="permission-tab" type="button" role="tab" aria-selected="false">Personal</button>
-        <button id="knowledge-proposals-tab" class="permission-tab" type="button" role="tab" aria-selected="false">My proposals <span id="knowledge-proposals-count" class="settings-tab-count" hidden></span></button>
-      </nav>
-      <div class="workspace-layout knowledge-layout">
-        <aside class="workspace-browser-pane knowledge-list-pane" aria-label="Knowledge list">
+      <div class="knowledge-navigation">
+        <nav class="permission-tabs knowledge-tabs" aria-label="Knowledge views" role="tablist">
+          <button id="knowledge-team-tab" class="permission-tab is-active" type="button" role="tab" aria-selected="true">Team</button>
+          <button id="knowledge-personal-tab" class="permission-tab" type="button" role="tab" aria-selected="false">Personal</button>
+          <button id="knowledge-proposals-tab" class="permission-tab" type="button" role="tab" aria-selected="false">My proposals <span id="knowledge-proposals-count" class="settings-tab-count" hidden></span></button>
+        </nav>
+        <nav class="knowledge-browse-actions" aria-label="Knowledge navigation">
+          <button id="knowledge-home" class="button ghost" type="button">Home</button>
+          <button id="knowledge-browse" class="button secondary" type="button" aria-expanded="false" aria-controls="knowledge-directory">All pages</button>
+        </nav>
+      </div>
+      <div id="knowledge-layout" class="workspace-layout knowledge-layout is-reading">
+        <aside id="knowledge-directory" class="workspace-browser-pane knowledge-list-pane" aria-label="Knowledge list" hidden>
           <form id="knowledge-search" class="knowledge-search" role="search">
             <label class="sr-only" for="knowledge-query">Search pages</label>
             <input id="knowledge-query" class="memory-editor-input" type="search" placeholder="Search pages" maxlength="400">
@@ -231,11 +237,12 @@
             </select>
           </form>
           <div id="knowledge-list" class="knowledge-list"></div>
+          <div id="knowledge-pagination" class="knowledge-pagination" hidden></div>
         </aside>
         <section class="workspace-viewer-pane" aria-labelledby="knowledge-viewer-title">
           <header class="workspace-viewer-heading">
             <div>
-              <h2 id="knowledge-viewer-title">Select a page</h2>
+              <h2 id="knowledge-viewer-title">Home</h2>
               <p id="knowledge-viewer-meta"></p>
             </div>
             <div id="knowledge-viewer-tools" class="workspace-viewer-tools knowledge-viewer-tools" role="group" aria-label="Page actions" hidden></div>
