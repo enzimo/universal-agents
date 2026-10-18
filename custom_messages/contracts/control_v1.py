@@ -281,7 +281,16 @@ class AgentStatus(BaseModel):
     agent_role: Optional[str] = Field(description="Agent's self-reported role")
     last_seen_at: Optional[str] = Field(
         default=None,
-        description="ISO 8601 UTC timestamp of when this agent's status was last received.",
+        description="ISO 8601 UTC timestamp of when the agent sent this status.",
+    )
+    process_identity: Optional[str] = Field(
+        default=None,
+        description=(
+            "The agent's own process (runtime run, host, process number and start time; "
+            "runtime_hosting.process_run), so other agents can prove whether it still runs. "
+            "Set only by agents that are their own process (startup agents and the team lead); "
+            "workers started inside another process leave it empty and their start record decides."
+        ),
     )
     info_type: ControlType = Field(
         default=ControlType.STATUS_REQUEST_BASIC
@@ -299,6 +308,12 @@ class AgentStatus(BaseModel):
             self.is_executing = self.is_busy
         if self.is_busy is None and self.is_executing is not None:
             self.is_busy = self.is_executing
+
+
+# Fields agents exchange for liveness checks (custom_agents.agent_liveness) that
+# are never shown to a model or a person: process numbers and host names say
+# nothing useful there.
+AGENT_STATUS_RUNTIME_ONLY_FIELDS = frozenset({"process_identity"})
 
 
 class AgentStatusMap(BaseModel):

@@ -130,7 +130,16 @@ a person asks about such a notice, look at the task's history and current state
 
 After a host suspension or a long gap in the task monitor's checks, allow the
 runtime's one-minute heartbeat refresh window. Use `event=liveness_monitor_paused`
-to identify that wait in runtime logs. A cleared task warning means its reported
+to identify that wait in runtime logs. Startup agents and TeamLead are judged by
+whether their process still runs; only when that cannot be checked
+(`event=owner_liveness_unknown`) are they judged by their heartbeat. If the logs show
+`event=runtime_custody_released`, another agent took that work over and runs it;
+the agent that logged it dropped its copy, so do not resend or recreate the
+task. After a restart, allow queued clarification replies to finish; check the
+task's state before asking the person to repeat a resume or cancel decision.
+Let a chosen delayed retry wait for its timer after restart; do not create
+another retry schedule for it.
+A cleared task warning means its reported
 condition ended, not proof of new task progress. Check the task history and
 current state before describing it as moving again. Distinguish system maintenance
 from work a person requested; maintenance runs work for no person and reach

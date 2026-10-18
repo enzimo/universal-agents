@@ -493,7 +493,7 @@
             }
           ],
           "default": null,
-          "description": "ISO 8601 UTC timestamp of when this agent's status was last received.",
+          "description": "ISO 8601 UTC timestamp of when the agent sent this status.",
           "title": "Last Seen At"
         },
         "message_class": {
@@ -526,6 +526,19 @@
           ],
           "description": "Named type of the agent. Will be used during instantiation requests to look up and set agent's parameters (e.g. role, backstory, tools). Not unique - e.g: CodeWritingAgent",
           "title": "Named Agent Type"
+        },
+        "process_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The agent's own process (runtime run, host, process number and start time; runtime_hosting.process_run), so other agents can prove whether it still runs. Set only by agents that are their own process (startup agents and the team lead); workers started inside another process leave it empty and their start record decides.",
+          "title": "Process Identity"
         },
         "self_id": {
           "anyOf": [

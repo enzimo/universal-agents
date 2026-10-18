@@ -1,4 +1,8 @@
-"""Recovery custody across actual transactions, contenders, and process death."""
+"""Recovery custody across actual transactions, contenders, and process death.
+
+The last tests cover a previous owner that is still running after a takeover:
+its saves are refused (``RuntimeCustodyLost``) instead of claiming the work again.
+"""
 
 import json
 import os
@@ -10,13 +14,11 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from tests.runtime_snapshot_fixtures import snapshot_json
+from tests.runtime_snapshot_fixtures import seed_deferred, snapshot_json
 
 from storage.config import resolve_storage_settings
-from storage.runtime_state_repository import (
-    RuntimeRecoveryConflict,
-    create_runtime_state_repository,
-)
+from storage.runtime_custody import RuntimeCustodyLost, RuntimeRecoveryConflict
+from storage.runtime_state_repository import create_runtime_state_repository
 
 
 @pytest.fixture(params=["sqlite", pytest.param("postgres", marks=[pytest.mark.live, pytest.mark.postgres])])
@@ -35,18 +37,25 @@ def recovery_store(request, tmp_path):
     yield repo, config, owners
     for owner in owners:
         repo.clear_task_runtime(owner)
-        repo.clear_deferred_messages(owner)
+        repo.remove_deferred_messages(owner_agent_id=owner, message_ids=SEEDED_MESSAGES, expect_existing=False)
+
+
+SEEDED_MESSAGES = ("work", "work2", "m1")
+
+
+def save(repo, kind, owner, *, expect_existing, message_id="work"):
+    """One write of the given kind of saved work, as its owner makes it."""
+    if kind == "task_runtime":
+        repo.save_task_runtime(
+            owner_agent_id=owner, owner_agent_name="Original", team_id="recovery_tests",
+            owner_named_agent_type="Worker", runtime_state_json=snapshot_json(), expect_existing=expect_existing,
+        )
+    else:
+        seed_deferred(repo, owner, message_id, team_id="recovery_tests", expect_existing=expect_existing)
 
 
 def seed(repo, kind, owner):
-    payload = "runtime_state_json" if kind == "task_runtime" else "messages_json"
-    getattr(repo, f"save_{kind}")(
-        owner_agent_id=owner,
-        owner_agent_name="Original",
-        team_id="recovery_tests",
-        owner_named_agent_type="Worker",
-        **{payload: snapshot_json() if kind == "task_runtime" else '[{"work":1}]'},
-    )
+    save(repo, kind, owner, expect_existing=False)
     return getattr(repo, f"load_{kind}_by_owner")(owner)
 
 
@@ -80,7 +89,7 @@ def test_recovery_rejects_a_snapshot_changed_since_decode(recovery_store, kind):
     repo, _, owners = recovery_store
     original = seed(repo, kind, owners[0])
     # A current owner wrote another snapshot while the replacement decoded its copy.
-    seed(repo, kind, owners[0])
+    save(repo, kind, owners[0], expect_existing=True, message_id="work2")
     with pytest.raises(RuntimeRecoveryConflict):
         getattr(repo, f"commit_{kind}_recovery")(
             sources=original, replacement=replace(original[0], owner_agent_id=owners[1])
@@ -132,3 +141,238 @@ os._exit(19)
     expected_owner = owners[1] if death_at == "after_commit" else owners[0]
     assert len(load(expected_owner)) == 1
     assert sum(len(load(owner)) for owner in owners) == 1
+
+
+# -- a previous owner that is still running cannot save taken-over work -------------
+
+
+def save_again(repo, kind, owner, *, expect_existing):
+    save(repo, kind, owner, expect_existing=expect_existing, message_id="work2")
+
+
+@pytest.mark.parametrize("kind", ["task_runtime", "deferred_messages"])
+def test_a_former_owner_cannot_recreate_custody_with_a_full_save(recovery_store, kind):
+    """Before 2026-10-17 this save wrote the old owner's row again: two owners, one task."""
+    repo, _, owners = recovery_store
+    sources = seed(repo, kind, owners[0])
+    getattr(repo, f"commit_{kind}_recovery")(
+        sources=sources, replacement=replace(sources[0], owner_agent_id=owners[1])
+    )
+    with pytest.raises(RuntimeCustodyLost) as refused:
+        save_again(repo, kind, owners[0], expect_existing=True)
+    assert (refused.value.owner_agent_id, refused.value.store.value) == (owners[0], kind)
+    load = getattr(repo, f"load_{kind}_by_owner")
+    assert load(owners[0]) == []
+    assert len(load(owners[1])) == 1
+
+
+@pytest.mark.parametrize("kind", ["task_runtime", "deferred_messages"])
+def test_a_first_save_still_creates_custody(recovery_store, kind):
+    repo, _, owners = recovery_store
+    save_again(repo, kind, owners[0], expect_existing=False)
+    save_again(repo, kind, owners[0], expect_existing=True)
+    assert len(getattr(repo, f"load_{kind}_by_owner")(owners[0])) == 1
+
+
+@pytest.mark.parametrize("kind", ["task_runtime", "deferred_messages"])
+def test_custody_check_and_takeover_serialize(recovery_store, kind):
+    """The owner's save and a takeover race; exactly one wins and one agent holds the work."""
+    repo, config, owners = recovery_store
+    sources = seed(repo, kind, owners[0])
+    barrier = Barrier(2)
+
+    def owner_saves():
+        contender = create_runtime_state_repository(resolve_storage_settings(config))
+        barrier.wait()
+        try:
+            save_again(contender, kind, owners[0], expect_existing=True)
+        except RuntimeCustodyLost:
+            return "refused"
+        return "saved"
+
+    def replacement_takes_over():
+        contender = create_runtime_state_repository(resolve_storage_settings(config))
+        barrier.wait()
+        try:
+            getattr(contender, f"commit_{kind}_recovery")(
+                sources=sources, replacement=replace(sources[0], owner_agent_id=owners[1])
+            )
+        except RuntimeRecoveryConflict:
+            return "conflict"
+        return "took_over"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        saved = executor.submit(owner_saves)
+        taken = executor.submit(replacement_takes_over)
+        outcome = (saved.result(timeout=30), taken.result(timeout=30))
+    assert outcome in {("saved", "conflict"), ("refused", "took_over")}
+    load = getattr(repo, f"load_{kind}_by_owner")
+    assert sum(len(load(owner)) for owner in owners[:2]) == 1
+
+
+def test_a_history_write_without_a_row_reports_custody_lost(recovery_store):
+    repo, _, owners = recovery_store
+    from custom_messages.contracts.runtime_snapshot_v3 import decode_runtime_snapshot
+
+    [task] = decode_runtime_snapshot(snapshot_json()).tasks
+    with pytest.raises(RuntimeCustodyLost):
+        repo.save_task_runtime_task(
+            owner_agent_id=owners[0], task=task, task_plan_links={},
+            task_objective_links={}, plan_objective_links={},
+        )
+
+
+def test_a_deferred_hand_off_and_a_deferred_takeover_serialize(recovery_store):
+    """The task save that takes a deferred message races a takeover of the deferred row.
+
+    Exactly one wins: either the message moved into the old owner's task row and
+    the takeover's transfer is refused, or the takeover holds the message and
+    the old owner's save wrote nothing.
+    """
+    repo, config, owners = recovery_store
+    envelope = {"msg_header": {"message_id": "m1"}, "msg_content": {"task_id": "m1"}}
+    repo.add_deferred_message(
+        owner_agent_id=owners[0], owner_agent_name="Original", team_id="recovery_tests",
+        owner_named_agent_type="Worker", message_id="m1", envelope_json=json.dumps(envelope),
+        first=False, expect_existing=False,
+    )
+    sources = repo.load_deferred_messages_by_owner(owners[0])
+    barrier = Barrier(2)
+
+    def hand_off():
+        contender = create_runtime_state_repository(resolve_storage_settings(config))
+        barrier.wait()
+        try:
+            contender.save_task_runtime(
+                owner_agent_id=owners[0], owner_agent_name="Original", team_id="recovery_tests",
+                owner_named_agent_type="Worker", runtime_state_json=snapshot_json("m1"),
+                expect_existing=False, deferred_message_id="m1", consume_deferred_message=True,
+            )
+        except RuntimeCustodyLost:
+            return "refused"
+        return "moved"
+
+    def take_over():
+        contender = create_runtime_state_repository(resolve_storage_settings(config))
+        barrier.wait()
+        try:
+            contender.commit_deferred_messages_recovery(
+                sources=sources, replacement=replace(sources[0], owner_agent_id=owners[1])
+            )
+        except RuntimeRecoveryConflict:
+            return "conflict"
+        return "took_over"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        moved = executor.submit(hand_off)
+        taken = executor.submit(take_over)
+        outcome = (moved.result(timeout=30), taken.result(timeout=30))
+    assert outcome in {("moved", "conflict"), ("refused", "took_over")}
+    in_task_row = len(repo.load_task_runtime_by_owner(owners[0])) == 1
+    taken_rows = repo.load_deferred_messages_by_owner(owners[1])
+    in_new_deferred = bool(taken_rows) and "m1" in taken_rows[0].messages_json
+    assert in_task_row != in_new_deferred
+
+
+@pytest.mark.parametrize("write_kind", ["snapshot", "admission", "history"])
+def test_a_recreated_deferred_row_does_not_authorize_a_transferred_message(recovery_store, write_kind):
+    """Full, admitting and partial writes all prove the named message, not just its row."""
+    from custom_messages.contracts.runtime_snapshot_v3 import decode_runtime_snapshot
+
+    repo, _, owners = recovery_store
+    save(repo, "task_runtime", owners[0], expect_existing=False)
+    sources = seed(repo, "deferred_messages", owners[0])
+    repo.commit_deferred_messages_recovery(
+        sources=sources, replacement=replace(sources[0], owner_agent_id=owners[1]),
+    )
+    save(repo, "deferred_messages", owners[0], expect_existing=False, message_id="work2")
+    before_task = repo.load_task_runtime_by_owner(owners[0])
+    before_deferred = repo.load_deferred_messages_by_owner(owners[0])
+    with pytest.raises(RuntimeCustodyLost) as refused:
+        if write_kind == "history":
+            [task] = decode_runtime_snapshot(snapshot_json()).tasks
+            repo.save_task_runtime_task(
+                owner_agent_id=owners[0], task=task,
+                task_plan_links={}, task_objective_links={}, plan_objective_links={},
+                deferred_message_id="work",
+            )
+        else:
+            repo.save_task_runtime(
+                owner_agent_id=owners[0], owner_agent_name="Original", team_id="recovery_tests",
+                owner_named_agent_type="Worker", runtime_state_json=snapshot_json(),
+                expect_existing=True, deferred_message_id="work",
+                consume_deferred_message=write_kind == "admission",
+            )
+    assert refused.value.store.value == "deferred_messages"
+    assert repo.load_task_runtime_by_owner(owners[0]) == before_task
+    assert repo.load_deferred_messages_by_owner(owners[0]) == before_deferred
+    assert repo.load_deferred_messages_by_owner(owners[1])[0].messages_json == sources[0].messages_json
+
+
+def test_an_intermediate_snapshot_keeps_the_deferred_message(recovery_store):
+    repo, _, owners = recovery_store
+    seed(repo, "deferred_messages", owners[0])
+    repo.save_task_runtime(
+        owner_agent_id=owners[0], owner_agent_name="Original", team_id="recovery_tests",
+        owner_named_agent_type="Worker", runtime_state_json=snapshot_json(),
+        expect_existing=False, deferred_message_id="work",
+    )
+    assert repo.load_task_runtime_by_owner(owners[0])
+    assert json.loads(repo.load_deferred_messages_by_owner(owners[0])[0].messages_json)[0]["msg_header"]["message_id"] == "work"
+
+
+@pytest.mark.parametrize("outcome", ["commit", "lost", "write_failed"])
+def test_a_completed_schedule_and_its_deferred_reply_commit_together(recovery_store, monkeypatch, outcome):
+    from contextlib import contextmanager
+    from datetime import datetime, timedelta, timezone
+
+    from custom_agents.schedule_store import ScheduleStore
+    from custom_messages.contracts.schedule_v1 import ScheduledMessage
+    from custom_messages.contracts.task_v1 import Task
+    from custom_messages.enums import MessageMetaType, ScheduleManagementClass
+    from storage.runtime_custody import DeferredMessageClaim
+
+    repo, config, owners = recovery_store
+    sources = seed(repo, "deferred_messages", owners[0])
+    store = ScheduleStore(storage_settings=resolve_storage_settings(config))
+    schedule = ScheduledMessage(
+        schedule_id=owners[2], payload=Task(task_type=MessageMetaType.REQUEST),
+        management_class=ScheduleManagementClass.USER,
+        next_fire_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+    )
+    if outcome == "lost":
+        repo.commit_deferred_messages_recovery(
+            sources=sources, replacement=replace(sources[0], owner_agent_id=owners[1]),
+        )
+    if outcome == "write_failed":
+        connect = store._repository._connect
+
+        @contextmanager
+        def refuse_insert():
+            with connect() as conn:
+                class FailingInsert:
+                    def execute(self, sql, *args, **kwargs):
+                        if "INSERT" in sql and "scheduled_messages" in sql:
+                            raise RuntimeError("Schedule insert failed after the deferred check")
+                        return conn.execute(sql, *args, **kwargs)
+
+                    def __getattr__(self, name):
+                        return getattr(conn, name)
+
+                yield FailingInsert()
+
+        monkeypatch.setattr(store._repository, "_connect", refuse_insert)
+    claim = DeferredMessageClaim(owners[0], "work")
+    try:
+        if outcome == "commit":
+            store.add(schedule, deferred_message=claim)
+            assert store.get_row(schedule.schedule_id) is not None
+            assert json.loads(repo.load_deferred_messages_by_owner(owners[0])[0].messages_json) == []
+        else:
+            with pytest.raises(RuntimeCustodyLost if outcome == "lost" else RuntimeError):
+                store.add(schedule, deferred_message=claim)
+            assert store.get_row(schedule.schedule_id) is None
+            owner = owners[1] if outcome == "lost" else owners[0]
+            assert repo.load_deferred_messages_by_owner(owner)[0].messages_json == sources[0].messages_json
+    finally:
+        store.remove(schedule.schedule_id)

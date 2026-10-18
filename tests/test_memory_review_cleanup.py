@@ -121,6 +121,7 @@ def test_retirement_preserves_work_that_is_not_proven_abandoned(lead, protection
         create_runtime_state_repository(
             lead.task_manager.storage_settings
         ).save_task_runtime(
+            expect_existing=False,
             owner_agent_id="old-worker",
             owner_agent_name="Old worker",
             team_id="team",

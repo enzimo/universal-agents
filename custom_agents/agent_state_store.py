@@ -32,11 +32,14 @@ class AgentStateStore:
     def upsert(self, status: AgentStatus) -> None:
         self._repository.upsert(status)
 
+    def upsert_if_newer(self, status: AgentStatus) -> bool:
+        return self._repository.upsert_if_newer(status)
+
     def remove(self, agent_id: str) -> bool:
         return self._repository.remove(agent_id)
 
-    def remove_by_team_id(self, team_id: str) -> bool:
-        return self._repository.remove_by_team_id(team_id)
+    def remove_unseen(self, agent_id: str, last_seen_at: Optional[str]) -> bool:
+        return self._repository.remove_unseen(agent_id, last_seen_at)
 
     def get_by_id(self, agent_id: str) -> Optional[AgentStatus]:
         return self._repository.get_by_id(agent_id)

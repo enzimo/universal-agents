@@ -5,12 +5,31 @@ from __future__ import annotations
 from contextvars import ContextVar
 from copy import deepcopy
 import asyncio
-from typing import Any, Callable, ParamSpec, TypeVar
+from typing import Any, Callable, Optional, ParamSpec, TypeVar
 
 from runtime_hosting.blocking_io import BlockingIOLane
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
+
+# The asyncio task that submitted the operation now running on the lane. The
+# lane runs each operation in a copy of the submitter's context, so code inside
+# the operation can tell which task asked for it (submitting_task).
+_SUBMITTING_TASK: ContextVar[Optional["asyncio.Task[Any]"]] = ContextVar("submitting_task", default=None)
+
+
+def submitting_task() -> Optional["asyncio.Task[Any]"]:
+    """The asyncio task a task operation runs for: the current task, else its lane submitter.
+
+    On the event loop the running task is always the answer, so a task started
+    from a lane operation never inherits the submitter. On the lane thread
+    (no running loop) it is the task that submitted the operation; None in any
+    other thread.
+    """
+    try:
+        return asyncio.current_task()
+    except RuntimeError:
+        return _SUBMITTING_TASK.get()
 
 # The lane whose operation is running, if any. An operation that asks its own
 # lane for another operation would wait for itself forever: the lane runs one
@@ -86,7 +105,11 @@ class TaskOperationRuntime:
         if self.loop is not None and self.loop is not loop and self.loop.is_running():
             raise RuntimeError("Task operations must use one owning event loop.")
         self.loop = loop
-        return await self._io.run(_detached_operation, self, operation, args, kwargs)
+        token = _SUBMITTING_TASK.set(asyncio.current_task())
+        try:
+            return await self._io.run(_detached_operation, self, operation, args, kwargs)
+        finally:
+            _SUBMITTING_TASK.reset(token)
 
     def inside_operation(self) -> bool:
         """Whether the calling code runs inside one of this lane's operations."""

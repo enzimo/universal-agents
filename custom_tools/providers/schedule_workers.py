@@ -57,9 +57,8 @@ def install_scheduled_worker_draft(
 
     claim_scope = schedule_claim_scope_for_agent(agent)
     if target_agent_type:
-        claim_scope.update(
-            claim_named_agent_type=target_agent_type, claim_agent_id=None
-        )
+        claim_scope["claim_named_agent_type"] = target_agent_type
+        claim_scope["claim_agent_id"] = None
         schedule.payload_meta.to_named_agent_type = target_agent_type
     automation = bool(worker_policy_json or requirements_json)
     if automation:

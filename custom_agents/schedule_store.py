@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import TYPE_CHECKING, Any, List, Optional, TypedDict
 
 from storage.backends import STORAGE_BACKEND_SQLITE
+from storage.runtime_custody import DeferredMessageClaim
 from custom_agents.schedule_management import (
     ScheduleMutationOperation,
     ScheduleMutationPermit,
@@ -78,7 +79,15 @@ def _preview_text(value: Optional[str], *, limit: int = 180) -> Optional[str]:
     return f"{normalized[: limit - 3]}..."
 
 
-def schedule_claim_scope_for_agent(agent: Any) -> dict[str, Optional[str]]:
+class ScheduleClaimScope(TypedDict):
+    """Only the three claim fields inferred from an agent's identity."""
+
+    claim_team_id: str | None
+    claim_named_agent_type: str | None
+    claim_agent_id: str | None
+
+
+def schedule_claim_scope_for_agent(agent: Any) -> ScheduleClaimScope:
     """Return the default persisted claim scope for schedules owned by an agent."""
     named_agent_type = getattr(agent, "named_agent_type", None)
     return {
@@ -316,6 +325,7 @@ class ScheduleStore:
             ScheduleMutationOperation.UPDATE
         ),
         system_mutation_request_binding: Optional[dict[str, Any]] = None,
+        deferred_message: DeferredMessageClaim | None = None,
     ) -> None:
         prepare_schedule_for_add(
             msg,
@@ -368,6 +378,7 @@ class ScheduleStore:
                 claim_named_agent_type=getattr(msg, "claim_named_agent_type", None),
                 claim_agent_id=getattr(msg, "claim_agent_id", None),
                 owner_canonical_user_id=owner_canonical_user_id_for_schedule(msg),
+                deferred_message=deferred_message,
             )
             self._logger.info(
                 f"Schedule {msg.schedule_id} added, next fire at {msg.next_fire_at}"

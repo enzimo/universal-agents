@@ -8,7 +8,7 @@ from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
 from storage.config import resolve_storage_settings
-from storage.runtime_state_repository import RuntimeRecoveryConflict
+from storage.runtime_custody import RuntimeRecoveryConflict
 
 
 @pytest.fixture

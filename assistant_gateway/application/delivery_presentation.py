@@ -12,7 +12,11 @@ from assistant_gateway.domain.message_types import (
 from custom_messages.contracts.notification_v1 import (
     MODEL_PROVIDER_FAILOVER_NOTIFICATION_REASON,
 )
-from custom_messages.contracts.control_v1 import AgentStatus, SystemStatusMessage
+from custom_messages.contracts.control_v1 import (
+    AGENT_STATUS_RUNTIME_ONLY_FIELDS,
+    AgentStatus,
+    SystemStatusMessage,
+)
 from custom_messages.contracts.credentials_v1 import (
     TOOL_SETUP_COMPLETED,
     SecureCredentialCollectionRequest,
@@ -197,7 +201,8 @@ class GatewayDeliveryPresentation:
         if isinstance(content, ToolSetupResultV1):
             return _render_tool_setup_result_fallback(content)
         if isinstance(content, AgentStatus):
-            return json.dumps(content.model_dump(mode="json"), indent=2)
+            shown = content.model_dump(mode="json", exclude=set(AGENT_STATUS_RUNTIME_ONLY_FIELDS))
+            return json.dumps(shown, indent=2)
         if isinstance(content, TaskSteering):
             return GatewayDeliveryPresentation._render_task_steering(content)
         if isinstance(content, UserNotification):
