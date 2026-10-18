@@ -206,7 +206,8 @@ def start_owned_task(
 
     Only work that may be stopped at shutdown belongs here. Once the agent is
     stopping, nothing new starts: the refusal is logged with the task name and
-    the coroutine is never created.
+    the coroutine is never created. ``make_coroutine`` is called inside the
+    new task, so work cancelled before it starts leaves no unawaited coroutine.
     """
     if agent._should_exit.is_set():
         agent._logger.warning(
@@ -216,16 +217,22 @@ def start_owned_task(
             name,
         )
         return None
-    task = asyncio.create_task(_run_owned(agent, make_coroutine(), name), name=name)
+    task = asyncio.create_task(_run_owned(agent, make_coroutine, name), name=name)
     owned: set[asyncio.Task[None]] = agent._owned_tasks
     owned.add(task)
     task.add_done_callback(owned.discard)
     return task
 
 
-async def _run_owned(agent: Any, coroutine: Coroutine[Any, Any, Any], name: str) -> None:
+async def _run_owned(
+    agent: Any, make_coroutine: Callable[[], Coroutine[Any, Any, Any]], name: str
+) -> None:
+    # The coroutine is created only once the task runs. A task cancelled
+    # before its first step (shutdown right after the start) never runs this
+    # body, so a coroutine created earlier would be left unawaited and Python
+    # would warn "coroutine ... was never awaited".
     try:
-        await coroutine
+        await make_coroutine()
     except Exception:
         agent._logger.exception(
             "Background work failed. event=owned_task_failed agent_id=%s task_name=%s",

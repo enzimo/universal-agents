@@ -1,7 +1,9 @@
 """Queue wakeups and background work have one owner, and shutdown waits for all of it."""
 
 import asyncio
+import gc
 import logging
+import warnings
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -139,6 +141,34 @@ async def test_no_owned_task_starts_once_the_agent_is_stopping(caplog):
         assert start_owned_task(agent, make, name="send:late") is None
     assert created == []  # the coroutine is never created, so nothing is left unawaited
     assert "event=owned_task_refused" in caplog.text and "send:late" in caplog.text
+
+
+def test_owned_work_stopped_before_it_starts_leaves_no_unawaited_coroutine():
+    """Review F1: the coroutine was created before its task ran, so a shutdown
+    right after the start cancelled the task first and Python warned
+    "coroutine ... was never awaited".
+
+    The loop runs to its end inside the warning capture: the warning comes when
+    the last reference to the coroutine goes, which can be after the test's own
+    step returns.
+    """
+    ran = []
+
+    async def send():
+        ran.append(True)
+
+    async def start_then_stop() -> bool:
+        agent = _agent()
+        task = start_owned_task(agent, send, name="send:early")
+        await close_pending_work(agent)  # cancels the task before its first step
+        return task.cancelled()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert asyncio.run(start_then_stop())
+        gc.collect()
+    assert ran == []
+    assert [str(w.message) for w in caught if "was never awaited" in str(w.message)] == []
 
 
 @pytest.mark.asyncio
