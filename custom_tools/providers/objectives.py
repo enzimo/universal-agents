@@ -1,13 +1,14 @@
 """The team lead's Objective tools (catalog tool ``fn:objectives``).
 
 ``objectives``, ``objective_work_sessions`` and ``objective_work_profiles``
-each take an ``action`` and replace several functions (owner's decision
-2026-10-10: a model request may carry only so many tool definitions, and
-these were nineteen). The catalog keeps a level per action (``argument:
-action``) and each tool checks which inputs its action takes
-(``custom_tools.action_inputs``); each action runs the function it replaced,
-unchanged (``_get_objective``, ``_enable_sessions``, ...). Functions with many
-inputs of their own stay separate: ``create_objective``,
+group related functions under an ``action`` argument to keep model requests
+within providers' tool-count limits. The catalog records the level required
+by each action, while grants cover the whole tool; blocks may stop one
+action. Each tool checks which inputs its action takes
+(``custom_tools.action_inputs``). Status changes use fresh records and the
+shared lifecycle operation (``custom_agents.objective_lifecycle``), including
+linked schedules and heartbeat items. Functions with many inputs of their
+own stay separate: ``create_objective``,
 ``start_objective_task``, ``propose_objective_work_profile``,
 ``record_objective_work_checkpoint``, ``activate_plan_execution`` and
 ``start_isolated_recovery``. The work-session and profile tools live in

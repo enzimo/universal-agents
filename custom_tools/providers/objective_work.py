@@ -1,9 +1,10 @@
 """Bounded Objective work sessions and their execution profiles (catalog tool ``fn:objectives``).
 
 ``objective_work_sessions`` and ``objective_work_profiles`` take an action
-(``custom_tools.providers.objectives`` explains the merge); each action runs
-the function it replaced, unchanged. ``propose_objective_work_profile`` stays
-its own function (15 inputs). This module holds the sessions' schedule
+to group related operations within providers' tool-count limits. Each call
+validates its action's inputs and required level; grants cover the whole
+tool. ``propose_objective_work_profile`` stays its own function because it
+has many inputs. This module holds the sessions' schedule
 installation and rollback too; ``custom_tools.providers.objectives`` lists
 these tools in the objectives provider.
 """

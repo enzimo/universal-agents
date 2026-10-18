@@ -273,9 +273,10 @@ async def close_pending_work(agent: Any) -> None:
     """Stop new background work, then cancel and join what is running.
 
     A cancelled drain may stop a model turn halfway. Its task stays saved as in
-    progress, with the note the turn read (a turn removes it only when it ends,
-    ``LLMTurnExecutor._release_turn_start_state``). Restart recovery queues the
-    task again only if the agent restarts within
+    progress. The note the turn read stays saved unless its decision was
+    already recorded with the outbox batch (``TurnStartNotes``); results saved
+    outside the outbox release it when the turn returns. Restart recovery queues
+    the task again only if the agent restarts within
     ``restart_executing_task_grace_seconds`` (900 s by default) of the task's
     last saved state; after that, recovery fails the task and tells its
     requester (``runtime_recovery.should_fail_stale_executing_recovery``).

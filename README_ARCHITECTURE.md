@@ -803,8 +803,10 @@ wake-up that arrives during a pass, or while another holder has the execution
 slot, is kept and answered with another pass. A failed pass is retried after
 5 s, doubling to at most 5 minutes. Shutdown stops new work, then cancels and
 waits for the drain, its timers and short sends (sync tools' sends included)
-before the transport closes, so nothing writes or publishes after it. A turn in
-progress at shutdown is cancelled; restart recovery queues its task again if
+before the transport closes, so that background work cannot write task state
+or publish after it. The final status write still marks this agent exiting
+after delivery callbacks have settled. A turn in progress at shutdown is
+cancelled; restart recovery queues its task again if
 the agent restarts within `restart_executing_task_grace_seconds` (900 s by
 default) and otherwise fails the task and tells the requester.
 
@@ -991,8 +993,9 @@ argument (`memory` and `topic_tags`; `mcp_connections`, `hosted_mcp_servers`,
 `fn:objectives`): each action is its own operation
 (`memory.delete`) with its own level, an unlisted action needs `full`, and the
 tool checks which inputs each action takes (`custom_tools/action_inputs.py`).
-A request then carries fewer tool definitions while access stays per action,
-and a block can still stop one action.
+A request then carries fewer tool definitions. Grants cover the whole tool
+at one level, each call requires its action's catalog level, and a block can
+still stop one action.
 The broker and the runtime share the catalog package, which imports only
 contracts, because the broker never imports agent code. The broker checks
 every `gh`/`gog` command line with one unambiguous parser and runs exactly the
