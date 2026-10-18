@@ -3,7 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import os
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from threading import Barrier
 from uuid import uuid4
 
@@ -234,6 +234,40 @@ def test_stale_claim_rolls_back_new_runtime_custody(stores):
         admit(runtime, occurrence)
     assert runtime.load_task_runtime_by_owner("worker") == []
     assert store.worker_records.for_task(occurrence.task_id, "team") is None
+
+
+def test_a_retained_claim_cannot_admit_a_future_occurrence(stores):
+    store, runtime, _ = stores
+    schedule = seed_schedule(store)
+    occurrence = claim_occurrence(store, schedule)
+    base = store.get_scheduled_message(schedule.schedule_id)
+    future = (utc_now() + timedelta(days=1)).isoformat()
+    store.update(base.model_copy(update={"next_fire_at": future}), base=base)
+    future_id = occurrence_identity(schedule.schedule_id, future)
+    future_occurrence = occurrence.model_copy(
+        update={"due_at": future, "occurrence_id": future_id, "task_id": "task_" + future_id}
+    )
+
+    with pytest.raises(ScheduleWorkerConflict, match="stale_schedule_admission_claim"):
+        admit(runtime, future_occurrence)
+
+    assert runtime.load_task_runtime_by_owner("worker") == []
+    assert store.worker_records.get_occurrence(future_id, "team") is None
+
+
+def test_a_run_already_due_in_the_current_second_is_admitted(stores):
+    store, runtime, _ = stores
+    schedule = seed_schedule(store)
+    base = store.get_scheduled_message(schedule.schedule_id)
+    due = datetime.now(timezone.utc).replace(microsecond=1).isoformat()
+    schedule = base.model_copy(update={"next_fire_at": due})
+    store.update(schedule, base=base)
+    occurrence = claim_occurrence(store, schedule)
+
+    admit(runtime, occurrence)
+
+    assert len(runtime.load_task_runtime_by_owner("worker")) == 1
+    assert store.worker_records.get_occurrence(occurrence.occurrence_id, "team").state == "admitted"
 
 
 def test_recovery_transfers_occurrence_and_runtime_custody(stores):

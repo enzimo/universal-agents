@@ -287,6 +287,60 @@ def test_a_notify_policy_change_keeps_run_notes_written_after_the_read(store):
     assert (memory.state.summary, memory.ledger.total_notifications) == ("run notes", 1)
 
 
+@pytest.mark.parametrize("recurring", [False, True])
+def test_an_older_reschedule_cannot_overwrite_a_newer_run_time(store, recurring):
+    schedule = _schedule(interval_ms=60_000 if recurring else None, repeat_count=None if recurring else 1)
+    store.add(schedule)
+    older_time = (_now() + timedelta(days=2)).isoformat()
+    newer_time = (_now() + timedelta(days=3)).isoformat()
+
+    def prepare(at):
+        return prepare_schedule_change(
+            store,
+            ScheduleChangeRequestV1(
+                schedule_id=schedule.schedule_id, action="update", update=ScheduleUpdateV1(next_fire_at=at)
+            ),
+            person_id=OWNER,
+        )
+
+    older, newer = prepare(older_time), prepare(newer_time)
+    newer.commit(None)
+
+    with pytest.raises(ScheduleWriteConflict) as refused:
+        older.commit(None)
+
+    assert refused.value.reason_code == SCHEDULE_CHANGED
+    assert store.get_scheduled_message(schedule.schedule_id).next_fire_at == newer_time
+
+
+@pytest.mark.parametrize(
+    ("older_fields", "newer_fields"),
+    [({"notify": "never"}, {"notify": "always"}), ({"schedule_kind": "older"}, {"schedule_kind": "newer"})],
+)
+def test_an_older_policy_edit_cannot_overwrite_newer_run_note_settings(store, older_fields, newer_fields):
+    schedule = _schedule()
+    store.add(schedule)
+
+    def prepare(fields):
+        return prepare_schedule_change(
+            store,
+            ScheduleChangeRequestV1(
+                schedule_id=schedule.schedule_id, action="update", update=ScheduleUpdateV1(**fields)
+            ),
+            person_id=OWNER,
+        )
+
+    older, newer = prepare(older_fields), prepare(newer_fields)
+    newer.commit(None)
+    saved_settings = store.get_scheduled_message(schedule.schedule_id).schedule_memory.model_dump()
+
+    with pytest.raises(ScheduleWriteConflict) as refused:
+        older.commit(None)
+
+    assert refused.value.reason_code == SCHEDULE_CHANGED
+    assert store.get_scheduled_message(schedule.schedule_id).schedule_memory.model_dump() == saved_settings
+
+
 def test_an_edit_that_sets_timing_or_the_count_writes_them(store):
     schedule_id = _due(store, repeat_count=5)
     claimed = _claim(store)
@@ -798,6 +852,19 @@ def test_a_daily_run_in_the_skipped_hour_runs_at_the_first_time_after_it_when_cl
 
     assert change_day == "2026-03-08T07:00:00+00:00"  # 03:00 EDT: it runs, not skipped
     assert day_after == "2026-03-09T06:30:00+00:00"
+
+
+def test_fixed_times_do_not_repeat_during_a_two_hour_clock_rollback():
+    # Troll goes from UTC+02 to UTC at 01:00 UTC, repeating 01:00 through 02:59.
+    previous = datetime.fromisoformat("2026-10-25T00:59:00+00:00")  # first local 02:59
+    next_run = compute_next_fire_at(
+        cron_expression="0-59 1-2 * * *",
+        cron_timezone="Antarctica/Troll",
+        from_time=previous + timedelta(seconds=5),
+        previous_fire_at=previous,
+    )
+
+    assert next_run == "2026-10-26T01:00:00+00:00"
 
 
 def test_the_store_moves_a_fall_back_run_to_the_next_day(store, monkeypatch):

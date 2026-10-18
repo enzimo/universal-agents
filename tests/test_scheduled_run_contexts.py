@@ -289,6 +289,58 @@ def test_a_schedule_paused_or_turned_off_after_its_claim_does_not_run_and_frees_
     assert not world.bus.published, "the manager was not asked to sign a run that does not start"
 
 
+@pytest.mark.parametrize("one_time", [False, True])
+def test_a_claim_retimed_before_admission_waits_and_counts_only_the_actual_run(world, monkeypatch, caplog, one_time):
+    from custom_agents import schedule_store, scheduled_runtime
+    from custom_messages.contracts.schedule_worker_v1 import occurrence_identity
+    from storage import schedule_worker_repository
+
+    record_ann(world, PersonStanding.ACTIVE)
+    saved = save_schedule(world)
+    world.store.update(
+        saved.model_copy(update={"interval_ms": None if one_time else saved.interval_ms, "repeat_count": 1 if one_time else 2}),
+        base=saved,
+    )
+    original_claim = claim(world)
+    base = world.store.get_scheduled_message(SCHEDULE_ID)
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    world.store.update(base.model_copy(update={"next_fire_at": future.isoformat()}), base=base)
+
+    async def scenario():
+        await subscribe(world)
+        await fire(world, original_claim)
+
+    with caplog.at_level(logging.INFO, logger="test.worker"):
+        asyncio.run(scenario())
+
+    future_id = occurrence_identity(SCHEDULE_ID, future.isoformat())
+    assert queued(world) == []
+    assert world.store.worker_records.get_occurrence(future_id, TEAM) is None
+    assert claim_row(world) == (None, None)
+    assert world.store.get_row(SCHEDULE_ID)["remaining_count"] == (1 if one_time else 2)
+    assert "event=scheduled_run_skipped_schedule_retimed" in caplog.text
+
+    class AtFutureRun(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (future + timedelta(seconds=1)).astimezone(tz)
+
+    monkeypatch.setattr(schedule_store, "datetime", AtFutureRun)
+    monkeypatch.setattr(scheduled_runtime, "datetime", AtFutureRun)
+    monkeypatch.setattr(scheduled_run_contexts, "datetime", AtFutureRun)
+    monkeypatch.setattr(schedule_worker_repository, "database_now", lambda _conn: AtFutureRun.now(timezone.utc))
+    asyncio.run(fire(world, claim(world)))
+
+    assert len(queued(world)) == 1
+    assert world.store.worker_records.get_occurrence(future_id, TEAM) is not None
+    row = world.store.get_row(SCHEDULE_ID)
+    if one_time:
+        assert row is None
+    else:
+        assert row["remaining_count"] == 1
+        assert row["next_fire_at"] > future.isoformat()
+
+
 def test_the_manager_refuses_a_run_paused_after_the_workers_check(world, caplog) -> None:
     record_ann(world, PersonStanding.ACTIVE)
     save_schedule(world)

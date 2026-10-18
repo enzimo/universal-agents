@@ -24,6 +24,7 @@ from custom_agents.schedule_management import (
 )
 from custom_agents.schedule_store import (
     schedule_claim_scope_for_agent,
+    schedule_record_digest,
     with_cron_start,
 )
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
@@ -165,21 +166,22 @@ def _rollback_objective_work_schedule(
     store: Any,
     schedule_id: str,
     existing_schedule: Any,
+    installed_schedule: ScheduledMessage,
     owner_canonical_user_id: str,
 ) -> None:
-    persisted_candidate = store.get_scheduled_message(schedule_id)
-    if persisted_candidate is None:
-        return
+    # Only undo this operation's write. A fresh read could already include
+    # somebody else's stop or edit and must never authorize undoing it.
     if existing_schedule is None:
         delete_permit = _objective_work_schedule_permit(
             agent,
-            schedule=persisted_candidate,
+            schedule=installed_schedule,
             operation=ScheduleMutationOperation.DELETE,
             owner_canonical_user_id=owner_canonical_user_id,
         )
         if not store.remove(
             schedule_id,
             system_mutation_permit=delete_permit,
+            expected_record_digest=schedule_record_digest(installed_schedule),
         ):
             raise RuntimeError(
                 "Failed to remove a partially installed Objective work schedule."
@@ -187,16 +189,14 @@ def _rollback_objective_work_schedule(
         return
     rollback_permit = _objective_work_schedule_permit(
         agent,
-        schedule=persisted_candidate,
+        schedule=installed_schedule,
         operation=ScheduleMutationOperation.UPDATE,
         owner_canonical_user_id=owner_canonical_user_id,
         candidate=existing_schedule,
     )
-    # Restored against the installed schedule as just read: refused if it
-    # changed or went away meanwhile, and never recreated.
     store.update(
         existing_schedule,
-        base=persisted_candidate,
+        base=installed_schedule,
         system_mutation_permit=rollback_permit,
         system_mutation_operation=ScheduleMutationOperation.UPDATE,
     )
@@ -212,7 +212,6 @@ def _install_objective_work_schedule(
     """Install or exactly replace one Objective's protected recurring schedule."""
 
     schedule_id = policy.schedule_id or new_id("objwork_sched")
-    claim_scope = schedule_claim_scope_for_agent(agent)
     schedule = _build_objective_work_schedule(
         agent,
         current=current,
@@ -225,6 +224,10 @@ def _install_objective_work_schedule(
         existing_schedule,
         objective_id=policy.objective_id,
     )
+    if existing_schedule is not None:
+        # Reconfiguration changes the definition, not a run's notes. Equal
+        # memory in candidate/base makes update keep the latest stored notes.
+        schedule.schedule_memory = existing_schedule.schedule_memory
     permit = _objective_work_schedule_permit(
         agent,
         schedule=existing_schedule,
@@ -234,12 +237,10 @@ def _install_objective_work_schedule(
     )
     schedule_persisted = False
     try:
-        store.add(
-            schedule,
-            **claim_scope,
-            system_mutation_permit=permit,
-            system_mutation_operation=ScheduleMutationOperation.UPDATE,
-        )
+        if existing_schedule is None:
+            store.add(schedule, system_mutation_permit=permit)
+        else:
+            store.update(schedule, base=existing_schedule, system_mutation_permit=permit)
         schedule_persisted = True
         policy = agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.objective_work_coordinator.set_schedule,
@@ -266,6 +267,7 @@ def _install_objective_work_schedule(
                     store=store,
                     schedule_id=schedule_id,
                     existing_schedule=existing_schedule,
+                    installed_schedule=schedule,
                     owner_canonical_user_id=owner_canonical_user_id,
                 )
             except Exception as rollback_exc:

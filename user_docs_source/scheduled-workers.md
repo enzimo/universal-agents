@@ -217,6 +217,12 @@ runs still stops after its last run, even if that run moved its next time. A
 one-time schedule always runs once: asking for more runs needs an interval or a
 cron time.
 
+Moving a run that a worker has reserved, before it starts, releases that
+reservation and waits for the new time. The run is counted only when it starts.
+An older edit cannot replace a newer reminder time or notification setting.
+When changing a repeating schedule's next run time, your assistant must read it
+again if that time changed meanwhile, including when a run advanced it.
+
 The runtime notices and reports; it does not guarantee a repair. Disallowed
 types, missing tools or credentials, or a stopped team lead can still need an
 administrator. The team lead does the checking, so while it is down nobody is
@@ -533,6 +539,8 @@ of its times that night, while an hourly or every-few-minutes schedule
 real hour.
 When clocks go forward, a time in the skipped hour runs at the first time after
 it: a 02:30 schedule runs at 03:00 that day.
+The same rule applies in time zones whose clock change repeats more than one
+hour; none of those fixed local times runs again.
 
 Interval schedules ("every 6 hours") do not depend on a time zone. Objective
 work plans use their `cadence_timezone`, which is `owner` by default (see

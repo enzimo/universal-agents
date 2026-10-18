@@ -302,6 +302,17 @@ schedule that runs often can still be paused. Before, saves replaced whole rows 
 which could bring back a deleted schedule, undo a pause, or make a run happen
 twice.
 
+The comparison includes a one-time reminder's due time and the run-note policy,
+so a stale reschedule or notification edit is refused too. Explicitly moving a
+repeating run requires its next time to remain unchanged since the read; other
+edits preserve automatic advances. Before admission a worker releases a claim
+whose occurrence was re-timed, and the admission transaction refuses a future
+due time using the database clock. Objective schedule rollback compares against
+the state that installation wrote, so it cannot undo a later stop or edit.
+Reconfiguration and rollback both preserve notes written by running work.
+Time checks keep subsecond precision: SQLite uses its process's host clock,
+and PostgreSQL reads the server's wall clock after any lock wait.
+
 Whether a worker start's process is gone is proven, never assumed from a timeout
 (`runtime_hosting.process_run`). The supervisor holds an exclusive lock on
 `runtime/process_run.lock` and passes the locked file to every agent process, so

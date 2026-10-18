@@ -522,6 +522,7 @@ class ScheduleWorkerRepository:
             or row["claim_token"] != occurrence.claim_token
             or row["claimed_by_agent_id"] != occurrence.agent_id
             or row["next_fire_at"] != occurrence.due_at
+            or row["next_fire_at"] > now
             or not row["enabled"]
             or not row["claim_expires_at"]
             or row["claim_expires_at"] <= now

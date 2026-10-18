@@ -241,8 +241,8 @@ def compute_next_fire_at(
     repeated hour's local times come twice. A schedule at fixed times of day
     (``_fixed_time_of_day``: "30 1 * * *", "0,30 1 * * *") skips results whose
     local time is not later than that run's, so it runs once per time that
-    night, as classic cron does. A schedule with a wildcard, step or range in
-    its minute or hour ("0 * * * *", "*/30 * * * *") runs every real hour,
+    night, as classic cron does. A schedule whose minute or hour starts with
+    a wildcard ("0 * * * *", "*/30 * * * *") runs every real hour,
     the repeated one included. When clocks go forward, a time in the skipped
     hour runs at the first time after it (02:30 runs at 03:00).
     """
@@ -274,15 +274,13 @@ def _next_cron_run(
     next_time = runs.get_next(datetime)
     if previous_fire_at is not None and _fixed_time_of_day(cron_expression):
         previous_local = _local_wall_time(previous_fire_at, zone)
-        # Only the repeated hour can give such results, at most 60 of them.
-        for _ in range(_MAX_REPEATED_HOUR_RESULTS):
-            if _local_wall_time(next_time, zone) > previous_local:
-                break
+        # Some zones repeat more than an hour, and cron can include seconds.
+        # Never return a repeated local time just because a fixed count ran out.
+        while _local_wall_time(next_time, zone) <= previous_local:
             next_time = runs.get_next(datetime)
     return next_time.astimezone(timezone.utc).isoformat()
 
 
-_MAX_REPEATED_HOUR_RESULTS = 61
 # Cron shorthands at fixed times of day, and the one that is not.
 _FIXED_TIME_SHORTHANDS = frozenset({"@yearly", "@annually", "@monthly", "@weekly", "@daily", "@midnight"})
 
@@ -782,8 +780,10 @@ class ScheduleStore:
         Refused with ``ScheduleWriteConflict`` when the schedule is gone (it
         is never recreated) or when another change reached what a person
         reviews (``schedule_reviewed_state_digest``) since ``base`` was read.
-        Runs moving the next run time or writing run notes in between do not
-        count. Kept from the stored row unless the change itself changed
+        Runs writing notes or moving a repeating run time do not invalidate
+        unrelated edits. An explicit retiming requires the run time still
+        read by the caller, so it cannot overwrite another retiming. Kept
+        from the stored row unless the change itself changed
         them: the next run time (new timing or a new time), the remaining
         count (a new repeat count, or ``remaining_count`` when the change
         sets the count again) and the run notes. A policy change to the run
@@ -802,7 +802,9 @@ class ScheduleStore:
                     SCHEDULE_GONE, schedule_id, f"Schedule {schedule_id} no longer exists; nothing was saved."
                 )
             current = _row_message(row, self._logger)
-            if schedule_reviewed_state_digest(current) != schedule_reviewed_state_digest(base):
+            if schedule_reviewed_state_digest(current) != schedule_reviewed_state_digest(base) or (
+                _next_run_changed(candidate, base) and current.next_fire_at != base.next_fire_at
+            ):
                 raise ScheduleWriteConflict(
                     SCHEDULE_CHANGED,
                     schedule_id,

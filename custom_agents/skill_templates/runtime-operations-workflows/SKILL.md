@@ -1050,7 +1050,10 @@ schedule is reported as not found.
   `schedule_not_found`** means someone paused, turned off, changed or deleted
   the schedule after it was read. Nothing was saved. List it again, tell the
   person what is different, and repeat the change only if they still want it.
-  A run's own notes and run times never cause this refusal.
+  A run's own notes and automatic run times do not invalidate unrelated edits.
+  When explicitly setting a next run time, a changed run time needs a fresh
+  read too. A newer reminder time, schedule kind or notification setting
+  always invalidates an older edit.
 - A one-time schedule (no interval or cron) runs once: `repeat_count=0` keeps it
   at one run, and more runs need `interval_seconds` or `cron_expression`.
 

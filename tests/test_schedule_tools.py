@@ -676,6 +676,7 @@ def test_record_scheduled_run_never_undoes_a_change_made_after_its_read(
 def test_scheduler_loop_updates_schedule_with_claim_token_after_acceptance():
     scheduled_message = ScheduledMessage(
         schedule_id="sched_loop",
+        next_fire_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
         payload=Task(
             task_id="task_loop",
             task_type=MessageMetaType.REQUEST,

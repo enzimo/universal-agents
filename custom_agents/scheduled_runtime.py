@@ -2069,6 +2069,12 @@ async def _fire_claimed_schedule(
         if stopped is not None:
             await _release_stopped_claim(agent, schedule_id, claim_token, stopped)
             return
+        # The claim reserved one occurrence, not whichever time an edit set
+        # afterwards. Releasing it leaves the new occurrence and count intact.
+        due_at = scheduled_message.next_fire_at
+        if _claimed_occurrence_changed(claimed_schedule, due_at, datetime.now(timezone.utc)):
+            await _release_retimed_claim(agent, claimed_schedule, due_at)
+            return
         from custom_agents.schedule_occurrences import prepare_occurrence
 
         admission = prepare_occurrence(agent, scheduled_message, claim_token)
@@ -2114,6 +2120,30 @@ async def _fire_claimed_schedule(
                 claimer_agent_id=agent.id,
             )
         await sleep_fn(1)
+
+
+def _claimed_occurrence_changed(claimed: dict[str, Any], due_at: str, now: datetime) -> bool:
+    if due_at != claimed["next_fire_at"]:
+        return True
+    due = datetime.fromisoformat(due_at)
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    return due > now
+
+
+async def _release_retimed_claim(agent: Any, claimed: dict[str, Any], next_fire_at: str) -> None:
+    """Leave a newly timed occurrence waiting, without admitting or counting it."""
+    agent._logger.info(
+        "A claimed schedule's run time changed before its run started; the run waits for its new time. "
+        "event=scheduled_run_skipped_schedule_retimed agent_id=%s schedule_id=%s due_at=%s next_fire_at=%s",
+        agent.id, claimed["schedule_id"], claimed["next_fire_at"], next_fire_at,
+    )
+    await agent.task_manager.operations_runtime.run(
+        agent._schedule_store.release_claim,
+        claimed["schedule_id"],
+        claim_token=claimed["claim_token"],
+        claimer_agent_id=agent.id,
+    )
 
 
 async def _release_stopped_claim(agent: Any, schedule_id: str, claim_token: Optional[str], reason: str) -> None:
