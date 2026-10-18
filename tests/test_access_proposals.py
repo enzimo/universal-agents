@@ -44,6 +44,7 @@ from custom_tools.providers.access_proposals import get_proposal_status, propose
 from custom_tools.runtime_context import set_agent_ref
 from secure_tool_broker.access_gate import REASON_ACCOUNT_LINK_MISSING, REASON_UNLISTED_HOST, BrokerAccessGate
 from storage.access_repository import AccessRepository
+from tests.access_decision_support import uncertain_store
 from tests.broker_access_support import agent_context, context_verify_keys
 from tests.test_access_request_tools import BINARY, OWNER, TEAM, Context, make_agent
 
@@ -110,6 +111,67 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service.cedar.close()
     access_runtime._runtime_access.cache_clear()
     set_agent_ref(None)
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_an_unconfirmed_proposal_is_reconciled_after_reopening_the_store(world, monkeypatch, committed):
+    from datetime import timedelta
+
+    from access_control.requests import DecisionOutcomeUnknown
+
+    lead, requests, _gate, instance, service = world
+    set_agent_ref(lead)
+    context = Context("tooluse-uncertain-proposal")
+    with pytest.raises(InterruptException):
+        propose(context)
+    request_id = context.raised[0]["access_request_id"]
+    with uncertain_store(monkeypatch, service.store, "apply_together", committed=committed):
+        with pytest.raises(DecisionOutcomeUnknown, match="could not yet confirm"):
+            requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE)
+
+    tool = instance / "control" / "access" / "tools" / "proposed-http-portainer.yaml"
+    assert tool.exists()
+    service.store = AccessRepository(service.store.settings)
+    later = service.clock() + timedelta(minutes=11)
+    assert len(service.store.decision_recoveries(TEAM, now=later)) == 1
+    monkeypatch.setattr(service, "clock", lambda: later)
+    requests().recover_decisions()
+    assert service.store.decision_recoveries(TEAM, now=later) == []
+    assert tool.exists() is committed
+    stored = service.store.get_request(request_id)
+    if committed:
+        assert stored.status is AccessRequestStatus.GRANTED
+        assert all(service.store.get(key).status.value == "active" for key in stored.grant_ids)
+    else:
+        assert stored.status is AccessRequestStatus.WAITING
+        assert requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE).status is AccessRequestStatus.GRANTED
+
+
+def test_failed_proposal_cleanup_keeps_its_record_until_a_retry_succeeds(world, monkeypatch):
+    from datetime import timedelta
+
+    lead, requests, _gate, instance, service = world
+    set_agent_ref(lead)
+    context = Context("tooluse-proposal-cleanup-retry")
+    with pytest.raises(InterruptException):
+        propose(context)
+    request_id = context.raised[0]["access_request_id"]
+    with uncertain_store(monkeypatch, service.store, "apply_together"):
+        with pytest.raises(HandDownRefused):
+            requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE)
+    later = service.clock() + timedelta(minutes=11)
+    monkeypatch.setattr(service, "clock", lambda: later)
+
+    def cannot_remove(_path):
+        raise PermissionError("read-only filesystem")
+
+    tool = instance / "control" / "access" / "tools" / "proposed-http-portainer.yaml"
+    with monkeypatch.context() as failure:
+        failure.setattr("access_control.proposals.remove_instance_tool", cannot_remove)
+        requests().recover_decisions()
+    assert tool.exists() and len(service.store.decision_recoveries(TEAM)) == 1
+    requests().recover_decisions()
+    assert not tool.exists() and service.store.decision_recoveries(TEAM) == []
 
 
 def boa(gate: BrokerAccessGate, method: str, url: str):

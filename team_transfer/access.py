@@ -23,7 +23,8 @@ request that was not granted (an older version could leave one when it
 stopped between a decision's grants and its outcome; logged, see
 ``AccessRepository.grants_without_granted_outcome``), access requests and the
 claims of decisions running on them (``AccessRepository.claim_decision``,
-transient), change plans, notices and the audit log (history), and the
+transient), decision recovery records (export waits for the gateway to
+reconcile them), change plans, notices and the audit log (history), and the
 gateway's copy of the people (rebuilt at gateway start). Standard role access is not stored as
 grants; it comes from the release (``access_control.standard_grants``).
 
@@ -61,6 +62,7 @@ from pydantic import BaseModel, Field, JsonValue
 from custom_messages.contracts.access_v2 import MODEL_KEYS_SHARING_SUBJECT
 from secure_tools.chat_commands import ACCOUNTS_SHARE, accounts_command
 from team_transfer.format import TransferModel
+from team_transfer.errors import TransferError
 from team_transfer.sections import (
     ExportSource,
     ImportContext,
@@ -182,6 +184,11 @@ class AccessSection:
     def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:
         store = _store(source.config.manager_storage_settings)
         team = source.team_id
+        if store.decision_recoveries(team):
+            raise TransferError(
+                "An access decision is awaiting confirmation. Start the gateway, let its Inbox reconcile the "
+                "decision after the ten-minute claim period, then stop the runtime and export again."
+            )
         now = datetime.now(timezone.utc)
         records: list[AccessRecordV1] = []
         for folder in store.data_folders(team):

@@ -1209,17 +1209,44 @@ other decision is refused while the claim is current ("Someone is deciding
 this request right now"). The claim is renewed before and after each program
 download, and a download stops after `DOWNLOAD_DEADLINE_SECONDS` measured from
 connecting to its last byte (redirects, TLS and headers included; a timer
-shuts the connection down, because a socket timeout bounds one read only, and
+shuts a duplicate of the transport down, because the HTTP client detaches
+its socket after headers and a socket timeout bounds one read only, and
 the deadline is checked again after each host name lookup, which nothing can
 interrupt, so a slow lookup overruns by its own length at most). So
-a claim runs out only when a step stalls past its limit or the process ends;
-then the next decision takes it over, and the stalled decision finds it lost
-at its next renewal or when storing its outcome, and stores nothing. On any
-failure an applier takes back what it wrote, unless the outcome was in fact
-stored (it reads the request back: a lost PostgreSQL commit answer may have
-stored it). A decision that lost its claim leaves the programs it downloaded
-in place unless the request was closed, because the decision that took over
-may already rely on them (an unused program runs nowhere: no tool names it).
+a claim runs out only when a step stalls past its limit or the process ends.
+The gateway first reconciles any recorded effects; then another decision may
+take over. The stalled decision finds its claim lost at its next renewal or
+when storing its outcome, and stores nothing. Cleanup
+reads the outcome and claim under the access store's write lock, so a new
+decision cannot take over between that check and removing local files. A
+losing decision keeps programs another decision may use regardless of the
+exception type, including a failed renewal that reports a database error.
+
+Before doing external work, each applier stores a transient recovery record
+in `access_decision_recoveries`: the expected decision and its effects list.
+Before writing each file's bytes, it records the relative path, file identity,
+expected size and content digest. Tool definitions stay in a hidden staging
+file until complete, then are published without replacing an existing file.
+MCP activation rechecks the claim under the cleanup lock after journaling,
+so a paused approval cannot activate a server after recovery releases it.
+A confirmed rollback removes only files still matching that ownership record;
+a replacement or edited file is kept and logged. Failed cleanup retains the
+record for another pass. A lost
+PostgreSQL commit answer may hide a committed outcome, so a failed readback
+is an unknown result and never authorizes cleanup. The person is told to
+check the Inbox when the store returns, rather than told nothing changed.
+The files, claim and recovery record stay. After the claim period, Inbox
+maintenance rereads the latest effects, outcome and claim under the store
+lock, even after a gateway restart. Claim renewal also postpones recovery,
+so an old maintenance scan cannot clean up a live download. Committed work stays, an
+uncommitted delivery is removed, an uncommitted proposal is undone, and a
+committed move finishes removing its unchanged original. Delivery notices
+use a request-derived id so recovery cannot store duplicate notices.
+Unresolved recovery records prevent another decision from taking over and
+prevent an access transfer export until the gateway has reconciled them.
+They never travel in a transfer. The journal makes cleanup retryable across
+database failures; filesystem changes are still separate from the database
+transaction.
 
 A grant that carries the approval id of a request that was not granted is
 never kept in force: none can be written now, but an older version stored a

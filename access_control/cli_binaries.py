@@ -134,7 +134,7 @@ class _DownloadDeadline:
         self.seconds = seconds
         self.expired = False
         self._ends = time.monotonic() + seconds
-        self._connections: list[http.client.HTTPConnection] = []
+        self._sockets: list[socket.socket] = []
         self._lock = threading.Lock()
         self._timer = threading.Timer(seconds, self._expire)
         self._timer.daemon = True
@@ -145,6 +145,8 @@ class _DownloadDeadline:
 
     def __exit__(self, *exc: object) -> None:
         self._timer.cancel()
+        for sock in self._sockets:
+            sock.close()
 
     def remaining(self) -> float:
         return max(0.0, self._ends - time.monotonic())
@@ -161,19 +163,25 @@ class _DownloadDeadline:
             self.expired = True
             raise TimeoutError("the download deadline passed")
 
-    def track(self, connection: http.client.HTTPConnection) -> None:
+    def track(self, sock: socket.socket) -> None:
+        """Keep a duplicate of the transport until the body closes.
+
+        http.client and urllib detach and close their socket object after
+        reading headers. The response's file still holds the connection open,
+        so looking at HTTPConnection.sock would miss a blocked body read.
+        A raw duplicate can shut down that same connection during TLS,
+        headers or body reads, and is closed when this download ends.
+        """
+
         with self._lock:
             self.check()
-            self._connections.append(connection)
+            self._sockets.append(sock.dup())
 
     def _expire(self) -> None:
         with self._lock:
             self.expired = True
-            connections = list(self._connections)
-        for connection in connections:
-            sock = getattr(connection, "sock", None)
-            if sock is None:
-                continue  # still looking up the host name: checked when the lookup returns
+            sockets = list(self._sockets)
+        for sock in sockets:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -201,6 +209,7 @@ class _DeadlineHTTPSConnection(http.client.HTTPSConnection):
                 if source_address:
                     sock.bind(source_address)
                 sock.connect(target)
+                self._deadline.track(sock)
                 return sock
             except OSError as exc:
                 sock.close()
@@ -229,9 +238,7 @@ class _DeadlineHTTPSHandler(HTTPSHandler):
 
         def connection(host: str, **kwargs: Any) -> http.client.HTTPSConnection:
             kwargs.pop("timeout", None)
-            opened = _DeadlineHTTPSConnection(host, deadline=deadline, **kwargs)
-            deadline.track(opened)
-            return opened
+            return _DeadlineHTTPSConnection(host, deadline=deadline, **kwargs)
 
         # No context given: http.client uses its default, certificate-checking one.
         return self.do_open(connection, req)
@@ -323,7 +330,10 @@ def _mismatch(parts: tuple[str, ...], expected: str, actual: str) -> ProgramRefu
     )
 
 
-def install_program(root: Path, parts: tuple[str, ...], data: bytes, sha256: str) -> None:
+def install_program(
+    root: Path, parts: tuple[str, ...], data: bytes, sha256: str,
+    *, before_write: Callable[[int, bytes], None] | None = None,
+) -> None:
     """Write a downloaded program into the workspace after checking its digest (never over an existing file)."""
 
     actual = hashlib.sha256(data).hexdigest()
@@ -332,6 +342,8 @@ def install_program(root: Path, parts: tuple[str, ...], data: bytes, sha256: str
     root.mkdir(parents=True, exist_ok=True)  # the instance's own workspaces folder
     try:
         with safe_open.writable_file(root, parts, create_directories=True, exclusive=True) as writer:
+            if before_write is not None:
+                before_write(writer.fileno(), data)
             writer.write(data)
             os.fchmod(writer.fileno(), 0o755)
     except safe_open.UnsafePath as exc:
@@ -343,16 +355,6 @@ def install_program(root: Path, parts: tuple[str, ...], data: bytes, sha256: str
         "/".join(parts),
         sha256,
     )
-
-
-def remove_program(root: Path, parts: tuple[str, ...]) -> None:
-    """Take back a program written for a proposal that could not be applied."""
-
-    try:
-        safe_open.remove_file(root, parts)
-    except safe_open.UnsafePath:
-        return
-    logger.warning("A program written for a proposal was removed again. event=cli_program_removed path=%s", "/".join(parts))
 
 
 def checked_copy(root: Path, parts: tuple[str, ...], sha256: str, destination: Path) -> None:
@@ -399,7 +401,6 @@ __all__ = [
     "extract_member",
     "fetch_https",
     "install_program",
-    "remove_program",
     "workspace_digest",
     "workspaces_root",
 ]

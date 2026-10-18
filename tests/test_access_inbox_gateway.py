@@ -183,8 +183,9 @@ def test_a_waiting_request_is_announced_once_where_its_person_can_decide(harness
     assert view["choice_effects"]["deny"] == {"any": "Nothing is given, and WebResearchAgent is told you said no."}
 
 
-def test_a_failed_check_for_grants_without_an_outcome_does_not_skip_announcements(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("operation", ["end_grants_without_granted_outcome", "decision_recoveries"])
+def test_a_failed_recovery_check_does_not_skip_announcements(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, operation: str
 ) -> None:
     request = ask(harness)
 
@@ -192,13 +193,14 @@ def test_a_failed_check_for_grants_without_an_outcome_does_not_skip_announcement
         raise RuntimeError("database unavailable")
 
     store = harness.inbox.requests().service.store
-    monkeypatch.setattr(type(store), "end_grants_without_granted_outcome", broken)
+    monkeypatch.setattr(type(store), operation, broken)
     with caplog.at_level(logging.ERROR):
         asyncio.run(harness.inbox.run_once())
 
     [event] = harness.emitted
     assert event.access_request_id == request.request_id
-    assert "event=grants_without_outcome_check_failed" in caplog.text
+    event = "grants_without_outcome_check_failed" if operation == "end_grants_without_granted_outcome" else "access_decision_recovery_scan_failed"
+    assert f"event={event}" in caplog.text
 
 
 def test_a_members_request_goes_to_the_member_when_they_hold_the_access(harness: Harness) -> None:

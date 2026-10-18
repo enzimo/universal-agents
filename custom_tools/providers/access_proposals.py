@@ -25,13 +25,15 @@ records a new MCP connection and proposes installing it in the same call.
 from __future__ import annotations
 
 from access_control.cli_binaries import fetch_https
-from access_control.proposal_clis import install_programs, remove_programs
+from access_control.proposal_clis import install_programs
+from access_control.decision_effects import OwnedFile
 
 import asyncio
 import json
 import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
@@ -236,11 +238,16 @@ def apply_by_agreement(agent: Any, proposal: AccessProposalV1, confirmed: bool) 
         }
     installed = _install_by_agreement(agent, proposal)
     layout = runtime_layout(agent)
-    programs: list = []
+    programs: list[tuple[Path, OwnedFile]] = []
+
+    def prepare_program(root: Path, parts: tuple[str, ...], descriptor: int, data: bytes) -> None:
+        programs.append((root, OwnedFile.prepared(parts, descriptor, data)))
+
     try:
-        install_programs(layout.root, proposal.clis, fetch_https, programs)
+        install_programs(layout.root, proposal.clis, fetch_https, before_write=prepare_program)
     except ValueError:
-        remove_programs(programs)
+        for root, owned in programs:
+            owned.remove(root)
         raise
     for proposed in (*proposal.tools, *proposal.clis):
         write_instance_tool(layout.root, proposed)

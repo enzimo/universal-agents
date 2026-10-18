@@ -41,7 +41,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import Callable, Protocol
 
 from access_control.decisions import AccessService, HandDownRefused
 from access_control.entities import (
@@ -75,7 +75,9 @@ from custom_messages.contracts.access_v2 import (
     TargetRefV1,
 )
 from id_generation import new_id
-from storage.access_repository import AccessStoreConflict, DecisionClaim, DecisionInProgress, store_unavailable
+from storage.access_repository import (
+    AccessStoreConflict, DecisionClaim, DecisionInProgress, DecisionRecovery, store_unavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +114,10 @@ DECISION_CLAIM_SECONDS = 600
 DECISION_NOT_SAVED = (
     "The decision couldn't be saved because the access store was busy or could not be reached. Nothing was "
     "changed; try again."
+)
+DECISION_UNCONFIRMED = (
+    "The access store could not yet confirm this decision. Check its Inbox card after the store is available "
+    "again; do not repeat it yet."
 )
 DECIDING_NOW = (
     "Someone is deciding this request right now; its card shows the outcome when they finish. If that decision "
@@ -169,6 +175,14 @@ class Decided:
         }
 
 
+class DecisionRecoveryPending(HandDownRefused):
+    """External work needs reconciliation before its claim may be released."""
+
+
+class DecisionOutcomeUnknown(DecisionRecoveryPending):
+    """The store could not prove whether the outcome committed; keep its effects and claim for reconciliation."""
+
+
 class ChangeApplier(Protocol):
     """Trusted code that applies one kind of change when a person approves it.
 
@@ -186,6 +200,13 @@ class ChangeApplier(Protocol):
     def apply(
         self, request: AccessRequestV1, reviewer: PersonPrincipal, finished: AccessRequestV1, claim: DecisionClaim
     ) -> AccessRequestV1: ...
+
+    def recover(
+        self, requests: AccessRequests, recovery: DecisionRecovery,
+        current: AccessRequestV1 | None, claimed_elsewhere: bool,
+    ) -> AccessRequestV1 | None:
+        """Keep a committed decision's effects or undo only this decision's work, under the access-store lock."""
+        ...
 
 
 class RequestWatcher(Protocol):
@@ -1021,6 +1042,10 @@ class AccessRequests:
         finished = self._change_outcome(request, decided)
         try:
             applied = applier.apply(request, decided.reviewer, finished, claim)
+        except DecisionRecoveryPending:
+            # Its durable recovery record must establish what committed before
+            # files are removed or a new decision takes over.
+            raise
         except BaseException as exc:
             self._release(claim, decided.reviewer, exc)
             if isinstance(exc, AccessStoreConflict):
@@ -1076,21 +1101,22 @@ class AccessRequests:
         A PostgreSQL connection that drops while the outcome commits may have
         committed it. The stored request is this decision's outcome when it no
         longer waits and records this reviewer at this decision's time; then
-        the applier keeps its work. Reading it may fail too: then the work is
-        taken back, so nothing stays in place for a request that waits.
+        the applier keeps its work. A failed read leaves the outcome unknown,
+        never rolled back: appliers preserve their files and their durable
+        recovery record until the gateway can reconcile it.
         """
 
         if decided_at is None:
             return None
         try:
             stored = self.service.store.get_request(request_id)
-        except Exception:  # noqa: BLE001 - logged; treated as not stored
+        except Exception as exc:  # noqa: BLE001 - preserve effects until the store answers
             logger.exception(
-                "Could not read back an access request after its decision failed; taking back the decision's "
-                "work. event=access_decision_readback_failed request_id=%s",
+                "Could not confirm an access decision's outcome; its external work is kept for reconciliation. "
+                "event=access_decision_readback_failed request_id=%s",
                 request_id,
             )
-            return None
+            raise DecisionOutcomeUnknown(DECISION_UNCONFIRMED) from exc
         if (
             stored is None
             or stored.status not in {AccessRequestStatus.GRANTED, AccessRequestStatus.DENIED}
@@ -1106,6 +1132,77 @@ class AccessRequests:
             type(error).__name__,
         )
         return stored
+
+    def recovery_record(
+        self, claim: DecisionClaim, finished: AccessRequestV1, effects: dict[str, object]
+    ) -> DecisionRecovery:
+        return DecisionRecovery(
+            claim, finished, effects, self.service.clock() + timedelta(seconds=DECISION_CLAIM_SECONDS)
+        )
+
+    def clear_recovery(self, claim: DecisionClaim) -> None:
+        """A known outcome stands even if deleting its recovery record needs another pass."""
+
+        try:
+            self.service.store.clear_decision_recovery(claim)
+        except Exception:  # noqa: BLE001 - the durable record is retried by Inbox maintenance
+            logger.exception(
+                "The decision stands; its recovery record will be cleared by the Inbox. "
+                "event=access_decision_recovery_clear_failed request_id=%s claim_id=%s",
+                claim.request_id, claim.claim_id,
+            )
+
+    def reconcile_decision(
+        self, recovery: DecisionRecovery,
+        reconcile: Callable[[DecisionRecovery, AccessRequestV1 | None, bool], AccessRequestV1 | None],
+        *, require_record: bool = False,
+    ) -> AccessRequestV1 | None:
+        """Check the outcome and claim without a takeover racing the local cleanup."""
+
+        try:
+            with self.service.store.decision_cleanup_transaction(
+                recovery.claim, require_record=require_record, now=self.service.clock()
+            ) as state:
+                if state is None:
+                    return None
+                current, elsewhere, latest = state
+                return reconcile(latest or recovery, current, elsewhere)
+        except Exception as exc:
+            logger.exception(
+                "Could not reconcile an access decision; its external work is kept for the next Inbox pass. "
+                "event=access_decision_recovery_deferred request_id=%s claim_id=%s",
+                recovery.claim.request_id, recovery.claim.claim_id,
+            )
+            if store_unavailable(exc):
+                raise DecisionOutcomeUnknown(DECISION_UNCONFIRMED) from exc
+            raise DecisionRecoveryPending(
+                "The decision could not be completed. Some files still need cleanup; check its Inbox card "
+                "after storage is available again."
+            ) from exc
+
+    def recover_decisions(self) -> None:
+        """Resume durable reconciliation after an outage or a gateway restart, never grant access."""
+
+        for recovery in self.service.store.decision_recoveries(self.service.team_id, now=self.service.clock()):
+            assert recovery.finished.change is not None
+            try:
+                applier = self.appliers[recovery.finished.change.kind]
+                self.reconcile_decision(
+                    recovery,
+                    lambda latest, current, elsewhere: applier.recover(self, latest, current, elsewhere),
+                    require_record=True,
+                )
+                logger.info(
+                    "Reconciled an access decision's external work. event=access_decision_recovered "
+                    "request_id=%s claim_id=%s",
+                    recovery.claim.request_id, recovery.claim.claim_id,
+                )
+            except Exception:  # noqa: BLE001 - one failed recovery must not stop the other Inbox work
+                logger.exception(
+                    "Could not reconcile an access decision; it will be checked again. "
+                    "event=access_decision_recovery_failed request_id=%s claim_id=%s",
+                    recovery.claim.request_id, recovery.claim.claim_id,
+                )
 
     def _release(self, claim: DecisionClaim, reviewer: PersonPrincipal, error: BaseException) -> None:
         """Give up the claim of an applied change that failed (its applier took back its own work)."""

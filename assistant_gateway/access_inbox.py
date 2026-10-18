@@ -1031,6 +1031,12 @@ class GatewayAccessInbox:
     async def run_once(self) -> None:
         requests = self.requests()
         store = requests.service.store
+        try:
+            await asyncio.to_thread(requests.recover_decisions)
+        except Exception:  # noqa: BLE001 - an unavailable store must not skip other Inbox work
+            self._logger.exception(
+                "Could not list access decisions awaiting reconciliation. event=access_decision_recovery_scan_failed"
+            )
         # A grant carrying the approval id of a request that was not granted
         # (only an older version stored grants before their outcome) does not
         # stay in force (AccessRepository.end_grants_without_granted_outcome).

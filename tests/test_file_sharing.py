@@ -32,6 +32,7 @@ from custom_messages.contracts.access_v2 import (
 from runtime_settings.instance_layout import InstanceLayout, person_folder_name
 from storage.access_repository import AccessRepository
 from storage.config import resolve_storage_settings
+from tests.access_decision_support import uncertain_store
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "target" / "debug" / "ua-cedar-authorizer"
@@ -252,6 +253,123 @@ def test_a_delivery_stored_despite_a_reported_failure_keeps_the_file(
     delivered = world.home(BOB) / "received" / person_folder_name("alice") / "plan.md"
     assert delivered.read_text(encoding="utf-8") == "the plan"
     assert "event=access_decision_stored_despite_error" in caplog.text
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_an_unconfirmed_delivery_is_reconciled_after_reopening_the_store(world, monkeypatch, committed) -> None:
+    from datetime import timedelta
+
+    from access_control.requests import DecisionOutcomeUnknown
+
+    source = alice_file(world, "plan.md", "the plan")
+    world.sharing.send("alice", "plan.md", "Bob", move=True)
+    [request] = world.service.store.list_requests(TEAM)
+    with uncertain_store(monkeypatch, world.service.store, "finish_request", committed=committed):
+        with pytest.raises(DecisionOutcomeUnknown, match="could not yet confirm"):
+            world.requests().decide(request.request_id, BOB, AccessReviewChoice.APPROVE)
+
+    delivered = world.home(BOB) / "received" / person_folder_name("alice") / "plan.md"
+    assert delivered.read_text() == "the plan", "an unavailable readback never authorizes deleting the copy"
+    assert source.exists(), "an unconfirmed move keeps its original"
+    # The recovery has no in-memory callback dependency and survives a new repository.
+    world.service.store = AccessRepository(world.service.store.settings)
+    later = world.service.clock() + timedelta(minutes=11)
+    assert len(world.service.store.decision_recoveries(TEAM, now=later)) == 1
+    if not committed:
+        with pytest.raises(HandDownRefused, match="deciding this request"):
+            world.requests().decide(request.request_id, BOB, AccessReviewChoice.DENY)
+    monkeypatch.setattr(world.service, "clock", lambda: later)
+    world.requests().recover_decisions()
+    assert world.service.store.decision_recoveries(TEAM, now=later) == []
+    assert delivered.exists() is committed
+    assert source.exists() is not committed
+    if not committed:
+        denied = world.requests().decide(request.request_id, BOB, AccessReviewChoice.DENY)
+        assert denied.status is AccessRequestStatus.DENIED
+
+
+@pytest.mark.parametrize("fail_on", [1, 2])
+@pytest.mark.parametrize("committed", [False, True])
+def test_a_failed_journal_write_never_leaves_delivered_data_without_recovery(world, monkeypatch, fail_on, committed):
+    from datetime import timedelta
+
+    alice_file(world, "plan.md", "the plan")
+    world.sharing.send("alice", "plan.md", "Bob")
+    [request] = world.service.store.list_requests(TEAM)
+    with uncertain_store(monkeypatch, world.service.store, "save_decision_recovery", fail_on=fail_on, committed=committed):
+        with pytest.raises(HandDownRefused):
+            world.requests().decide(request.request_id, BOB, AccessReviewChoice.APPROVE)
+    delivered = world.home(BOB) / "received" / person_folder_name("alice") / "plan.md"
+    assert not delivered.exists()
+    later = world.service.clock() + timedelta(minutes=11)
+    monkeypatch.setattr(world.service, "clock", lambda: later)
+    world.requests().recover_decisions()
+    world.requests().decide(request.request_id, BOB, AccessReviewChoice.DENY)
+    assert not delivered.exists()
+    assert world.service.store.decision_recoveries(TEAM) == []
+
+
+def test_repeated_cleanup_keeps_the_recipients_replacement_file(world, monkeypatch):
+    import sqlite3
+    from datetime import timedelta
+
+    alice_file(world, "plan.md", "the plan")
+    world.sharing.send("alice", "plan.md", "Bob")
+    [request] = world.service.store.list_requests(TEAM)
+    with uncertain_store(monkeypatch, world.service.store, "finish_request"):
+        with pytest.raises(HandDownRefused):
+            world.requests().decide(request.request_id, BOB, AccessReviewChoice.APPROVE)
+    later = world.service.clock() + timedelta(minutes=11)
+    monkeypatch.setattr(world.service, "clock", lambda: later)
+
+    def cannot_commit_cleanup(_claim):
+        raise sqlite3.OperationalError("cleanup transaction failed")
+
+    delivered = world.home(BOB) / "received" / person_folder_name("alice") / "plan.md"
+    with monkeypatch.context() as failure:
+        failure.setattr(world.service.store, "clear_decision_recovery", cannot_commit_cleanup)
+        world.requests().recover_decisions()
+    assert not delivered.exists()
+    assert len(world.service.store.decision_recoveries(TEAM)) == 1
+    delivered.write_text("Bob's replacement file")
+    world.requests().recover_decisions()
+    assert delivered.read_text() == "Bob's replacement file"
+    assert world.service.store.decision_recoveries(TEAM) == []
+
+
+def test_recovery_removes_a_file_journaled_after_its_initial_scan(world, monkeypatch):
+    from datetime import timedelta
+
+    from access_control import safe_open
+    from access_control.decision_effects import EffectJournal
+    from access_control.requests import Decided
+
+    alice_file(world, "plan.md", "the plan")
+    world.sharing.send("alice", "plan.md", "Bob")
+    [request] = world.service.store.list_requests(TEAM)
+    requests = world.requests()
+    waiting, claim = requests._claim(request.request_id)
+    finished = requests._change_outcome(waiting, Decided(BOB, AccessReviewChoice.APPROVE, "", world.service.clock()))
+    recovery = requests.recovery_record(claim, finished, {"files": []})
+    world.service.store.save_decision_recovery(recovery)
+    later = world.service.clock() + timedelta(minutes=11)
+    monkeypatch.setattr(world.service, "clock", lambda: later)
+    [scanned] = world.service.store.decision_recoveries(TEAM, now=later)
+
+    # The original process wakes after the scan, records and writes its file,
+    # then stops before storing an outcome. Cleanup must reread its journal.
+    parts = ("users", person_folder_name("bob"), "received", person_folder_name("alice"), "plan.md")
+    journal = EffectJournal(world.service.store, recovery)
+    with safe_open.writable_file(world.layout.workspaces_dir, parts, create_directories=True, exclusive=True) as writer:
+        journal.prepare("files", world.layout.workspaces_dir, parts, writer.fileno(), b"the plan")
+        writer.write(b"the plan")
+    with monkeypatch.context() as stale_scan:
+        stale_scan.setattr(world.service.store, "decision_recoveries", lambda *_args, **_kwargs: [scanned])
+        requests.recover_decisions()
+
+    requests.decide(request.request_id, BOB, AccessReviewChoice.DENY)
+    assert not world.layout.workspaces_dir.joinpath(*parts).exists()
+    assert world.service.store.decision_recoveries(TEAM) == []
 
 
 def test_a_file_changed_after_sending_is_not_delivered_and_the_team_folder_needs_no_approval(world: World) -> None:

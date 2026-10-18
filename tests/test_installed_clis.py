@@ -470,6 +470,21 @@ def test_a_slow_name_lookup_on_a_redirect_cannot_carry_the_download_past_its_dea
     assert seconds < 1.8, "overran by the lookup at most, not by the trickled headers"
 
 
+def test_the_download_deadline_interrupts_a_body_read_after_delayed_headers(https_server, monkeypatch) -> None:
+    monkeypatch.setattr(cli_binaries, "DOWNLOAD_DEADLINE_SECONDS", 1)
+    monkeypatch.setattr(cli_binaries, "DOWNLOAD_TIMEOUT_SECONDS", 2)
+
+    def stalled_body(tls, _port):
+        time.sleep(0.8)
+        tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n")
+        time.sleep(1.5)
+        tls.sendall(b"tea")
+
+    result, seconds = _download(https_server([stalled_body]))
+    assert "stopped after 1 seconds in total" in result
+    assert seconds < 1.5, seconds
+
+
 def test_a_download_follows_a_few_https_redirects_and_refuses_more(https_server, monkeypatch) -> None:
     monkeypatch.setattr(cli_binaries, "DOWNLOAD_DEADLINE_SECONDS", 20)
 
@@ -504,7 +519,10 @@ def test_each_download_runs_between_two_claim_renewals(world, served, monkeypatc
     assert program_path(instance).read_bytes() == PROGRAM
 
 
-def test_a_decision_that_lost_its_claim_keeps_a_program_the_winning_approval_uses(world, served) -> None:  # noqa: F811
+@pytest.mark.parametrize("renewal_unavailable", [False, True])
+def test_a_decision_that_lost_its_claim_keeps_a_program_the_winning_approval_uses(  # noqa: F811
+    world, served, monkeypatch, renewal_unavailable  # noqa: F811
+) -> None:
     # 2026-10-17 review: the first approval's claim ran out during its second
     # download and a second approval was stored meanwhile, relying on the
     # program the first had already installed; the first approval's clean-up
@@ -525,6 +543,19 @@ def test_a_decision_that_lost_its_claim_keeps_a_program_the_winning_approval_use
     applier = requests().appliers[ACCESS_PROPOSAL_KIND]
     first_program = program_path(instance)
     seen: dict = {}
+    renew = AccessRequests.renew_claim
+    first_claim: list[str] = []
+
+    def renew_claim(self, claim):
+        import sqlite3
+
+        if not first_claim:
+            first_claim.append(claim.claim_id)
+        if renewal_unavailable and "second" in seen and claim.claim_id == first_claim[0]:
+            raise sqlite3.OperationalError("connection lost during claim renewal")
+        return renew(self, claim)
+
+    monkeypatch.setattr(AccessRequests, "renew_claim", renew_claim)
 
     def download(url: str) -> bytes:
         data = served.download(url)
@@ -537,12 +568,22 @@ def test_a_decision_that_lost_its_claim_keeps_a_program_the_winning_approval_use
                     "UPDATE access_request_claims SET claimed_until = '2000-01-01T00:00:00+00:00' WHERE request_id = ?",
                     (request_id,),
                 )
+                conn.execute(
+                    "UPDATE access_decision_recoveries SET recover_after = '2000-01-01T00:00:00+00:00' WHERE request_id = ?",
+                    (request_id,),
+                )
                 conn.commit()
+            # An expired claim with external work must be reconciled before
+            # another approval starts. The old process can still resume later.
+            with pytest.raises(HandDownRefused, match="deciding this request"):
+                requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE)
+            requests().recover_decisions()
             seen["second"] = requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE, kept_item_ids=("grant-0",))
         return data
 
     applier.download = download
-    with pytest.raises(HandDownRefused, match="already granted by another decision"):
+    message = "couldn't be saved" if renewal_unavailable else "already granted by another decision"
+    with pytest.raises(HandDownRefused, match=message):
         requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE, kept_item_ids=("grant-0",))
 
     assert seen["first_program_installed"] and seen["second"].status is AccessRequestStatus.GRANTED

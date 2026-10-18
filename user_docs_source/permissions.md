@@ -208,12 +208,17 @@ and the next step:
    Discord ([Decide requests in chat](#decide-requests-in-chat)). The task
    continues with the decision. A request is decided once: if you press a
    button twice, or decide in chat and in the Inbox at the same moment, the
-   second one finds it already decided. If a decision cannot be saved,
+   second one finds it already decided. If a decision is confirmed not saved,
    nothing it gave is kept and the request waits for a decision again. While
    an approved proposal or a sent file is being applied, other decisions on
-   it are told someone is deciding it; if that stopped halfway (for example
-   the gateway restarted), the request can be decided again within 10
-   minutes.
+   it are told someone is deciding it. If that stopped halfway (for example
+   the gateway restarted), the gateway checks the result after the ten-minute
+   decision period. If the store cannot confirm whether a decision was saved, the
+   Inbox tells you to wait and check again. Files are kept until the gateway
+   can confirm the result. It checks after the ten-minute claim period,
+   including after a restart, and finishes or undoes the work before allowing
+   another decision on that request. If cleanup fails, the request stays on
+   hold until a later check succeeds.
 
 Workers ask the same way. A worker's request goes to the person directly;
 TeamLead does not pass the question along in its own conversation. When you

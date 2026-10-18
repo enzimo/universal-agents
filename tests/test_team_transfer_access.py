@@ -102,6 +102,36 @@ def _old_instance(tmp_path: Path) -> tuple[Path, Path]:
     return path, datasets
 
 
+def test_export_waits_for_unconfirmed_external_effects_to_be_reconciled(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from assistant_gateway.config import GatewayInstanceConfig
+    from custom_messages.contracts.access_v2 import AccessRequestStatus, AccessRequestV1
+    from storage.access_repository import DecisionClaim, DecisionRecovery
+    from team_transfer.errors import TransferError
+
+    config_path, _datasets = _old_instance(tmp_path)
+    store = AccessRepository(GatewayInstanceConfig.load(config_path).manager_storage_settings)
+    request = store.create_request(AccessRequestV1(
+        request_id="access_req_uncertain", team_id=TEAM, requester_agent_id="agent-lead",
+        requester_agent_type="TeamArchitect",
+        subject=SubjectRefV1(kind=SubjectKind.USER, id="usr_ana"),
+        target=TargetRefV1(kind=TargetKind.TOOL, id="fn:schedules"),
+        level=AccessLevel.WRITE, reason="Approve the change", created_at_utc=NOW,
+    ))
+    claim = DecisionClaim(request.request_id, "decision_uncertain")
+    store.claim_decision(request.request_id, claim_id=claim.claim_id, at=NOW, until=NOW + timedelta(minutes=10))
+    finished = request.model_copy(update={"status": AccessRequestStatus.GRANTED})
+    store.save_decision_recovery(DecisionRecovery(claim, finished, {}, NOW))
+    out = tmp_path / "team.uatransfer"
+    with pytest.raises(TransferError, match="awaiting confirmation"):
+        export_team(
+            export_source(config_path), out, PASSPHRASE, owner_person_id="usr_ana", sections=SECTIONS,
+            key_derivation=new_key_derivation(**FAST_KEYS),
+        )
+    assert not out.exists()
+
+
 def test_lasting_access_arrives_and_what_would_dangle_is_refused(tmp_path: Path) -> None:
     from assistant_gateway.config import GatewayInstanceConfig
 

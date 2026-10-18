@@ -188,7 +188,10 @@ If storing a catalog credential fails, retry the same backup. The broker reuses
 that record's stored secret items and saves its complete catalog entry together,
 so a partial attempt does not block the retry or create duplicate secret items.
 Account links belong to their owner and tool, so an older link cannot replace a
-newer destination sign-in even when their link IDs differ. Each tool has one
+newer destination sign-in even when their link IDs differ. An access decision
+whose result is still being confirmed must be reconciled before export. Start
+the gateway and let the Inbox check it after the ten-minute claim period,
+then stop the runtime and export again. Each tool has one
 link per owner; if a backup holds two for the same tool and owner, the review
 refuses the older one and names the newer one, which was the one in use. A person's chat
 account already linked to someone in the destination is refused before writing,

@@ -27,7 +27,11 @@ fields change, and those live in their own columns so updates are atomic:
   an owner and a time limit, renewed before and after long steps by
   ``renew_decision``) and store their outcome only while the claim holds;
   any other decision is refused while such a claim is current. Claims are
-  transient and never travel in a team transfer;
+  transient and never travel in a team transfer. Before writing an outcome,
+  appliers persist their external effects in ``access_decision_recoveries``.
+  An unavailable readback preserves those effects for Inbox reconciliation,
+  including after restart; an unresolved recovery prevents another decision
+  from taking over or an access transfer from exporting uncertain work;
 - a grant that carries the approval id of a request that was not granted
   (only an older version could leave one) is never kept in force
   (``end_grants_without_granted_outcome``, found by the indexed
@@ -146,6 +150,29 @@ class DecisionClaim:
 
     request_id: str
     claim_id: str
+
+
+@dataclass(frozen=True)
+class DecisionRecovery:
+    """External effects saved before an outcome write, retained until its result is known.
+
+    These are transient gateway recovery records, like decision claims, and
+    never travel in a team transfer. Paths in effects are relative to the
+    owning applier's instance, never agent-supplied host paths.
+    """
+
+    claim: DecisionClaim
+    finished: AccessRequestV1
+    effects: dict[str, Any]
+    recover_after: datetime
+
+    def matches(self, stored: AccessRequestV1 | None) -> bool:
+        return (
+            stored is not None
+            and stored.status is self.finished.status
+            and stored.decided_by == self.finished.decided_by
+            and stored.decided_at_utc == self.finished.decided_at_utc
+        )
 
 
 class _JoinedWrite:
@@ -306,6 +333,14 @@ class AccessRepository:
                 request_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, claim_id TEXT NOT NULL,
                 claimed_at TEXT NOT NULL, claimed_until TEXT NOT NULL
             )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS access_decision_recoveries (
+                claim_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, team_id TEXT NOT NULL,
+                finished_json TEXT NOT NULL, effects_json TEXT NOT NULL, recover_after TEXT NOT NULL
+            )""")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS access_decision_recoveries_request "
+                "ON access_decision_recoveries(request_id)"
+            )
             conn.execute("""CREATE TABLE IF NOT EXISTS access_notices (
                 notice_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, payload_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
@@ -1881,6 +1916,7 @@ class AccessRepository:
             conn.begin_write()
             requests = 0
             for request_id in request_ids:
+                conn.execute(f"DELETE FROM access_decision_recoveries WHERE request_id={p}", (request_id,))
                 conn.execute(f"DELETE FROM access_request_claims WHERE request_id={p}", (request_id,))
                 requests += int(
                     conn.execute(f"DELETE FROM access_requests WHERE request_id={p}", (request_id,)).rowcount or 0
@@ -2113,6 +2149,7 @@ class AccessRepository:
         )
 
     def _refuse_current_claim_in(self, conn: Any, request_id: str, *, at: datetime) -> None:
+        self._refuse_recovery_in(conn, request_id)
         p = self.dialect.bind
         row = conn.execute(
             f"SELECT claimed_until FROM access_request_claims WHERE request_id={p}", (request_id,)
@@ -2135,6 +2172,7 @@ class AccessRepository:
         with self._connect() as conn:
             conn.begin_write()
             request = self._waiting_in(conn, request_id, message="That access request was already {status}.")
+            self._refuse_recovery_in(conn, request_id)
             row = conn.execute(
                 f"SELECT claim_id, claimed_until FROM access_request_claims WHERE request_id={p}", (request_id,)
             ).fetchone()
@@ -2173,6 +2211,10 @@ class AccessRepository:
                 f"UPDATE access_request_claims SET claimed_until={p} WHERE request_id={p} AND claim_id={p}",
                 (_utc(until), claim.request_id, claim.claim_id),
             )
+            conn.execute(
+                f"UPDATE access_decision_recoveries SET recover_after={p} WHERE request_id={p} AND claim_id={p}",
+                (_utc(until), claim.request_id, claim.claim_id),
+            )
             conn.commit()
 
     def release_decision(self, request_id: str, claim_id: str) -> bool:
@@ -2186,6 +2228,129 @@ class AccessRepository:
             ).rowcount
             conn.commit()
         return bool(released)
+
+    # -- external effects whose outcome needs reconciliation -------------------
+
+    def _refuse_recovery_in(self, conn: Any, request_id: str) -> None:
+        p = self.dialect.bind
+        row = conn.execute(
+            f"SELECT 1 FROM access_decision_recoveries WHERE request_id={p}", (request_id,)
+        ).fetchone()
+        if row is not None:
+            raise DecisionInProgress(
+                f"Access request {request_id} is checking the result of an earlier decision before it can be decided again."
+            )
+
+    def save_decision_recovery(self, recovery: DecisionRecovery) -> None:
+        """Persist effects before attempting the outcome, independently of its commit or rollback."""
+
+        p = self.dialect.bind
+        with self._connect() as conn:
+            conn.begin_write()
+            self._require_claim_in(conn, recovery.claim)
+            held_until = conn.execute(
+                f"SELECT claimed_until FROM access_request_claims WHERE request_id={p}", (recovery.claim.request_id,)
+            ).fetchone()
+            recover_after = max(recovery.recover_after, datetime.fromisoformat(held_until[0]))
+            conn.execute(
+                "INSERT INTO access_decision_recoveries "
+                "(claim_id, request_id, team_id, finished_json, effects_json, recover_after) "
+                f"VALUES ({p},{p},{p},{p},{p},{p}) ON CONFLICT(claim_id) DO UPDATE SET "
+                "effects_json=excluded.effects_json, finished_json=excluded.finished_json, "
+                "recover_after=excluded.recover_after",
+                (
+                    recovery.claim.claim_id, recovery.claim.request_id, recovery.finished.team_id,
+                    recovery.finished.model_dump_json(), json.dumps(recovery.effects), _utc(recover_after),
+                ),
+            )
+            conn.commit()
+
+    def clear_decision_recovery(self, claim: DecisionClaim) -> None:
+        p = self.dialect.bind
+        with self._connect() as conn:
+            conn.begin_write()
+            conn.execute(
+                f"DELETE FROM access_decision_recoveries WHERE request_id={p} AND claim_id={p}",
+                (claim.request_id, claim.claim_id),
+            )
+            conn.commit()
+
+    @contextmanager
+    def decision_effect_transaction(self, claim: DecisionClaim) -> Iterator[None]:
+        """Publish a journaled external effect while excluding recovery cleanup.
+
+        The journal is already committed. If cleanup won first, its released
+        claim prevents publication; otherwise cleanup waits and sees the effect.
+        Only bounded local publication belongs here, never a download.
+        """
+
+        with self._connect() as conn:
+            conn.begin_write()
+            self._require_claim_in(conn, claim)
+            yield
+            conn.commit()
+
+    def decision_recoveries(self, team_id: str, *, now: datetime | None = None) -> list[DecisionRecovery]:
+        p = self.dialect.bind
+        query = f"SELECT * FROM access_decision_recoveries WHERE team_id={p}"
+        params = (team_id,) if now is None else (team_id, _utc(now))
+        if now is not None:
+            query += f" AND recover_after<={p}"
+        rows = self._read_rows(
+            query, params,
+        )
+        return [self._decision_recovery_from_row(row) for row in rows]
+
+    @staticmethod
+    def _decision_recovery_from_row(row: Any) -> DecisionRecovery:
+        return DecisionRecovery(
+            DecisionClaim(str(row["request_id"]), str(row["claim_id"])),
+            AccessRequestV1.model_validate_json(row["finished_json"]),
+            json.loads(row["effects_json"]), datetime.fromisoformat(row["recover_after"]),
+        )
+
+    @contextmanager
+    def decision_cleanup_transaction(
+        self, claim: DecisionClaim, *, require_record: bool = False, now: datetime | None = None
+    ) -> Iterator[tuple[AccessRequestV1 | None, bool, DecisionRecovery | None] | None]:
+        """Recheck the outcome and claim while excluding a takeover during local cleanup.
+
+        A failed read is never evidence that a commit failed. The caller must
+        preserve its effects when entering this transaction fails. A successful
+        cleanup removes its recovery record and releases only its own claim.
+        """
+
+        p = self.dialect.bind
+        with self._connect() as conn:
+            conn.begin_write()
+            row = conn.execute(
+                f"SELECT * FROM access_decision_recoveries WHERE claim_id={p}", (claim.claim_id,)
+            ).fetchone()
+            if require_record and row is None:
+                # Another maintenance pass already reconciled this record.
+                yield None
+                return
+            with self._joining(conn):
+                current = self.get_request(claim.request_id)
+                held = conn.execute(
+                    f"SELECT claim_id, claimed_until FROM access_request_claims WHERE request_id={p}", (claim.request_id,)
+                ).fetchone()
+                if (
+                    require_record and held is not None and held[0] == claim.claim_id
+                    and datetime.fromisoformat(held[1]) > (now or datetime.now(timezone.utc))
+                ):
+                    # A download renewed after the maintenance pass read its
+                    # list. Its current claim takes precedence over that list.
+                    yield None
+                    return
+                # The claimant may have journaled another file after the
+                # maintenance scan. Only this locked read can supply the
+                # complete effects list that cleanup is about to clear.
+                latest = self._decision_recovery_from_row(row) if row is not None else None
+                yield current, held is not None and held[0] != claim.claim_id, latest
+                self.clear_decision_recovery(claim)
+                self.release_decision(claim.request_id, claim.claim_id)
+            conn.commit()
 
     # -- grants without a granted outcome --------------------------------------------
 
