@@ -19,6 +19,10 @@ EOF
 
 profile="${1:-fast}"
 profile_args=()
+if [[ "${profile}" == fast || "${profile}" == collect ]]; then
+    # Hermetic collection also imports dependency adapters directly.
+    export LITELLM_LOCAL_MODEL_COST_MAP=true
+fi
 if [[ $# -gt 0 ]]; then
     shift
 fi

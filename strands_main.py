@@ -1066,6 +1066,10 @@ def run_with_args(args: argparse.Namespace) -> None:
             sys.exit(1)
 
     # Import here to avoid circular imports
+    # Warm the SDK on this main thread before agent construction starts workers.
+    from custom_agents.litellm_runtime import initialize_litellm
+
+    initialize_litellm()
     from custom_agents.strands_team import (
         AGENT_TYPE_MAP,
         create_strands_agent,

@@ -22,14 +22,18 @@ def _run_profile(tmp_path: Path, *arguments: str) -> tuple[subprocess.CompletedP
     fake_pytest.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
-        "printf '%s\\n' \"$@\" > \"${CAPTURE_FILE}\"\n",
+        "printf '%s\\n' \"$@\" > \"${CAPTURE_FILE}\"\n"
+        "printf '%s\\n' \"${LITELLM_LOCAL_MODEL_COST_MAP}\"\n",
         encoding="utf-8",
     )
     fake_pytest.chmod(0o755)
     completed = subprocess.run(
         ["bash", str(SCRIPT), *arguments],
         cwd=PROJECT_ROOT,
-        env={**os.environ, "PYTEST": str(fake_pytest), "CAPTURE_FILE": str(capture_path)},
+        env={
+            **os.environ, "PYTEST": str(fake_pytest), "CAPTURE_FILE": str(capture_path),
+            "LITELLM_LOCAL_MODEL_COST_MAP": "false",
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -65,6 +69,8 @@ def test_test_suite_runner_selects_expected_pytest_arguments(
 
     assert completed.returncode == 0, completed.stderr
     assert captured == expected
+    profile = arguments[0] if arguments else "fast"
+    assert completed.stdout.strip() == ("true" if profile in {"fast", "collect"} else "false")
 
 
 def test_test_suite_runner_rejects_unknown_profile(tmp_path: Path) -> None:

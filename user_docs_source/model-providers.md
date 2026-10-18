@@ -263,6 +263,11 @@ URL and a model ID accepted by that endpoint. In Universal Agents,
 runtime path; it does not require an OpenAI-operated endpoint or a separately
 deployed LiteLLM proxy.
 
+Built-in LiteLLM capability and pricing data comes with the installed release.
+Updating LiteLLM updates that data. Startup does not download a model catalog.
+For newer models, you can set capabilities explicitly or use the model lookup
+to read your endpoint's model information or OpenRouter's current directory.
+
 For Fireworks and Novita, UA selects its reduced provider-compatible tool and
 terminal-output schemas from either the provider marker in the model ID or the
 configured API-base hostname.

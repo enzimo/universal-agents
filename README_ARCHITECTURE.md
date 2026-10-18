@@ -2498,6 +2498,14 @@ providers have one fixed address each, and the OpenAI-compatible endpoint
 embedding service have their configured one. A key entered for one address
 is never sent to another.
 
+- **Model metadata at startup.** `custom_agents/litellm_runtime.py` selects the
+  catalog bundled with LiteLLM before importing it. `strands_main` warms it on
+  the main thread before creating agents; the reasoning adapter and capability
+  checker use the same initialization path. This removes an import-time pricing
+  download whose retry thread can race LiteLLM's logging imports under a network
+  outage ([upstream import issue](https://github.com/BerriAI/litellm/issues/46142)).
+  Built-in capabilities and prices update with dependency releases. Configured
+  capabilities and explicit provider metadata requests remain separate sources.
 - **Where keys live.** Administrators save the team's keys with `/auth model`,
   a broker page (`secure_tool_broker/model_key_page.py`) that tests each key
   with one real request (`model_providers/connection_test.py`, shared with

@@ -24,6 +24,8 @@ from typing import Any, Callable, Iterable
 
 import requests
 
+from custom_agents.litellm_runtime import initialize_litellm
+
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 LITELLM_PROXY_MODEL_INFO_PATH = "/model/info"
 DEFAULT_METHODS = ("litellm_proxy", "openrouter", "litellm", "huggingface")
@@ -375,7 +377,7 @@ def check_litellm_model_capabilities(model_id: str) -> dict[str, Any]:
             evidence=["No LiteLLM model id was provided."],
         )
     try:
-        import litellm
+        litellm = initialize_litellm()
 
         info = litellm.get_model_info(model=candidate_id)
     except Exception as exc:

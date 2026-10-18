@@ -101,6 +101,15 @@ Rust tools stages of both Dockerfiles, including the copied Rust source patches.
 It checks the generated pages, search index and container document converter.
 Keep build tools in the stage that runs them when changing dependency ownership.
 
+LiteLLM initializes through `custom_agents.litellm_runtime` with its bundled
+model catalog, before agent construction starts worker threads. Its import-time
+pricing download can start a retry thread that races its logging imports when
+the network fails. Catalog data therefore updates with the installed LiteLLM
+version; explicit endpoint metadata requests remain live. Fast tests and
+collection select the same bundled mode for direct SDK imports. Subprocess tests
+force the failed-download thread ordering and verify both production import paths
+make no catalog HTTP requests or retry threads.
+
 After editing an input, regenerate the universal, hash-checked locks with the
 development environment's uv 0.12.24:
 
@@ -114,6 +123,9 @@ for an intentional dependency refresh. Do not hand-edit generated lockfiles.
 scanner graph does not alter the agent runtime. Removing a development dependency
 from an existing environment requires recreating that environment; installing the
 runtime lock alone does not uninstall packages already present.
+SkillSpector itself is pinned by its source archive and SHA-256. `pip-audit`
+checks its registry dependencies, but skips the SkillSpector package because
+that source release is not on PyPI; a successful audit does not cover it.
 
 The dependency-audit workflow audits the runtime, development, and SkillSpector
 Python locks, Photon production dependencies, and the Rust workspace. Rust auditing

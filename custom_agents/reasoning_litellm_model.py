@@ -9,11 +9,14 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 from default_values import LLM_DEFAULTS
-from strands.models.litellm import LiteLLMModel
-from strands.types.content import ContentBlock, Messages, SystemContentBlock
-from strands.types.tools import ToolChoice, ToolSpec
+from custom_agents.litellm_runtime import initialize_litellm
 
-from custom_agents.litellm_compatibility import uses_litellm_compatible_schema
+initialize_litellm()
+from strands.models.litellm import LiteLLMModel  # noqa: E402
+from strands.types.content import ContentBlock, Messages, SystemContentBlock  # noqa: E402
+from strands.types.tools import ToolChoice, ToolSpec  # noqa: E402
+
+from custom_agents.litellm_compatibility import uses_litellm_compatible_schema  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
