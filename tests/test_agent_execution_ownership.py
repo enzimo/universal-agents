@@ -51,6 +51,7 @@ class RuntimeHost(SimpleNamespace):
     process_llm_interaction = UniversalAgent.process_llm_interaction
     _resume_parent_task_if_ready = UniversalAgent._resume_parent_task_if_ready
     _check_and_process_next_task = UniversalAgent._check_and_process_next_task
+    _can_continue_pending_work = UniversalAgent._can_continue_pending_work
 
 
 @pytest.fixture
@@ -89,6 +90,7 @@ def host(tmp_path, monkeypatch):
         named_agent_type="TeamArchitect",
         task_manager=manager,
         paused=False,
+        _should_exit=asyncio.Event(),
         _execution_gate=AgentExecutionGate(),
         _active_execution_task_id=None,
         _logger=logging.getLogger(__name__),
@@ -350,3 +352,57 @@ async def test_user_stop_cancels_sdk_child_without_cancelling_its_owner(host):
     finally:
         host.provider.release.set()
         await asyncio.gather(running, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_gate_release_callback_runs_once_per_outer_hold_even_when_cancelled():
+    released = []
+    gate = AgentExecutionGate(on_release=released.append)
+
+    async def holder():
+        async with gate.hold():
+            async with gate.hold():  # nested in the same task: no release yet
+                pass
+            assert released == []
+
+    owner = asyncio.create_task(holder())
+    await owner
+    assert released == [owner]
+
+    entered = asyncio.Event()
+
+    async def cancelled_holder():
+        async with gate.hold():
+            entered.set()
+            await asyncio.Event().wait()
+
+    stopped = asyncio.create_task(cancelled_holder())
+    await entered.wait()
+    stopped.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopped
+    assert released == [owner, stopped]
+    assert not gate.busy
+
+
+@pytest.mark.asyncio
+async def test_a_failing_release_callback_is_logged_and_keeps_the_holders_outcome(caplog):
+    def broken_callback(_owner):
+        raise RuntimeError("callback bug")
+
+    gate = AgentExecutionGate(on_release=broken_callback)
+
+    async def holder_that_fails():
+        async with gate.hold():
+            raise ValueError("the holder's own error")
+
+    async def holder_that_succeeds():
+        async with gate.hold():
+            return "done"
+
+    with caplog.at_level(logging.ERROR, logger="runtime_hosting.agent_execution"):
+        with pytest.raises(ValueError, match="the holder's own error"):
+            await asyncio.create_task(holder_that_fails())
+        assert await asyncio.create_task(holder_that_succeeds()) == "done"
+    assert caplog.text.count("event=execution_gate_release_callback_failed") == 2
+    assert not gate.busy

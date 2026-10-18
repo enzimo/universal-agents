@@ -390,8 +390,9 @@ async def test_after_an_agent_restart_the_task_resumes_from_a_directive(tmp_path
     manager = lead.task_manager
     assert get_human_interaction_blocker(manager, "task-lead") is None
     assert manager.get_task_info("task-lead").state == ProgressState.ACCEPTED
-    directive = manager.consume_runtime_resume_directive("task-lead")
+    directive = manager.read_runtime_resume_directive("task-lead")
     assert "Signed in to GitHub as exampleuser" in directive and '"status": "ready"' in directive
+    await asyncio.wait_for(lead._pending_work_task, 2)  # the retained drain runs the task
     lead._continue_pending_work.assert_awaited()
 
 

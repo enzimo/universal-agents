@@ -40,6 +40,7 @@ from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 from custom_agents.conversation_runtime import finalize_conversation_turn
 from custom_agents.model_failover_runtime import ProviderFailoverRequeued
 from custom_agents.model_keys import ModelKeyError, tell_administrators_about_key_problem
+from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.objective_work_completion import ObjectiveWorkCompletionError
 from custom_agents.provider_error_runtime import ProviderTimeoutError, iter_exception_chain
 from custom_agents.provider_limits import ProviderLimitExhausted
@@ -232,7 +233,11 @@ async def release_orphaned_slot_when_idle(agent: Any) -> bool:
     if gate is None or gate.busy or getattr(agent, "paused", False):
         return False
     async with gate.hold():
-        return await release_orphaned_execution_slot(agent)
+        released = await release_orphaned_execution_slot(agent)
+    if released:
+        # Queued work starts now, not when unrelated traffic next wakes the drain.
+        schedule_pending_work(agent)
+    return released
 
 
 __all__ = [

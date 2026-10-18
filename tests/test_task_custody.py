@@ -321,6 +321,7 @@ async def test_a_released_task_stops_its_delegated_work_but_is_not_cancelled(tmp
     _delegate_child(old_holder, "T", "C")
     agent = SimpleNamespace(
         id="worker_1", team_id="team", task_manager=old_holder, _request_subtask_stop=AsyncMock(return_value=True),
+        _should_exit=asyncio.Event(), _owned_tasks=set(), _logger=logging.getLogger("t"),
     )
     record_publication(agent, subtask_id="C", parent_task_id="T", named_agent_type="TeamArchitect",
                        target_agent_name=None, publish_sequence=5)

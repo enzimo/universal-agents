@@ -461,12 +461,19 @@ async def test_live_query_agent_state_live_sends_targeted_operational_status_req
             ),
             _has_execution_capacity=lambda: True,
             _send_operational_message=send_operational_message,
+            # A running agent's loop and owned-work fields: the tool's send runs there.
+            _runtime_loop=asyncio.get_running_loop(),
+            _should_exit=asyncio.Event(),
+            _owned_tasks=set(),
+            _logger=logging.getLogger("test_live_query_agent_state"),
         )
 
         set_agent_ref(fake_agent)
         try:
+            # Strands runs sync tools in a worker thread; the send finishes
+            # on the agent loop before the tool returns.
             result = json.loads(
-                query_agent_state(live="true", target_agent="target-manager")
+                await asyncio.to_thread(query_agent_state, live="true", target_agent="target-manager")
             )
             assert result["live_refresh_requested"] is True
             assert result["live_refresh_targets"] == ["target-manager"]

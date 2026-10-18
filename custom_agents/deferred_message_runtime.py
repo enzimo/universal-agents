@@ -443,8 +443,13 @@ class DeferredMessageInbox:
             return False
         if not handoff.committed and (error is not None or handoff.failure is not None):
             # Nothing of its handling was saved here; the message stays in the row.
+            # The ids are also in the text: the agent log format prints no ``extra``.
             self.logger.warning(
-                "Deferred dispatch did not complete; retaining durable work",
+                "A waiting message could not be handled and is kept. "
+                "event=deferred_dispatch_retained agent_id=%s message_id=%s task_id=%s",
+                self.owner.agent_id,
+                message_id,
+                getattr(envelope.msg_content, "task_id", None),
                 extra={"event": "deferred_dispatch_retained", "agent_id": self.owner.agent_id,
                        "message_id": message_id},
                 exc_info=error or handoff.failure,
@@ -462,7 +467,11 @@ class DeferredMessageInbox:
             return False
         if error is not None:
             self.logger.warning(
-                "Deferred dispatch failed after its handling was saved; the message is done here",
+                "Deferred dispatch failed after its handling was saved; the message is done here. "
+                "event=deferred_dispatch_failed_after_save agent_id=%s message_id=%s task_id=%s",
+                self.owner.agent_id,
+                message_id,
+                getattr(envelope.msg_content, "task_id", None),
                 extra={"event": "deferred_dispatch_failed_after_save", "agent_id": self.owner.agent_id,
                        "message_id": message_id},
                 exc_info=error,

@@ -147,5 +147,5 @@ async def test_after_the_access_approval_the_task_keeps_waiting_for_the_sign_in(
     manager = lead.task_manager
     assert manager.get_task_info("task-lead").state == ProgressState.WAITING
     assert get_human_interaction_blocker(manager, "task-lead") is not None
-    assert not lead._pending_interrupt_responses and manager.consume_runtime_resume_directive("task-lead") is None
+    assert not lead._pending_interrupt_responses and manager.read_runtime_resume_directive("task-lead") is None
     lead._continue_pending_work.assert_not_awaited()

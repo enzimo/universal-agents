@@ -12,6 +12,7 @@ from custom_agents.objective_work_sessions import ObjectiveWorkSessionCoordinato
 from custom_agents.structured_llm_messages import StructuredAgentTurnDecision
 from custom_agents.task_records import TaskInfo
 from custom_agents.task_operation_runtime import TaskOperationRuntime
+from custom_agents.task_runtime_state import TurnStartNotes
 from custom_agents.tool_call_limits import ToolCallLimitExceeded
 from custom_tools.tool_stop import ToolStop
 from custom_messages.contracts.envelope_v1 import (
@@ -84,6 +85,7 @@ class ExecuteTurnDecisionOutboxOperation(Protocol):
         incoming_header: MessageHeader,
         incoming_meta: MessageMeta,
         structured_output_details: Optional[Dict[str, Any]] = ...,
+        start_notes: Optional[TurnStartNotes] = ...,
     ) -> ContentType: ...
 
 
@@ -228,7 +230,7 @@ class AppendHistoryEntryOperation(Protocol):
     ) -> Optional[TaskHistoryEntry]: ...
 
 
-class ConsumePartialToolCallLimitOperation(Protocol):
+class ReadPartialToolCallLimitOperation(Protocol):
     def __call__(self, task_id: Optional[str]) -> Optional[int]: ...
 
 
@@ -236,8 +238,12 @@ class ConsumePendingProactiveGuidanceMessageOperation(Protocol):
     async def __call__(self, task_id: Optional[str]) -> str: ...
 
 
-class ConsumeRuntimeResumeDirectiveOperation(Protocol):
+class ReadRuntimeResumeDirectiveOperation(Protocol):
     def __call__(self, task_id: Optional[str]) -> Optional[str]: ...
+
+
+class ReleaseTurnStartNotesOperation(Protocol):
+    def __call__(self, notes: TurnStartNotes) -> None: ...
 
 
 class CountRecoverablePausesOperation(Protocol):
@@ -315,6 +321,7 @@ class SendInterruptRequestForResultOperation(Protocol):
         strands_agent: Any,
         invoke_kwargs: Dict[str, Any],
         full_prompt: str,
+        start_notes: Optional[TurnStartNotes] = ...,
     ) -> TaskSteering: ...
 
 
@@ -384,8 +391,10 @@ class PublishTurnMessage(Protocol):
 class TurnTaskOperations:
     runtime: TaskOperationRuntime
     append_history_entry: AppendHistoryEntryOperation
-    consume_partial_tool_call_limit: ConsumePartialToolCallLimitOperation
-    consume_runtime_resume_directive: ConsumeRuntimeResumeDirectiveOperation
+    # Read at turn start; released once the turn's decision is recorded (TurnStartNotes).
+    read_partial_tool_call_limit: ReadPartialToolCallLimitOperation
+    read_runtime_resume_directive: ReadRuntimeResumeDirectiveOperation
+    release_turn_start_notes: ReleaseTurnStartNotesOperation
     count_recoverable_pauses: CountRecoverablePausesOperation
     get_task_info: GetTaskInfoOperation
     is_isolated_recovery_task: IsIsolatedRecoveryTaskOperation

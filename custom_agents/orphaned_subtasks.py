@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import Any, Sequence
 
+from custom_agents.pending_work_runtime import start_owned_task
 from custom_messages.contracts.control_v1 import ControlInstruction, Instruction
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -100,13 +101,21 @@ def register_parent_end_stops(agent: Any) -> None:
                 getattr(state, "value", state),
                 ",".join(child_ids),
             )
-            _on_owner_loop(agent, partial(_send_stops, agent, task_id, pending))
+            _on_owner_loop(
+                agent, partial(_send_stops, agent, task_id, pending), name=f"parent-end-stops:{task_id}"
+            )
 
         agent._parent_end_stop_callback = callback
     agent.task_manager.add_task_terminal_callback(callback)
 
 
-def _on_owner_loop(agent: Any, make_coroutine: Any) -> None:
+def _on_owner_loop(agent: Any, make_coroutine: Any, *, name: str) -> None:
+    """Send the stops as an owned task on the agent's loop.
+
+    The cancellation barrier is saved before this, so shutdown may stop the
+    sends: a worker that later reports on such a task is told to stop
+    (``stop_report_for_ended_parent``).
+    """
     loop = agent.task_manager.operations_runtime.loop
     if loop is None or not loop.is_running():
         try:
@@ -114,7 +123,7 @@ def _on_owner_loop(agent: Any, make_coroutine: Any) -> None:
         except RuntimeError:
             logger.warning("No running loop to send stop messages on. event=parent_end_stop_unsent")
             return
-    loop.call_soon_threadsafe(lambda: loop.create_task(make_coroutine()))
+    loop.call_soon_threadsafe(partial(start_owned_task, agent, make_coroutine, name=name))
 
 
 async def _send_stops(agent: Any, parent_task_id: str, pending: list[Any]) -> None:
@@ -182,7 +191,7 @@ def _released_task_stops(agent: Any, task_id: str) -> None:
         task_id,
         ",".join(item.task_info.task.task_id for item in pending),
     )
-    _on_owner_loop(agent, partial(_send_moved_stops, agent, pending))
+    _on_owner_loop(agent, partial(_send_moved_stops, agent, pending), name=f"released-task-stops:{task_id}")
 
 
 def _record_moved_barriers(manager: Any, items: Sequence[Any], *, command: str) -> None:

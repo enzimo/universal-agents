@@ -36,6 +36,7 @@ from custom_agents.control_runtime import (
     _interrupt_active_execution,
     request_subtask_stop,
 )
+from custom_agents.pending_work_runtime import start_owned_task
 from custom_agents.sdk.strands.turn_tool_stop import ANSWERED_TASK_FINISHED_REASON, HANDBACK_REASON
 from custom_agents.task_records import TaskInfo
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
@@ -137,8 +138,10 @@ def start_lease_loss_wind_down(
         evidence.reason,
         state.deadline.isoformat(),
     )
-    state.task = asyncio.create_task(
-        _run_wind_down(agent, state), name=f"{agent.id}:lease_loss_wind_down"
+    # Shutdown cancels and joins it; tasks not yet handed back stay saved
+    # for same-role recovery.
+    state.task = start_owned_task(
+        agent, partial(_run_wind_down, agent, state), name=f"{agent.id}:lease_loss_wind_down"
     )
     return state
 

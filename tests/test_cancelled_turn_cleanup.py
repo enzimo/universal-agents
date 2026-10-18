@@ -59,7 +59,7 @@ def prepared_turn(background_command):
     host = SimpleNamespace(
         id="independent", _active_execution_task=None, _active_execution_task_id=None,
         _active_tool_stop=None, _logger=LOGGER, _should_exit=asyncio.Event(),
-        _pending_work_task=None,
+        _pending_work_task=None, _pending_work_timers=set(), _owned_tasks=set(),
     )
     children = []
     from custom_agents.strands_agent import UniversalAgent

@@ -16,6 +16,7 @@ from custom_agents import access_runtime
 from custom_agents.control_runtime import (
     handle_interrupted_turn,
 )
+from custom_agents.pending_work_runtime import close_pending_work
 from custom_agents.task_manager import TaskManager
 from custom_agents.worker_handback_runtime import handle_worker_task_handback
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
@@ -92,6 +93,7 @@ def _worker(manager, *, inbox=None, wait_seconds=1800.0, monkeypatch=None):
         _stop_reasons_by_task_id={},
         _lease_loss_wind_down=None,
         _should_exit=asyncio.Event(),
+        _owned_tasks=set(),
         _active_execution_task=None,
         _active_execution_task_id=None,
         _active_tool_stop=None,
@@ -599,3 +601,66 @@ async def test_failing_a_waiting_task_at_the_deadline_withdraws_its_access_reque
     assert "failed" in request.decision_note
     agent._send_task_error_response.assert_awaited_once()
     assert agent.team_comms.sent == []
+
+
+@pytest.mark.asyncio
+async def test_shutdown_stops_and_joins_the_wind_down(manager, monkeypatch):
+    """Tasks not yet handed back stay saved for same-role recovery."""
+    _add(manager, "queued")
+    agent = _worker(manager, monkeypatch=monkeypatch)
+    agent._pending_work_task = None
+    agent._pending_work_timers = set()
+    leaving, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_unsubscribe(role):
+        leaving.set()
+        await release.wait()
+        return 1
+
+    agent.adapter.unsubscribe_consumer_role = slow_unsubscribe
+    state = wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease", recent_scheduler_errors=[])
+    await asyncio.wait_for(leaving.wait(), 5)
+    assert state.task in agent._owned_tasks
+
+    await asyncio.wait_for(close_pending_work(agent), 5)
+    assert state.task.done() and agent._owned_tasks == set()
+    assert agent.exited  # its own exit path still ran
+    assert agent.team_comms.sent == []
+    assert manager.get_task_info("queued") is not None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_during_a_handback_keeps_the_tasks_not_yet_handed_back(manager, monkeypatch):
+    """Stopped while it hands back the running task (after its commands were stopped),
+    the wind-down leaves that task and the unstarted one saved for same-role recovery."""
+    _add(manager, "running", ProgressState.IN_PROGRESS)
+    _add(manager, "queued")
+    agent = _worker(manager, monkeypatch=monkeypatch)
+    agent._pending_work_task = None
+    agent._pending_work_timers = set()
+    publishing = asyncio.Event()
+
+    async def held_publish(_agent, _state, _handed_back):
+        publishing.set()
+        await asyncio.Event().wait()  # the handback is still being sent when shutdown starts
+
+    monkeypatch.setattr(wind_down, "_publish_handback", held_publish)
+
+    async def running_turn():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await handle_interrupted_turn(agent, task_id="running", task_info=manager.get_task_info("running"))
+            raise
+
+    agent._active_execution_task = asyncio.create_task(running_turn())
+    agent._active_execution_task_id = "running"
+    await asyncio.sleep(0)
+    state = wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease", recent_scheduler_errors=[])
+    await asyncio.wait_for(publishing.wait(), 5)
+
+    await asyncio.wait_for(close_pending_work(agent), 5)
+    assert state.task.done() and agent.exited
+    assert agent.team_comms.handbacks() == []
+    assert manager.get_task_info("running") is not None
+    assert manager.get_task_info("queued") is not None

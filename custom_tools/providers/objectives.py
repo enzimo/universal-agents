@@ -1,13 +1,14 @@
 """The team lead's Objective tools (catalog tool ``fn:objectives``).
 
 ``objectives``, ``objective_work_sessions`` and ``objective_work_profiles``
-each take an ``action`` and replace several functions (owner's decision
-2026-10-10: a model request may carry only so many tool definitions, and
-these were nineteen). The catalog keeps a level per action (``argument:
-action``) and each tool checks which inputs its action takes
-(``custom_tools.action_inputs``); each action runs the function it replaced,
-unchanged (``_get_objective``, ``_enable_sessions``, ...). Functions with many
-inputs of their own stay separate: ``create_objective``,
+group related functions under an ``action`` argument to keep model requests
+within providers' tool-count limits. The catalog records the level required
+by each action, while grants cover the whole tool; blocks may stop one
+action. Each tool checks which inputs its action takes
+(``custom_tools.action_inputs``). Status changes use fresh records and the
+shared lifecycle operation (``custom_agents.objective_lifecycle``), including
+linked schedules and heartbeat items. Functions with many inputs of their
+own stay separate: ``create_objective``,
 ``start_objective_task``, ``propose_objective_work_profile``,
 ``record_objective_work_checkpoint``, ``activate_plan_execution`` and
 ``start_isolated_recovery``. The work-session and profile tools live in
@@ -74,6 +75,7 @@ if TYPE_CHECKING:
     from custom_agents.strands_agent import UniversalAgent
 
 
+from custom_agents.pending_work_runtime import wake_scheduler
 from custom_tools.providers._runtime import (
     _get_current_task_info,
     _link_to_objective,
@@ -577,8 +579,8 @@ def _update_status(
         return json.dumps(
             {"error": f"Failed to update objective {resolved_objective_id}"}
         )
-    if outcome.links_switched and getattr(agent, "_scheduler_wake", None):
-        agent._scheduler_wake.set()
+    if outcome.links_switched:
+        wake_scheduler(agent)
     return json.dumps(_status_payload(agent, outcome), default=str)
 
 
@@ -1393,8 +1395,7 @@ def start_isolated_recovery(
                 recovery_task_id,
                 checkpoint_schedule_id,
             )
-            if getattr(agent, "_scheduler_wake", None):
-                agent._scheduler_wake.set()
+            wake_scheduler(agent)
         except Exception as exc:
             checkpoint_schedule = {"error": str(exc)}
 

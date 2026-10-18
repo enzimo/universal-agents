@@ -12,6 +12,7 @@ has unfinished steps.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -260,6 +261,7 @@ async def test_after_a_restart_the_task_resumes_from_a_directive_once_the_batch_
     assert manager.get_task_info("task-lead").state == ProgressState.ACCEPTED
     directive = manager.task_state.runtime_resume_directives["task-lead"]
     assert "apply_change" in json.dumps(directive) and first in json.dumps(directive)
+    await asyncio.wait_for(lead._pending_work_task, 2)  # the retained drain runs the task
     lead._continue_pending_work.assert_awaited()
 
 
@@ -293,6 +295,6 @@ def test_holding_a_task_for_its_workflow_keeps_the_restart_note_it_has_not_read(
 
     assert defer_workflow_completion(manager, task_id="task-lead", team_id=TEAM) is True
 
-    directive = manager.consume_runtime_resume_directive("task-lead")
+    directive = manager.read_runtime_resume_directive("task-lead")
     assert restart_note in directive
     assert "get_access_workflow" in directive

@@ -883,6 +883,37 @@ The gateway presentation transcript and manager conversation history are
 different records. The first reproduces what a user-facing channel was allowed
 to display. The second supports reasoning context and task continuity.
 
+### Queue draining, shutdown and next-turn notes
+
+Each agent runs its queued work in one retained drain
+(`custom_agents/pending_work_runtime.py`). Every wake-up (a delivery, a fired
+schedule, a decided access request, work recovered at startup) goes through it,
+so neither a message handler nor the scheduler loop waits for a model turn. A
+wake-up that arrives during a pass, or while another holder has the execution
+slot, is kept and answered with another pass. A failed pass is retried after
+5 s, doubling to at most 5 minutes. Shutdown stops new work, then cancels and
+waits for the drain, its timers and short sends (sync tools' sends included)
+before the transport closes, so that background work cannot write task state
+or publish after it. The final status write still marks this agent exiting
+after delivery callbacks have settled. A turn in progress at shutdown is
+cancelled; restart recovery queues its task again if
+the agent restarts within `restart_executing_task_grace_seconds` (900 s by
+default) and otherwise fails the task and tells the requester.
+
+A turn reads the note left for its task's next turn (an access decision, a
+delegation decision, a restart notice) and the requester's partial tool-call
+limit when it starts. They are released when the turn's decision is recorded,
+in the same save as its outbox batch (`TurnStartNotes` in
+`custom_agents/task_runtime_state.py`); a result saved outside the outbox (a
+budget pause, a work-session yield) releases them when the turn returns. A turn
+that pauses for an approval keeps them until the resumed turn's decision is
+recorded. A cancel, failover or failure before the decision is recorded keeps
+them for the task's next turn. Rationale: a note removed at turn start was lost
+when shutdown cancelled the turn, and a note kept after its decision makes a
+later turn act on it again; a repeated delegation is not deduplicated across
+turns. Details are in the runtime execution architecture document of the
+ua-architecture repository ("Pending work and shutdown", "Context assembly").
+
 ## Authorization and credentials
 
 Every trust boundary keeps its own deterministic checks. These include gateway
@@ -1052,8 +1083,9 @@ argument (`memory` and `topic_tags`; `mcp_connections`, `hosted_mcp_servers`,
 `fn:objectives`): each action is its own operation
 (`memory.delete`) with its own level, an unlisted action needs `full`, and the
 tool checks which inputs each action takes (`custom_tools/action_inputs.py`).
-A request then carries fewer tool definitions while access stays per action,
-and a block can still stop one action.
+A request then carries fewer tool definitions. Grants cover the whole tool
+at one level, each call requires its action's catalog level, and a block can
+still stop one action.
 The broker and the runtime share the catalog package, which imports only
 contracts, because the broker never imports agent code. The broker checks
 every `gh`/`gog` command line with one unambiguous parser and runs exactly the

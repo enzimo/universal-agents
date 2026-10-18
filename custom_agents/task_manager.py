@@ -5,6 +5,8 @@ from custom_agents.task_runtime_state import (
     ExecutionRuntimeState,
     RuntimeOwnerIdentity,
     forget_task_records,
+    TurnStartNotes,
+    release_turn_start_notes,
 )
 from custom_agents.task_manager_ports import (
     AfterActionReportCoordinatorOperations,
@@ -1352,11 +1354,17 @@ class TaskManager(
         *,
         plan_id: Optional[str] = None,
         plan_step_id: Optional[str] = None,
+        release_notes: Optional[TurnStartNotes] = None,
     ) -> Optional[TurnActionBatchRecord]:
-        """Create durable outbox records for one ordered runtime-action batch."""
+        """Create durable outbox records for one ordered runtime-action batch.
+
+        ``release_notes`` (what the deciding turn read) are released in the same
+        snapshot save as the batch (``TurnStartNotes``).
+        """
         return self.runtime_operations_coordinator.create_turn_action_batch(
             source_task_id,
             actions,
+            release_notes=release_notes,
             plan_id=plan_id,
             plan_step_id=plan_step_id,
         )
@@ -2789,13 +2797,11 @@ class TaskManager(
             self.task_state.partial_tool_call_limit_overrides[task_id] = int(limit)
         self._persist_runtime_state()
 
-    def consume_partial_tool_call_limit(self, task_id: Optional[str]) -> Optional[int]:
+    def read_partial_tool_call_limit(self, task_id: Optional[str]) -> Optional[int]:
+        """The limit the task's next turn uses; released with the turn's note (``TurnStartNotes``)."""
         if not task_id:
             return None
-        limit = self.task_state.partial_tool_call_limit_overrides.pop(task_id, None)
-        if limit is not None:
-            self._persist_runtime_state()
-        return limit
+        return self.task_state.partial_tool_call_limit_overrides.get(task_id)
 
     def append_runtime_resume_directive(self, task_id: str, directive: str) -> None:
         """Add to the note the task's next turn reads (the only way to leave one).
@@ -2817,13 +2823,20 @@ class TaskManager(
         self.task_state.runtime_resume_directives[task_id] = f"{earlier}\n\n{text}" if earlier else text
         self._persist_runtime_state()
 
-    def consume_runtime_resume_directive(self, task_id: Optional[str]) -> Optional[str]:
+    def read_runtime_resume_directive(self, task_id: Optional[str]) -> Optional[str]:
+        """The note for the task's next turn; released once the turn's decision is recorded.
+
+        A turn cancelled before then keeps it, so the task's turn after a
+        restart reads it again (``TurnStartNotes``).
+        """
         if not task_id:
             return None
-        directive = self.task_state.runtime_resume_directives.pop(task_id, None)
-        if directive is not None:
+        return self.task_state.runtime_resume_directives.get(task_id)
+
+    def release_turn_start_notes(self, notes: TurnStartNotes) -> None:
+        """Remove what a turn read once its result is saved (``TurnStartNotes``)."""
+        if release_turn_start_notes(self.task_state, notes, self._logger):
             self._persist_runtime_state()
-        return directive
 
     def get_latest_pending_task_query(self, parent_task_id: str) -> Optional[TaskQuery]:
         """Return the latest unanswered TaskQuery request for the task, if any."""

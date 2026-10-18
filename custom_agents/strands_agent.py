@@ -31,6 +31,7 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from typing import Any, AsyncIterator, Callable, Dict, List, Literal, Mapping, Optional, Tuple, Union
 
 import randomname
@@ -233,7 +234,12 @@ from custom_agents.tool_result_offloader import TaskAwareToolResultOffloader
 from custom_agents import task_message_runtime
 from custom_agents import tool_setup_runtime
 from custom_agents.person_role_context import person_role_context
-from custom_agents.pending_work_runtime import close_pending_work, schedule_pending_work
+from custom_agents.pending_work_runtime import (
+    close_pending_work,
+    schedule_pending_work,
+    start_owned_task,
+    wake_after_slot_release,
+)
 from custom_agents.objective_work_completion import prepare_objective_work_completion
 from custom_agents.sdk.strands import turn as llm_turn_runtime
 from custom_agents import model_failover_runtime
@@ -1143,7 +1149,6 @@ class UniversalAgent(BaseModel):
     )
     _conversation_history: List[Dict[str, str]] = PrivateAttr(default_factory=list)
     _deferred_inbox: DeferredMessageInbox | None = PrivateAttr(default=None)
-    _continuing_work: bool = PrivateAttr(default=False)
     _agent_result_transformer: Optional[Callable[[Any, Any, Any], Any]] = PrivateAttr(
         default=None
     )
@@ -1181,6 +1186,15 @@ class UniversalAgent(BaseModel):
     _execution_gate: AgentExecutionGate = PrivateAttr(default_factory=AgentExecutionGate)
     _active_execution_task: Optional[asyncio.Task] = PrivateAttr(default=None)
     _pending_work_task: Optional[asyncio.Task] = PrivateAttr(default=None)
+    # A wake-up arrived that the drain has not yet answered with a pass.
+    _pending_work_requested: bool = PrivateAttr(default=False)
+    # Failed passes since the last finished one, and the backoff retry timer.
+    _pending_work_failures: int = PrivateAttr(default=0)
+    _pending_work_retry: Optional[asyncio.TimerHandle] = PrivateAttr(default=None)
+    # Timers that wake the drain later, and short background work such as
+    # sends; shutdown cancels and joins both (pending_work_runtime).
+    _pending_work_timers: set[asyncio.TimerHandle] = PrivateAttr(default_factory=set)
+    _owned_tasks: set[asyncio.Task[None]] = PrivateAttr(default_factory=set)
     # Next time to look for decided access requests whose notice never arrived
     # (access_request_runtime.resume_decided_access_waits).
     _decided_access_check_after: float = PrivateAttr(default=0.0)
@@ -1310,6 +1324,9 @@ class UniversalAgent(BaseModel):
         local_team_runtime = kwargs.pop("local_team_runtime", None)
         super().__init__(**kwargs)
         self._local_team_runtime = local_team_runtime
+        # Work saved or freed while another holder had the slot gets a drain
+        # pass when that holder lets go (pending_work_runtime).
+        self._execution_gate.on_release = partial(wake_after_slot_release, self)
 
         self._configured_model_provider = self.model_provider
         self._configured_model_id = self.model_id
@@ -3799,17 +3816,22 @@ class UniversalAgent(BaseModel):
         if not routing_key:
             routing_key = f"{self.team_id}_{MEM_REVIEW_AGENT_TYPE}"
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             self._logger.warning(
                 "[%s] Skipping memory review task dispatch for %s because no running event loop is available.",
                 self.id,
                 getattr(review_job, "job_id", None),
             )
-        else:
-            loop.create_task(
-                self._publish_memory_review_task(review_job, payload, routing_key)
-            )
+            return
+        # The job is saved as queued before this send. If shutdown stops the
+        # send, the person's next stale-conversation review still lists the
+        # job (scheduled_runtime.prepare_memory_review_schedule).
+        start_owned_task(
+            self,
+            partial(self._publish_memory_review_task, review_job, payload, routing_key),
+            name=f"memory-review-dispatch:{getattr(review_job, 'job_id', None)}",
+        )
 
     def _memory_review_task_ttl_seconds(self) -> Optional[float]:
         default_ttl = (
@@ -4602,39 +4624,43 @@ class UniversalAgent(BaseModel):
                 source_queue_name="deferred",
             )
 
-    async def _continue_pending_work(self) -> None:
-        if self._continuing_work or self.paused or self.is_executing:
-            return
+    def _can_continue_pending_work(self) -> bool:
+        return not (self.paused or self.is_executing or self._should_exit.is_set())
 
-        self._continuing_work = True
-        try:
-            while not self.paused and not self.is_executing:
-                if self._pending_interrupt_responses:
-                    interrupted_task_id = next(iter(self._pending_interrupt_responses))
-                    await self._resume_interrupted_task_turn(interrupted_task_id)
-                    continue
-                if self.deferred_inbox:
-                    drained = await self.deferred_inbox.drain(
-                        dispatch=self._dispatch_deferred_envelope,
-                        available=lambda: not self.paused and not self.is_executing,
-                    )
-                    if not drained:
-                        break
-                    continue
-                retried_outbox = await self._drain_due_turn_action_outbox()
-                if retried_outbox:
-                    continue
-                drained_runtime_mailbox = (
-                    await self._runtime_coordinator().drain_all_deferred_events()
+    async def _continue_pending_work(self) -> bool:
+        """Run one drain pass. Only the retained drain calls this.
+
+        ``pending_work_runtime`` keeps that drain in one task, so passes never
+        overlap. Nothing new starts once the agent is stopping. Returns False
+        when a waiting message failed and was kept, so the drain stops instead
+        of retrying it at once.
+        """
+        while self._can_continue_pending_work():
+            if self._pending_interrupt_responses:
+                interrupted_task_id = next(iter(self._pending_interrupt_responses))
+                await self._resume_interrupted_task_turn(interrupted_task_id)
+                continue
+            if self.deferred_inbox:
+                drained = await self.deferred_inbox.drain(
+                    dispatch=self._dispatch_deferred_envelope,
+                    available=self._can_continue_pending_work,
                 )
-                if drained_runtime_mailbox:
-                    continue
-                started = await self._check_and_process_next_task()
-                if started:
-                    continue
-                break
-        finally:
-            self._continuing_work = False
+                if not drained:
+                    return False
+                continue
+            retried_outbox = await self._drain_due_turn_action_outbox()
+            if retried_outbox:
+                continue
+            drained_runtime_mailbox = (
+                await self._runtime_coordinator().drain_all_deferred_events()
+            )
+            if drained_runtime_mailbox:
+                continue
+            started = await self._check_and_process_next_task()
+            if started:
+                continue
+            break
+        return True
 
     async def _apply_runtime_content_defaults(
         self,
@@ -5054,8 +5080,9 @@ class UniversalAgent(BaseModel):
             if self.is_team_lead and self._local_team_runtime is not None:
                 self._local_schedule_task = asyncio.create_task(local_schedule_runtime_loop(self))
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
-            if not self.paused and not self.is_executing:
-                await self._continue_pending_work()
+            # Work recovered above runs in the retained drain, so a stop
+            # request during a resumed turn still reaches cleanup.
+            schedule_pending_work(self)
 
             self._logger.info(
                 "[%s] NATS transport ready; waiting for messages until exit.", self.id
@@ -5067,9 +5094,19 @@ class UniversalAgent(BaseModel):
                 await self._activity_client.close()
             self._runtime_loop = None
 
+    def _cancel_scheduler_pass(self) -> None:
+        """Stop the scheduler's current pass; cleanup joins it.
+
+        A signal exit stops it together with the drain, as exit_agent does, so
+        it cannot claim or queue work while the drain is joined.
+        """
+        if self._scheduler_task is not None:
+            self._scheduler_task.cancel()
+
     async def _cleanup_nats_runtime_on_exit(
         self, adapter: NatsTransportAdapter
     ) -> None:
+        self._cancel_scheduler_pass()
         await close_pending_work(self)
         unregister_local_worker(self.id)
         if self._local_schedule_task is not None:
@@ -5495,7 +5532,7 @@ class UniversalAgent(BaseModel):
         )
 
     async def _check_and_process_next_task(self, *args, **kwargs):
-        if self.is_executing or self.paused:
+        if not self._can_continue_pending_work():
             return False
         refresh_state = True
         try:
@@ -5979,11 +6016,6 @@ class UniversalAgent(BaseModel):
             self, *args, **kwargs
         )
 
-    async def _wake_turn_action_retry_after(self, *args, **kwargs):
-        return await turn_action_outbox_runtime._wake_turn_action_retry_after(
-            self, *args, **kwargs
-        )
-
     async def _schedule_turn_action_recovery(self, *args, **kwargs):
         return await turn_action_outbox_runtime._schedule_turn_action_recovery(
             self, *args, **kwargs
@@ -6021,8 +6053,9 @@ class UniversalAgent(BaseModel):
                 tasks=TurnTaskOperations(
                     runtime=self.task_manager.operations_runtime,
                     append_history_entry=self.task_manager.append_history_entry,
-                    consume_partial_tool_call_limit=self.task_manager.consume_partial_tool_call_limit,
-                    consume_runtime_resume_directive=self.task_manager.consume_runtime_resume_directive,
+                    read_partial_tool_call_limit=self.task_manager.read_partial_tool_call_limit,
+                    read_runtime_resume_directive=self.task_manager.read_runtime_resume_directive,
+                    release_turn_start_notes=self.task_manager.release_turn_start_notes,
                     count_recoverable_pauses=self.task_manager.count_recoverable_pauses,
                     get_task_info=self.task_manager.get_task_info,
                     is_isolated_recovery_task=self.task_manager.is_isolated_recovery_task,
@@ -6159,8 +6192,7 @@ class UniversalAgent(BaseModel):
         self._logger.info(f"[{self.id}] Resuming agent as per control message.")
         self.paused = False
         await self._refresh_self_agent_state()
-        if not self.is_executing:
-            asyncio.create_task(self._continue_pending_work())
+        schedule_pending_work(self)
 
     # ──────────────────────────────────────────────────────────────────────
     # SCHEDULED MESSAGE LOGIC — see ../ua-architecture/docs/scheduling_and_automation_architecture.md.
@@ -6188,11 +6220,7 @@ class UniversalAgent(BaseModel):
     async def _enqueue_heartbeat_items(
         self, scheduled_message: ScheduledMessage
     ) -> bool:
-        return await enqueue_heartbeat_items(
-            self,
-            scheduled_message,
-            create_task_fn=asyncio.create_task,
-        )
+        return await enqueue_heartbeat_items(self, scheduled_message)
 
     async def _enqueue_fired_scheduled_task(
         self,
@@ -6207,7 +6235,6 @@ class UniversalAgent(BaseModel):
             self,
             schedule_id,
             scheduled_message,
-            create_task_fn=asyncio.create_task,
             from_runtime_mailbox=from_runtime_mailbox,
             schedule_admission=schedule_admission,
             claim_token=claim_token,

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -35,6 +36,7 @@ from live_storage_utils import (
 )
 from id_generation import new_id_suffix
 from storage.postgres_connection import redact_postgres_dsn
+from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
 
 try:
     from dotenv import load_dotenv
@@ -70,6 +72,22 @@ def _reset_storage(settings: Any) -> None:
 
 
 def run_validation(*, config_path: str | None = None) -> dict[str, Any]:
+    """Exercise person-owned tools with a gateway-signed fixture task.
+
+    Authorization-off mode still verifies who the task works for. Trust only
+    this canary's public key while it runs, then retire the cached verifier
+    before restoring the caller's environment.
+    """
+    with patch.dict(os.environ, {"ACCESS_CONTEXT_VERIFY_KEYS": context_verify_keys()}):
+        forget_task_context_keys()
+        try:
+            return _run_validation(config_path=config_path)
+        finally:
+            set_agent_ref(None)
+            forget_task_context_keys()
+
+
+def _run_validation(*, config_path: str | None = None) -> dict[str, Any]:
     settings = resolve_live_storage_settings(
         config_path=config_path,
         sqlite_fallback_path=RESULT_DIR / "task_history.db",
@@ -109,6 +127,11 @@ def run_validation(*, config_path: str | None = None) -> dict[str, Any]:
                 canonical_user_id="live-objective-user",
                 session_key=f"session_live_objective_{run_id}",
                 heartbeat_source_id=f"hb_source_live_objective_{run_id}",
+                task_context=context_signer().issue(
+                    team_id="team_live_objective",
+                    person_id="live-objective-user",
+                    person_roles=("owner",),
+                ),
             ),
         ),
         owner_person_id="live-objective-user",
@@ -188,6 +211,7 @@ def run_validation(*, config_path: str | None = None) -> dict[str, Any]:
         name="Live Objective Manager",
         team_id="team_live_objective",
         named_agent_type="TeamArchitect",
+        authorization_config={"enabled": False},
         task_manager=manager,
         _schedule_store=schedule_store,
         _scheduler_wake=_FakeWake(),
