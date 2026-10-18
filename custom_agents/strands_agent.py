@@ -61,7 +61,7 @@ from custom_agents.deferred_message_runtime import (
 from custom_agents.agent_team_runtime import LocalAgentTeamRuntime, unregister_local_worker
 from custom_agents.custody_loss import install_custody_listeners
 from custom_agents.liveness_observation import LivenessObservation, NATS_PRESENCE_HEARTBEAT_SECONDS
-from custom_agents.agent_liveness import own_process_identity, received_status_time
+from custom_agents.agent_liveness import newest_agent_status, own_process_identity, parse_utc, received_status_time
 from storage.runtime_custody import DeferredMessageClaim, RuntimeCustodyLost
 from custom_agents.runtime_paths import (
     agent_layout,
@@ -1240,7 +1240,7 @@ class UniversalAgent(BaseModel):
     )
     _pending_agent_status_futures: Dict[
         str,
-        tuple[Optional[str], Optional[str], asyncio.Future],
+        tuple[Optional[str], Optional[str], datetime, asyncio.Future],
     ] = PrivateAttr(default_factory=dict)
     _runtime_loop: Optional[asyncio.AbstractEventLoop] = PrivateAttr(default=None)
     _task_runtime_coordinator: Optional[TaskRuntimeCoordinator] = PrivateAttr(
@@ -5673,28 +5673,43 @@ class UniversalAgent(BaseModel):
             f"[{self.id}] Received status update for agent '{agent_name}' ({agent_id})."
         )
 
+        # Keep the message's raw time for probe evidence. A missing timestamp
+        # must not become a fresh reply when normalized to arrival below.
+        sent_at = parse_utc(agent_status.last_seen_at)
         # The sender's own time, never later than now: presence is replayed
         # when the lead subscribes, so the arrival time made agents that had
         # just crashed look alive (agent_liveness.received_status_time).
         agent_status.last_seen_at = received_status_time(self, agent_status)
-        self.known_agents.agent_map[agent_id] = agent_status
-
-        self._resolve_pending_agent_status_probes(
-            agent_status,
-            getattr(msg_meta, "msg_correlation_id", None),
+        agent_status = newest_agent_status(
+            agent_status, self.known_agents.agent_map.get(agent_id)
         )
+        stored_status = None
+        # Only leads write other agents' records. Every receiver can read a
+        # newer own refresh (including an exiting mark) from the shared store.
+        if self._agent_state_store:
+            written = False
+            if self.is_team_lead:
+                written = await self.task_manager.operations_runtime.run(
+                    self._agent_state_store.upsert_if_newer, agent_status
+                )
+            if not written:
+                stored_status = await self.task_manager.operations_runtime.run(
+                    self._agent_state_store.get_by_id, agent_id
+                )
 
-        # Update name lookup if a name is provided
+        # An older exit must not fail work after a newer running status, and an
+        # older running snapshot must not resurrect an exited worker. Still
+        # discover an agent when its own database refresh is newer than replay.
+        agent_status = newest_agent_status(
+            agent_status, stored_status, self.known_agents.agent_map.get(agent_id)
+        )
+        agent_name = agent_status.name or f"Agent_{agent_id}"
+        self.known_agents.agent_map[agent_id] = agent_status
+        self._resolve_pending_agent_status_probes(
+            agent_status, getattr(msg_meta, "msg_correlation_id", None), sent_at
+        )
         if agent_status.name:
             self._agent_id_by_name[agent_status.name] = agent_id
-
-        # Only team leads maintain records of other agents, and only with a
-        # newer time: a delayed older status must not overwrite a row the agent
-        # wrote itself (for example its exiting mark).
-        if self._agent_state_store and self.is_team_lead:
-            await self.task_manager.operations_runtime.run(
-                self._agent_state_store.upsert_if_newer, agent_status
-            )
 
         if agent_status.is_exiting:
             self._logger.warning(
@@ -5746,13 +5761,10 @@ class UniversalAgent(BaseModel):
     def _should_apply_stale_broadcast_filter(
         self, msg_envelope: MessageEnvelope
     ) -> bool:
-        content = getattr(msg_envelope, "msg_content", None)
-        if (
-            isinstance(content, AgentStatus)
-            and content.status_type == MessageMetaType.REQUEST
-        ):
-            return False
-        return True
+        # Presence replays the last snapshot after a restart, which can take
+        # longer than the broadcast age limit. Keep the sender's last_seen_at;
+        # agent_liveness decides freshness from that time and process evidence.
+        return not isinstance(getattr(msg_envelope, "msg_content", None), AgentStatus)
 
     async def handle_control_message(
         self,

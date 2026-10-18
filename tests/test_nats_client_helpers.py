@@ -49,6 +49,10 @@ def test_live_transport_resolves_config_and_auth_once(tmp_path, monkeypatch, ins
     monkeypatch.setenv("TEAM_NATS_LIVE_CONFIG", str(path))
 
     transport = live_nats_client.resolve_live_transport_settings()
+    # The multi-agent boundary harness uses this same resolver for its agents
+    # and channel, including credentials and the team's subject prefix.
+    from tests.test_live_multi_agent_state_boundaries import LiveNatsChannel
+    boundary_channel = LiveNatsChannel(team_id="transport-test")
     # Already-resolved settings must not read changing environment values again.
     monkeypatch.setenv("NATS_URL", "nats://unused.example:4444")
     monkeypatch.setenv("NATS_PASSWORD", "changed-password")
@@ -62,6 +66,11 @@ def test_live_transport_resolves_config_and_auth_once(tmp_path, monkeypatch, ins
     assert client.mapper.subject_prefix == agent_config["nats_subject_prefix"] == "transport-test"
     assert client.adapter.config.storage == agent_config["nats_storage"] == "memory"
     assert client.adapter.config.ack_wait_seconds == agent_config["nats_ack_wait_seconds"] == 25
+    assert boundary_channel.adapter.config.servers == client.adapter.config.servers
+    assert boundary_channel.adapter.config.user == client.adapter.config.user
+    assert boundary_channel.adapter.config.password == client.adapter.config.password
+    assert boundary_channel.adapter.config.credentials_file == client.adapter.config.credentials_file
+    assert boundary_channel.mapper.subject_prefix == client.mapper.subject_prefix
 
 
 def test_live_transport_server_list_overrides_single_url(tmp_path, monkeypatch):

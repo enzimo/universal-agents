@@ -182,6 +182,19 @@ def parse_utc(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def newest_agent_status(incoming: AgentStatus, *known: Optional[AgentStatus]) -> AgentStatus:
+    """Select the newest sender-written status, preferring known records on ties.
+
+    Own database refreshes can be newer than retained presence. Reconcile both
+    before discovery or exit effects, without inventing an arrival timestamp.
+    """
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+    return max(
+        [status for status in known if status is not None] + [incoming],
+        key=lambda status: parse_utc(status.last_seen_at) or oldest,
+    )
+
+
 def owner_gone_after(agent: Any) -> timedelta:
     """The one heartbeat threshold (module docstring, rule 3)."""
     settings = StuckTaskSettings.from_schedule_maintenance(getattr(agent, "schedule_maintenance", None))

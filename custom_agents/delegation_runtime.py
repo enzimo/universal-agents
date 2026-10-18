@@ -63,6 +63,7 @@ def _resolve_pending_agent_status_probes(
     self,
     agent_status: AgentStatus,
     correlation_id: Optional[str],
+    sent_at: Optional[datetime],
 ) -> int:
     """Resolve matching liveness probes from a response or fresh presence update."""
 
@@ -72,14 +73,25 @@ def _resolve_pending_agent_status_probes(
         verification_source = "correlated_response"
     else:
         # A newly created worker can publish presence after a probe was sent but
-        # before its operational subscription existed. Presence is TTL-bounded
-        # by transport and is therefore valid live evidence for matching probes.
+        # before its operational subscription existed. Only a snapshot sent
+        # during this probe can substitute for its correlated response; retained
+        # presence from before the probe is discovery data, not a live reply.
         candidates = list(self._pending_agent_status_futures.items())
         verification_source = "presence_update"
 
     resolved = 0
     for pending_correlation_id, pending in candidates:
-        expected_named_agent_type, expected_agent_name, future = pending
+        expected_named_agent_type, expected_agent_name, started_at, future = pending
+        if not correlation_id:
+            if sent_at is None or not started_at <= sent_at <= datetime.now(timezone.utc):
+                self._logger.debug(
+                    "[%s] Presence cannot answer this live probe. "
+                    "event=agent_status_probe_presence_ignored correlation_id=%s "
+                    "responding_agent_id=%s sent_at=%s probe_started_at=%s",
+                    self.id, pending_correlation_id, agent_status.self_id,
+                    sent_at, started_at.isoformat(),
+                )
+                continue
         matches_probe = self._agent_status_matches_named_type(
             agent_status,
             expected_named_agent_type,
@@ -230,6 +242,7 @@ async def _probe_live_named_agent_type(
     self._pending_agent_status_futures[correlation_id] = (
         named_agent_type,
         target_agent_name,
+        datetime.now(timezone.utc),
         future,
     )
     envelope = MessageEnvelope(

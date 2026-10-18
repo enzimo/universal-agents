@@ -56,8 +56,14 @@ async def test_live_manager_restart_keeps_startup_worker_rows(tmp_path):
         agent.set_exit_flag()
         await asyncio.wait_for(task, timeout=15)
 
+    async def no_heartbeats(agent) -> None:
+        # Discovery after the restart must come from the retained snapshot.
+        await agent._should_exit.wait()
+
     with patch("custom_agents.strands_agent.Agent", return_value=MagicMock()), patch(
         "custom_agents.strands_agent.UniversalAgent._configure_model", return_value=MagicMock()
+    ), patch(
+        "custom_agents.strands_agent.UniversalAgent._presence_heartbeat_loop", no_heartbeats
     ):
         try:
             old_lead = start("old lead", "TeamArchitect", is_lead=True)
@@ -69,18 +75,25 @@ async def test_live_manager_restart_keeps_startup_worker_rows(tmp_path):
             # The worker is its own agent here (no start record): it publishes its process.
             assert worker.get_self_status().process_identity == current_process_identity().text()
             assert store.get_by_id(worker.id).process_identity == current_process_identity().text()
+            await _until(lambda: worker.id in old_lead.known_agents.agent_map)
+            sent_at = old_lead.known_agents.agent_map[worker.id].last_seen_at
 
             await stop("old lead")
             kept = store.get_by_id(worker.id)
             assert kept is not None and kept.is_exiting is False
             assert store.get_by_id(old_lead.id).is_exiting is True
 
+            # Presence replay is deliberately older than the 100 ms broadcast
+            # limit. It must survive a restart that takes longer than that.
+            await asyncio.sleep(0.25)
             new_lead = start("new lead", "TeamArchitect", is_lead=True)
             await _until(lambda: new_lead._worker_ready)
-            # The worker's replayed presence keeps the time the worker sent it.
+            # Discovery keeps a sender-written time, from replay or a newer
+            # own database refresh, rather than the new lead's arrival time.
             await _until(lambda: new_lead.known_agents.agent_map.get(worker.id) is not None)
             replayed = new_lead.known_agents.agent_map[worker.id]
             stored = new_lead._agent_state_store.get_by_id(worker.id)
+            assert parse_utc(sent_at) <= parse_utc(replayed.last_seen_at)
             assert parse_utc(replayed.last_seen_at) <= parse_utc(stored.last_seen_at)
             assert stored.process_identity == current_process_identity().text()
             decision = owner_liveness(new_lead, worker.id, purpose=LivenessPurpose.STARTUP_TAKEOVER)

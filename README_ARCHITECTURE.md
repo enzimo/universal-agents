@@ -106,7 +106,18 @@ refuses a push listener on the work stream, and an architecture test fails when
 production code creates a deliver group or subscribes to NATS outside the
 adapter (`tests/test_runtime_architecture_boundaries.py`). Presence records let late
 joiners and the gateway discover live agents without turning presence into
-proof of identity or authority.
+proof of identity or authority. Agent status requests and snapshots bypass the
+short broadcast age limit: a restarted manager must receive retained presence
+even when startup takes longer than 100 ms. Replay keeps the sender's original
+`last_seen_at`; liveness checks use that time and process evidence, so receiving
+an old snapshot does not make a stopped worker look newly alive.
+An explicit live probe accepts its correlated reply, or a presence snapshot
+whose sender time falls between the probe's start and arrival. Older retained
+snapshots remain discovery data and cannot verify an exact delegation target.
+Before changing discovery or acting on an exit, the receiver selects the newest
+sender-written status from the message, memory and the shared database.
+An old exit cannot fail current work after a newer running status, and an old
+running snapshot cannot restore an agent whose newer status says it exited.
 
 ## Work, scheduling, and recovery
 

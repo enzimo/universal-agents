@@ -21,6 +21,7 @@ from typing import Callable, Iterator, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from live_nats_client import nats_transport_config_from_env, resolve_live_transport_settings
 
 try:
     from dotenv import load_dotenv
@@ -30,6 +31,7 @@ except ImportError:  # pragma: no cover - fallback for minimal live-test envs.
 from assistant_gateway.runtime_config import load_runtime_config_file
 from config_loader import load_config
 from runtime_settings.instance_layout import InstanceLayout
+from runtime_settings.projection import _project_transport
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.runtime_guardrails import RuntimeGuardrailsPlugin
@@ -75,7 +77,7 @@ from custom_tools.providers.objectives import (
 from custom_tools.runtime_context import set_agent_ref
 from storage import resolve_storage_settings
 from custom_transport.base import TransportPublishOptions
-from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
+from custom_transport.nats_adapter import NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
 from id_generation import new_id, new_id_suffix
 from tests.broker_access_support import context_signer, forget_task_context_keys, use_scheduler_key
@@ -178,27 +180,6 @@ def _load_live_env() -> None:
                 key, value = line.split("=", 1)
                 os.environ[key.strip()] = value.strip().strip('"').strip("'")
     _LIVE_ENV_LOADED = True
-
-
-def _nats_servers() -> list[str]:
-    _load_live_env()
-    raw_servers = os.getenv("NATS_SERVERS", "").strip()
-    if raw_servers:
-        return [item.strip() for item in raw_servers.split(",") if item.strip()]
-    config = _live_config()
-    config_servers = (
-        config.get("transport.nats_servers", None) if config is not None else None
-    )
-    if isinstance(config_servers, list) and config_servers:
-        return [str(item).strip() for item in config_servers if str(item).strip()]
-    config_url = (
-        str(config.get("transport.nats_url", "") or "").strip()
-        if config is not None
-        else ""
-    )
-    if config_url:
-        return [config_url]
-    return [os.getenv("NATS_URL", "nats://127.0.0.1:4222")]
 
 
 # The person live after-action report tests work for.
@@ -395,7 +376,7 @@ def _agent(
         # that need team-lead broker setup set `agent.is_team_lead` after
         # construction via the is_lead flag below.
         "is_team_lead": False,
-        "nats_servers": _nats_servers(),
+        **_project_transport(transport_cfg=resolve_live_transport_settings().model_dump()),
         "task_manager": TaskManager(
             db_path=str(db_path),
             logger=logging.getLogger(f"TaskManager.{agent_id}"),
@@ -460,17 +441,17 @@ class LiveNatsQueue:
 class LiveNatsChannel:
     def __init__(self, *, team_id: str) -> None:
         self.team_id = team_id
+        config = nats_transport_config_from_env(name=f"live-boundary-{new_id_suffix()}")
         self.mapper = NatsSubjectMapper(
             team_id=team_id,
+            subject_prefix=config.subject_prefix,
             named_agent_type_queue_map={
                 named_type: f"{team_id}_{named_type}"
                 for named_type in _LIVE_NAMED_TYPES
             },
         )
         self.adapter = NatsTransportAdapter(
-            config=NatsTransportConfig(
-                servers=_nats_servers(), name=f"live-boundary-{new_id_suffix()}"
-            ),
+            config=config,
             mapper=self.mapper,
             logger=logging.getLogger("LiveNatsChannel"),
         )

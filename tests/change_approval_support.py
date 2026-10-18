@@ -30,7 +30,7 @@ from custom_agents import access_runtime
 from custom_messages.contracts.access_v2 import AccessRequestV1, AccessReviewChoice, ChangeApprovalMode
 from custom_tools.providers.changes import apply_change
 from custom_tools.runtime_context import set_agent_ref
-from tests.broker_access_support import context_signer, context_verify_keys
+from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
 
 ROOT = Path(__file__).resolve().parents[1]
 CEDAR_BINARY = ROOT / "target" / "debug" / "ua-cedar-authorizer"
@@ -40,10 +40,10 @@ OWNER_ROLES = ("owner",)
 
 
 def use_signed_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Trust the test gateway key and forget access services cached by earlier tests."""
+    """Trust the test gateway key and forget identity/access caches from earlier tests."""
 
     monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
 
 
 def authorization_config(enabled: bool) -> dict[str, Any]:
