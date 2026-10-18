@@ -119,6 +119,9 @@ class LifecycleTests(unittest.TestCase):
     def test_docker_cleanup_uses_only_exact_job_label_and_owned_builder(self):
         job = self.begin()
         (self.state / "cache" / "docker-used").touch()
+        instances = self.state / "cache" / "docker" / "buildx" / "instances"
+        instances.mkdir(parents=True)
+        (instances / f"ua-ci-{job['id']}").write_text("{}")
         prefix = ("docker", "--config", str(self.state / "cache" / "docker"))
 
         def boundary(*args):
@@ -130,6 +133,9 @@ class LifecycleTests(unittest.TestCase):
             if command[:2] == ("ps", "-aq"):
                 self.assertEqual(command[-1], f"label={ci_hook.LABEL}={job['id']}")
                 return "owned-container"
+            if command[:2] in (("volume", "ls"), ("network", "ls")):
+                self.assertEqual(command[-1], f"label={ci_hook.LABEL}={job['id']}")
+                return "owned-" + command[0]
             if command[:2] == ("image", "ls"):
                 self.assertEqual(command[-1], f"label={ci_hook.LABEL}={job['id']}")
                 return "owned-image"
@@ -143,8 +149,17 @@ class LifecycleTests(unittest.TestCase):
             call.args[3:] for call in mocked.call_args_list if call.args[0] == "docker"
         ]
         self.assertIn(("rm", "--force", "--volumes", "owned-container"), calls)
+        self.assertIn(("volume", "rm", "owned-volume"), calls)
+        self.assertIn(("network", "rm", "owned-network"), calls)
         self.assertIn(("buildx", "rm", "--force", f"ua-ci-{job['id']}"), calls)
         self.assertNotIn(("buildx", "rm", "--force", "other-builder"), calls)
+
+    def test_non_build_docker_job_does_not_require_the_buildx_plugin(self):
+        self.begin()
+        (self.state / "cache" / "docker-used").touch()
+        with patch.object(ci_hook, "run", return_value="") as command:
+            ci_hook.cleanup(self.config)
+        self.assertFalse(any("buildx" in call.args for call in command.call_args_list))
 
     def test_colima_trim_is_limited_to_the_configured_ci_profile(self):
         self.config["colima_profile"] = "ua-ci"

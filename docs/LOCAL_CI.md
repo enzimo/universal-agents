@@ -382,8 +382,13 @@ a stable release's image and `container-image.txt` are published,
 appends the release with the host contract of the newest listed version,
 commits that to branch `ua-release/vX.Y.Z` and opens a pull request titled
 `Add UA X.Y.Z to the compatibility list`. The launcher repository's check
-verifies the digest against `container-image.txt` and that the UA files defining
-the contract are unchanged, then merges the pull request. Betas, release
+verifies the digest against `container-image.txt` and tests the published image
+against the desktop contract on native AMD64 and ARM64, then merges the pull
+request. The tests exercise data and workspace paths, synthetic sign-in import,
+onboarding, configured startup, browser routes, restart and data preservation.
+Internal source changes alone do not stop automatic approval. Failed runtime
+tests, an unknown host contract or a mismatched release digest keep the pull
+request open for review. Betas, release
 candidates and nightlies are never proposed.
 
 Reruns are safe: a version already listed with the same image needs nothing,
