@@ -256,6 +256,37 @@ async def test_a_missed_one_time_reminder_is_turned_off_and_its_owner_told(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_a_missed_reminder_a_worker_claims_meanwhile_is_not_turned_off(tmp_path, monkeypatch):
+    """The lead read the reminder as missed, then a worker claimed and started it (2026-10-17).
+
+    The turn-off used to apply anyway: the run was delivered, its owner was
+    told it was missed, and the row stayed turned off instead of finishing.
+    """
+    from custom_agents.stuck_schedules import StuckSchedules
+
+    lead = make_lead(tmp_path)
+    add_schedule(
+        lead, "crew-13", cron_expression=None, cron_timezone=None, repeat_count=1, due=NOW - 2 * HOUR
+    )
+    read_missed = StuckSchedules.missed_final_runs
+
+    def read_then_worker_claims(source, now, late_after):
+        missed = read_missed(source, now, late_after)
+        claim = lead._schedule_store.claim_next_due(
+            claimer_agent_id="worker", claimer_named_agent_type="BackgroundOperationsAgent", claimer_team_id="team"
+        )
+        assert claim["schedule_id"] == "crew-13"
+        return missed
+
+    monkeypatch.setattr(StuckSchedules, "missed_final_runs", read_then_worker_claims)
+    await report_stuck_schedules(lead, now=NOW)
+
+    assert lead._schedule_store.get_scheduled_message("crew-13").enabled
+    assert not [n for n in notices(lead) if "was missed" in n.title]
+    assert not [m for m in chats(lead) if "was missed" in m.msg_content.text]
+
+
+@pytest.mark.asyncio
 async def test_a_one_time_reminder_inside_the_limit_stays_on(tmp_path):
     lead = make_lead(tmp_path)
     add_schedule(

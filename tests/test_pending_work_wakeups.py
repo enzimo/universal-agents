@@ -121,17 +121,12 @@ async def test_drain_keeps_the_request_while_another_holder_runs():
 
 
 class _StoreFailsAfterAdmission:
-    """The runtime state store accepts the admission, then fails every later commit."""
+    """The runtime state store accepts the admission, then fails to remove the handled message."""
 
-    def __init__(self) -> None:
-        self.saves = 0
+    def add_deferred_message(self, **_kwargs):
+        pass
 
-    def save_deferred_messages(self, **_kwargs):
-        self.saves += 1
-        if self.saves > 1:
-            raise RuntimeError("runtime state store unavailable")
-
-    def clear_deferred_messages(self, *_args):
+    def remove_deferred_messages(self, **_kwargs):
         raise RuntimeError("runtime state store unavailable")
 
 
@@ -176,8 +171,15 @@ async def test_a_failing_waiting_message_does_not_repeat_even_if_it_records_a_wa
         # The exit flag ends even a spinning drain, whose cancellation a failing
         # store write can swallow, so a regression fails here instead of hanging.
         await asyncio.wait_for(close_pending_work(agent), timeout=5)
-    retry = [r.getMessage() for r in caplog.records if "event=pending_work_retry_scheduled" in r.getMessage()]
-    assert retry and envelope.msg_header.message_id in retry[0] and "task_child_result" in retry[0]
+    if failure == "handler_fails":
+        # The inbox kept the message and the pass names it.
+        retry = [r.getMessage() for r in caplog.records if "event=pending_work_retry_scheduled" in r.getMessage()]
+        assert retry and envelope.msg_header.message_id in retry[0] and "task_child_result" in retry[0]
+    else:
+        # A failed removal of a handled message reaches the pass as an error
+        # (DeferredMessageInbox._settle_dispatched); the same backoff applies.
+        retry = [r.getMessage() for r in caplog.records if "event=pending_work_failed" in r.getMessage()]
+        assert retry
     assert "tries again in 5 s" in retry[0]
 
 
@@ -205,7 +207,7 @@ async def test_a_waiting_message_that_failed_once_is_retried_on_an_idle_agent(mo
     agent._dispatch_message = dispatch
     envelope = subtask_result(agent, "task_child_result").envelope
     await agent.deferred_inbox.admit(envelope)
-    with caplog.at_level("ERROR", logger="tests.pending_work_support"):
+    with caplog.at_level("WARNING", logger="tests.pending_work_support"):
         schedule_pending_work(agent)
         await settled(agent)
         assert attempts == ["task_child_result"]

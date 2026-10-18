@@ -336,6 +336,7 @@ def test_upgrade_command_previews_and_applies_existing_timer(
         create_runtime_state_repository(
             lead.task_manager.storage_settings
         ).save_task_runtime(
+            expect_existing=False,
             owner_agent_id="old-worker",
             owner_agent_name="Old memory worker",
             team_id="team",

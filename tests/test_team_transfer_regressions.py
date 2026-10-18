@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 import yaml
 
+from access_control.grant_entries import GrantPlan
 from assistant_gateway.config import GatewayInstanceConfig
 from internal_credentials import parse_env_file
 from runtime_settings.instance_layout import InstanceLayout
@@ -135,7 +136,9 @@ def test_a_replaced_parent_is_written_before_its_older_child(tmp_path):
     )
     store.create(parent)
     store.create(child)
-    store.create(replacement, replaces=[parent.grant_id])
+    store.store_planned(
+        replacement, lambda: GrantPlan(new=[replacement], replaced={parent.grant_id: replacement.grant_id})
+    )
     plan, imported = transfer(
         tmp_path, path, (SettingsSection(), PeopleSection(), AccessSection())
     )

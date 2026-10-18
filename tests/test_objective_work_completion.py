@@ -165,3 +165,38 @@ async def test_completion_finishes_or_fails_cleanly_and_frees_queue_capacity(
             ).schedule_memory.ledger.total_runs
             == 1
         )
+
+
+@pytest.mark.asyncio
+async def test_a_schedule_removed_while_the_session_finishes_is_not_recreated(tmp_path, caplog, monkeypatch):
+    """Recording the checkpoint used to save the whole schedule it had read, recreating a deleted one (2026-10-17)."""
+    from storage.schedule_repository import RowWrite
+
+    agent, info, session, checkpoint = _checkpointed_timer(tmp_path)
+    manager = agent.task_manager
+    store = agent._schedule_store
+    edit = store.edit_schedule_memory
+
+    def removed_first(schedule_id, *args, **kwargs):
+        # Removed by another authorized path after the completion checked it.
+        store._repository.write_locked(schedule_id, lambda _row: RowWrite(delete=True))
+        return edit(schedule_id, *args, **kwargs)
+
+    monkeypatch.setattr(store, "edit_schedule_memory", removed_first)
+    agent._strands_agent = SimpleNamespace(invoke_async=AsyncMock(), messages=[])
+    agent._conversation_store = None
+    object.__setattr__(agent, "_refresh_self_agent_state", AsyncMock())
+    object.__setattr__(agent, "_notify_context_after_turn", AsyncMock())
+
+    assert await task_message_runtime._check_and_process_next_task(agent)
+
+    saved = manager.get_task_from_db(info.task.task_id, owner_agent_id=agent.id)
+    assert saved["main_task"].task_state[-1][0] == ProgressState.FAILED
+    assert store.get_row("objective-timer") is None
+    assert checkpoint in manager.objective_work_repository.list_checkpoints(
+        session.objective_id, owner_agent_id=session.owner_agent_id
+    )
+    assert any(
+        "objective_work_completion_rejected" in record.message and "reason=schedule_missing" in record.message
+        for record in caplog.records
+    )

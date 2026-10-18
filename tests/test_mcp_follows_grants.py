@@ -361,6 +361,108 @@ async def test_one_call_proposes_and_one_review_installs_the_server_and_its_use(
     assert len(world.mcp_store().list_records()) == 1, "the resumed call did not record another connection"
 
 
+@pytest.mark.asyncio
+async def test_a_second_approval_while_the_first_applies_is_refused_and_the_server_stays_installed(
+    world, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Before decisions claimed requests, a second approval that read the
+    # server as pending put it back to pending when it lost the race.
+    set_agent_ref(world.lead)
+    context = Context("tooluse-propose-mcp-twice")
+    with pytest.raises(InterruptException):
+        await propose(context)
+    request_id = context.raised[0]["access_request_id"]
+    [pending] = world.mcp_store().list_records()
+    store = world.service.store
+    original = store.apply_together
+    refusals: list[str] = []
+
+    def second_approval(*args: Any, **kwargs: Any) -> Any:
+        # The first approval has installed the server and is about to store its outcome.
+        assert world.mcp_store().require(pending.connection_id).lifecycle is MCPConnectionLifecycle.ACTIVE
+        try:
+            world.requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE_ALL)
+        except HandDownRefused as exc:
+            refusals.append(str(exc))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "apply_together", second_approval)
+    decided = world.requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE_ALL)
+
+    assert refusals and "deciding this request right now" in refusals[0]
+    assert decided.status is AccessRequestStatus.GRANTED
+    assert world.mcp_store().require(pending.connection_id).lifecycle is MCPConnectionLifecycle.ACTIVE
+    [grant] = world.grants()
+    assert decided.grant_ids == (grant.grant_id,)
+
+
+@pytest.mark.asyncio
+async def test_a_busy_database_while_applying_leaves_the_server_pending_and_a_later_approval_works(
+    world, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Before 2026-10-17 only refusals were undone: after "database is locked"
+    # the server stayed installed while the request waited, and every later
+    # approval was refused because the server was no longer pending.
+    import sqlite3
+
+    set_agent_ref(world.lead)
+    context = Context("tooluse-propose-mcp-busy")
+    with pytest.raises(InterruptException):
+        await propose(context)
+    request_id = context.raised[0]["access_request_id"]
+    [pending] = world.mcp_store().list_records()
+    store = world.service.store
+    original = store.apply_together
+    failures: list[int] = []
+
+    def busy_once(*args: Any, **kwargs: Any) -> Any:
+        if not failures:
+            failures.append(1)
+            raise sqlite3.OperationalError("database is locked")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "apply_together", busy_once)
+    with pytest.raises(HandDownRefused, match="couldn't be saved because the access store was busy"):
+        world.requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE_ALL)
+
+    assert world.mcp_store().require(pending.connection_id).lifecycle is MCPConnectionLifecycle.PENDING
+    assert world.service.store.get_request(request_id).status is AccessRequestStatus.WAITING
+    assert world.grants() == []
+
+    decided = world.requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE_ALL)
+    assert decided.status is AccessRequestStatus.GRANTED
+    assert world.mcp_store().require(pending.connection_id).lifecycle is MCPConnectionLifecycle.ACTIVE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("committed", [False, True])
+async def test_an_unconfirmed_mcp_install_keeps_or_restores_the_server_on_recovery(world, monkeypatch, committed):
+    from datetime import timedelta
+
+    from access_control.requests import DecisionOutcomeUnknown
+    from storage.access_repository import AccessRepository
+    from tests.access_decision_support import uncertain_store
+
+    set_agent_ref(world.lead)
+    context = Context("tooluse-propose-mcp-uncertain")
+    with pytest.raises(InterruptException):
+        await propose(context)
+    request_id = context.raised[0]["access_request_id"]
+    [pending] = world.mcp_store().list_records()
+    store = world.service.store
+    with uncertain_store(monkeypatch, store, "apply_together", committed=committed):
+        with pytest.raises(DecisionOutcomeUnknown):
+            world.requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE_ALL)
+    assert world.mcp_store().require(pending.connection_id).lifecycle is MCPConnectionLifecycle.ACTIVE
+    world.service.store = AccessRepository(store.settings)
+    later = world.service.clock() + timedelta(minutes=11)
+    monkeypatch.setattr(world.service, "clock", lambda: later)
+    world.requests().recover_decisions()
+    expected = MCPConnectionLifecycle.ACTIVE if committed else MCPConnectionLifecycle.PENDING
+    assert world.mcp_store().require(pending.connection_id).lifecycle is expected
+    assert world.service.store.decision_recoveries(world.service.team_id, now=later) == []
+
+
 def refusal(result: dict[str, Any]) -> dict[str, Any]:
     """The refusal the model reads in a failed MCP tool result."""
 
@@ -498,6 +600,37 @@ async def test_a_server_already_installed_is_not_proposed_again(world) -> None:
 
     assert again["status"] == "refused" and "already installed as mcp:tickets" in again["reason"]
     assert "request_access" in again["reason"]
+
+
+@pytest.mark.asyncio
+async def test_recovery_prevents_a_paused_decision_from_activating_its_server(world, monkeypatch) -> None:
+    from contextlib import contextmanager
+    from datetime import timedelta
+
+    set_agent_ref(world.lead)
+    context = Context("tooluse-paused-activation")
+    with pytest.raises(InterruptException):
+        await propose(context)
+    request_id = context.raised[0]["access_request_id"]
+    publish = world.service.store.decision_effect_transaction
+    later = world.service.clock() + timedelta(minutes=11)
+
+    @contextmanager
+    def paused(claim):
+        # The server is journaled, but activation has not acquired its lock.
+        monkeypatch.setattr(world.service, "clock", lambda: later)
+        world.requests().recover_decisions()
+        with publish(claim):
+            yield
+
+    monkeypatch.setattr(world.service.store, "decision_effect_transaction", paused)
+    with pytest.raises(HandDownRefused):
+        world.requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE_ALL)
+    [record] = world.mcp_store().list_records()
+    assert record.lifecycle is MCPConnectionLifecycle.PENDING
+    assert world.service.store.get_request(request_id).status is AccessRequestStatus.WAITING
+    assert world.service.store.decision_recoveries(TEAM) == []
+    assert world.grants() == []
 
 
 @pytest.mark.asyncio

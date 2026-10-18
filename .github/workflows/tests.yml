@@ -87,7 +87,8 @@ jobs:
   fast:
     if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
-    timeout-minutes: 30
+    # Environment setup and the full suite exceeded 30 minutes at 95% complete.
+    timeout-minutes: 45
     steps:
       - name: Require managed local runner
         run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
@@ -274,5 +275,8 @@ jobs:
         env:
           STORAGE_BACKEND: postgres
         run: python tests/live_postgres_storage_validation.py
-      - name: Test knowledge storage and curation with PostgreSQL
-        run: python -m pytest tests/test_knowledge_*.py -m postgres -q --tb=short --show-capture=no
+      - name: Run every PostgreSQL test
+        # Every test marked postgres: the Postgres variants of the storage,
+        # runtime recovery, snapshot and schedule-worker transaction tests,
+        # and the knowledge store and curation tests.
+        run: python -m pytest tests -m postgres -q --tb=short --show-capture=no

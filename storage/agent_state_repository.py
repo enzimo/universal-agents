@@ -8,6 +8,7 @@ import json
 import logging
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Protocol
 
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
@@ -34,9 +35,11 @@ class AgentStateQuery:
 class AgentStateRepository(Protocol):
     def upsert(self, status: AgentStatus) -> None: ...
 
+    def upsert_if_newer(self, status: AgentStatus) -> bool: ...
+
     def remove(self, agent_id: str) -> bool: ...
 
-    def remove_by_team_id(self, team_id: str) -> bool: ...
+    def remove_unseen(self, agent_id: str, last_seen_at: Optional[str]) -> bool: ...
 
     def get_by_id(self, agent_id: str) -> Optional[AgentStatus]: ...
 
@@ -49,6 +52,11 @@ class _RelationalAgentStateRepository:
     """Shared record operations of the agent-state repository."""
 
     _dialect: SqlDialect
+    _logger: logging.Logger
+
+    def _connect(self) -> Any:
+        """Open a connection (each backend overrides this)."""
+        raise NotImplementedError
 
 
     def _init_schema(self) -> None:
@@ -109,6 +117,95 @@ class _RelationalAgentStateRepository:
             raise
 
 
+    def upsert(self, status: AgentStatus) -> None:
+        """Write an agent's own status (its own refresh is always current)."""
+        self._write_status(status, only_if_newer=False)
+
+    def upsert_if_newer(self, status: AgentStatus) -> bool:
+        """Write a status another agent sent only if it is newer than the stored row.
+
+        The team lead stores received presence this way, in one statement, so
+        a delayed older status cannot overwrite what the agent wrote itself
+        (such as its exiting mark), however the two writes interleave.
+        """
+        return self._write_status(status, only_if_newer=True)
+
+    def _write_status(self, status: AgentStatus, *, only_if_newer: bool) -> bool:
+        agent_id = status.self_id
+        if not agent_id:
+            self._logger.warning("Cannot upsert AgentStatus without self_id.")
+            return False
+        # One fixed-width UTC form, so comparing the stored text compares the times.
+        status = status.model_copy(update={"last_seen_at": _sortable_time(status.last_seen_at)})
+        is_executing = status.is_executing if status.is_executing is not None else status.is_busy
+        has_capacity = None if status.has_execution_capacity is None else int(bool(status.has_execution_capacity))
+        bind = self._dialect.bind
+        # Postgres compares text by the database collation; "C" compares bytes like SQLite.
+        collate = ' COLLATE "C"' if self._dialect == POSTGRES else ""
+        newer_only = (
+            f" WHERE agent_states.last_seen_at IS NULL OR agent_states.last_seen_at{collate}"
+            f" < excluded.last_seen_at{collate}"
+            if only_if_newer
+            else ""
+        )
+        try:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    f"""
+                    INSERT INTO agent_states
+                    (
+                        agent_id, agent_name, named_agent_type, team_id, is_busy,
+                        is_executing, has_execution_capacity, is_paused, is_team_lead,
+                        top_level_queue_depth, waiting_top_level_task_count, deferred_message_count,
+                        agent_role, tools_json, diagnostic_json, last_seen_at, is_exiting, full_status_json
+                    )
+                    VALUES ({", ".join([bind] * 18)})
+                    ON CONFLICT(agent_id) DO UPDATE SET
+                        agent_name = excluded.agent_name,
+                        named_agent_type = excluded.named_agent_type,
+                        team_id = excluded.team_id,
+                        is_busy = excluded.is_busy,
+                        is_executing = excluded.is_executing,
+                        has_execution_capacity = excluded.has_execution_capacity,
+                        is_paused = excluded.is_paused,
+                        is_team_lead = excluded.is_team_lead,
+                        top_level_queue_depth = excluded.top_level_queue_depth,
+                        waiting_top_level_task_count = excluded.waiting_top_level_task_count,
+                        deferred_message_count = excluded.deferred_message_count,
+                        agent_role = excluded.agent_role,
+                        tools_json = excluded.tools_json,
+                        diagnostic_json = excluded.diagnostic_json,
+                        last_seen_at = excluded.last_seen_at,
+                        is_exiting = excluded.is_exiting,
+                        full_status_json = excluded.full_status_json{newer_only}
+                    """,
+                    (
+                        agent_id,
+                        status.name,
+                        status.named_agent_type,
+                        status.team_id,
+                        int(bool(is_executing)),
+                        int(bool(is_executing)),
+                        has_capacity,
+                        int(bool(status.is_paused)),
+                        int(bool(status.is_team_lead)),
+                        status.top_level_queue_depth,
+                        status.waiting_top_level_task_count,
+                        status.deferred_message_count,
+                        status.agent_role,
+                        None if status.tools is None else json.dumps(status.tools),
+                        None if status.diagnostic is None else json.dumps(status.diagnostic),
+                        status.last_seen_at,
+                        int(bool(status.is_exiting)),
+                        status.model_dump_json(),
+                    ),
+                )
+                conn.commit()
+                return bool(cursor.rowcount)
+        except Exception as exc:
+            self._logger.error(f"Failed to upsert agent state {agent_id}: {exc}")
+            return False
+
     def remove(self, agent_id: str) -> bool:
         try:
             with self._connect() as conn:
@@ -119,14 +216,34 @@ class _RelationalAgentStateRepository:
             self._logger.error(f"Failed to remove agent state {agent_id}: {exc}")
             return False
 
-    def remove_by_team_id(self, team_id: str) -> bool:
+    def remove_unseen(self, agent_id: str, last_seen_at: Optional[str]) -> bool:
+        """Delete one agent's row only if it still holds the heartbeat the caller read.
+
+        The team lead prunes rows of agents that are gone
+        (``agent_liveness.prune_departed_agent_rows``). An agent that reported in
+        between that read and this delete keeps its row. The time matches as
+        given or in the stored fixed-width form (``_sortable_time``), so a caller
+        may pass the time an agent sent as well as the time read back.
+        """
+        bind = self._dialect.bind
+        params: tuple[str, ...]
+        if last_seen_at is None:
+            statement, params = f"DELETE FROM agent_states WHERE agent_id = {bind} AND last_seen_at IS NULL", (agent_id,)
+        else:
+            statement, params = (
+                f"DELETE FROM agent_states WHERE agent_id = {bind} AND last_seen_at IN ({bind}, {bind})",
+                (agent_id, last_seen_at, _sortable_time(last_seen_at) or last_seen_at),
+            )
         try:
             with self._connect() as conn:
-                cursor = conn.execute(f"DELETE FROM agent_states WHERE team_id = {self._dialect.bind}", (team_id,))
+                cursor = conn.execute(statement, params)
                 conn.commit()
                 return cursor.rowcount > 0
-        except Exception as exc:
-            self._logger.error(f"Failed to remove agents for team {team_id}: {exc}")
+        except Exception:
+            self._logger.exception(
+                "Could not remove an agent status row. event=agent_status_row_remove_failed agent_id=%s",
+                agent_id,
+            )
             return False
 
     def get_by_id(self, agent_id: str) -> Optional[AgentStatus]:
@@ -222,66 +339,6 @@ class SqliteAgentStateRepository(_RelationalAgentStateRepository):
         return connect_sqlite(self._db_path, logger=self._logger)
 
 
-    def upsert(self, status: AgentStatus) -> None:
-        agent_id = status.self_id
-        if not agent_id:
-            self._logger.warning("Cannot upsert AgentStatus without self_id.")
-            return
-
-        try:
-            tools_json = json.dumps(status.tools) if status.tools is not None else None
-            diagnostic_json = json.dumps(status.diagnostic) if status.diagnostic is not None else None
-            full_status_json = status.model_dump_json()
-
-            is_executing = status.is_executing
-            if is_executing is None:
-                is_executing = status.is_busy
-            is_busy = 1 if is_executing else 0
-            has_execution_capacity = None
-            if status.has_execution_capacity is not None:
-                has_execution_capacity = 1 if status.has_execution_capacity else 0
-            is_paused = 1 if status.is_paused else 0
-            is_team_lead = 1 if status.is_team_lead else 0
-            is_exiting = 1 if status.is_exiting else 0
-
-            with self._connect() as conn:
-                conn.execute(
-                    f"""
-                    INSERT OR REPLACE INTO agent_states
-                    (
-                        agent_id, agent_name, named_agent_type, team_id, is_busy,
-                        is_executing, has_execution_capacity, is_paused, is_team_lead,
-                        top_level_queue_depth, waiting_top_level_task_count, deferred_message_count,
-                        agent_role, tools_json, diagnostic_json, last_seen_at, is_exiting, full_status_json
-                    )
-                    VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
-                    """,
-                    (
-                        agent_id,
-                        status.name,
-                        status.named_agent_type,
-                        status.team_id,
-                        is_busy,
-                        1 if is_executing else 0,
-                        has_execution_capacity,
-                        is_paused,
-                        is_team_lead,
-                        status.top_level_queue_depth,
-                        status.waiting_top_level_task_count,
-                        status.deferred_message_count,
-                        status.agent_role,
-                        tools_json,
-                        diagnostic_json,
-                        status.last_seen_at,
-                        is_exiting,
-                        full_status_json,
-                    ),
-                )
-                conn.commit()
-        except Exception as exc:
-            self._logger.error(f"Failed to upsert agent state {agent_id}: {exc}")
-
-
     def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
         ensure_sqlite_column(conn, table_name, column_name, column_type, logger=self._logger)
 
@@ -305,84 +362,6 @@ class PostgresAgentStateRepository(_RelationalAgentStateRepository):
 
     def _connect(self) -> PostgresConnection:
         return connect_postgres(self._dsn)
-
-    def upsert(self, status: AgentStatus) -> None:
-        agent_id = status.self_id
-        if not agent_id:
-            self._logger.warning("Cannot upsert AgentStatus without self_id.")
-            return
-
-        try:
-            tools_json = json.dumps(status.tools) if status.tools is not None else None
-            diagnostic_json = json.dumps(status.diagnostic) if status.diagnostic is not None else None
-            full_status_json = status.model_dump_json()
-
-            is_executing = status.is_executing
-            if is_executing is None:
-                is_executing = status.is_busy
-            is_busy = 1 if is_executing else 0
-            has_execution_capacity = None
-            if status.has_execution_capacity is not None:
-                has_execution_capacity = 1 if status.has_execution_capacity else 0
-            is_paused = 1 if status.is_paused else 0
-            is_team_lead = 1 if status.is_team_lead else 0
-            is_exiting = 1 if status.is_exiting else 0
-
-            with self._connect() as conn:
-                conn.execute(
-                    f"""
-                    INSERT INTO agent_states
-                    (
-                        agent_id, agent_name, named_agent_type, team_id, is_busy,
-                        is_executing, has_execution_capacity, is_paused, is_team_lead,
-                        top_level_queue_depth, waiting_top_level_task_count, deferred_message_count,
-                        agent_role, tools_json, diagnostic_json, last_seen_at, is_exiting, full_status_json
-                    )
-                    VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
-                    ON CONFLICT(agent_id) DO UPDATE SET
-                        agent_name = excluded.agent_name,
-                        named_agent_type = excluded.named_agent_type,
-                        team_id = excluded.team_id,
-                        is_busy = excluded.is_busy,
-                        is_executing = excluded.is_executing,
-                        has_execution_capacity = excluded.has_execution_capacity,
-                        is_paused = excluded.is_paused,
-                        is_team_lead = excluded.is_team_lead,
-                        top_level_queue_depth = excluded.top_level_queue_depth,
-                        waiting_top_level_task_count = excluded.waiting_top_level_task_count,
-                        deferred_message_count = excluded.deferred_message_count,
-                        agent_role = excluded.agent_role,
-                        tools_json = excluded.tools_json,
-                        diagnostic_json = excluded.diagnostic_json,
-                        last_seen_at = excluded.last_seen_at,
-                        is_exiting = excluded.is_exiting,
-                        full_status_json = excluded.full_status_json
-                    """,
-                    (
-                        agent_id,
-                        status.name,
-                        status.named_agent_type,
-                        status.team_id,
-                        is_busy,
-                        1 if is_executing else 0,
-                        has_execution_capacity,
-                        is_paused,
-                        is_team_lead,
-                        status.top_level_queue_depth,
-                        status.waiting_top_level_task_count,
-                        status.deferred_message_count,
-                        status.agent_role,
-                        tools_json,
-                        diagnostic_json,
-                        status.last_seen_at,
-                        is_exiting,
-                        full_status_json,
-                    ),
-                )
-                conn.commit()
-        except Exception as exc:
-            self._logger.error(f"Failed to upsert agent state {agent_id}: {exc}")
-
 
     def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
         conn.execute(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_type}')
@@ -412,3 +391,16 @@ def create_agent_state_repository(
     raise NotImplementedError(
         f"AgentStateRepository has no implementation for backend {storage_settings.backend!r}."
     )
+
+
+def _sortable_time(value: Optional[str]) -> Optional[str]:
+    """A stored time in one fixed-width UTC form; text that is not a time is kept as is."""
+    if not value:
+        return value
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")

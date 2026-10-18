@@ -53,13 +53,17 @@ from custom_agents.dead_letter_watch import report_dead_letters
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.access_request_runtime import resume_decided_access_waits
 from custom_agents.orphaned_work_takeover import take_over_orphaned_work
+from custom_agents.agent_liveness import prune_departed_agent_rows_when_due
 from custom_agents.turn_failure_runtime import release_orphaned_slot_when_idle
 from custom_agents.schedule_store import (
     DEFAULT_SCHEDULE_CLAIM_TTL_SECONDS,
+    AdvanceOutcome,
+    ScheduleClaimScope,
     compute_next_fire_at,
     owner_canonical_user_id_for_schedule,
     prepare_schedule_for_add,
     schedule_claim_scope_for_agent,
+    schedule_stopped_reason,
 )
 from custom_agents.schedule_management import (
     ScheduleMutationAuthorityMode,
@@ -172,6 +176,11 @@ def _open_objective_work_session_for_fired_task(
     task: Task,
     internal_meta: MessageMeta,
 ) -> bool:
+    """Open the bounded work session a fired Objective work schedule asked for.
+
+    Runs as one task operation (``_queue_fired_task``), so it calls the
+    manager's coordinators directly.
+    """
     if (
         scheduled_message.effective_system_schedule_kind
         != SystemScheduleKind.OBJECTIVE_WORK_SESSION
@@ -368,7 +377,7 @@ async def _coalesce_into_run_elsewhere(
     new fire must not run beside it. Only runs whose owner is still live count,
     so a crashed worker's leftover receipt cannot block the schedule forever.
     """
-    from custom_agents.runtime_recovery import filter_stale_role_takeover_owner_ids
+    from custom_agents.agent_liveness import LivenessPurpose, gone_owner_ids
 
     records = agent._schedule_store.worker_records
     unfinished = [
@@ -379,13 +388,18 @@ async def _coalesce_into_run_elsewhere(
         if record.occurrence_id != schedule_admission.occurrence_id
         and record.agent_id != agent.id
     ]
-    if not unfinished:
-        return False
+    # Asked even with no unfinished run, so this schedule's decision records
+    # about owners it no longer waits on are forgotten (agent_liveness).
     stale = set(
-        await filter_stale_role_takeover_owner_ids(
-            agent, sorted({record.agent_id for record in unfinished})
+        await gone_owner_ids(
+            agent,
+            sorted({record.agent_id for record in unfinished}),
+            purpose=LivenessPurpose.SCHEDULE_COALESCING,
+            scope=schedule_id,
         )
     )
+    if not unfinished:
+        return False
     live = sorted(
         (record for record in unfinished if record.agent_id not in stale),
         key=lambda record: record.due_at,
@@ -539,7 +553,7 @@ async def _preserve_inbound_routing(
         schedule_msg.payload_meta = normalized_meta
 
 
-async def _store_ensure(agent: Any, schedule_msg: ScheduledMessage, claim_scope: dict[str, Any]) -> None:
+async def _store_ensure(agent: Any, schedule_msg: ScheduledMessage, claim_scope: ScheduleClaimScope) -> None:
     """Insert the schedule only when absent; a stored one keeps all of its state."""
 
     ensured = await agent.task_manager.operations_runtime.run(
@@ -568,7 +582,7 @@ async def _store_ensure(agent: Any, schedule_msg: ScheduledMessage, claim_scope:
     )
 
 
-async def _store_replace(agent: Any, schedule_msg: ScheduledMessage, claim_scope: dict[str, Any]) -> None:
+async def _store_replace(agent: Any, schedule_msg: ScheduledMessage, claim_scope: ScheduleClaimScope) -> None:
     """Replace the row; a stored system schedule needs the trusted-runtime permit for this exact change."""
 
     existing = await agent.task_manager.operations_runtime.run(
@@ -1442,12 +1456,19 @@ async def _queue_fired_task(
         )
         return False
 
-    if not _open_objective_work_session_for_fired_task(
-        agent,
-        schedule_id,
-        scheduled_message,
-        task,
-        meta,
+    # One manager operation: opening the session adds an event to the stored
+    # Objective and changes the task and its queue. Outside the lane it could
+    # write between another operation's load and save of the same Objective,
+    # and that save would erase the event.
+    if not await agent.task_manager.operations_runtime.run(
+        partial(
+            _open_objective_work_session_for_fired_task,
+            agent,
+            schedule_id,
+            scheduled_message,
+            task,
+            meta,
+        )
     ):
         await agent.task_manager.operations_runtime.run(
             agent.task_manager.remove_task, task.task_id
@@ -1965,6 +1986,14 @@ async def _scheduler_pass(
             "Could not check for work held by dead agents. event=orphaned_work_check_failed agent_id=%s",
             agent.id,
         )
+    # ...and removes the status rows of agents that are gone, on its own timer.
+    try:
+        await prune_departed_agent_rows_when_due(agent)
+    except Exception:
+        agent._logger.exception(
+            "Could not remove status rows of departed agents. event=agent_status_prune_failed agent_id=%s",
+            agent.id,
+        )
 
     # Counts on running delegated work for the people waiting on it.
     try:
@@ -2044,6 +2073,18 @@ async def _fire_claimed_schedule(
             raise ValueError(
                 f"ScheduledMessage {schedule_id} could not be reconstructed."
             )
+        # Control changes keep the claim, so a pause or turn-off after the
+        # claim must still stop a run that has not started.
+        stopped = schedule_stopped_reason(scheduled_message, datetime.now(timezone.utc))
+        if stopped is not None:
+            await _release_stopped_claim(agent, schedule_id, claim_token, stopped)
+            return
+        # The claim reserved one occurrence, not whichever time an edit set
+        # afterwards. Releasing it leaves the new occurrence and count intact.
+        due_at = scheduled_message.next_fire_at
+        if _claimed_occurrence_changed(claimed_schedule, due_at, datetime.now(timezone.utc)):
+            await _release_retimed_claim(agent, claimed_schedule, due_at)
+            return
         from custom_agents.schedule_occurrences import prepare_occurrence
 
         admission = prepare_occurrence(agent, scheduled_message, claim_token)
@@ -2075,12 +2116,7 @@ async def _fire_claimed_schedule(
         accepted = False
 
     if accepted:
-        await agent.task_manager.operations_runtime.run(
-            agent._schedule_store.update_after_fire,
-            schedule_id,
-            claim_token=claim_token,
-            claimer_agent_id=agent.id,
-        )
+        await _advance_after_admission(agent, claimed_schedule)
     else:
         # A blocked earliest job must not starve later eligible jobs.
         from custom_agents.agent_instantiation_service import current_worker_limits
@@ -2094,6 +2130,84 @@ async def _fire_claimed_schedule(
                 claimer_agent_id=agent.id,
             )
         await sleep_fn(1)
+
+
+def _claimed_occurrence_changed(claimed: dict[str, Any], due_at: str, now: datetime) -> bool:
+    if due_at != claimed["next_fire_at"]:
+        return True
+    due = datetime.fromisoformat(due_at)
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    return due > now
+
+
+async def _release_retimed_claim(agent: Any, claimed: dict[str, Any], next_fire_at: str) -> None:
+    """Leave a newly timed occurrence waiting, without admitting or counting it."""
+    agent._logger.info(
+        "A claimed schedule's run time changed before its run started; the run waits for its new time. "
+        "event=scheduled_run_skipped_schedule_retimed agent_id=%s schedule_id=%s due_at=%s next_fire_at=%s",
+        agent.id, claimed["schedule_id"], claimed["next_fire_at"], next_fire_at,
+    )
+    await agent.task_manager.operations_runtime.run(
+        agent._schedule_store.release_claim,
+        claimed["schedule_id"],
+        claim_token=claimed["claim_token"],
+        claimer_agent_id=agent.id,
+    )
+
+
+async def _release_stopped_claim(agent: Any, schedule_id: str, claim_token: Optional[str], reason: str) -> None:
+    """Skip the run of a schedule paused, turned off or ended after it was claimed, and release the claim."""
+    agent._logger.info(
+        "A claimed schedule was paused, turned off or ended before its run started; the run is skipped "
+        "and the claim released. event=scheduled_run_skipped_schedule_stopped agent_id=%s schedule_id=%s reason=%s",
+        agent.id,
+        schedule_id,
+        reason,
+    )
+    if claim_token:
+        await agent.task_manager.operations_runtime.run(
+            agent._schedule_store.release_claim,
+            schedule_id,
+            claim_token=claim_token,
+            claimer_agent_id=agent.id,
+        )
+
+
+async def _advance_after_admission(agent: Any, claimed_schedule: dict[str, Any]) -> None:
+    """Move the schedule past the occurrence just admitted, and log a move that did not apply.
+
+    The move is tied to this agent's claim and the claimed run time
+    (``ScheduleStore.update_after_fire``, which logs moves that applied and
+    storage failures). A schedule removed or given a new run time during the
+    run is normal (info). Another agent holding the claim is an anomaly
+    (warning): the occurrence may stay due, and only a typed root job's
+    occurrence receipt keeps it from running again.
+    """
+    schedule_id = claimed_schedule["schedule_id"]
+    due_at = claimed_schedule.get("next_fire_at")
+    outcome = await agent.task_manager.operations_runtime.run(
+        agent._schedule_store.update_after_fire,
+        schedule_id,
+        claim_token=claimed_schedule.get("claim_token"),
+        claimer_agent_id=agent.id,
+        due_at=due_at,
+    )
+    if outcome.applied or outcome is AdvanceOutcome.FAILED:
+        return
+    log = agent._logger.info if outcome in _EXPECTED_ADVANCE_MISSES else agent._logger.warning
+    log(
+        "A scheduled run was admitted, but its schedule was not moved on to its next run. "
+        "event=schedule_advance_not_applied agent_id=%s schedule_id=%s due_at=%s outcome=%s",
+        agent.id,
+        schedule_id,
+        due_at,
+        outcome.value,
+    )
+
+
+# Not moving on after these is normal: the schedule was removed, or given a new run time, during the run.
+_EXPECTED_ADVANCE_MISSES = frozenset({AdvanceOutcome.NOT_FOUND, AdvanceOutcome.DUE_CHANGED})
 
 
 async def _idle_sleep_seconds(agent: Any, can_claim_scheduled_work: bool) -> float:

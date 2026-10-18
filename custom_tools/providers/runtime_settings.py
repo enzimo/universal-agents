@@ -21,6 +21,7 @@ from custom_agents.runtime_settings_service import (
     RuntimeSettingsService,
     runtime_settings_options_payload,
 )
+from custom_messages.contracts.control_v1 import AGENT_STATUS_RUNTIME_ONLY_FIELDS
 from custom_messages.enums import ControlType
 from custom_tools.agent_catalog_port import lookup_agent_type
 from custom_tools import file_access
@@ -85,7 +86,7 @@ def get_self_status(info_type: ControlType = ControlType.STATUS_REQUEST_BASIC) -
         return json.dumps({"error": "Agent reference not set"})
 
     status = agent.get_self_status(info_type=info_type)
-    return status.model_dump_json()
+    return status.model_dump_json(exclude=set(AGENT_STATUS_RUNTIME_ONLY_FIELDS))
 
 
 @tool

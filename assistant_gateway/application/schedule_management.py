@@ -28,6 +28,7 @@ from custom_messages.contracts.schedule_v1 import (
     ManagerScheduleCommand,
     ScheduledMessage,
     ScheduleTaskMemory,
+    schedule_listing_digest,
 )
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import (
@@ -116,6 +117,16 @@ class GatewayScheduleApplication:
         if schedule.management_class != ScheduleManagementClass.SYSTEM:
             return True
         return self.may_change_system_schedules(route)
+
+    @staticmethod
+    def listing_digest(schedule: ScheduledMessage) -> str:
+        """The digest a control on this listed schedule binds to (``schedule_listing_digest``).
+
+        The Schedules page and the chat and CLI commands send it as
+        ``expected_record_digest``; the manager's store checks the same digest.
+        """
+
+        return schedule_listing_digest(schedule)
 
     def _may_change_system_schedules(self, person_id: str | None) -> bool:
         if self._person_changes is None or not person_id:

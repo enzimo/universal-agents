@@ -18,7 +18,6 @@ from access_control.ownership import (
 )
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from functools import partial
 from typing import Any, Optional
 
@@ -40,17 +39,44 @@ from custom_agents.task_human_interaction_blockers import (
     get_human_interaction_blocker,
 )
 from custom_agents.heartbeat_store import HeartbeatStore
+from custom_agents.objective_lifecycle import (
+    LinkSwitchResult,
+    ObjectiveLifecycleOutcome,
+    ObjectiveStatusChange,
+    apply_objective_lifecycle,
+)
 from custom_agents.schedule_management import (
     ScheduleMutationPermit,
     ScheduleMutationAuthorityMode,
     ScheduleMutationOperation,
+    SystemScheduleMutationDenied,
     build_schedule_mutation_permit,
     is_system_managed_schedule,
 )
-from custom_agents.schedule_store import ScheduleStore, owner_canonical_user_id_for_schedule
+from custom_agents.schedule_store import (
+    ScheduleStore,
+    ScheduleWriteConflict,
+    owner_canonical_user_id_for_schedule,
+)
 from custom_agents.task_manager_objectives import ObjectiveSaveFailed
 from custom_messages.contracts.common_v1 import contract_sha256
 from custom_messages.contracts.control_v1 import (
+    ABANDON_OBJECTIVE,
+    DELETE_OBJECTIVE,
+    OBJECTIVE_ACTION_UNAVAILABLE,
+    OBJECTIVE_ALREADY_DELETED,
+    OBJECTIVE_CHANGED,
+    OBJECTIVE_CONTROL_INCOMPLETE,
+    OBJECTIVE_CONTROL_WORDS,
+    OBJECTIVE_DELETED,
+    OBJECTIVE_DELETION_INCOMPLETE,
+    OBJECTIVE_NOT_FOUND,
+    OBJECTIVE_OWNER_MISMATCH,
+    OBJECTIVE_PART_TASK,
+    OBJECTIVE_UPDATE_FAILED,
+    PAUSE_OBJECTIVE,
+    RESUME_OBJECTIVE,
+    STOP_OBJECTIVE,
     ManagerMemoryCommand,
     ManagerRuntimeWorkCommand,
     ManagerTopicCommand,
@@ -67,7 +93,9 @@ from custom_messages.contracts.routing_v1 import (
     MessageMeta,
 )
 from custom_messages.contracts.schedule_v1 import (
+    SCHEDULE_CHANGED_SINCE_LISTED,
     SYSTEM_SCHEDULE_CHANGE_NOT_ALLOWED,
+    SYSTEM_SCHEDULE_CHANGE_REFUSED,
     ManagerScheduleCommand,
     ScheduledMessage,
     ScheduleWorkerAssignmentV1,
@@ -79,6 +107,7 @@ from custom_messages.enums import (
     ProgressState,
     RequesterType,
 )
+from custom_messages.records.objectives import ObjectiveHeartbeatLink, ObjectiveScheduleLink
 from storage.pinned_memory_repository import PinnedMemoryConflictError
 
 
@@ -293,6 +322,64 @@ def _schedule_worker_assignment(
     )
 
 
+async def _apply_gateway_schedule_change(
+    agent: Any,
+    store: Any,
+    command: ManagerScheduleCommand,
+    scheduled_message: Any,
+    person: CommandPerson,
+) -> tuple[bool, str]:
+    """Pause, resume, turn off or remove one schedule for the verified person: (applied, message)."""
+
+    schedule_id = command.schedule_id or ""
+    expected = command.expected_record_digest or None
+    run = agent.task_manager.operations_runtime.run
+    if command.action == "pause":
+        candidate = scheduled_message.model_copy(deep=True)
+        candidate.paused_until = command.paused_until
+        permit = _authenticated_gateway_schedule_permit(
+            scheduled_message, principal=person, operation=ScheduleMutationOperation.PAUSE, candidate=candidate
+        )
+        applied = await run(
+            store.set_paused_until,
+            schedule_id,
+            command.paused_until,
+            operation=ScheduleMutationOperation.PAUSE,
+            system_mutation_permit=permit,
+            expected_record_digest=expected,
+        )
+        return applied, "schedule_paused" if applied else "schedule_not_found"
+    if command.action == "resume":
+        candidate = scheduled_message.model_copy(deep=True)
+        candidate.paused_until = None
+        candidate.enabled = True
+        permit = _authenticated_gateway_schedule_permit(
+            scheduled_message, principal=person, operation=ScheduleMutationOperation.RESUME, candidate=candidate
+        )
+        applied = await run(store.resume, schedule_id, system_mutation_permit=permit, expected_record_digest=expected)
+        return applied, "schedule_resumed" if applied else "schedule_not_found"
+    if command.action == "disable":
+        candidate = scheduled_message.model_copy(deep=True)
+        candidate.enabled = False
+        permit = _authenticated_gateway_schedule_permit(
+            scheduled_message, principal=person, operation=ScheduleMutationOperation.DISABLE, candidate=candidate
+        )
+        applied = await run(
+            store.set_enabled,
+            schedule_id,
+            False,
+            operation=ScheduleMutationOperation.DISABLE,
+            system_mutation_permit=permit,
+            expected_record_digest=expected,
+        )
+        return applied, "schedule_disabled" if applied else "schedule_not_found"
+    permit = _authenticated_gateway_schedule_permit(
+        scheduled_message, principal=person, operation=ScheduleMutationOperation.DELETE
+    )
+    applied = await run(store.remove, schedule_id, system_mutation_permit=permit, expected_record_digest=expected)
+    return applied, "schedule_removed" if applied else "schedule_not_found"
+
+
 async def handle_manager_schedule_command(
     agent: Any,
     *,
@@ -393,105 +480,26 @@ async def handle_manager_schedule_command(
             )
             response.success = False
             response.message = SYSTEM_SCHEDULE_CHANGE_NOT_ALLOWED
-        elif (
-            command.expected_record_digest
-            and command.expected_record_digest
-            != contract_sha256(scheduled_message.model_dump(mode="json"))
-        ):
-            response.success = False
-            response.message = "schedule_changed"
-        elif command.action == "pause":
-            candidate = scheduled_message.model_copy(deep=True)
-            candidate.paused_until = command.paused_until
-            permit = _authenticated_gateway_schedule_permit(
-                scheduled_message,
-                principal=person,
-                operation=ScheduleMutationOperation.PAUSE,
-                candidate=candidate,
-            )
-            response.success = await agent.task_manager.operations_runtime.run(
-                store.set_paused_until,
-                command.schedule_id or "",
-                command.paused_until,
-                operation=ScheduleMutationOperation.PAUSE,
-                system_mutation_permit=permit,
-            )
-            response.message = (
-                "schedule_paused" if response.success else "schedule_not_found"
-            )
-        elif command.action == "resume":
-            pause_candidate = scheduled_message.model_copy(deep=True)
-            pause_candidate.paused_until = None
-            pause_permit = _authenticated_gateway_schedule_permit(
-                scheduled_message,
-                principal=person,
-                operation=ScheduleMutationOperation.RESUME,
-                candidate=pause_candidate,
-            )
-            cleared = await agent.task_manager.operations_runtime.run(
-                store.set_paused_until,
-                command.schedule_id or "",
-                None,
-                operation=ScheduleMutationOperation.RESUME,
-                system_mutation_permit=pause_permit,
-            )
-            resumed_message = await agent.task_manager.operations_runtime.run(
-                store.get_scheduled_message, command.schedule_id or ""
-            )
-            enabled = False
-            if resumed_message is not None:
-                enabled_candidate = resumed_message.model_copy(deep=True)
-                enabled_candidate.enabled = True
-                enabled_permit = _authenticated_gateway_schedule_permit(
-                    resumed_message,
-                    principal=person,
-                    operation=ScheduleMutationOperation.RESUME,
-                    candidate=enabled_candidate,
-                )
-                enabled = await agent.task_manager.operations_runtime.run(
-                    store.set_enabled,
-                    command.schedule_id or "",
-                    True,
-                    operation=ScheduleMutationOperation.RESUME,
-                    system_mutation_permit=enabled_permit,
-                )
-            response.success = bool(cleared or enabled)
-            response.message = (
-                "schedule_resumed" if response.success else "schedule_not_found"
-            )
-        elif command.action == "disable":
-            candidate = scheduled_message.model_copy(deep=True)
-            candidate.enabled = False
-            permit = _authenticated_gateway_schedule_permit(
-                scheduled_message,
-                principal=person,
-                operation=ScheduleMutationOperation.DISABLE,
-                candidate=candidate,
-            )
-            response.success = await agent.task_manager.operations_runtime.run(
-                store.set_enabled,
-                command.schedule_id or "",
-                False,
-                operation=ScheduleMutationOperation.DISABLE,
-                system_mutation_permit=permit,
-            )
-            response.message = (
-                "schedule_disabled" if response.success else "schedule_not_found"
-            )
         else:
-            permit = _authenticated_gateway_schedule_permit(
-                scheduled_message,
-                principal=person,
-                operation=ScheduleMutationOperation.DELETE,
-            )
-            response.success = await agent.task_manager.operations_runtime.run(
-                store.remove,
-                command.schedule_id or "",
-                system_mutation_permit=permit,
-            )
-            response.message = (
-                "schedule_removed" if response.success else "schedule_not_found"
-            )
+            # The listed schedule the person acted on (expected_record_digest)
+            # and the permit are checked in the store's write transaction.
+            try:
+                response.success, response.message = await _apply_gateway_schedule_change(
+                    agent, store, command, scheduled_message, person
+                )
+            except (ScheduleWriteConflict, SystemScheduleMutationDenied) as exc:
+                changed = isinstance(exc, ScheduleWriteConflict)
+                agent._logger.warning(
+                    "[%s] A gateway schedule change was refused. event=gateway_schedule_change_refused "
+                    "schedule_id=%s action=%s person_id=%s reason=%s",
+                    agent.id,
+                    command.schedule_id,
+                    command.action,
+                    owner,
+                    exc.reason_code,
+                )
+                response.success = False
+                response.message = SCHEDULE_CHANGED_SINCE_LISTED if changed else SYSTEM_SCHEDULE_CHANGE_REFUSED
         if response.success and getattr(agent, "_scheduler_wake", None) is not None:
             agent._scheduler_wake.set()
     await _send_durable_response(
@@ -1029,20 +1037,24 @@ async def _runtime_work_schedules(
 
 
 def _objective_available_actions(status: ObjectiveStatus) -> list[str]:
+    """The control words a person is offered for an Objective in ``status``."""
+
     if status == ObjectiveStatus.DELETED:
-        return []
-    if status == ObjectiveStatus.DELETING:
-        return ["delete"]
-    if status == ObjectiveStatus.PAUSED:
-        return ["resume", "stop", "abandon", "delete"]
-    if status in {
+        controls: tuple[str, ...] = ()
+    elif status == ObjectiveStatus.DELETING:
+        controls = (DELETE_OBJECTIVE,)
+    elif status == ObjectiveStatus.PAUSED:
+        controls = (RESUME_OBJECTIVE, STOP_OBJECTIVE, ABANDON_OBJECTIVE, DELETE_OBJECTIVE)
+    elif status in {
         ObjectiveStatus.SATISFIED,
         ObjectiveStatus.FAILED,
         ObjectiveStatus.CANCELLED,
         ObjectiveStatus.ABANDONED,
     }:
-        return ["delete"]
-    return ["pause", "stop", "abandon", "delete"]
+        controls = (DELETE_OBJECTIVE,)
+    else:
+        controls = (PAUSE_OBJECTIVE, STOP_OBJECTIVE, ABANDON_OBJECTIVE, DELETE_OBJECTIVE)
+    return [OBJECTIVE_CONTROL_WORDS[control] for control in controls]
 
 
 def _objective_work_policy(agent: Any, objective: Any) -> Any:
@@ -1144,351 +1156,233 @@ async def _runtime_user_objectives(
     return [await _runtime_objective_summary(agent, item) for item in objectives]
 
 
-def _objective_link_needs_control(link: Any, *, should_enable: bool) -> bool:
-    if not link.managed_by_objective:
-        return False
-    return (
-        link.disabled_by_objective_pause
-        if should_enable
-        else not link.disabled_by_objective_pause
-    )
+# Each person's Objective control: the status it sets and the summary it
+# records. The manager enforces the actions it publishes
+# (``_objective_available_actions``), so a stale page or a typed command
+# cannot, for example, make a satisfied Objective active again. A control
+# whose status is already stored is a retry and is accepted: a pause or
+# abandon whose schedule did not switch must be repeatable, and the lifecycle
+# step records nothing new and switches only the links not yet switched.
+_OBJECTIVE_CONTROLS: dict[str, tuple[ObjectiveStatus, str]] = {
+    PAUSE_OBJECTIVE: (ObjectiveStatus.PAUSED, "Paused by authenticated user control."),
+    STOP_OBJECTIVE: (ObjectiveStatus.PAUSED, "Stopped by authenticated user control."),
+    RESUME_OBJECTIVE: (ObjectiveStatus.ACTIVE, "Resumed by authenticated user control."),
+    ABANDON_OBJECTIVE: (ObjectiveStatus.ABANDONED, "Abandoned by authenticated user control."),
+    DELETE_OBJECTIVE: (
+        ObjectiveStatus.DELETING,
+        "Recoverable deletion requested by authenticated user control.",
+    ),
+}
+_OBJECTIVE_CONTROLS_THAT_STOP_WORK = frozenset(
+    {STOP_OBJECTIVE, ABANDON_OBJECTIVE, DELETE_OBJECTIVE}
+)
 
 
-def _cascade_objective_schedule_links(
-    agent: Any,
-    *,
-    objective: Any,
-    command: ManagerRuntimeWorkCommand,
-    person: CommandPerson,
-    should_enable: bool,
-    tolerate_missing: bool = False,
-) -> list[str]:
-    failures: list[str] = []
-    schedule_store = agent._ensure_schedule_store()
-    operation = (
-        ScheduleMutationOperation.ENABLE
-        if should_enable
-        else ScheduleMutationOperation.DISABLE
-    )
-    for link in objective.schedule_links:
-        if not _objective_link_needs_control(link, should_enable=should_enable):
-            continue
+@dataclass
+class _PersonLinkSwitch:
+    """Turns an Objective's linked items on or off for the person its control works for.
+
+    Schedules change under the person's gateway-signed permit
+    (``AUTHENTICATED_GATEWAY_USER``), as these controls always did.
+    """
+
+    agent: Any
+    person: CommandPerson
+    _heartbeats: Optional[HeartbeatStore] = None
+
+    def switch_schedule(
+        self, objective_id: str, link: ObjectiveScheduleLink, enabled: bool
+    ) -> LinkSwitchResult:
+        schedule_store = self.agent._ensure_schedule_store()
         schedule = schedule_store.get_scheduled_message(link.schedule_id)
         if schedule is None:
-            agent._logger.warning(
-                "Objective control skipped missing linked schedule. "
-                "event=objective_control_schedule_missing objective_id=%s "
-                "schedule_id=%s tolerate_missing=%s",
-                objective.objective_id,
-                link.schedule_id,
-                tolerate_missing,
-            )
-            if tolerate_missing:
-                link.disabled_by_objective_pause = not should_enable
-                continue
-            failures.append(f"schedule:{link.schedule_id}")
-            continue
+            return LinkSwitchResult.MISSING
+        operation = (
+            ScheduleMutationOperation.ENABLE if enabled else ScheduleMutationOperation.DISABLE
+        )
         candidate = schedule.model_copy(deep=True)
-        candidate.enabled = should_enable
+        candidate.enabled = enabled
         permit = build_schedule_mutation_permit(
             schedule=schedule,
             operation=operation,
-            authority_mode=(ScheduleMutationAuthorityMode.AUTHENTICATED_GATEWAY_USER),
-            actor_principal_id=person.canonical_user_id,
-            owner_canonical_user_id=person.canonical_user_id,
-            team_id=person.team_id,
+            authority_mode=ScheduleMutationAuthorityMode.AUTHENTICATED_GATEWAY_USER,
+            actor_principal_id=self.person.canonical_user_id,
+            owner_canonical_user_id=self.person.canonical_user_id,
+            team_id=self.person.team_id,
             candidate=candidate,
         )
         try:
             changed = schedule_store.set_enabled(
                 link.schedule_id,
-                should_enable,
+                enabled,
                 operation=operation,
                 system_mutation_permit=permit,
             )
         except Exception as exc:
-            changed = False
-            agent._logger.warning(
+            self.agent._logger.warning(
                 "Objective control schedule mutation failed. "
                 "event=objective_control_schedule_mutation_failed "
                 "objective_id=%s schedule_id=%s error=%s",
-                objective.objective_id,
+                objective_id,
                 link.schedule_id,
                 exc,
             )
-        if changed:
-            link.disabled_by_objective_pause = not should_enable
-        else:
-            failures.append(f"schedule:{link.schedule_id}")
-    return failures
+            return LinkSwitchResult.FAILED
+        return LinkSwitchResult.SWITCHED if changed else LinkSwitchResult.FAILED
 
-
-def _cascade_objective_heartbeat_links(
-    agent: Any,
-    *,
-    objective: Any,
-    should_enable: bool,
-    tolerate_missing: bool = False,
-) -> list[str]:
-    failures: list[str] = []
-    heartbeat_store = HeartbeatStore(
-        db_path=agent.task_manager._db_path,
-        logger_=agent._logger,
-        storage_settings=agent.task_manager.storage_settings,
-    )
-    for link in objective.heartbeat_links:
-        if not _objective_link_needs_control(link, should_enable=should_enable):
-            continue
-        heartbeat_item = heartbeat_store.set_item_enabled(
-            link.heartbeat_item_id,
-            should_enable,
-        )
-        if heartbeat_item is None:
-            if tolerate_missing:
-                agent._logger.warning(
-                    "Objective control accepted missing linked heartbeat during "
-                    "recoverable deletion. "
-                    "event=objective_control_heartbeat_missing "
-                    "objective_id=%s heartbeat_item_id=%s",
-                    objective.objective_id,
-                    link.heartbeat_item_id,
+    def switch_heartbeat(
+        self, objective_id: str, link: ObjectiveHeartbeatLink, enabled: bool
+    ) -> LinkSwitchResult:
+        try:
+            if self._heartbeats is None:
+                self._heartbeats = HeartbeatStore(
+                    db_path=self.agent.task_manager._db_path,
+                    logger_=self.agent._logger,
+                    storage_settings=self.agent.task_manager.storage_settings,
                 )
-                link.disabled_by_objective_pause = not should_enable
-                continue
-            failures.append(f"heartbeat:{link.heartbeat_item_id}")
-        else:
-            link.disabled_by_objective_pause = not should_enable
-    return failures
+            item = self._heartbeats.set_item_enabled(link.heartbeat_item_id, enabled)
+        except Exception as exc:
+            self.agent._logger.warning(
+                "Objective control heartbeat mutation failed. "
+                "event=objective_control_heartbeat_mutation_failed "
+                "objective_id=%s heartbeat_item_id=%s error=%s",
+                objective_id,
+                link.heartbeat_item_id,
+                exc,
+            )
+            return LinkSwitchResult.FAILED
+        return LinkSwitchResult.SWITCHED if item is not None else LinkSwitchResult.MISSING
 
 
-async def _resolve_controlled_objective(
+@dataclass(frozen=True)
+class _ObjectiveControlResult:
+    """What one control's task operation found or changed (data only).
+
+    A refusal changed nothing, so it carries no status: the gateway would
+    otherwise tell the person the Objective "is now" that status.
+    """
+
+    refusal: Optional[str] = None
+    already_deleted: bool = False
+    outcome: Optional[ObjectiveLifecycleOutcome] = None
+
+
+def _control_objective_in_operation(
     agent: Any,
     *,
     command: ManagerRuntimeWorkCommand,
     person: CommandPerson,
-) -> tuple[Any, Optional[str]]:
+    summary_override: Optional[str],
+) -> _ObjectiveControlResult:
+    """Check and apply one person's Objective control, all inside one task operation.
+
+    The owner check, the page's record digest and the allowed actions are
+    checked against the same stored record the change starts from, so a
+    change that lands after the person looked is either refused
+    (``objective_changed``) or seen. The status, work policy and links then
+    change in ``apply_objective_lifecycle`` before anything else runs.
+    """
+
+    task_manager = agent.task_manager
     objective_id = str(command.target_objective_id or "").strip()
-    objective = await agent.task_manager.operations_runtime.run(
-        agent.task_manager.get_user_owned_objective,
+    objective = task_manager.get_user_owned_objective(
         objective_id,
         owner_canonical_user_id=person.canonical_user_id,
         team_id=person.team_id,
         adopt_live_custody=True,
     )
     if objective is None:
-        return None, "objective_not_found"
+        return _ObjectiveControlResult(refusal=OBJECTIVE_NOT_FOUND)
     decision = private_access(
         person_id=person.canonical_user_id,
         owner_id=objective.owner_canonical_user_id,
         resource_type=RESOURCE_OBJECTIVE,
         resource_id=objective.objective_id,
-        action=(
-            PRIVATE_DELETE
-            if command.action == "delete_objective"
-            else PRIVATE_UPDATE
-        ),
+        action=PRIVATE_DELETE if command.action == DELETE_OBJECTIVE else PRIVATE_UPDATE,
     )
     if not decision.allowed:
-        return None, "objective_owner_mismatch"
+        return _ObjectiveControlResult(refusal=OBJECTIVE_OWNER_MISMATCH)
     expected_digest = str(command.expected_objective_digest or "").strip()
-    if expected_digest and expected_digest != contract_sha256(
-        objective.model_dump(mode="json")
-    ):
-        return None, "objective_changed"
-    return objective, None
-
-
-def _set_objective_policy_control(
-    agent: Any,
-    *,
-    objective: Any,
-    command: ManagerRuntimeWorkCommand,
-    person: CommandPerson,
-    should_enable: bool,
-) -> list[str]:
-    coordinator = getattr(agent.task_manager, "objective_work_coordinator", None)
-    if coordinator is None or not coordinator.enabled:
-        return []
-    policy = _objective_work_policy(agent, objective)
-    if policy is None:
-        return []
-    try:
-        if should_enable:
-            coordinator.enable_policy_after_objective_control(
-                objective.objective_id,
-                owner_canonical_user_id=person.canonical_user_id,
-            )
-        else:
-            coordinator.disable_policy(
-                objective.objective_id,
-                owner_canonical_user_id=person.canonical_user_id,
-                by_objective_control=True,
-            )
-    except Exception:
-        agent._logger.exception(
-            "Objective control could not update its work policy. "
-            "event=objective_control_policy_mutation_failed objective_id=%s "
-            "should_enable=%s",
-            objective.objective_id,
-            should_enable,
-        )
-        return [f"policy:{policy.policy_id}"]
-    return []
-
-
-async def _apply_objective_future_control(
-    agent: Any,
-    *,
-    objective: Any,
-    command: ManagerRuntimeWorkCommand,
-    person: CommandPerson,
-    should_enable: bool,
-) -> list[str]:
-    tolerate_missing = command.action == "delete_objective"
-    failures = _set_objective_policy_control(
-        agent,
-        objective=objective,
-        command=command,
-        should_enable=should_enable,
-        person=person,
-    )
-    failures.extend(
-        _cascade_objective_schedule_links(
-            agent,
-            objective=objective,
-            command=command,
-            should_enable=should_enable,
-            tolerate_missing=tolerate_missing,
-            person=person,
-        )
-    )
-    failures.extend(
-        _cascade_objective_heartbeat_links(
-            agent,
-            objective=objective,
-            should_enable=should_enable,
-            tolerate_missing=tolerate_missing,
-        )
-    )
-    try:
-        await agent.task_manager.operations_runtime.run(
-            agent.task_manager._save_objective, objective
-        )
-    except ObjectiveSaveFailed:
-        # The links changed but the Objective does not record it, so a later
-        # resume would not undo it: the command reports itself incomplete.
-        failures.append(f"objective:{objective.objective_id}")
-    if getattr(agent, "_scheduler_wake", None):
-        agent._scheduler_wake.set()
-    return failures
-
-
-async def _set_objective_status_for_control(
-    agent: Any,
-    *,
-    objective: Any,
-    target_status: ObjectiveStatus,
-    summary: str,
-) -> Any:
-    updated = await agent.task_manager.operations_runtime.run(
-        agent.task_manager.update_objective_status,
-        objective.objective_id,
-        target_status,
-        summary=summary,
-        user_visible=True,
-    )
-    if updated is None:
-        raise RuntimeError("Objective status update failed.")
-    return updated
-
-
-async def _prepare_objective_control_state(
-    agent: Any,
-    *,
-    objective: Any,
-    command: ManagerRuntimeWorkCommand,
-    person: CommandPerson,
-    summary_override: Optional[str] = None,
-) -> tuple[Any, list[str]]:
-    if command.action == "resume_objective":
-        target_status = ObjectiveStatus.ACTIVE
-        summary = "Resumed by authenticated user control."
-        should_enable = True
-    elif command.action == "abandon_objective":
-        target_status = ObjectiveStatus.ABANDONED
-        summary = "Abandoned by authenticated user control."
-        should_enable = False
-    elif command.action == "delete_objective":
-        target_status = ObjectiveStatus.DELETING
-        summary = "Recoverable deletion requested by authenticated user control."
-        should_enable = False
-    else:
-        target_status = ObjectiveStatus.PAUSED
-        summary = (
-            "Stopped by authenticated user control."
-            if command.action == "stop_objective"
-            else "Paused by authenticated user control."
-        )
-        should_enable = False
-
+    if expected_digest and expected_digest != contract_sha256(objective.model_dump(mode="json")):
+        return _ObjectiveControlResult(refusal=OBJECTIVE_CHANGED)
     if objective.status == ObjectiveStatus.DELETED:
-        return objective, []
-    updated = await _set_objective_status_for_control(
-        agent,
-        objective=objective,
-        target_status=target_status,
-        summary=summary_override or summary,
-    )
-    if command.action == "delete_objective":
-        now = datetime.now(timezone.utc).isoformat()
-        updated.deletion_operation_id = (
-            updated.deletion_operation_id or command.command_id
+        return _ObjectiveControlResult(already_deleted=True)
+    target_status, summary = _OBJECTIVE_CONTROLS[command.action]
+    offered = OBJECTIVE_CONTROL_WORDS[command.action] in _objective_available_actions(objective.status)
+    if not offered and target_status != objective.status:
+        agent._logger.info(
+            "Refused an Objective control its status does not offer. "
+            "event=objective_control_action_unavailable objective_id=%s action=%s status=%s",
+            objective.objective_id,
+            command.action,
+            objective.status.value,
         )
-        updated.deletion_requested_at = updated.deletion_requested_at or now
-    return updated, await _apply_objective_future_control(
-        agent,
-        objective=updated,
-        command=command,
-        should_enable=should_enable,
-        person=person,
+        return _ObjectiveControlResult(
+            refusal=f"{OBJECTIVE_ACTION_UNAVAILABLE}:{objective.status.value}",
+        )
+    deleting = command.action == DELETE_OBJECTIVE
+    outcome = apply_objective_lifecycle(
+        task_manager,
+        objective.objective_id,
+        ObjectiveStatusChange(
+            status=target_status,
+            summary=summary_override or summary,
+            deletion_operation_id=command.command_id if deleting else None,
+            policy_person_id=person.canonical_user_id,
+            tolerate_missing_links=deleting,
+        ),
+        _PersonLinkSwitch(agent, person),
     )
+    if outcome is None:
+        return _ObjectiveControlResult(refusal=OBJECTIVE_NOT_FOUND)
+    return _ObjectiveControlResult(outcome=outcome)
 
 
 async def _finish_objective_deletion(
     agent: Any,
-    objective: Any,
+    objective_id: str,
     *,
     incomplete: list[str],
     response: ManagerRuntimeWorkCommand,
 ) -> None:
     """Record a deletion as waiting on ``incomplete`` controls, or as done.
 
-    A save that fails raises ``ObjectiveSaveFailed``, so the person is never
-    told an Objective was deleted that the store still holds.
+    Each write loads the stored record in its own operation. A save that
+    fails raises ``ObjectiveSaveFailed``, so the person is never told an
+    Objective was deleted that the store still holds.
     """
 
+    task_manager = agent.task_manager
     if incomplete:
-        objective.deletion_summary = (
-            "Deletion is waiting for controls to finish: " + ", ".join(incomplete)
-        )
-        await agent.task_manager.operations_runtime.run(
-            agent.task_manager._save_objective, objective
+        waiting = "Deletion is waiting for controls to finish: " + ", ".join(incomplete)
+
+        def note_waiting(objective: Any) -> bool:
+            if objective.deletion_summary == waiting:
+                return False
+            objective.deletion_summary = waiting
+            return True
+
+        await task_manager.operations_runtime.run(
+            partial(task_manager.objective_coordinator.change_objective, objective_id, note_waiting)
         )
         response.success = False
-        response.message = "objective_deletion_incomplete:" + ",".join(incomplete)
+        response.message = f"{OBJECTIVE_DELETION_INCOMPLETE}:" + ",".join(incomplete)
         response.objective_status = ObjectiveStatus.DELETING
         return
-    await _set_objective_status_for_control(
-        agent,
-        objective=objective,
-        target_status=ObjectiveStatus.DELETED,
+    deleted = await task_manager.operations_runtime.run(
+        task_manager.update_objective_status,
+        objective_id,
+        ObjectiveStatus.DELETED,
         summary=(
             "Future execution is disabled and linked active work was stopped. "
             "Plans, evidence, checkpoints, and audit history were retained."
         ),
+        user_visible=True,
     )
+    if deleted is None:
+        raise ObjectiveSaveFailed(objective_id)
     response.success = True
-    response.message = "objective_deleted"
+    response.message = OBJECTIVE_DELETED
     response.objective_status = ObjectiveStatus.DELETED
 
 
@@ -1635,6 +1529,28 @@ async def _cancel_runtime_work_roots(
     return receipts
 
 
+def _answer_unchanged_objective(
+    result: _ObjectiveControlResult,
+    *,
+    command: ManagerRuntimeWorkCommand,
+    response: ManagerRuntimeWorkCommand,
+) -> None:
+    """Answer a control that changed nothing: a refusal, or an already deleted Objective.
+
+    Only a deletion reports the deleted status as its outcome; any other
+    control carries no status, so the gateway never reports one as new.
+    """
+
+    if result.already_deleted:
+        response.success = command.action == DELETE_OBJECTIVE
+        response.message = OBJECTIVE_DELETED if response.success else OBJECTIVE_ALREADY_DELETED
+        if response.success:
+            response.objective_status = ObjectiveStatus.DELETED
+        return
+    response.success = False
+    response.message = result.refusal or OBJECTIVE_UPDATE_FAILED
+
+
 async def _apply_objective_control(
     agent: Any,
     *,
@@ -1648,47 +1564,40 @@ async def _apply_objective_control(
     ``summary_override`` replaces the status summary recorded on the
     objective; trusted runtime callers acting for the owner say why
     (``custom_agents.person_departure_runtime`` when the owner leaves).
+    The checks and the change run as one task operation
+    (``_control_objective_in_operation``); stopping active work and finishing
+    a deletion follow as their own operations.
     """
 
-    objective, error = await _resolve_controlled_objective(agent, command=command, person=person)
-    if error:
-        response.success = False
-        response.message = error
-        return
-    if objective.status == ObjectiveStatus.DELETED:
-        response.success = command.action == "delete_objective"
-        response.message = (
-            "objective_deleted" if response.success else "objective_already_deleted"
-        )
-        response.objective_status = objective.status
-        return
-
     try:
-        updated, failures = await _prepare_objective_control_state(
-            agent,
-            objective=objective,
-            command=command,
-            summary_override=summary_override,
-            person=person,
+        result = await agent.task_manager.operations_runtime.run(
+            partial(
+                _control_objective_in_operation,
+                agent,
+                command=command,
+                person=person,
+                summary_override=summary_override,
+            )
         )
     except Exception:
         agent._logger.exception(
             "Objective lifecycle control failed before active-work cancellation. "
             "event=objective_control_prepare_failed objective_id=%s action=%s",
-            objective.objective_id,
+            command.target_objective_id,
             command.action,
         )
         response.success = False
-        response.message = "objective_update_failed"
+        response.message = OBJECTIVE_UPDATE_FAILED
+        return
+    if result.outcome is None:
+        _answer_unchanged_objective(result, command=command, response=response)
         return
 
-    response.objective_status = updated.status
-    cancellation_required = command.action in {
-        "stop_objective",
-        "abandon_objective",
-        "delete_objective",
-    }
-    if cancellation_required:
+    outcome = result.outcome
+    if getattr(agent, "_scheduler_wake", None):
+        agent._scheduler_wake.set()
+    response.objective_status = outcome.objective.status
+    if command.action in _OBJECTIVE_CONTROLS_THAT_STOP_WORK:
         roots = await _runtime_work_roots(
             agent,
             person.canonical_user_id,
@@ -1710,21 +1619,23 @@ async def _apply_objective_control(
         for receipt in response.cancellation_receipts
         if not receipt.confirmed
     ]
-    incomplete = failures + [f"task:{task_id}" for task_id in unconfirmed]
-    if command.action == "delete_objective":
+    incomplete = list(outcome.incomplete) + [f"{OBJECTIVE_PART_TASK}:{task_id}" for task_id in unconfirmed]
+    if command.action == DELETE_OBJECTIVE:
         try:
-            await _finish_objective_deletion(agent, updated, incomplete=incomplete, response=response)
+            await _finish_objective_deletion(
+                agent, outcome.objective.objective_id, incomplete=incomplete, response=response
+            )
         except ObjectiveSaveFailed:
             response.success = False
-            response.message = "objective_update_failed"
+            response.message = OBJECTIVE_UPDATE_FAILED
             response.objective_status = ObjectiveStatus.DELETING
         return
 
     response.success = not incomplete
     response.message = (
-        f"objective_{updated.status.value}"
+        f"objective_{outcome.objective.status.value}"
         if response.success
-        else "objective_control_incomplete:" + ",".join(incomplete)
+        else f"{OBJECTIVE_CONTROL_INCOMPLETE}:" + ",".join(incomplete)
     )
 
 
@@ -1799,13 +1710,7 @@ async def handle_manager_runtime_work_command(
         )
         return
 
-    if command.action in {
-        "pause_objective",
-        "resume_objective",
-        "stop_objective",
-        "abandon_objective",
-        "delete_objective",
-    }:
+    if command.action in _OBJECTIVE_CONTROLS:
         await _apply_objective_control(
             agent,
             command=command,

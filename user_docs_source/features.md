@@ -167,8 +167,15 @@ Open **Settings → Knowledge** in Web Chat (or `/webchat?view=knowledge`) to re
 and write knowledge pages yourself. The link appears while the knowledge base is
 on (`agent.knowledge.enabled`).
 
-- **Team** and **Personal** list the pages of that space, 20 at a time, the most
-  recently changed first. Type words in the search box to find pages by their
+- **Team** and **Personal** open that space's **Home** article. Edit it to
+  organize links to topic pages, using `[[page-name]]`. If it does not exist,
+  select **Create Home page** to write it. This creates an ordinary page named
+  `home`; existing pages stay available through **All pages**.
+- **All pages** opens a searchable directory beside the article, 20 pages at
+  a time, the most recently changed first. Scroll its rows to browse; the page
+  controls and total stay visible below them. Select **All pages** again to
+  close the directory, or **Home** to return to the landing article.
+  Type words in the search box to find pages by their
   text instead. **Current pages** is the default. Select **Archived pages**
   below the search box to find a page you archived, then open it and select
   **Restore**. Pages merged into another stay out of both lists, though a
@@ -181,6 +188,10 @@ on (`agent.knowledge.enabled`).
   personal page) open that page. A link to a page that does not exist yet stays
   plain text marked "no page yet"; links inside code stay as written. Opening a
   merged page's name shows the page it was merged into, with a note saying so.
+  Each article has its own browser address. You can bookmark it, refresh it,
+  or use browser Back and Forward to retrace article links. Sharing an address
+  does not grant access; a personal address always opens the signed-in person's
+  own pages.
   A new page cannot take a merged page's name: edit the page it leads to, or
   choose another name.
 - **Edit** and **New page** open an editor for the title, summary, tags and text.
@@ -381,6 +392,16 @@ anything until you choose an explicit scope:
   work in its other conversation lanes.
 - `/stop all` cancels all current nonterminal work owned by you across sessions
   and conversations.
+
+Stopping work also ends the commands an agent is running for it, such as a
+build, a test run or a script, and the background processes those commands
+started, such as a development server. Each is asked to stop and is ended a
+second later if it keeps going, and no further command of that work starts.
+Not ended: a process that detaches itself completely (for example with
+`setsid` or by turning itself into a daemon), and a background process started
+by an earlier step of the work that had already finished. Each agent marks its
+part of the work as stopped only after its commands have ended, which can take
+a few seconds.
 
 Future schedules remain separate from every stop scope. Pause an Objective or
 use its schedule controls when you also need to prevent later runs.
@@ -974,15 +995,31 @@ authority.
 
 Objective controls have distinct meanings:
 
-- **Pause** prevents future managed runs but leaves current work alone.
+- **Pause** prevents future managed runs but leaves current work alone. When
+  that work finishes, the Objective stays paused until you resume it.
 - **Stop** pauses future runs and asks current Objective work to halt at a safe
   boundary.
-- **Resume** re-enables only links that the Objective control previously
-  disabled.
+- **Resume** re-enables only links and work sessions that an Objective control
+  previously disabled. A work-session setting you turned off yourself stays off.
 - **Abandon** stops work and retains a terminal Objective record.
 - **Delete** runs a recoverable state machine: it disables linked policies,
   schedules, and heartbeat items, stops active work, and then retains a
   `deleted` tombstone with Plans, evidence, checkpoints, and audit history.
+  Only you can delete your Objective; the team lead cannot.
+
+Each Objective shows only the controls its current status allows, and these
+controls refuse any other: for example, a satisfied Objective can only be
+deleted. Repeating the control that set the current status is allowed: if a
+pause or abandon reports that a schedule did not switch, send the same command
+in chat again (for example `/pause objective <id>`) to retry the parts that did
+not finish. An unfinished deletion is retried with Delete or
+`/delete objective <id>`.
+
+Asking the team lead in chat to pause or resume an Objective also pauses or
+resumes its work sessions and the schedules and heartbeat items it manages,
+except schedules the system manages: the team lead leaves those as they are and
+says so. Unlike these controls, the team lead can still set a finished
+Objective back to active when you ask it to.
 
 Delete and abandon require a second confirmation click. Every Web mutation is
 bound to the signed-in browser, same origin, an in-memory CSRF token, canonical

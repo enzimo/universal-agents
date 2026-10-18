@@ -8,7 +8,8 @@ from storage.sql_dialect import SQLITE, POSTGRES, SqlDialect
 
 import logging
 import sqlite3
-from typing import Any, List, Optional, Protocol
+from dataclasses import dataclass, field
+from typing import Any, Callable, List, Mapping, Optional, Protocol
 
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
 
@@ -21,32 +22,90 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
+from .runtime_custody import DeferredMessageClaim, check_deferred_message
 from .sqlite_connection import connect_sqlite
 
 
+# Every column of a schedule row; a locked write (``write_locked``) names only these.
+SCHEDULE_COLUMNS: tuple[str, ...] = (
+    "schedule_id",
+    "payload_json",
+    "schedule_json",
+    "schedule_name",
+    "objective_id",
+    "interval_ms",
+    "cron_expression",
+    "repeat_count",
+    "remaining_count",
+    "next_fire_at",
+    "paused_until",
+    "expires_at_utc",
+    "created_at",
+    "enabled",
+    "claim_team_id",
+    "claim_named_agent_type",
+    "claim_agent_id",
+    "owner_canonical_user_id",
+    "claimed_by_agent_id",
+    "claim_token",
+    "claim_expires_at",
+    "claimed_at",
+    "run_permit_json",
+    "run_permit_owner",
+    "run_permit_recheck_at",
+)
+
+
+# The columns ``get_schedule_row`` returns, in this order (callers index the tuple).
+SCHEDULE_ROW_FIELDS: tuple[str, ...] = (
+    "schedule_json",
+    "payload_json",
+    "schedule_name",
+    "interval_ms",
+    "cron_expression",
+    "repeat_count",
+    "next_fire_at",
+    "paused_until",
+    "created_at",
+    "enabled",
+    "remaining_count",
+    "objective_id",
+    "claim_team_id",
+    "claim_named_agent_type",
+    "claim_agent_id",
+    "claimed_by_agent_id",
+    "claim_token",
+    "claim_expires_at",
+    "claimed_at",
+    "expires_at_utc",
+    "owner_canonical_user_id",
+    "run_permit_json",
+)
+
+
+@dataclass(frozen=True)
+class RowWrite:
+    """What a decision made while the row is locked writes (``write_locked``).
+
+    ``columns`` are set on the existing row, or form the new row when
+    ``insert``; ``delete`` removes the row; with neither nothing is written.
+    ``result`` is handed back to the caller unchanged.
+    """
+
+    columns: Mapping[str, Any] = field(default_factory=dict)
+    insert: bool = False
+    delete: bool = False
+    result: Any = None
+
+
+RowDecision = Callable[[Optional[dict[str, Any]]], RowWrite]
+
+
 class ScheduleRepository(Protocol):
-    def add_schedule_row(
-        self,
-        *,
-        schedule_id: str,
-        payload_json: str,
-        schedule_json: Optional[str],
-        schedule_name: Optional[str],
-        objective_id: Optional[str],
-        interval_ms: Optional[int],
-        cron_expression: Optional[str],
-        repeat_count: Optional[int],
-        remaining_count: Optional[int],
-        next_fire_at: str,
-        paused_until: Optional[str],
-        expires_at_utc: Optional[str] = None,
-        created_at: str,
-        enabled: bool,
-        claim_team_id: Optional[str] = None,
-        claim_named_agent_type: Optional[str] = None,
-        claim_agent_id: Optional[str] = None,
-        owner_canonical_user_id: Optional[str] = None,
-    ) -> None: ...
+    def write_locked(
+        self, schedule_id: str, decide: RowDecision,
+        *, deferred_message: DeferredMessageClaim | None = None,
+    ) -> RowWrite: ...
 
     def add_schedule_row_if_absent(
         self,
@@ -71,19 +130,7 @@ class ScheduleRepository(Protocol):
         owner_canonical_user_id: Optional[str] = None,
     ) -> bool: ...
 
-    def remove(self, schedule_id: str) -> bool: ...
-
     def get_schedule_row(self, schedule_id: str) -> Optional[tuple]: ...
-
-    def update_after_fire(
-        self,
-        *,
-        schedule_id: str,
-        next_fire_at: Optional[str],
-        remaining_count: Optional[int],
-        claim_token: Optional[str] = None,
-        claimer_agent_id: Optional[str] = None,
-    ) -> bool: ...
 
     def get_all_enabled(self) -> List[dict]: ...
 
@@ -112,15 +159,9 @@ class ScheduleRepository(Protocol):
         claimer_agent_id: str,
     ) -> bool: ...
 
-    def prune_expired(self, *, now_iso: str) -> int: ...
+    def prune_expired(self, *, now_iso: str) -> list[str]: ...
 
     def get_next_wake_time(self) -> Optional[str]: ...
-
-    def set_enabled(self, schedule_id: str, enabled: bool, schedule_json: Optional[str] = None) -> bool: ...
-
-    def set_paused_until(self, schedule_id: str, paused_until: Optional[str], schedule_json: str) -> bool: ...
-
-    def set_timing(self, schedule_id: str, *, schedule_json: str, next_fire_at: str) -> bool: ...
 
     def count_enabled(self) -> int: ...
 
@@ -282,68 +323,77 @@ class _RelationalScheduleRepository:
             raise
 
 
-    def remove(self, schedule_id: str) -> bool:
+    def write_locked(
+        self, schedule_id: str, decide: RowDecision,
+        *, deferred_message: DeferredMessageClaim | None = None,
+    ) -> RowWrite:
+        """Read one schedule row, decide what to write and write it, in one write transaction.
+
+        Every change that depends on the row's current values goes through
+        here, so nothing another process writes between a read and a write is
+        overwritten (``custom_agents.schedule_store``). The row stays locked
+        while ``decide`` runs (``_locked_row``). ``decide`` gets the row as a
+        dict, or None when there is none, and must do no I/O; an exception
+        from it rolls the transaction back and propagates. A delayed retry
+        checks and consumes its exact deferred reply in this same transaction,
+        so a lost dispatch cannot install a retry and a failed write leaves
+        the reply available. Lock the deferred row before the schedule, as task
+        admission does, to keep concurrent PostgreSQL saves in the same order.
+        """
+
         with self._connect() as conn:
-            cursor = conn.execute(
-                f"DELETE FROM scheduled_messages WHERE schedule_id = {self._dialect.bind}",
-                (schedule_id,),
-            )
+            conn.begin_write()
+            if deferred_message is not None:
+                check_deferred_message(
+                    conn, self._dialect, deferred_message, consume=True, logger=self._logger,
+                )
+            row = self._locked_row(conn, schedule_id)
+            write = decide(dict(row) if row is not None else None)
+            self._apply_write(conn, schedule_id, write, existed=row is not None)
             conn.commit()
-            return cursor.rowcount > 0
+        return write
+
+    def _locked_row(self, conn: Any, schedule_id: str) -> Any:
+        raise NotImplementedError
+
+    def _apply_write(self, conn: Any, schedule_id: str, write: RowWrite, *, existed: bool) -> None:
+        unknown = sorted(set(write.columns) - set(SCHEDULE_COLUMNS))
+        if unknown:
+            raise ValueError(f"Unknown schedule columns: {', '.join(unknown)}")
+        bind = self._dialect.bind
+        if write.delete:
+            if existed:
+                conn.execute(f"DELETE FROM scheduled_messages WHERE schedule_id = {bind}", (schedule_id,))
+            return
+        if write.insert:
+            if existed:
+                raise ValueError(f"Schedule {schedule_id} already exists; a new row cannot replace it.")
+            row = {**write.columns, "schedule_id": schedule_id}
+            conn.execute(
+                f"INSERT INTO scheduled_messages ({', '.join(row)}) VALUES ({', '.join([bind] * len(row))})",
+                tuple(row.values()),
+            )
+            return
+        if not write.columns:
+            return
+        if not existed:
+            raise ValueError(f"Schedule {schedule_id} does not exist; there is no row to change.")
+        assignments = ", ".join(f"{name} = {bind}" for name in write.columns)
+        conn.execute(
+            f"UPDATE scheduled_messages SET {assignments} WHERE schedule_id = {bind}",
+            (*write.columns.values(), schedule_id),
+        )
 
     def get_schedule_row(self, schedule_id: str) -> Optional[tuple]:
         with self._connect() as conn:
             row = conn.execute(
                 f"""
-                SELECT schedule_json, payload_json, schedule_name, interval_ms, cron_expression,
-                       repeat_count, next_fire_at, paused_until, created_at, enabled, remaining_count,
-                       objective_id, claim_team_id, claim_named_agent_type, claim_agent_id,
-                       claimed_by_agent_id, claim_token, claim_expires_at, claimed_at, expires_at_utc,
-                       owner_canonical_user_id, run_permit_json
+                SELECT {", ".join(SCHEDULE_ROW_FIELDS)}
                 FROM scheduled_messages WHERE schedule_id = {self._dialect.bind}
                 """,
                 (schedule_id,),
             ).fetchone()
         return tuple(row[index] for index in range(len(row))) if row else None
-
-    def update_after_fire(
-        self,
-        *,
-        schedule_id: str,
-        next_fire_at: Optional[str],
-        remaining_count: Optional[int],
-        claim_token: Optional[str] = None,
-        claimer_agent_id: Optional[str] = None,
-    ) -> bool:
-        with self._connect() as conn:
-            claim_where = ""
-            claim_params: tuple[Any, ...] = ()
-            if claim_token and claimer_agent_id:
-                claim_where = f" AND claim_token = {self._dialect.bind} AND claimed_by_agent_id = {self._dialect.bind}"
-                claim_params = (claim_token, claimer_agent_id)
-            if next_fire_at is None:
-                cursor = conn.execute(
-                    f"DELETE FROM scheduled_messages WHERE schedule_id = {self._dialect.bind}{claim_where}",
-                    (schedule_id, *claim_params),
-                )
-                conn.commit()
-                return cursor.rowcount > 0
-            cursor = conn.execute(
-                f"""
-                UPDATE scheduled_messages
-                   SET next_fire_at = {self._dialect.bind},
-                       remaining_count = {self._dialect.bind},
-                       paused_until = NULL,
-                       claimed_by_agent_id = NULL,
-                       claim_token = NULL,
-                       claim_expires_at = NULL,
-                       claimed_at = NULL
-                 WHERE schedule_id = {self._dialect.bind}{claim_where}
-                """,
-                (next_fire_at, remaining_count, schedule_id, *claim_params),
-            )
-            conn.commit()
-            return cursor.rowcount > 0
 
     def get_all_enabled(self) -> List[dict]:
         with self._connect() as conn:
@@ -469,18 +519,21 @@ class _RelationalScheduleRepository:
             conn.commit()
             return cursor.rowcount > 0
 
-    def prune_expired(self, *, now_iso: str) -> int:
+    def prune_expired(self, *, now_iso: str) -> list[str]:
+        """Delete schedules past their end; returns their ids (the store ends their access)."""
+
         with self._connect() as conn:
-            cursor = conn.execute(
+            rows = conn.execute(
                 f"""
                 DELETE FROM scheduled_messages
                  WHERE expires_at_utc IS NOT NULL
                    AND expires_at_utc <= {self._dialect.bind}
+                RETURNING schedule_id
                 """,
                 (now_iso,),
-            )
+            ).fetchall()
             conn.commit()
-            return int(cursor.rowcount or 0)
+        return [str(row[0]) for row in rows]
 
     def get_next_wake_time(self) -> Optional[str]:
         with self._connect() as conn:
@@ -503,72 +556,6 @@ class _RelationalScheduleRepository:
                 """
             ).fetchone()
         return row[0] if row else None
-
-    def set_enabled(self, schedule_id: str, enabled: bool, schedule_json: Optional[str] = None) -> bool:
-        with self._connect() as conn:
-            if schedule_json is not None:
-                cursor = conn.execute(
-                    f"""
-                    UPDATE scheduled_messages
-                       SET enabled = {self._dialect.bind},
-                           schedule_json = {self._dialect.bind},
-                           claimed_by_agent_id = NULL,
-                           claim_token = NULL,
-                           claim_expires_at = NULL,
-                           claimed_at = NULL
-                     WHERE schedule_id = {self._dialect.bind}
-                    """,
-                    (1 if enabled else 0, schedule_json, schedule_id),
-                )
-            else:
-                cursor = conn.execute(
-                    f"""
-                    UPDATE scheduled_messages
-                       SET enabled = {self._dialect.bind},
-                           claimed_by_agent_id = NULL,
-                           claim_token = NULL,
-                           claim_expires_at = NULL,
-                           claimed_at = NULL
-                     WHERE schedule_id = {self._dialect.bind}
-                    """,
-                    (1 if enabled else 0, schedule_id),
-                )
-            conn.commit()
-            return cursor.rowcount > 0
-
-    def set_paused_until(self, schedule_id: str, paused_until: Optional[str], schedule_json: str) -> bool:
-        with self._connect() as conn:
-            cursor = conn.execute(
-                f"""
-                UPDATE scheduled_messages
-                   SET paused_until = {self._dialect.bind},
-                       schedule_json = {self._dialect.bind},
-                       claimed_by_agent_id = NULL,
-                       claim_token = NULL,
-                       claim_expires_at = NULL,
-                       claimed_at = NULL
-                 WHERE schedule_id = {self._dialect.bind}
-                """,
-                (paused_until, schedule_json, schedule_id),
-            )
-            conn.commit()
-            return cursor.rowcount > 0
-
-    def set_timing(self, schedule_id: str, *, schedule_json: str, next_fire_at: str) -> bool:
-        """Replace one schedule's record and next run time (``ScheduleStore.fill_missing_cron_timezones``)."""
-
-        with self._connect() as conn:
-            cursor = conn.execute(
-                f"""
-                UPDATE scheduled_messages
-                   SET schedule_json = {self._dialect.bind},
-                       next_fire_at = {self._dialect.bind}
-                 WHERE schedule_id = {self._dialect.bind}
-                """,
-                (schedule_json, next_fire_at, schedule_id),
-            )
-            conn.commit()
-            return cursor.rowcount > 0
 
     def count_enabled(self) -> int:
         with self._connect() as conn:
@@ -630,16 +617,6 @@ class _RelationalScheduleRepository:
             return cursor.rowcount > 0
 
 
-# A save replaces the whole row in SQLite (INSERT OR REPLACE), which would
-# drop the run permit on every save, and runs that record schedule memory save
-# the schedule each time. The permit is runtime bookkeeping, not part of what
-# was saved, so the save keeps it (Postgres updates in place and keeps it too).
-_KEPT_RUN_PERMIT_COLUMNS = ", ".join(
-    f"(SELECT {column} FROM scheduled_messages WHERE schedule_id = ?)"
-    for column in ("run_permit_json", "run_permit_owner", "run_permit_recheck_at")
-)
-
-
 class SqliteScheduleRepository(_RelationalScheduleRepository):
     """SQLite lifecycle and database-specific operations."""
 
@@ -655,66 +632,13 @@ class SqliteScheduleRepository(_RelationalScheduleRepository):
         return connect_sqlite(self._db_path, logger=self._logger, row_factory=sqlite3.Row)
 
 
-    def add_schedule_row(
-        self,
-        *,
-        schedule_id: str,
-        payload_json: str,
-        schedule_json: Optional[str],
-        schedule_name: Optional[str],
-        objective_id: Optional[str],
-        interval_ms: Optional[int],
-        cron_expression: Optional[str],
-        repeat_count: Optional[int],
-        remaining_count: Optional[int],
-        next_fire_at: str,
-        paused_until: Optional[str],
-        expires_at_utc: Optional[str] = None,
-        created_at: str,
-        enabled: bool,
-        claim_team_id: Optional[str] = None,
-        claim_named_agent_type: Optional[str] = None,
-        claim_agent_id: Optional[str] = None,
-        owner_canonical_user_id: Optional[str] = None,
-    ) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                f"""
-                INSERT OR REPLACE INTO scheduled_messages
-                   (schedule_id, payload_json, schedule_name, objective_id, interval_ms, cron_expression,
-                    schedule_json, repeat_count, remaining_count, next_fire_at, paused_until, created_at, enabled,
-                    expires_at_utc, claim_team_id, claim_named_agent_type, claim_agent_id, owner_canonical_user_id,
-                    claimed_by_agent_id, claim_token, claim_expires_at, claimed_at,
-                    run_permit_json, run_permit_owner, run_permit_recheck_at)
-                   VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, NULL, NULL, NULL,
-                           {_KEPT_RUN_PERMIT_COLUMNS})
-                """,
-                (
-                    schedule_id,
-                    payload_json,
-                    schedule_name,
-                    objective_id,
-                    interval_ms,
-                    cron_expression,
-                    schedule_json,
-                    repeat_count,
-                    remaining_count,
-                    next_fire_at,
-                    paused_until,
-                    created_at,
-                    1 if enabled else 0,
-                    expires_at_utc,
-                    claim_team_id,
-                    claim_named_agent_type,
-                    claim_agent_id,
-                    owner_canonical_user_id,
-                    schedule_id,
-                    schedule_id,
-                    schedule_id,
-                ),
-            )
-            conn.commit()
-
+    def _locked_row(self, conn: Any, schedule_id: str) -> Any:
+        # The database write lock first, so no other writer changes the row
+        # between this read and the write.
+        return conn.execute(
+            f"SELECT * FROM scheduled_messages WHERE schedule_id = {self._dialect.bind}",
+            (schedule_id,),
+        ).fetchone()
 
     def add_schedule_row_if_absent(
         self,
@@ -851,82 +775,18 @@ class PostgresScheduleRepository(_RelationalScheduleRepository):
     def _connect(self) -> PostgresConnection:
         return connect_postgres(self._dsn)
 
-    def add_schedule_row(
-        self,
-        *,
-        schedule_id: str,
-        payload_json: str,
-        schedule_json: Optional[str],
-        schedule_name: Optional[str],
-        objective_id: Optional[str],
-        interval_ms: Optional[int],
-        cron_expression: Optional[str],
-        repeat_count: Optional[int],
-        remaining_count: Optional[int],
-        next_fire_at: str,
-        paused_until: Optional[str],
-        expires_at_utc: Optional[str] = None,
-        created_at: str,
-        enabled: bool,
-        claim_team_id: Optional[str] = None,
-        claim_named_agent_type: Optional[str] = None,
-        claim_agent_id: Optional[str] = None,
-        owner_canonical_user_id: Optional[str] = None,
-    ) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                f"""
-                INSERT INTO scheduled_messages
-                   (schedule_id, payload_json, schedule_name, objective_id, interval_ms, cron_expression,
-                    schedule_json, repeat_count, remaining_count, next_fire_at, paused_until, created_at, enabled,
-                    expires_at_utc, claim_team_id, claim_named_agent_type, claim_agent_id, owner_canonical_user_id,
-                    claimed_by_agent_id, claim_token, claim_expires_at, claimed_at)
-                   VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, NULL, NULL, NULL)
-                ON CONFLICT(schedule_id) DO UPDATE SET
-                   payload_json = excluded.payload_json,
-                   schedule_name = excluded.schedule_name,
-                   objective_id = excluded.objective_id,
-                   interval_ms = excluded.interval_ms,
-                   cron_expression = excluded.cron_expression,
-                   schedule_json = excluded.schedule_json,
-                   repeat_count = excluded.repeat_count,
-                   remaining_count = excluded.remaining_count,
-                   next_fire_at = excluded.next_fire_at,
-                   paused_until = excluded.paused_until,
-                   created_at = excluded.created_at,
-                   enabled = excluded.enabled,
-                   expires_at_utc = excluded.expires_at_utc,
-                   claim_team_id = excluded.claim_team_id,
-                   claim_named_agent_type = excluded.claim_named_agent_type,
-                   claim_agent_id = excluded.claim_agent_id,
-                   owner_canonical_user_id = excluded.owner_canonical_user_id,
-                   claimed_by_agent_id = NULL,
-                   claim_token = NULL,
-                   claim_expires_at = NULL,
-                   claimed_at = NULL
-                """,
-                (
-                    schedule_id,
-                    payload_json,
-                    schedule_name,
-                    objective_id,
-                    interval_ms,
-                    cron_expression,
-                    schedule_json,
-                    repeat_count,
-                    remaining_count,
-                    next_fire_at,
-                    paused_until,
-                    created_at,
-                    1 if enabled else 0,
-                    expires_at_utc,
-                    claim_team_id,
-                    claim_named_agent_type,
-                    claim_agent_id,
-                    owner_canonical_user_id,
-                ),
-            )
-            conn.commit()
+    def _locked_row(self, conn: Any, schedule_id: str) -> Any:
+        # A transaction lock on the schedule id also covers a row that does not
+        # exist yet, so two first saves of one id cannot both insert; the row
+        # lock keeps claims and permit updates out until the write commits.
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"scheduled_messages:{schedule_id}",),
+        )
+        return conn.execute(
+            "SELECT * FROM scheduled_messages WHERE schedule_id = %s FOR UPDATE",
+            (schedule_id,),
+        ).fetchone()
 
     def add_schedule_row_if_absent(
         self,

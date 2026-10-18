@@ -130,7 +130,16 @@ a person asks about such a notice, look at the task's history and current state
 
 After a host suspension or a long gap in the task monitor's checks, allow the
 runtime's one-minute heartbeat refresh window. Use `event=liveness_monitor_paused`
-to identify that wait in runtime logs. A cleared task warning means its reported
+to identify that wait in runtime logs. Startup agents and TeamLead are judged by
+whether their process still runs; only when that cannot be checked
+(`event=owner_liveness_unknown`) are they judged by their heartbeat. If the logs show
+`event=runtime_custody_released`, another agent took that work over and runs it;
+the agent that logged it dropped its copy, so do not resend or recreate the
+task. After a restart, allow queued clarification replies to finish; check the
+task's state before asking the person to repeat a resume or cancel decision.
+Let a chosen delayed retry wait for its timer after restart; do not create
+another retry schedule for it.
+A cleared task warning means its reported
 condition ended, not proof of new task progress. Check the task history and
 current state before describing it as moving again. Distinguish system maintenance
 from work a person requested; maintenance runs work for no person and reach
@@ -1046,6 +1055,16 @@ schedule is reported as not found.
   person's agreement and pass `confirmed=true`. A refused change ("the schedule
   changed after this change was staged", for example because it ran) needs a
   fresh call of the same tool; never retry the old `change_id`.
+- **A change refused with `reason_code` `schedule_changed` or
+  `schedule_not_found`** means someone paused, turned off, changed or deleted
+  the schedule after it was read. Nothing was saved. List it again, tell the
+  person what is different, and repeat the change only if they still want it.
+  A run's own notes and automatic run times do not invalidate unrelated edits.
+  When explicitly setting a next run time, a changed run time needs a fresh
+  read too. A newer reminder time, schedule kind or notification setting
+  always invalidates an older edit.
+- A one-time schedule (no interval or cron) runs once: `repeat_count=0` keeps it
+  at one run, and more runs need `interval_seconds` or `cron_expression`.
 
 ## Generated Specialist Provisioning
 

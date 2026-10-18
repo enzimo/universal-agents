@@ -27,12 +27,22 @@ With authorization off (decision D8) there are no grants to consult: the
 task's folders and the writable data folders are read-write, the others
 read-only, the network is open, and code runs outside the sandbox only when
 the operator turns the sandbox off.
+
+A command with no agent behind it is refused. Every agent tool call knows its
+agent (``custom_tools.runtime_context``); losing it on a thread hop once let
+parallel shell commands run with the network open despite a person's block.
+Only code that embeds the tools on purpose (tests, a script) may run commands
+without an agent, inside ``embedded_commands()``, and never in a process the
+runtime's supervisor started.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -65,6 +75,7 @@ from custom_messages.contracts.access_v2 import (
     TargetKind,
     TargetRefV1,
 )
+from runtime_hosting.process_run import PROCESS_RUN_ID_ENV
 from runtime_settings.instance_layout import WorkspaceScope
 
 logger = logging.getLogger(__name__)
@@ -75,6 +86,11 @@ UNCONFINED_TOOL_ID = UNCONFINED_EXECUTION_TOOL_ID
 UNCONFINED_OPERATION = UNCONFINED_EXECUTION_OPERATION
 REASON_UNCONFINED_UNAVAILABLE = "unconfined_execution_unavailable"
 REASON_IDENTITY_REJECTED = "identity_rejected"
+REASON_NO_AGENT = "code_without_agent"
+NO_AGENT_REFUSAL = (
+    "This command has no agent behind it, so nothing decides what it may reach; it was not run. "
+    "This is a runtime fault, not something to work around: report it."
+)
 UNCONFINED_WITH_AUTHORIZATION_OFF = (
     "Running code outside the sandbox is not something an agent can ask for while authorization "
     "is off: only the operator can turn the sandbox off, for every agent "
@@ -112,9 +128,54 @@ def _without_authorization(scope: WorkspaceScope, data_folders: tuple[DataFolder
     )
 
 
-def code_access_without_agent(scope: WorkspaceScope, *, unconfined: bool = False) -> CodeAccess:
-    """Embedded use with no agent (and tests): the task's folders, as in single-person mode."""
+# How many embedded_commands() blocks are open. Process-wide rather than a
+# context variable, because embedding code and tests run commands from threads
+# that do not inherit context.
+_embedded_users = 0
+_embedded_lock = threading.Lock()
 
+
+@contextmanager
+def embedded_commands() -> Iterator[None]:
+    """Let commands with no agent behind them run, for code that embeds the tools on purpose.
+
+    Tests and scripts that call the shell or Python tools directly use this.
+    It has no effect in a process the runtime's supervisor started
+    (``UA_PROCESS_RUN_ID`` set, runtime_hosting.process_run), where a command
+    without an agent is always a fault. The commands agents run never get that
+    variable (custom_tools.non_interactive_shell), so tests an agent runs on
+    this repository still opt in normally.
+    """
+
+    global _embedded_users
+    with _embedded_lock:
+        _embedded_users += 1
+    try:
+        yield
+    finally:
+        with _embedded_lock:
+            _embedded_users -= 1
+
+
+def no_agent_refusal_reason() -> str | None:
+    """Why a command with no agent must be refused now; None inside embedded_commands()."""
+
+    if os.environ.get(PROCESS_RUN_ID_ENV):
+        return "runtime_process"
+    if not _embedded_users:
+        return "not_embedded"
+    return None
+
+
+def code_access_without_agent(scope: WorkspaceScope, *, unconfined: bool = False) -> CodeAccess:
+    """Embedded use with no agent: the task's folders, as in single-person mode.
+
+    Raises ``CodeAccessRefused`` unless inside ``embedded_commands()`` and
+    outside a supervised runtime process.
+    """
+
+    if no_agent_refusal_reason() is not None:
+        raise CodeAccessRefused(NO_AGENT_REFUSAL, reason_code=REASON_NO_AGENT)
     return _without_authorization(scope, (), unconfined)
 
 
@@ -288,10 +349,14 @@ __all__ = [
     "CODE_SHELL_TOOL_ID",
     "CodeAccess",
     "CodeAccessRefused",
+    "NO_AGENT_REFUSAL",
     "REASON_IDENTITY_REJECTED",
+    "REASON_NO_AGENT",
     "REASON_UNCONFINED_UNAVAILABLE",
     "UNCONFINED_TOOL_ID",
     "UNCONFINED_WITH_AUTHORIZATION_OFF",
     "code_access",
     "code_access_without_agent",
+    "embedded_commands",
+    "no_agent_refusal_reason",
 ]

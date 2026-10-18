@@ -33,6 +33,7 @@ from custom_agents.provider_error_runtime import (
 )
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.pending_work_runtime import close_pending_work
+from custom_tools.tool_stop import ToolStop
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.credentials_v1 import (
@@ -2244,10 +2245,80 @@ def test_an_approval_pause_keeps_the_note_until_the_resumed_turns_decision(tmp_p
     )
     object.__setattr__(agent, "_apply_task_processing_result", AsyncMock())
     steering = TaskSteering(steering_type=TaskSteeringType.INTERRUPT_RESPONSE, target_task_id=parent.task_id)
+    tool_stop = ToolStop(agent_id=agent.id, task_id=parent.task_id)
     asyncio.run(
-        task_steering_runtime._run_resumed_turn(agent, session, steering, info, [{"interruptResponse": {}}])
+        task_steering_runtime._run_resumed_turn(
+            agent, session, steering, info, [{"interruptResponse": {}}], tool_stop
+        )
     )
     assert setup_note not in _saved_note(tmp_path, parent.task_id)
+
+
+def test_a_resumed_approval_turn_cancelled_at_shutdown_ends_its_tool_work_and_keeps_its_note(tmp_path) -> None:
+    """Both rules meet here: a cancelled turn ends its commands (task stop), and a
+    turn cancelled before its decision is recorded keeps the note it read."""
+    from custom_agents import task_steering_runtime
+    from custom_agents.task_runtime_state import TurnStartNotes
+    from custom_messages.contracts.task_v1 import TaskSteering, TaskSteeringInterruptRecord
+    from custom_messages.enums import TaskSteeringType
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    manager.append_runtime_resume_directive(parent.task_id, ACCESS_NOTE)
+    info = manager.get_task_info(parent.task_id)
+    stops: list[ToolStop] = []
+
+    async def scenario() -> None:
+        model_called = asyncio.Event()
+
+        async def resumed_model_call(_prompt, **_kwargs):
+            model_called.set()
+            await asyncio.Event().wait()
+
+        session = task_steering_runtime.StrandsInterruptedTurnSession(
+            task_id=parent.task_id,
+            strands_agent=SimpleNamespace(invoke_async=resumed_model_call),
+            invoke_kwargs={},
+            full_prompt="",
+            msg_content=parent,
+            msg_header=info.header,
+            msg_meta=info.meta,
+            created_at=_now(),
+            interrupts=[TaskSteeringInterruptRecord(interrupt_id="interrupt_1", reason={"access_request_id": "areq_1"})],
+            start_notes=TurnStartNotes(parent.task_id, resume_directive=ACCESS_NOTE),
+        )
+        steering = TaskSteering(
+            steering_type=TaskSteeringType.INTERRUPT_RESPONSE,
+            target_task_id=parent.task_id,
+            interrupt_responses=[
+                {"interrupt_id": "interrupt_1", "response": {"access_request_id": "areq_1", "status": "granted"}}
+            ],
+        )
+        agent = SimpleNamespace(
+            id="agent_id_manager",
+            name="manager",
+            task_manager=manager,
+            _interrupted_turn_sessions={parent.task_id: session},
+            _pending_interrupt_responses={parent.task_id: steering},
+            _strands_agent=None,
+            _strands_agent_replacement_required=False,
+            _set_active_execution_context=lambda task_id: stops.append(
+                ToolStop(agent_id="agent_id_manager", task_id=task_id)
+            )
+            or stops[-1],
+            _clear_active_execution_context=lambda: None,
+            _refresh_self_agent_state=AsyncMock(),
+            _logger=logging.getLogger("test_turn_action_outbox"),
+        )
+        resumed = asyncio.create_task(task_steering_runtime.resume_interrupted_task_turn(agent, parent.task_id))
+        await asyncio.wait_for(model_called.wait(), 5)
+        resumed.cancel()  # shutdown cancels the resumed turn before its decision
+        with pytest.raises(asyncio.CancelledError):
+            await resumed
+
+    asyncio.run(scenario())
+    assert stops and stops[0].reason == "turn_cancelled"  # its tool work was ended
+    assert ACCESS_NOTE in _saved_note(tmp_path, parent.task_id)  # and its note kept
 
 
 def test_a_recorded_batch_and_its_released_note_are_saved_together(tmp_path) -> None:

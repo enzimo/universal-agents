@@ -102,6 +102,36 @@ def _old_instance(tmp_path: Path) -> tuple[Path, Path]:
     return path, datasets
 
 
+def test_export_waits_for_unconfirmed_external_effects_to_be_reconciled(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from assistant_gateway.config import GatewayInstanceConfig
+    from custom_messages.contracts.access_v2 import AccessRequestStatus, AccessRequestV1
+    from storage.access_repository import DecisionClaim, DecisionRecovery
+    from team_transfer.errors import TransferError
+
+    config_path, _datasets = _old_instance(tmp_path)
+    store = AccessRepository(GatewayInstanceConfig.load(config_path).manager_storage_settings)
+    request = store.create_request(AccessRequestV1(
+        request_id="access_req_uncertain", team_id=TEAM, requester_agent_id="agent-lead",
+        requester_agent_type="TeamArchitect",
+        subject=SubjectRefV1(kind=SubjectKind.USER, id="usr_ana"),
+        target=TargetRefV1(kind=TargetKind.TOOL, id="fn:schedules"),
+        level=AccessLevel.WRITE, reason="Approve the change", created_at_utc=NOW,
+    ))
+    claim = DecisionClaim(request.request_id, "decision_uncertain")
+    store.claim_decision(request.request_id, claim_id=claim.claim_id, at=NOW, until=NOW + timedelta(minutes=10))
+    finished = request.model_copy(update={"status": AccessRequestStatus.GRANTED})
+    store.save_decision_recovery(DecisionRecovery(claim, finished, {}, NOW))
+    out = tmp_path / "team.uatransfer"
+    with pytest.raises(TransferError, match="awaiting confirmation"):
+        export_team(
+            export_source(config_path), out, PASSPHRASE, owner_person_id="usr_ana", sections=SECTIONS,
+            key_derivation=new_key_derivation(**FAST_KEYS),
+        )
+    assert not out.exists()
+
+
 def test_lasting_access_arrives_and_what_would_dangle_is_refused(tmp_path: Path) -> None:
     from assistant_gateway.config import GatewayInstanceConfig
 
@@ -468,6 +498,100 @@ def test_team_links_this_version_would_not_use_are_refused_or_shown_for_attentio
     assert outcomes["account_link/link_http_exa_team"].outcome is RecordOutcome.IMPORT
     imported = {link.tool_id for link in _target_store(target).list_links(TEAM)}
     assert {"cli:x", "http:exa"} <= imported and "http:github" not in imported
+
+
+def test_a_file_with_two_links_for_one_tool_and_owner_refuses_the_older(tmp_path: Path, monkeypatch) -> None:
+    # A store from before the one-active-link index could export two active
+    # links for one tool and owner; only the newer one was in use.
+    from datetime import timedelta
+
+    config_path, _datasets = _old_instance(tmp_path)
+    export = AccessSection.export
+
+    def exported_by_an_older_store(self, source, files):  # noqa: ANN001 - patched method
+        result = export(self, source, files)
+        older = AccountLinkV1(
+            link_id="link_github_ana_older", team_id=TEAM, tool_id="cli:github", owner_kind=LinkOwnerKind.PERSON,
+            owner_id="usr_ana", credential_key="github_ana_older", created_by=OWNER, created_at_utc=NOW - timedelta(days=1),
+        )
+        result.records.append({"kind": "account_link", "record_id": older.link_id, "document": older.model_dump(mode="json")})
+        return result
+
+    monkeypatch.setattr(AccessSection, "export", exported_by_an_older_store)
+    plan, target = _export_and_import(tmp_path, config_path)
+
+    outcomes = {r.key: r for r in plan.records if r.section == "access"}
+    older = outcomes["account_link/link_github_ana_older"]
+    assert older.outcome is RecordOutcome.REFUSED
+    assert "the newer account link link_github_ana for the same tool and owner replaces it" in older.reason
+    assert outcomes["account_link/link_github_ana"].outcome is RecordOutcome.IMPORT
+    assert [link.link_id for link in _target_store(target).list_links(TEAM)] == ["link_github_ana"]
+
+
+@pytest.mark.skipif(not _CEDAR_BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
+def test_a_failed_decision_leaves_nothing_to_export_and_older_leftovers_stay_behind(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    import logging
+    import sqlite3
+
+    from access_catalog.catalog import load_catalog
+    from access_control.cedar import CedarAccessClient
+    from access_control.decisions import AccessService, HandDownRefused
+    from access_control.entities import AgentPrincipal, PersonPrincipal, agent_role_resolver
+    from access_control.inbox import StoredAccessInbox
+    from access_control.requests import AccessRequests
+    from access_control.starter_profiles import apply_starter_profile
+    from assistant_gateway.config import GatewayInstanceConfig
+    from custom_messages.contracts.access_v2 import AccessReviewChoice
+
+    config_path, _datasets = _old_instance(tmp_path)
+    store = AccessRepository(GatewayInstanceConfig.load(config_path).manager_storage_settings)
+    cedar = CedarAccessClient(binary=str(_CEDAR_BINARY))
+    try:
+        service = AccessService(
+            store=store, catalog=load_catalog(None), cedar=cedar, team_id=TEAM,
+            agent_role_of=agent_role_resolver("TeamArchitect"),
+        )
+        requests = AccessRequests(service=service, inbox=StoredAccessInbox(store), lead_agent_type="TeamArchitect")
+        ana = PersonPrincipal("usr_ana", TEAM, ("owner",))
+        apply_starter_profile(service, ana, "careful", lead_agent_type="TeamArchitect")
+        worker = AgentPrincipal("agent-web", "WebResearchAgent", "worker", TEAM, work_id="task-1")
+
+        def ask() -> str:
+            return requests.submit(
+                requester=worker, person=ana, target=TargetRefV1(kind=TargetKind.TOOL, id="cli:x"),
+                level=AccessLevel.WRITE, reason="Post the update", task_id="task-1",
+            ).request.request_id
+
+        failed_id = ask()
+
+        def busy(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        # A decision that fails while storing its outcome stores none of its grants.
+        monkeypatch.setattr(store, "finish_request", busy)
+        with pytest.raises(HandDownRefused, match="couldn't be saved because the access store was busy"):
+            requests.decide(failed_id, ana, AccessReviewChoice.APPROVE)
+        monkeypatch.undo()
+        assert [g for g in store.list_team(TEAM) if g.approval_id == failed_id] == []
+
+        # An older version stored a lasting grant before its outcome and stopped in between.
+        older_id = ask()
+        store.create(_grant(
+            "g_left", SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(TEAM, "TeamArchitect")),
+            TargetRefV1(kind=TargetKind.TOOL, id="cli:x"), approval_id=older_id, for_person_id="usr_ana",
+        ))
+    finally:
+        cedar.close()
+
+    with caplog.at_level(logging.WARNING, logger="team_transfer.access"):
+        plan, target = _export_and_import(tmp_path, config_path)
+
+    keys = {r.key for r in plan.records if r.section == "access"}
+    assert "grant/g_left" not in keys, "a grant whose request was not granted stays behind"
+    assert not any(grant.approval_id in {failed_id, older_id} for grant in _target_store(target).list_team(TEAM))
+    assert f"event=team_transfer_grant_without_outcome grant_id=g_left request_id={older_id}" in caplog.text
 
 
 def test_a_later_batch_does_not_guess_what_the_destination_chose() -> None:

@@ -320,7 +320,7 @@ def test_a_moved_team_schedule_continues_in_a_new_conversation_of_its_new_owner(
     outcome = PersonWorkOutcomeV1()
 
     _move_team_schedule(
-        agent, agent._schedule_store, stored, agent._schedule_store.get_row("sched_coremem"), OLIVE,
+        agent, agent._schedule_store, stored, OLIVE,
         _ScheduleMoves(new_owner=OTTO), outcome,
     )
 
@@ -343,7 +343,7 @@ def test_a_restored_persons_conversation_comes_back_untouched_after_a_move(world
     _say(store, "conv_olive_proactive", OLIVE, "olive_turn", SECRET)
     stored = _store_schedule(agent, _team_schedule("sched_coremem", OLIVE, "conv_olive_proactive"))
     _move_team_schedule(
-        agent, agent._schedule_store, stored, agent._schedule_store.get_row("sched_coremem"), OLIVE,
+        agent, agent._schedule_store, stored, OLIVE,
         _ScheduleMoves(new_owner=OTTO), PersonWorkOutcomeV1(),
     )
     departures = PersonDepartureRepository(agent.task_manager.storage_settings)
@@ -479,7 +479,7 @@ def test_moving_a_heartbeat_launcher_gives_its_items_new_conversations(world) ->
     stored = _store_schedule(agent, launcher)
 
     _move_team_schedule(
-        agent, agent._schedule_store, stored, agent._schedule_store.get_row("sched_heartbeat"), OLIVE,
+        agent, agent._schedule_store, stored, OLIVE,
         _ScheduleMoves(new_owner=OTTO), PersonWorkOutcomeV1(),
     )
 
@@ -524,7 +524,7 @@ def test_a_failed_heartbeat_handover_stays_stopped_until_retry_and_restore_keeps
 
     with monkeypatch.context() as failure, caplog.at_level(logging.ERROR):
         if failure_stage == "schedule_update":
-            failure.setattr(agent._schedule_store, "add", fail_schedule_update)
+            failure.setattr(agent._schedule_store, "update", fail_schedule_update)
         else:
             failure.setattr(HeartbeatStore, "start_new_item_conversation", fail_item_reset)
         _clear_schedules(agent, OLIVE, outcome)

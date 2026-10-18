@@ -2,6 +2,7 @@ from __future__ import annotations
 
 
 import ast
+import logging
 import sys
 import time
 from pathlib import Path
@@ -17,7 +18,9 @@ from custom_tools.non_interactive_shell import (
     _openshell_rtk_wrapped_command,
     _validate_command_path_tokens,
 )
+from custom_agents.code_access import REASON_NO_AGENT, embedded_commands
 from custom_tools.path_policy import WORKSPACE_PATH_DENIED, PathPolicyError
+from runtime_hosting.process_run import PROCESS_RUN_ID_ENV
 from custom_tools.runtime_context import set_agent_ref
 from runtime_settings.instance_layout import InstanceLayout
 from custom_tools.shell_execution import (
@@ -28,7 +31,7 @@ from custom_tools.shell_execution import (
 
 
 @pytest.fixture
-def agents_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def agents_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands_without_agent) -> Path:
     """The default folder of a task that works for no person.
 
     Agent shell commands may only run inside the task's folders under
@@ -145,3 +148,83 @@ def test_parallel_shell_failure_cancels_siblings_and_keeps_input_order(
     assert results[0]["termination_reason"] == "cancelled"
     assert results[1]["exit_code"] == 7
     assert time.monotonic() - started < 3
+
+
+# --- commands with no agent behind them ---------------------------------------
+
+
+def _no_agent_instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    layout.ensure_directories()
+    monkeypatch.setenv("AGENT_WORKSPACE_DIR", str(layout.workspaces_dir))
+    monkeypatch.setenv("TEAM_INSTANCE_ROOT", str(layout.root))
+    monkeypatch.delenv(PROCESS_RUN_ID_ENV, raising=False)
+    set_agent_ref(None)
+    return layout.agents_dir
+
+
+def test_a_command_with_no_agent_behind_it_is_refused(tmp_path: Path, monkeypatch, caplog) -> None:
+    """Without an agent nothing decides what a command may reach, so it must not run."""
+
+    folder = _no_agent_instance(tmp_path, monkeypatch)
+    caplog.set_level(logging.ERROR, logger="custom_tools.non_interactive_shell")
+
+    result = _execute_single_command("touch ran.txt", default_work_dir=str(folder), default_timeout=5)
+
+    assert result["exit_code"] == 126 and result["reason_code"] == REASON_NO_AGENT
+    assert not (folder / "ran.txt").exists()
+    assert "event=code_refused_without_agent tool_id=code:shell reason=not_embedded" in caplog.text
+
+
+def test_embedded_use_may_run_commands_without_an_agent(tmp_path: Path, monkeypatch, caplog) -> None:
+    folder = _no_agent_instance(tmp_path, monkeypatch)
+    caplog.set_level(logging.WARNING, logger="custom_tools.non_interactive_shell")
+
+    with embedded_commands():
+        result = _execute_single_command("touch ran.txt", default_work_dir=str(folder), default_timeout=5)
+
+    assert result["status"] == "success", result
+    assert (folder / "ran.txt").exists()
+    assert "event=code_access_without_agent tool_id=code:shell" in caplog.text
+
+
+def test_a_supervised_runtime_process_refuses_commands_without_an_agent_even_when_embedded(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    folder = _no_agent_instance(tmp_path, monkeypatch)
+    monkeypatch.setenv(PROCESS_RUN_ID_ENV, "run-under-the-supervisor")
+    caplog.set_level(logging.ERROR, logger="custom_tools.non_interactive_shell")
+
+    with embedded_commands():
+        result = _execute_single_command("touch ran.txt", default_work_dir=str(folder), default_timeout=5)
+
+    assert result["reason_code"] == REASON_NO_AGENT
+    assert not (folder / "ran.txt").exists()
+    assert "event=code_refused_without_agent tool_id=code:shell reason=runtime_process" in caplog.text
+
+
+def test_commands_never_get_the_agent_process_run_variables(monkeypatch) -> None:
+    """Only the agent process reads them; a command with them would look like a supervised agent process."""
+
+    from custom_tools.non_interactive_shell import _build_env
+
+    monkeypatch.setenv(PROCESS_RUN_ID_ENV, "run-1")
+    monkeypatch.setenv("UA_PROCESS_RUN_PROVEN", "1")
+    monkeypatch.setenv("UA_PROCESS_RUN_LOCK_FD", "9")
+    monkeypatch.setenv("SHELL_PASSTHROUGH_ENV_ALLOWLIST", f"{PROCESS_RUN_ID_ENV},UA_PROCESS_RUN_PROVEN")
+    monkeypatch.setenv("UA_KEPT_FOR_COMMANDS", "yes")
+
+    env = _build_env()
+
+    assert not [key for key in env if key.startswith("UA_PROCESS_RUN_")]
+    assert env["UA_KEPT_FOR_COMMANDS"] == "yes"
+
+
+def test_a_command_does_not_see_the_process_run_variables(agents_workspace: Path, monkeypatch) -> None:
+    monkeypatch.setenv("UA_PROCESS_RUN_PROVEN", "1")
+    monkeypatch.setenv("UA_PROCESS_RUN_LOCK_FD", "9")
+
+    result = _execute_single_command("env", default_work_dir=str(agents_workspace), default_timeout=5)
+
+    assert result["status"] == "success", result
+    assert "UA_PROCESS_RUN_" not in result["output"]

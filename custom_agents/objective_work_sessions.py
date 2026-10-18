@@ -22,7 +22,7 @@ from custom_agents.objective_work_config import (
     validate_agent_profile,
 )
 from custom_messages.contracts.common_v1 import contract_sha256
-from custom_messages.records.objectives import ObjectiveWorkCheckpoint, ObjectiveWorkInstalledProfile, ObjectiveWorkPolicy, ObjectiveWorkProfile, ObjectiveWorkProfileProposal, ObjectiveWorkSession
+from custom_messages.records.objectives import ObjectiveRecord, ObjectiveWorkCheckpoint, ObjectiveWorkInstalledProfile, ObjectiveWorkPolicy, ObjectiveWorkProfile, ObjectiveWorkProfileProposal, ObjectiveWorkSession
 from custom_messages.enums import (
     ObjectiveHealthDisposition,
     ObjectiveEventType,
@@ -147,6 +147,27 @@ class ObjectiveWorkSessionCoordinator:
             raise PermissionError(
                 "This Objective work policy belongs to another authenticated user."
             )
+
+    def _record_objective_event(
+        self,
+        objective_id: str,
+        event_type: ObjectiveEventType,
+        summary: str,
+        *,
+        step: str,
+        **fields: Any,
+    ) -> None:
+        """Add one event to the stored Objective, loaded and saved in this operation.
+
+        The work records (policy, session, checkpoint) are already stored, so
+        a failed Objective save is logged with ``step`` and the step goes on.
+        """
+
+        def add_event(objective: ObjectiveRecord) -> bool:
+            self.operations.append_objective_event(objective, event_type, summary, **fields)
+            return True
+
+        self.operations.change_objective(objective_id, add_event, step=step)
 
     def publish_inventory(self) -> None:
         """Seed the activity projection with canonical state after a manager restart."""
@@ -741,16 +762,16 @@ class ObjectiveWorkSessionCoordinator:
             policy_fields["policy_id"] = existing.policy_id
         policy = ObjectiveWorkPolicy.model_validate(policy_fields)
         self.objective_work_repository.save_policy(policy)
-        self.operations.append_objective_event(
-            objective,
+        self._record_objective_event(
+            objective_id,
             ObjectiveEventType.WORK_SESSION_POLICY_ENABLED,
             "Enabled bounded Objective work sessions after explicit acceptance.",
+            step="work_session_policy_enabled",
             task_id=accepted_by_task_id,
             schedule_id=policy.schedule_id,
             user_visible=True,
             details={"policy": policy.model_dump(mode="json")},
         )
-        self.operations.save_objective(objective, step="work_session_policy_enabled")
         self._emit_snapshot(objective_id, "Bounded Objective execution enabled.", task_id=accepted_by_task_id)
         return policy
 
@@ -777,26 +798,23 @@ class ObjectiveWorkSessionCoordinator:
         if policy is None:
             raise ValueError(f"No bounded execution policy exists for Objective {objective_id!r}.")
         self._require_policy_user(policy, owner_canonical_user_id)
-        if (
-            policy.status == ObjectiveWorkPolicyStatus.DISABLED
-            and by_objective_control
-            and not policy.disabled_by_objective_control
-        ):
+        if policy.status == ObjectiveWorkPolicyStatus.DISABLED and by_objective_control:
+            # Either the person turned it off (resume must not turn it back
+            # on) or an earlier Objective control did (a repeated control
+            # records nothing new).
             return cast(ObjectiveWorkPolicy, policy)
         policy.status = ObjectiveWorkPolicyStatus.DISABLED
         policy.disabled_by_objective_control = bool(by_objective_control)
         policy.updated_at = datetime.now(timezone.utc).isoformat()
         self.objective_work_repository.save_policy(policy)
-        objective = self.operations.get_objective(objective_id)
-        if objective is not None:
-            self.operations.append_objective_event(
-                objective,
-                ObjectiveEventType.WORK_SESSION_POLICY_DISABLED,
-                "Disabled bounded Objective work sessions.",
-                user_visible=True,
-                details={"policy": policy.model_dump(mode="json")},
-            )
-            self.operations.save_objective(objective, step="work_session_policy_disabled")
+        self._record_objective_event(
+            objective_id,
+            ObjectiveEventType.WORK_SESSION_POLICY_DISABLED,
+            "Disabled bounded Objective work sessions.",
+            step="work_session_policy_disabled",
+            user_visible=True,
+            details={"policy": policy.model_dump(mode="json")},
+        )
         self._emit_snapshot(objective_id, "Bounded Objective execution disabled.", task_id=None)
         return cast(ObjectiveWorkPolicy, policy)
 
@@ -824,16 +842,14 @@ class ObjectiveWorkSessionCoordinator:
         policy.disabled_by_objective_control = False
         policy.updated_at = datetime.now(timezone.utc).isoformat()
         self.objective_work_repository.save_policy(policy)
-        objective = self.operations.get_objective(objective_id)
-        if objective is not None:
-            self.operations.append_objective_event(
-                objective,
-                ObjectiveEventType.WORK_SESSION_POLICY_ENABLED,
-                "Resumed bounded Objective work sessions after Objective control.",
-                user_visible=True,
-                details={"policy": policy.model_dump(mode="json")},
-            )
-            self.operations.save_objective(objective, step="work_session_policy_resumed")
+        self._record_objective_event(
+            objective_id,
+            ObjectiveEventType.WORK_SESSION_POLICY_ENABLED,
+            "Resumed bounded Objective work sessions after Objective control.",
+            step="work_session_policy_resumed",
+            user_visible=True,
+            details={"policy": policy.model_dump(mode="json")},
+        )
         self._emit_snapshot(
             objective_id,
             "Bounded Objective execution resumed.",
@@ -901,15 +917,15 @@ class ObjectiveWorkSessionCoordinator:
         task_info.meta.objective_work_session_id = session.session_id
         self.objective_work_repository.save_session(session)
         self.operations.persist_runtime_state()
-        self.operations.append_objective_event(
-            objective,
+        self._record_objective_event(
+            objective_id,
             ObjectiveEventType.WORK_SESSION_STARTED,
             f"Started bounded work session {session.session_id}.",
+            step="work_session_started",
             task_id=task_id,
             user_visible=True,
             details={"session": session.model_dump(mode="json")},
         )
-        self.operations.save_objective(objective, step="work_session_started")
         self._emit_snapshot(objective_id, "Objective work session started.", task_id=task_id)
         return session
 
@@ -1203,17 +1219,15 @@ class ObjectiveWorkSessionCoordinator:
         session.ended_at = datetime.now(timezone.utc).isoformat()
         session.updated_at = session.ended_at
         self.objective_work_repository.save_session(session)
-        objective = self.operations.get_objective(session.objective_id)
-        if objective is not None:
-            self.operations.append_objective_event(
-                objective,
-                ObjectiveEventType.WORK_SESSION_CHECKPOINTED,
-                f"Checkpointed bounded work session {session.session_id}.",
-                task_id=session.task_id,
-                user_visible=True,
-                details={"checkpoint": checkpoint.model_dump(mode="json")},
-            )
-            self.operations.save_objective(objective, step="work_session_checkpointed")
+        self._record_objective_event(
+            session.objective_id,
+            ObjectiveEventType.WORK_SESSION_CHECKPOINTED,
+            f"Checkpointed bounded work session {session.session_id}.",
+            step="work_session_checkpointed",
+            task_id=session.task_id,
+            user_visible=True,
+            details={"checkpoint": checkpoint.model_dump(mode="json")},
+        )
         self._emit_snapshot(session.objective_id, "Objective work session checkpointed.", task_id=session.task_id)
         return checkpoint
 

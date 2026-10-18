@@ -13,10 +13,10 @@ from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry
 from custom_messages.enums import MessageMetaType
 from custom_messages.records.task_results import TaskResultUpdate
 from storage.config import resolve_storage_settings
-from storage.runtime_state_repository import RuntimeRecoveryConflict
+from storage.runtime_custody import RuntimeRecoveryConflict
 
 
-@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.live)])
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=[pytest.mark.live, pytest.mark.postgres])])
 def manager(request, tmp_path):
     if request.param == "postgres":
         dsn = os.environ.get("LIVE_TEST_POSTGRES_DSN")

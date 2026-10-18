@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from tests.runtime_snapshot_fixtures import snapshot_json
+from tests.runtime_snapshot_fixtures import deferred_message_json, seed_deferred, snapshot_json
 
 from tests.postgres_test_helpers import patch_fake_postgres
 from storage.config import resolve_storage_settings
@@ -47,13 +47,7 @@ def test_runtime_state_repository_claims_deferred_rows_by_owner(tmp_path: Path) 
     )
     repo = create_runtime_state_repository(settings, logger=logging.getLogger("test"))
 
-    repo.save_deferred_messages(
-        owner_agent_id="agent_a",
-        owner_agent_name="Agent A",
-        team_id="team_1",
-        owner_named_agent_type="CodeWritingAgent",
-        messages_json='["m1"]',
-    )
+    seed_deferred(repo, "agent_a", "m1", team_id="team_1")
 
     assert repo.get_deferred_messages_team_id("agent_a") == "team_1"
     rows = repo.load_deferred_messages_by_owner("agent_a")
@@ -63,18 +57,20 @@ def test_runtime_state_repository_claims_deferred_rows_by_owner(tmp_path: Path) 
         sources=rows, replacement=replace(rows[0], owner_agent_id="replacement"),
     )
     assert repo.load_deferred_messages_by_owner("agent_a") == []
-    assert repo.load_deferred_messages_by_owner("replacement")[0].messages_json == '["m1"]'
+    assert repo.load_deferred_messages_by_owner("replacement")[0].messages_json == f"[{deferred_message_json('m1')}]"
 
 
 @pytest.mark.parametrize("state_kind", ["task_runtime", "deferred_messages"])
 def test_recovery_commit_failure_preserves_the_original_snapshot(tmp_path, monkeypatch, state_kind):
     settings = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "runtime.db")}})
     repo = create_runtime_state_repository(settings)
-    payload_field = "runtime_state_json" if state_kind == "task_runtime" else "messages_json"
-    getattr(repo, f"save_{state_kind}")(
-        owner_agent_id="original", owner_agent_name="Original", team_id="team", owner_named_agent_type="Worker",
-        **{payload_field: snapshot_json() if state_kind == "task_runtime" else '{"work":1}'},
-    )
+    if state_kind == "task_runtime":
+        repo.save_task_runtime(
+            owner_agent_id="original", owner_agent_name="Original", team_id="team",
+            owner_named_agent_type="Worker", runtime_state_json=snapshot_json(), expect_existing=False,
+        )
+    else:
+        seed_deferred(repo, "original", "work")
     load = getattr(repo, f"load_{state_kind}_by_owner")
     sources = load("original")
     replacement = replace(sources[0], owner_agent_id="replacement")

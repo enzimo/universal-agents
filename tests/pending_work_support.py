@@ -44,10 +44,12 @@ def use_simple_queue_checks(monkeypatch) -> None:
 
 
 class _Repository:
-    def save_deferred_messages(self, **_kwargs: Any) -> None:
+    """The deferred row's named writes succeed and keep nothing; the inbox keeps its own list."""
+
+    def add_deferred_message(self, **_kwargs: Any) -> None:
         pass
 
-    def clear_deferred_messages(self, *_args: Any) -> None:
+    def remove_deferred_messages(self, **_kwargs: Any) -> None:
         pass
 
 

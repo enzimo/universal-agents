@@ -34,6 +34,7 @@ from custom_agents.task_runtime_state import (
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState
+from custom_tools.tool_stop import ToolStop
 
 
 def unexpected(name):
@@ -66,7 +67,7 @@ def build_turn_owner(*, invoke, guidance, committed, cleared, task_operations=No
     effects.update(
         refresh_runtime_llm_selection=lambda: None,
         history_task_id_for_content=lambda content: content.task_id,
-        set_active_execution_context=lambda task_id: None,
+        set_active_execution_context=lambda task_id: ToolStop(agent_id="independent", task_id=task_id),
         select_turn_model=lambda task_id: None,
         clear_active_execution_context=lambda: cleared.append(True),
         ensure_fresh_strands_agent_for_new_turn=lambda **kwargs: False,

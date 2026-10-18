@@ -24,7 +24,7 @@ from custom_agents.scheduled_runtime import (
     scheduler_loop,
 )
 from custom_agents.conversation_store import ConversationStore
-from custom_agents.schedule_store import ScheduleStore
+from custom_agents.schedule_store import AdvanceOutcome, ScheduleStore
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_records import ReportedWorkIdentity
 from custom_messages.contracts.routing_v1 import (
@@ -40,6 +40,8 @@ from custom_messages.enums import (
     PlanActionType,
     ProgressState,
     RequesterType,
+    ScheduleManagementClass,
+    SystemScheduleKind,
     TaskHistoryImportance,
 )
 from storage.config import resolve_storage_settings
@@ -330,6 +332,7 @@ class _LoopScheduleStore:
         return {
             "schedule_id": self.scheduled_message.schedule_id,
             "claim_token": "claim_token_1",
+            "next_fire_at": self.scheduled_message.next_fire_at,
         }
 
     def get_all_enabled(self):
@@ -342,7 +345,7 @@ class _LoopScheduleStore:
 
     def update_after_fire(self, schedule_id: str, **kwargs):
         self.updated_with = {"schedule_id": schedule_id, **kwargs}
-        return False
+        return AdvanceOutcome.ADVANCED
 
     def release_claim(self, schedule_id: str, **kwargs):
         self.released_with = {"schedule_id": schedule_id, **kwargs}
@@ -632,9 +635,53 @@ def test_record_scheduled_run_updates_bounded_memory_and_notification_decision(
     assert memory.state.domain["last_event_id"] == "goal:gakpo:47"
 
 
+@pytest.mark.parametrize("concurrent", ["remove", "disable"])
+def test_record_scheduled_run_never_undoes_a_change_made_after_its_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, concurrent: str
+):
+    """The person deletes or turns off the schedule while a run records its notes (2026-10-17).
+
+    The tool used to save the whole schedule it had read, which recreated a
+    deleted schedule and turned a turned-off one back on.
+    """
+    import custom_tools.providers.schedules as schedule_tools
+
+    agent = _FakeAgent(str(tmp_path / "task_history.db"))
+    set_agent_ref(agent)
+    schedule_id = json.loads(
+        create_scheduled_job(instruction="Check match state.", schedule_name="match monitor", interval_seconds=60)
+    )["schedule_id"]
+    task_info = agent.task_manager._task_info
+    task_info.meta.requester_type = RequesterType.TIMER_REQUESTER
+    task_info.meta.gateway_context.scheduled_job_id = schedule_id
+    store = agent._schedule_store
+    read_schedule = schedule_tools._owned_or_denial
+
+    def read_then_person_acts(*args, **kwargs):
+        found = read_schedule(*args, **kwargs)
+        if concurrent == "remove":
+            assert store.remove(schedule_id)
+        else:
+            assert store.set_enabled(schedule_id, False)
+        return found
+
+    monkeypatch.setattr(schedule_tools, "_owned_or_denial", read_then_person_acts)
+    result = json.loads(record_scheduled_run(outcome="no_change", state_summary="Score unchanged."))
+
+    if concurrent == "remove":
+        assert result == {"schedule_id": schedule_id, "recorded": False, "error": schedule_tools.SCHEDULE_NOT_FOUND}
+        assert store.get_row(schedule_id) is None
+    else:
+        assert result["recorded"] is True
+        saved = store.get_scheduled_message(schedule_id)
+        assert saved.enabled is False
+        assert saved.schedule_memory.state.summary == "Score unchanged."
+
+
 def test_scheduler_loop_updates_schedule_with_claim_token_after_acceptance():
     scheduled_message = ScheduledMessage(
         schedule_id="sched_loop",
+        next_fire_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
         payload=Task(
             task_id="task_loop",
             task_type=MessageMetaType.REQUEST,
@@ -652,6 +699,7 @@ def test_scheduler_loop_updates_schedule_with_claim_token_after_acceptance():
         "schedule_id": "sched_loop",
         "claim_token": "claim_token_1",
         "claimer_agent_id": "manager_id",
+        "due_at": scheduled_message.next_fire_at,
     }
 
 
@@ -1337,3 +1385,59 @@ def test_recurring_fired_schedule_keeps_history_without_followup_delivery_obliga
     assert turn is not None
     assert turn["followup_to_task_id"] is None
     assert conversation_store.get_turn_by_task_id("task_prior_fire") is not None
+
+
+def test_notify_user_records_run_notes_only_on_a_schedule_the_task_may_record(tmp_path: Path):
+    """notify_user wrote notes on whatever schedule the task's metadata named, unlike record_scheduled_run."""
+    from custom_tools.providers.communication import _record_schedule_notification_if_active
+
+    db_path = str(tmp_path / "task_history.db")
+    owner = _FakeAgent(db_path)
+    set_agent_ref(owner)
+    schedule_id = json.loads(
+        create_scheduled_job(instruction="Check match state.", schedule_name="match monitor", interval_seconds=60)
+    )["schedule_id"]
+    someone_else = _FakeAgent(db_path, canonical_user_id="usr_sched_b")
+    someone_else.task_manager._task_info.meta.gateway_context.scheduled_job_id = schedule_id
+    set_agent_ref(someone_else)
+
+    refused = _record_schedule_notification_if_active(someone_else, message="Hello", notification_id="note_1", reason="")
+
+    assert refused == {"recorded": False, "reason": "schedule_not_recordable", "schedule_id": schedule_id}
+    assert someone_else._schedule_store.get_scheduled_message(schedule_id).schedule_memory.ledger.total_notifications == 0
+
+    owner.task_manager._task_info.meta.gateway_context.scheduled_job_id = schedule_id
+    set_agent_ref(owner)
+    recorded = _record_schedule_notification_if_active(owner, message="Hello", notification_id="note_2", reason="")
+
+    assert recorded == {"recorded": True, "schedule_id": schedule_id}
+    memory = owner._schedule_store.get_scheduled_message(schedule_id).schedule_memory
+    assert memory.ledger.total_notifications == 1
+
+
+def test_a_persons_system_timer_records_notes_with_both_tools(tmp_path: Path):
+    """A system timer signed for its owner (such as MemReviewAgent's memory review) works like the person's request."""
+    from custom_tools.providers.communication import _record_schedule_notification_if_active
+
+    agent = _FakeAgent(str(tmp_path / "task_history.db"))
+    set_agent_ref(agent)
+    timer = ScheduledMessage(
+        schedule_id="mem_rev_user_test",
+        schedule_name="memory_review:usermem:test",
+        management_class=ScheduleManagementClass.SYSTEM,
+        system_schedule_kind=SystemScheduleKind.MEMORY_REVIEW_USERMEM,
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Review memory."),
+        payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id="usr_sched_a")),
+        interval_ms=86_400_000,
+        repeat_count=None,
+    )
+    agent._schedule_store.add(timer)
+    agent.task_manager._task_info.meta.gateway_context.scheduled_job_id = timer.schedule_id
+
+    noted = _record_schedule_notification_if_active(agent, message="Memory reviewed.", notification_id="note_timer", reason="")
+    recorded = json.loads(record_scheduled_run(outcome="no_change", state_summary="Nothing to change."))
+
+    assert noted == {"recorded": True, "schedule_id": timer.schedule_id}
+    assert recorded["recorded"] is True
+    memory = agent._schedule_store.get_scheduled_message(timer.schedule_id).schedule_memory
+    assert (memory.ledger.total_notifications, memory.ledger.total_runs) == (1, 1)

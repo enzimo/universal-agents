@@ -18,7 +18,6 @@ from assistant_cli import (
     CliMessageTracker,
     GatewayOnboardingSeed,
     InteractiveCliConsole,
-    _apply_cli_objective_lifecycle_cascade,
     _collect_onboarding_answers,
     _handle_local_session_command as _handle_application_session_command,
     _interactive_app_list,
@@ -77,11 +76,6 @@ from secure_tool_broker.service import SecureToolBrokerService
 from access_control.caller_tokens import CALLER_GATEWAY
 from secure_tool_broker.access_gate import BrokerAccessGate
 from tests.broker_access_support import BROKER_ROOT, caller_token, open_gate
-from custom_agents.schedule_store import ScheduleStore
-from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
-from custom_messages.contracts.schedule_v1 import ScheduledMessage
-from custom_messages.contracts.task_v1 import Task
-from custom_messages.enums import MessageMetaType, ObjectiveStatus, ScheduleManagementClass, SystemScheduleKind
 from tests.application_test_doubles import RecordingLinkResults, application_from
 
 
@@ -1900,16 +1894,19 @@ def test_cli_parser_accepts_schedule_pause_resume_and_heartbeat_commands():
     assert args.include_closed is True
 
     args = parser.parse_args(
-        [
-            "objective-pause",
-            "--config",
-            "/tmp/config.yaml",
-            "--objective-id",
-            "objective_id_1",
-        ]
+        ["objective-show", "--config", "/tmp/config.yaml", "--objective-id", "objective_id_1"]
     )
-    assert args.command == "objective-pause"
+    assert args.command == "objective-show"
     assert args.objective_id == "objective_id_1"
+
+    # Objective changes go through the running manager (Runtime controls or
+    # the team lead), so the host commands that wrote the record directly
+    # from another process are gone.
+    for removed in ("objective-pause", "objective-resume", "objective-abandon"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                [removed, "--config", "/tmp/config.yaml", "--objective-id", "objective_id_1"]
+            )
 
     args = parser.parse_args(
         ["heartbeat-pause", "--config", "/tmp/config.yaml", "--minutes", "15"]
@@ -2016,67 +2013,6 @@ def test_cli_parser_accepts_schedule_pause_resume_and_heartbeat_commands():
     assert args.command == "migrate-config"
     assert args.config == "/tmp/instance_config.yaml"
     assert args.yes is True
-
-
-def test_cli_objective_pause_authorizes_system_schedule_and_updates_truthfully(
-    tmp_path,
-) -> None:
-    config = GatewayInstanceConfig.create(
-        instance_name="objective_cli",
-        instance_root=str(tmp_path / "instance"),
-        team_id="team_1",
-        timezone="UTC",
-        display_name="Owner",
-        initial_user_context="",
-    )
-    config.state.storage.sqlite.path = str(tmp_path / "runtime.db")
-    store = ScheduleStore(storage_settings=config.manager_storage_settings)
-    store.add(
-        ScheduledMessage(
-            schedule_id="objective_schedule",
-            schedule_name="objective:test",
-            management_class=ScheduleManagementClass.SYSTEM,
-            system_schedule_kind=SystemScheduleKind.OBJECTIVE_WORK_SESSION,
-            claim_team_id="team_1",
-            claim_named_agent_type="TeamArchitect",
-            payload=Task(
-                task_type=MessageMetaType.REQUEST,
-                problem_statement="Run the Objective work window.",
-            ),
-            payload_meta=MessageMeta(
-                gateway_context=GatewayContext(
-                    canonical_user_id="Owner",
-                    session_key="session_1",
-                )
-            ),
-            interval_ms=60_000,
-        )
-    )
-    active_link = SimpleNamespace(
-        schedule_id="objective_schedule",
-        managed_by_objective=True,
-        disabled_by_objective_pause=False,
-    )
-    missing_link = SimpleNamespace(
-        schedule_id="missing_schedule",
-        managed_by_objective=True,
-        disabled_by_objective_pause=False,
-    )
-    objective = SimpleNamespace(
-        objective_id="objective_1",
-        status=ObjectiveStatus.PAUSED,
-        schedule_links=[active_link, missing_link],
-        heartbeat_links=[],
-    )
-
-    changed = _apply_cli_objective_lifecycle_cascade(config, objective)
-
-    assert changed is True
-    restored = store.get_scheduled_message("objective_schedule")
-    assert restored is not None
-    assert restored.enabled is False
-    assert active_link.disabled_by_objective_pause is True
-    assert missing_link.disabled_by_objective_pause is False
 
 
 def test_interactive_app_list_uses_registry_catalog(tmp_path, capsys) -> None:

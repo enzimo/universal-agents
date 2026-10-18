@@ -283,6 +283,36 @@ change, the gateway moving a maintenance schedule to the person's current chat)
 move the saved policy along (`follow_authorized_change`). See
 [Scheduled workers](user_docs_source/scheduled-workers.md).
 
+A schedule change never overwrites a newer one (`custom_agents.schedule_store`).
+Every write that depends on a schedule's current values reads, decides and
+writes in one write transaction (`ScheduleRepository.write_locked`: SQLite's
+write lock, or PostgreSQL's schedule-id and row locks). A run changes only its
+notes; an edit made to a copy read earlier is refused when the schedule is gone
+or someone changed it meanwhile, and keeps the next run time, count and notes
+unless it set them; turning on and off, pausing and resuming keep the claim,
+and whoever starts or signs a claimed run checks again that the schedule is
+on, not paused and not ended; and the advance after a run applies only while
+its agent holds the claim and the claimed run time still stands; a one-time
+schedule re-timed during its run stays at the new time, while a counted series
+counts the run and finishes after its last one. The Schedules page and the
+chat and CLI schedule commands bind their controls to one digest of the schedule
+as listed (`schedule_listing_digest`): it leaves out a repeating schedule's next
+run time and the run notes' content, which runs change by themselves, so a
+schedule that runs often can still be paused. Before, saves replaced whole rows with copies read earlier,
+which could bring back a deleted schedule, undo a pause, or make a run happen
+twice.
+
+The comparison includes a one-time reminder's due time and the run-note policy,
+so a stale reschedule or notification edit is refused too. Explicitly moving a
+repeating run requires its next time to remain unchanged since the read; other
+edits preserve automatic advances. Before admission a worker releases a claim
+whose occurrence was re-timed, and the admission transaction refuses a future
+due time using the database clock. Objective schedule rollback compares against
+the state that installation wrote, so it cannot undo a later stop or edit.
+Reconfiguration and rollback both preserve notes written by running work.
+Time checks keep subsecond precision: SQLite uses its process's host clock,
+and PostgreSQL reads the server's wall clock after any lock wait.
+
 Whether a worker start's process is gone is proven, never assumed from a timeout
 (`runtime_hosting.process_run`). The supervisor holds an exclusive lock on
 `runtime/process_run.lock` and passes the locked file to every agent process, so
@@ -317,8 +347,9 @@ task monitor also observes its own scheduler cadence
 60-second scheduler wait plus one 20-second heartbeat interval, it gives
 workers 60 active seconds to refresh their heartbeats. During that window,
 heartbeat-only takeover waits and task incidents remain unchanged; launch
-records and explicit exits still allow replacement. This prevents host sleep
-from making a live startup worker look dead before its next heartbeat. Signed
+records, process evidence and explicit exits still decide. Host sleep cannot
+make a live startup agent look dead in any case: it is judged by its process,
+not its heartbeat (see below). Signed
 work for no person is labelled as system work or maintenance. A cleared warning
 reports that the condition ended, without claiming new task progress.
 The same pass also frees a work slot held by a task whose turn is gone
@@ -329,10 +360,25 @@ Four repairs keep work from getting stuck in the first place:
 
 - The team lead starts a replacement worker for a dead agent that still holds
   unfinished work (`custom_agents.orphaned_work_takeover`); the replacement's
-  startup takeover adopts it in one transaction. An agent counts as gone only
-  when its worker start ended or its process is proven gone; agents without a
-  start record fall back to their heartbeat. Takeover itself uses the same rule,
-  so a slow but live worker keeps its work.
+  startup takeover adopts it in one transaction. One rule
+  (`custom_agents.agent_liveness`) decides whether an agent is gone, for
+  takeover, replacements, schedule coalescing and stuck-task notices alike. A
+  worker started inside another process is gone when its start record ended or
+  its process is proven gone. A startup agent or the team lead reports its own
+  process in its status (`AgentStatus.process_identity`) and is gone only when
+  that process is proven gone (`runtime_hosting.process_run`); while it runs it
+  keeps its work, however old its heartbeat. An agent that reports no process,
+  or whose process cannot be checked from here (logged as
+  `owner_liveness_unknown`), is judged by its heartbeat, after
+  `agent.schedule_maintenance.stuck_tasks.owner_gone_after_seconds`. The proof
+  assumes every agent process of a team is a child of one supervisor run on one
+  host: a process from another run counts as gone whatever host it names, so
+  agent processes of a second runtime sharing the database are not supported.
+  Each agent writes only its own status row as it stops (marked exiting from
+  the moment its exit begins); the team lead stores other agents' presence only
+  when it is newer, never later than its own clock, and removes rows of agents
+  that are gone on its own timer, so a manager-only restart no longer makes
+  running startup agents look gone.
 - A worker stays up while it holds any unfinished task, waiting ones included
   (`strands_team.worker_holds_work`); replies to a waiting task are addressed to
   it.
@@ -370,8 +416,10 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
 2. It returns each task it has not started, and the task it is executing, to the
    TeamLead as a `WorkerTaskHandbackV1` message, one task per message with a
    deterministic handback id. The running turn is interrupted without a
-   cancellation record, so the task can run elsewhere. New requests that still
-   reach the worker go to the TeamLead the same way.
+   cancellation record, so the task can run elsewhere, and its running shell
+   and Python commands end before the handback is sent, so the rerun never
+   overlaps them. New requests that still reach the worker go to the TeamLead
+   the same way.
 3. It keeps tasks that already started and now wait on a person or subtask,
    because replies are addressed to this worker's id. They may finish until
    `agent.schedule_workers.lease_loss_wait_timeout_seconds` (default 30 minutes)
@@ -435,6 +483,13 @@ Known limits of the lease-loss handling:
 - Replies addressed to a worker's id after that worker exits (for example a
   subtask result for a task it failed at the wind-down deadline) are not
   delivered anywhere; the requester already received a failed result.
+- The handback waits at most 10 seconds for the interrupted turn's tool calls.
+  A call the process supervisor cannot end (an HTTP request, OpenShell sandbox
+  creation) may still run after the handback; it is logged as
+  `event=tool_work_outlived_turn`, and none of the stopped turn's remaining
+  commands start. A process that moved itself into a new session or process
+  group (`setsid`, daemonizing) is not ended at all, and is logged only while it
+  keeps its command's output open (the call then counts as still running).
 
 Abandoned memory-review claims become inactive review records after a grace period
 and checks for live or saved work. InternalImprovementAgent reviews their metadata
@@ -451,6 +506,25 @@ conversations, memory, authorization records, gateway sessions, and execution
 attempts. Agents still coordinate through NATS rather than polling one
 another's tables.
 
+A store whose writes read before they write takes turns between writers on
+both backends. In SQLite every write starts with `BEGIN IMMEDIATE`. In
+PostgreSQL the default READ COMMITTED isolation lets two transactions read the
+same rows before either writes, so the access store and the knowledge store
+take their own transaction-level advisory lock in `begin_write`
+(`storage/postgres_connection.py`, one key per store, so unrelated stores never
+wait for each other); other stores lock the rows they change (`SELECT ... FOR
+UPDATE`). An advisory lock key covers the whole PostgreSQL database, so
+instances or teams that share one database in different schemas also wait for
+each other's writes to that store. Reads and writes a thread makes while it
+holds an open write transaction of the access store (a grant plan, a whole
+decision) join that transaction, so no second connection is opened while the
+lock is held. Moving rows between tables uses `DELETE ... RETURNING` so exactly the
+rows deleted are the rows kept elsewhere (a removed person's held records,
+`storage/person_departure_repository.py`). Rationale: the 2026-10-17
+concurrency audit found that on PostgreSQL an approved change could be claimed
+twice, two edits to one person's model settings lost one, and holding a
+person's records could delete a row written meanwhile without holding it.
+
 An Objective change that a tool call or a person's command asked for is
 reported as not saved when the write fails (`ObjectiveSaveFailed` in
 `custom_agents/task_manager_objectives.py`), so the caller never gets back a
@@ -464,6 +538,42 @@ The final deletion status, completion timestamp and summary are saved together.
 A failed completion therefore leaves the Objective deleting and retryable;
 there is no later metadata write after the record becomes deleted, because
 repeated deletion commands return immediately for a completed deletion.
+
+Every Objective change loads the stored record, changes it and saves it inside
+one operation of the team lead's task operation lane
+(`ObjectiveCoordinator.change_objective` in
+`custom_agents/task_manager_objectives.py`). The store writes whole records, so
+a copy kept from an earlier operation and saved later would erase whatever was
+stored in between. Until 2026-10-17 this happened: a person's pause or resume
+erased the work-session policy's own event every time, and the team lead's
+status tool could erase a progress update or a schedule linked by a parallel
+tool call. A static test keeps every other module from saving Objective
+records, and a lane refuses an operation submitted from inside one of its own
+operations (`NestedTaskOperation`) instead of waiting for itself.
+
+A lifecycle change (`custom_agents/objective_lifecycle.py`) is one such
+operation for both a person's Runtime controls and the team lead's
+`objectives(action="update_status")`: it saves the status, then turns the
+bounded work policy and the managed schedules and heartbeat items off, or back
+on after an earlier control, and records which links changed. Each caller
+passes its own rules for switching schedules (the person's gateway-signed
+permit, or the agent rule that leaves system-managed schedules to
+`apply_change`); a schedule the agent rule leaves alone, or a switch that
+fails, is reported instead of recorded as switched. Runtime controls check
+ownership and the actions the current status offers in the same operation as
+the change, and refuse other actions with a plain reply and no new status. A
+record digest in the request is checked in that operation too. The Web page
+sends the digest of the record it showed, so a change made after the person
+looked is refused; a chat command takes the digest just before it sends, which
+guards only against a change in that moment; a trusted stop (a departing
+person's Objectives) sends none. A control whose status is already stored is
+accepted as a retry: it records no new status or policy event and switches only
+the links that did not switch before, so a pause or abandon whose schedule
+failed can be repeated. The team lead cannot set `deleting` or `deleted`:
+deletion is the person's control. A task that ends while its Objective is
+paused or being deleted keeps that status. Objective changes from the host
+command line were removed, because they wrote the record from another process
+while the team lead ran.
 
 The memory system has the five stores the README lists, which agents recall
 from (conversation history, user memory, team memory, the memory graph and the
@@ -612,9 +722,34 @@ the sanitized prompt metadata.
 
 Runtime snapshots and idempotent admission let processes recover queued work,
 waiting subtasks, deferred messages, and recent in-flight Tasks. Outboxes record
-ordered actions before external effects. Leases and fencing prevent a stale
-worker from committing after another worker takes over. Repairs and fallback
-paths are logged rather than hidden.
+ordered actions before external effects. Execution attempts and worker starts
+use leases and fencing, so a stale holder cannot commit after another takes
+over. A stopped or handed-back turn ends its running commands before the task
+is archived or handed back. Saved runtime snapshots and deferred messages move
+only from an agent
+that counts as gone, in one transaction that deletes its row. A previous owner
+that is still running finds its row gone at its next save, which is refused
+(`RuntimeCustodyLost`) before anything is written; it then drops that work from
+memory without replying and keeps running (`custom_agents.custody_loss`). A
+deferred request leaves its row atomically with admission of its own task.
+The reply choosing a delayed provider retry leaves atomically with insertion
+of its retry schedule. Both use `storage.runtime_custody` to check ownership
+inside the effect's transaction.
+Restart keeps a delayed-retry task paused until its timer fires.
+Other messages, including clarification replies, stay until their handler
+completes: saving query history alone does not apply a resume or cancel
+decision. Every task snapshot or history write by the dispatching asyncio task
+checks the exact message in the locked deferred row
+(`deferred_message_runtime.DeferredHandoff`). A recreated row holding newer
+messages cannot authorize an old dispatch, and that dispatch cannot clear the
+new inbox when it finishes. Child tasks and other threads never inherit this
+handoff. A crash therefore keeps an unadmitted request or unfinished reply in
+the deferred row; an admitted request is held by its task snapshot. Intermediate
+reply handling can be replayed after restart. What is not covered: work
+a previous owner does before its first save after the takeover (a model turn in
+progress until it is stopped) and handling that saves nothing (such as a reply
+about a task it no longer holds) may still happen on both agents. Repairs and
+fallback paths are logged rather than hidden.
 
 Transport contracts, workflow records, and snapshot codecs have separate owners.
 Shared subsystem configuration lives in `runtime_settings/`; the gateway composes
@@ -892,7 +1027,18 @@ refused rather than run with the network open. Landlock does not cover UDP,
 so internal services such as the local NATS server still require credentials
 that sandboxed code cannot read. Writable folders get every right except making device files;
 links may be made (Python environments need them) because trusted code never
-follows them.
+follows them. `shell(parallel=true)` runs its commands in a thread pool, and
+pool threads do not inherit context variables, so each command runs in a copy
+of the calling thread's context; without it, parallel commands ran as if no
+agent were present, with the network open and without the person's folder.
+A command with no agent behind it is now refused (`event=code_refused_without_agent`)
+instead of running with that open fallback: nothing would decide what it may
+reach. Only code that embeds the tools on purpose (tests, scripts) may run
+such commands, inside `custom_agents.code_access.embedded_commands()`, and
+never in a process the supervisor started (`UA_PROCESS_RUN_ID` set,
+`runtime_hosting/process_run.py`), where a missing agent is always a fault.
+The commands agents run never get the `UA_PROCESS_RUN_*` variables: only the
+agent process itself reads them.
 
 Running a command outside the sandbox is its own catalog tool,
 `code:unconfined`, so network access never implies host access:
@@ -915,6 +1061,65 @@ created on first use with copies of only their folder, `team/` and `agents/`;
 work for no person uses a shared one. The operator's OpenShell policy decides
 the network and anything else there; folder grants and the network rule above
 do not apply.
+
+Commands stop with their task. Strands runs the `shell` and `python_env` tools
+in a worker thread, and cancelling a turn does not stop that thread, so a
+command used to keep running after a person stopped its task, after a
+lease-loss handback while another worker reran the task in the same folders,
+and through shutdown. Each turn now gets a stop signal that Universal Agents
+owns (`custom_tools/tool_stop.py`). The turn passes it to Strands as the
+invocation's `cancel_signal` and to the tools through `invocation_state`.
+Strands' own `agent.cancel_signal` cannot carry the stop: Strands clears it as
+soon as the invocation ends, and a stopped turn ends before a tool thread looks.
+Every turn also passes `callback_handler` to Strands as an extra keyword, so
+Strands hands tools the turn's `invocation_state` one level down; tools read
+it through `custom_tools.runtime_context.caller_invocation_state`, which
+handles both shapes.
+
+A stop sets the signal before it cancels the turn. The process supervisor then
+ends the running command's whole process group (SIGTERM, then SIGKILL a second
+later) and starts none of the turn's remaining commands; a tool call that
+starts after the stop does nothing. A command can leave processes running in
+its group after it returns (`server &`), so each command's process group is
+recorded, also when the command already exited (its leader is then a zombie
+the supervisor has not collected yet). On a stop, wherever it lands (during
+the model call or after it, while the turn applies its result or handles an
+error), the groups that still have processes get SIGTERM, then SIGKILL a second later
+(`event=tool_background_processes_ended`). Each check reads `/proc` once for
+all groups, in a worker thread, so the agent's event loop keeps running. The
+stat parser reads bytes: Linux process names need not be UTF-8, and truncating
+a name can split a character. An unrelated process name must never abort
+cleanup. A group is signalled only while its number still belongs to that command: the
+number cannot be reused while any member lives, and a process holding it with
+a different start time is a reuse and left alone. A turn that ends normally
+leaves its background processes running, as before. A tool call keeps the task
+it started for until it returns (`runtime_context.bind_tool_call_task`), so a
+call that outlives its turn never picks up the next task's person and folders.
+
+The cancelled turn waits up to 10 seconds for its running tool calls to end,
+then gives leftover processes one second after SIGTERM and up to one more
+second to exit after SIGKILL (`custom_agents/sdk/strands/turn_tool_stop.py`), so the stop reply, the
+cancellation record, the next queued task, the lease-loss handback and shutdown
+all come after its commands ended. The stop path's own wait is that plus two
+seconds, 14 seconds in all, within the gateway's 15-second control timeout. The
+wait sits in the turn rather than in each stop path because the code that runs
+the turn archives the task and frees the execution slot as soon as the turn
+ends, whoever stopped it. Each turn retains one cleanup task, so overlapping
+stops, a lease-loss handback and shutdown all join the same work without
+restarting its grace period. Further cancellation cannot cut cleanup short;
+the caller propagates it only after cleanup finishes. Both turn runners own
+this cancellation handling outside their error handlers too, because writing
+context or settling a failed resumed turn may still be in progress at a stop.
+A process still present after SIGKILL is logged with its group and process ids
+(`event=tool_process_groups_outlived_kill`); uninterruptible kernel work can
+delay its exit. A tool call still running after the wait is logged
+(`event=tool_work_outlived_turn`) and the stop goes ahead; it can only be work
+the supervisor cannot end, such as an HTTP request or OpenShell sandbox
+creation, or a process that moved itself into a new session or group and still
+holds its command's output open. Such a process that closed its output is not
+seen at all. In OpenShell mode the supervisor ends the local
+`openshell sandbox exec` client; whether that ends the command inside the
+sandbox has not yet been verified.
 
 Who a task works for is signed, not claimed. The gateway signs a task context
 (Ed25519) naming the person and their current team roles when it admits a
@@ -1095,7 +1300,14 @@ grant moves to the new one (`AccessRepository._replace_in`, a `grant_moved`
 event), so replacing never cuts off a worker; this relaxes "grants are
 immutable" for `parent_grant_id` only. A grant an existing one covers is not
 stored. Grants neither covers stay side by side (lasting access plus a step-up
-for one task). Removing access removes the whole entry
+for one task). The plan runs after the store's write lock is taken
+(`AccessRepository.store_planned`, `approve_pending`, `apply_together`), so of
+two grants stored at once the second sees the first: before 2026-10-17 two
+first calls of one tool in one request could both store a task grant, and a
+tool grant stored with its tool set could stay as a separate entry that
+removing the set left working. A person's decision stores its grants and its
+outcome in one transaction, so a grant it replaces ends only if the outcome is
+stored (see "Each request is decided once" below). Removing access removes the whole entry
 (`AccessService.revoke_by_person`, `AccessRequests.revoke`, proposals'
 removals). Why: people saw several independent grants for one tool, assumed the
 broadest replaced the others, and removing one could leave another working.
@@ -1175,6 +1387,113 @@ and TeamLead's own requests a box that lets it hand the access on to workers
 without asking. Chat buttons, which have no checkboxes, offer the same choices
 as separate buttons (`assistant_gateway/application/access_reviews.py`).
 
+Each request is decided once (`AccessRequests.decide`). A person's decision
+stores its grants and its outcome in one transaction
+(`AccessRepository.decision_transaction`): it takes the access store's write
+lock, checks that the request still waits, and everything the decision then
+does on the store in that thread joins the transaction, so its authority
+checks see the grants it stored a moment ago. Only the thread that opened the
+transaction joins it: work handed to another thread, even with a copied
+context (`asyncio.to_thread`), opens its own connection and sees only what was
+committed. Other writers see none of the decision's grants until the outcome
+is stored with them, and log lines about what the decision replaced are
+written only after it commits (`AccessRepository.after_commit`). A second decision made at the same
+moment (a double click, a chat button and the web card, two reviewers,
+`assistant_cli access decide`), a withdrawal (the task ended, or its person
+left), or another writer (a person giving access on the Access page, a
+worker's request that trusted code may hand down) waits for the lock and then
+works on what was committed: the second decision finds the request decided.
+A decision that fails, or cannot get the lock, stores nothing, so there is
+nothing to take back and no access in force for a request that still waits;
+replacing narrower access (one entry per tool) happens in the same
+transaction. When the database was busy or could not be reached, the person
+is told so in plain words ("Nothing was changed; try again") and the failure
+is logged as `event=access_decision_failed` with the request and the
+reviewer; it first reads the request back, because a lost PostgreSQL commit
+answer may hide an outcome that was stored. A denied or withdrawn request denies its hand-downs still
+waiting for approval in the same transaction; only a granted outcome keeps
+the hand-downs it approved in place.
+
+Changes applied at the decision (proposals, file deliveries) also do work
+outside the database: downloads, tool files, MCP records, a copied file. They
+first claim the request (`AccessRepository.claim_decision`, a short-lived row
+in `access_request_claims` with an owner and a time limit,
+`DECISION_CLAIM_SECONDS`), do that work, and store their grants and outcome
+together (`apply_together`, `finish_request`) only while the claim holds; any
+other decision is refused while the claim is current ("Someone is deciding
+this request right now"). The claim is renewed before and after each program
+download, and a download stops after `DOWNLOAD_DEADLINE_SECONDS` measured from
+connecting to its last byte (redirects, TLS and headers included; a timer
+shuts a duplicate of the transport down, because the HTTP client detaches
+its socket after headers and a socket timeout bounds one read only, and
+the deadline is checked again after each host name lookup, which nothing can
+interrupt, so a slow lookup overruns by its own length at most). So
+a claim runs out only when a step stalls past its limit or the process ends.
+The gateway first reconciles any recorded effects; then another decision may
+take over. The stalled decision finds its claim lost at its next renewal or
+when storing its outcome, and stores nothing. Cleanup
+reads the outcome and claim under the access store's write lock, so a new
+decision cannot take over between that check and removing local files. A
+losing decision keeps programs another decision may use regardless of the
+exception type, including a failed renewal that reports a database error.
+
+Before doing external work, each applier stores a transient recovery record
+in `access_decision_recoveries`: the expected decision and its effects list.
+Before writing each file's bytes, it records the relative path, file identity,
+expected size and content digest. Tool definitions stay in a hidden staging
+file until complete, then are published without replacing an existing file.
+MCP activation rechecks the claim under the cleanup lock after journaling,
+so a paused approval cannot activate a server after recovery releases it.
+A confirmed rollback removes only files still matching that ownership record;
+a replacement or edited file is kept and logged. Failed cleanup retains the
+record for another pass. A lost
+PostgreSQL commit answer may hide a committed outcome, so a failed readback
+is an unknown result and never authorizes cleanup. The person is told to
+check the Inbox when the store returns, rather than told nothing changed.
+The files, claim and recovery record stay. After the claim period, Inbox
+maintenance rereads the latest effects, outcome and claim under the store
+lock, even after a gateway restart. Claim renewal also postpones recovery,
+so an old maintenance scan cannot clean up a live download. Committed work stays, an
+uncommitted delivery is removed, an uncommitted proposal is undone, and a
+committed move finishes removing its unchanged original. Delivery notices
+use a request-derived id so recovery cannot store duplicate notices.
+Unresolved recovery records prevent another decision from taking over and
+prevent an access transfer export until the gateway has reconciled them.
+They never travel in a transfer. The journal makes cleanup retryable across
+database failures; filesystem changes are still separate from the database
+transaction.
+
+A grant that carries the approval id of a request that was not granted is
+never kept in force: none can be written now, but an older version stored a
+decision's grants before its outcome and could leave them behind when it
+stopped in between. The gateway's Inbox pass ends such grants
+(`end_grants_without_granted_outcome`, found by the indexed
+`access_grants.approval_id` column), a decision ends those carrying its own
+request's id before it writes anything (so a decision made before the first
+Inbox pass cannot make one permanent), and the team transfer leaves them
+behind.
+Existing stores get the `approval_id` column added and filled from each
+grant's record at their first open, in one transaction.
+
+Rationale (2026-10-17 concurrency audit and its two reviews): grants and the
+outcome were separate transactions, so a lost race revoked the winner's
+grants and access in force before the request, a failed approval left access
+in force that a later Deny did not remove, and between the grants and the
+outcome other writers already relied on an undecided grant (a person's own
+grant was answered "already covered", a worker's request was handed down
+from it) and lost that when the decision failed. A first fix with claims,
+undo and postponed replacements still left that window; one transaction
+removes it at the root. It became possible once every read a decision makes
+goes through the store's joined transaction, and the evaluator (Cedar) only
+computes over the data it is given and never waits for the store while
+holding its own lock, so holding the store's lock across a decision cannot
+deadlock; a decision holds it for the time of a few evaluations. The claim is
+a separate transient table rather than a new request status, so readers of
+waiting requests are unchanged and the team transfer, which never carries
+access requests, is unaffected; the approval id column is filled from each
+grant's record (`GrantV1.approval_id`), which is how grants travel, so the
+transfer format does not change either.
+
 When nobody can hand the access on, or a service is missing from the tool
 catalog, TeamLead proposes the whole change with `propose_access_change`
 (`custom_tools/providers/access_proposals.py`, catalog `fn:access_proposals`):
@@ -1200,9 +1519,15 @@ plan, compares its digest with the one reviewed, writes any new tool file to
 `control/access/tools/` from the typed item (`access_catalog/instance_tools.py`,
 only `http:*` tools), reloads the catalog, and stores grants, blocks, data
 folders, revocations and the request outcome in one transaction
-(`AccessRepository.apply_together`); if that fails the tool files are removed,
-so nothing is half applied. A tool with no grants gives nobody anything, which
-is why writing its file first is safe. Afterwards the gateway opens the broker's
+(`AccessRepository.apply_together`) under the decision's claim; if anything
+fails, including a busy database, the tool files, downloaded programs and MCP
+servers it wrote are taken back, so nothing is half applied. Because the claim
+is held from before the first file is written and renewed around each
+download, a second approval of the same proposal is refused while the first
+works; if the first stalls past its limit and the second takes over, the
+first keeps the programs the second may rely on (see "Each request is decided
+once"). A tool with no
+grants gives nobody anything, which is why writing its file first is safe. Afterwards the gateway opens the broker's
 account link form for the approver, watches it with the tool setup watcher
 (`GatewayToolSetups.after_proposal_links`), and holds the decision message to
 the waiting task until every form ended; the resumed `propose_access_change`
@@ -1412,7 +1737,13 @@ person types, through the broker's own store path (`collect_credential`, in the
 team's collection for a team link and the person's for their own), and links it
 in the same submission, so one form finishes the job. A new credential gets a
 key made from the tool and owner and a number when that key is taken, so it
-never replaces a stored credential. The form's **Used by** line is read by the
+never replaces a stored credential. One link per tool and owner is active:
+creating one reads and revokes the earlier link in the same transaction, and a
+partial unique index refuses a second active link. A store that held two from
+before the index (two forms finished at once) keeps the newest, the one in use,
+and revokes the older at the first start, logging
+`event=account_link_duplicate_revoked`; otherwise unlinking the newest would
+have put the older credential back in use. The form's **Used by** line is read by the
 broker from the grant store it already holds (agent-side grants in force that
 reach the tool for the owner's work). It is shown for information only, and the
 access service still decides every call. The broker reads it itself rather than
@@ -2234,8 +2565,12 @@ known to one process.
 ### Knowledge page
 
 People read and write the knowledge base from Web Chat (`/webchat?view=knowledge`,
-`knowledge_page.mjs`): Team and Personal lists with search and a Current pages /
-Archived pages filter, a page with its links
+`knowledge_page.mjs`): Team and Personal open their ordinary `home` article as
+an editable wiki landing page. Home is a page convention, not a separate
+setting or stored navigation tree, so normal ownership, revision checks,
+content review and transfer behavior apply. A missing Home offers explicit
+creation and browsing; reading never creates it. **All pages** reveals the
+searchable directory with a Current pages / Archived pages filter, and a page with its links
 in, open notes and history, an editor, revert and archive, and **My proposals**
 (the person's own pending team contributions, published or withdrawn by them).
 `GET /api/web-chat/knowledge/counts` answers only how many proposals wait for
@@ -2281,6 +2616,30 @@ publication copies the current page fields and changes only its status, with the
 same optimistic revision check as other writes. Archive proposals therefore have
 no edit option. The browser retains the displayed page's full space and slug for
 Refresh, and discards replies from a previous view or signed-in session.
+
+The directory reads at most 20 rows per request. Rows retain their full height
+inside one scrolling pane; the shared pagination controls and visible range
+stay in a separate footer. This avoids CSS grid compressing and clipping the
+list while its parent reports no overflow. When a removal empties the last
+page, the browser reads the last remaining page. The Home reader occupies the
+full width until the person opens All pages; proposals keep their list visible.
+`knowledge_navigation.mjs` reads and builds article addresses, including a full
+space/page reference and optional revision. Browser Back/Forward and reload
+read through the existing gateway routes. Creating an article adds a history
+entry; editing keeps that entry. A successful revert replaces the historical
+address with the current article, so reload opens the new current revision.
+Addresses convey no authority and
+personal always means the signed-in person's own space. A linked team article
+can be read while the Personal directory stays selected. Sign-out clears the
+article address and stops history navigation from fetching until sign-in.
+
+Every Web Chat module, including nested imports such as
+`knowledge_navigation.mjs`, belongs in `WEB_CHAT_MODULE_ASSETS` in
+`interactive_apps/website_support.py`. That registry supplies both public asset
+routes and the shell's content revision. A missing entry stops the browser's
+entire module load before sign-in can start, even when the independent background
+animation still runs. The operator UI HTTP test follows nested imports and
+checks that each file is served with `Cache-Control: no-store`.
 
 ## Deployment and observability
 
@@ -2408,8 +2767,10 @@ inspect | review | import | import-credentials | finish-import`; guide:
   new gateway key. Later batches require its receipt and the exact same signed
   export. Imported identities are skipped and existing destination records
   kept. Account links match by team, owner and tool, since a newer link has a
-  new ID; all active destination chat bindings, including removed people's,
-  participate in collision checks through a separate read-only identity query.
+  new ID; a file holding two for one tool and owner (from a store before the
+  one-active-link index) has the older refused with the newer named. All
+  active destination chat bindings, including removed people's, participate in
+  collision checks through a separate read-only identity query.
   Noncredential batches hold an import lock and the supervisor's run lock;
   broker batches hold the import lock while the runtime runs. The process config
   loader checks the unfinished marker for every entry point. Failed later

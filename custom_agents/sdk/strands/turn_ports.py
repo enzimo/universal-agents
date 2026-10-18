@@ -14,6 +14,7 @@ from custom_agents.task_records import TaskInfo
 from custom_agents.task_operation_runtime import TaskOperationRuntime
 from custom_agents.task_runtime_state import TurnStartNotes
 from custom_agents.tool_call_limits import ToolCallLimitExceeded
+from custom_tools.tool_stop import ToolStop
 from custom_messages.contracts.envelope_v1 import (
     CommsMessage,
     ContentType,
@@ -180,7 +181,9 @@ class SendRuntimePauseQueryOperation(Protocol):
 
 
 class SetActiveExecutionContextOperation(Protocol):
-    def __call__(self, task_id: Optional[str]) -> None: ...
+    """Mark the current task as the running turn; returns the turn's new ToolStop."""
+
+    def __call__(self, task_id: Optional[str]) -> ToolStop: ...
 
 
 class SelectTurnModelOperation(Protocol):

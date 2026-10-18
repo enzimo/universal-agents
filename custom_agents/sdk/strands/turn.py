@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError
 
+import asyncio
 import hashlib
 import mimetypes
 import sys
@@ -15,6 +16,11 @@ from strands import Agent
 from custom_agents.context_engine import ContextEngine
 from custom_agents.model_turn import TurnDecisionOutcome
 from custom_agents.task_operation_runtime import TaskOperationRuntime
+from custom_agents.sdk.strands.turn_tool_stop import (
+    TURN_CANCELLED_REASON,
+    invoke_with_tool_stop,
+    stop_tool_calls,
+)
 from custom_agents.task_runtime_state import TurnStartNotes
 from custom_agents.sdk.strands.turn_ports import (
     TurnRuntimeSettings,
@@ -78,6 +84,7 @@ from custom_agents.structured_llm_messages import (
     ModelAgentTurnDecision,
     ModelWorkerTurnDecision,
 )
+from custom_tools.tool_stop import ToolStop
 from custom_agents.tool_call_limits import (
     ToolCallLimitExceeded,
     ToolCallLimitCallbackHandler,
@@ -150,6 +157,7 @@ async def _finalize_objective_work_invocation(
     tool_call_limit_handler: Optional[ToolCallLimitCallbackHandler],
     msg_content: ContentType,
     active_task_id: Optional[str],
+    tool_stop: ToolStop,
 ) -> Optional[Task]:
     """Account one bounded invocation and produce a durable-yield response if needed."""
     usage, cycles = _objective_work_invocation_usage(result)
@@ -244,9 +252,12 @@ async def _finalize_objective_work_invocation(
             "OODA continuation state you can establish. Do not call any other tool."
         )
         try:
-            checkpoint_result = await model.invoke_async(
+            checkpoint_result = await invoke_with_tool_stop(
+                model,
                 checkpoint_prompt,
-                **checkpoint_kwargs,
+                tool_stop=tool_stop,
+                invoke_kwargs=checkpoint_kwargs,
+                logger=logger,
             )
             checkpoint_usage, checkpoint_cycles = _objective_work_invocation_usage(
                 checkpoint_result
@@ -594,6 +605,8 @@ class _TurnState:
     provider_retry_attempt: int = field(init=False)
     strands_invocation_attempt: int = field(init=False)
     reasoning_summary_repair_attempted: bool = field(init=False)
+    # The turn's stop for its tool commands, from set_active_execution_context.
+    tool_stop: ToolStop | None = None
     # What the turn read for itself at its start (TurnStartNotes). The outbox
     # releases it with the decision's batch, an approval pause hands it to the
     # interrupted session, and any other returned result releases it at return.
@@ -638,6 +651,23 @@ class LLMTurnExecutor:
         if model is None:
             raise RuntimeError("LLM turn requires an initialized Strands agent.")
         return model
+
+    async def _end_tool_work_of_cancelled_turn(self, turn: _TurnState) -> None:
+        """End the turn's tool work, wherever the stop landed.
+
+        A stop can land after the model call returned (the late-guidance
+        check, applying the result, a retry wait), where the invocation no
+        longer ends the turn's tool work. Doing it twice is harmless.
+        """
+
+        if turn.tool_stop is not None:
+            await stop_tool_calls(turn.tool_stop, self.logger, reason=TURN_CANCELLED_REASON)
+
+    @staticmethod
+    def _require_tool_stop(turn: _TurnState) -> ToolStop:
+        if turn.tool_stop is None:
+            raise RuntimeError("LLM turn requires the ToolStop set with its execution context.")
+        return turn.tool_stop
 
     def _require_context(self) -> ContextEngine:
         context = self.context()
@@ -1892,10 +1922,16 @@ class LLMTurnExecutor:
             # A turn that pauses before the model runs gives back a person's model too.
             self.effects.clear_active_execution_context()
             return early_response
-        content = await self._run_invocation(turn)
-        if not turn.start_notes_handed_over:
-            await self._release_turn_start_state(turn)
-        return content
+        try:
+            content = await self._run_prepared_turn(turn)
+            if not turn.start_notes_handed_over:
+                await self._release_turn_start_state(turn)
+            return content
+        except asyncio.CancelledError:
+            await self._end_tool_work_of_cancelled_turn(turn)
+            raise
+        finally:
+            self.effects.clear_active_execution_context()
 
     async def _release_turn_start_state(self, turn: _TurnState) -> None:
         """Release what this turn read, for a result saved outside the outbox.
@@ -1919,7 +1955,9 @@ class LLMTurnExecutor:
                 turn.active_task_id,
             )
 
-    async def _run_invocation(self, turn: _TurnState) -> ContentType:
+    async def _run_prepared_turn(self, turn: _TurnState) -> ContentType:
+        """Run and recover inside the cancellation owner, including error-handler awaits."""
+
         try:
             await self._prepare_invocation(turn)
             await self._invoke_model(turn)
@@ -2089,9 +2127,6 @@ class LLMTurnExecutor:
                 )
             self.logger.exception(f"[{self.settings.id}] Error in LLM interaction: {e}")
             raise
-        finally:
-            self.effects.clear_active_execution_context()
-
     async def _finish_checkpointed_work_session(
         self, content: ContentType, header: MessageHeader, meta: MessageMeta,
     ) -> ContentType | None:
@@ -2247,7 +2282,7 @@ class LLMTurnExecutor:
         self.logger.info(
             f"[{self.settings.id}] Invoking Strands Agent with prompt length: {len(turn.full_prompt)} chars"
         )
-        self.effects.set_active_execution_context(turn.active_task_id)
+        turn.tool_stop = self.effects.set_active_execution_context(turn.active_task_id)
         return None
 
     async def _prepare_invocation(self, turn: _TurnState) -> None:
@@ -2431,8 +2466,12 @@ class LLMTurnExecutor:
                         strands_prompt_input=strands_prompt_input,
                         attempt=turn.strands_invocation_attempt,
                     )
-                    turn.result = await self._require_model().invoke_async(
-                        strands_prompt_input, **turn.invoke_kwargs
+                    turn.result = await invoke_with_tool_stop(
+                        self._require_model(),
+                        strands_prompt_input,
+                        tool_stop=self._require_tool_stop(turn),
+                        invoke_kwargs=turn.invoke_kwargs,
+                        logger=self.logger,
                     )
                     late_guidance = (
                         await self.effects.consume_pending_proactive_guidance_message(
@@ -2469,6 +2508,11 @@ class LLMTurnExecutor:
     async def _recover_invocation(
         self, turn: _TurnState, invoke_error: Exception
     ) -> None:
+        if turn.tool_stop is not None and turn.tool_stop.is_requested():
+            # The failed invocation's commands were stopped (turn_tool_stop):
+            # its tool work was cut short, and a set stop would cancel any new
+            # invocation at once, so the turn is not run again inline.
+            raise invoke_error
         if (
             not turn.reasoning_summary_repair_attempted
             and is_unsupported_reasoning_summary_error(
@@ -2688,6 +2732,7 @@ class LLMTurnExecutor:
                 tool_call_limit_handler=turn.tool_call_limit_handler,
                 msg_content=turn.msg_content,
                 active_task_id=turn.active_task_id,
+                tool_stop=self._require_tool_stop(turn),
             )
             if work_yield_response is not None:
                 return work_yield_response

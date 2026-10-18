@@ -40,7 +40,6 @@ from custom_agents.schedule_fields import (
     parse_schedule_bool,
     parse_schedule_json_object,
     schedule_memory_now,
-    trim_schedule_memory_ledger,
 )
 from access_control.ownership import PRIVATE_READ, PRIVATE_UPDATE, system_work_schedule_access
 from custom_agents.access_runtime import agent_principal, verified_task_context
@@ -49,7 +48,12 @@ from custom_agents.schedule_observations import (
     SCHEDULE_FAILURE_OUTCOMES,
     record_run_observation,
 )
-from custom_agents.schedule_store import ScheduleStore
+from custom_agents.schedule_store import (
+    OwnerGuard,
+    ScheduleStore,
+    ScheduleWriteConflict,
+    owner_canonical_user_id_for_schedule,
+)
 from custom_agents.system_schedule_changes import change_schedule
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import (
@@ -188,7 +192,7 @@ def _run_change(agent: "UniversalAgent", request: ScheduleChangeRequestV1, *, ac
     flag = RESULT_FLAGS[request.action]
     try:
         result = change_schedule(agent, request)
-    except SystemScheduleMutationDenied as exc:
+    except (SystemScheduleMutationDenied, ScheduleWriteConflict) as exc:
         return json.dumps(
             {"schedule_id": request.schedule_id, flag: False, "error": str(exc), "reason_code": exc.reason_code}
         )
@@ -246,32 +250,6 @@ def _apply_schedule_state_update(
         memory.state.last_changed_at = observed_at or schedule_memory_now()
         changes["state.last_changed_at"] = memory.state.last_changed_at
     return changes
-
-
-def _remaining_count_for_schedule(store: ScheduleStore, schedule_id: str) -> Any:
-    return next(
-        (
-            row.get("remaining_count")
-            for row in store.get_all()
-            if row.get("schedule_id") == schedule_id
-        ),
-        None,
-    )
-
-
-def _persist_schedule_memory(
-    store: ScheduleStore,
-    scheduled_message: ScheduledMessage,
-) -> None:
-    if scheduled_message.schedule_memory is not None:
-        scheduled_message.schedule_memory.updated_at = schedule_memory_now()
-        trim_schedule_memory_ledger(scheduled_message.schedule_memory)
-    store.add(
-        scheduled_message,
-        remaining_count_override=_remaining_count_for_schedule(
-            store, scheduled_message.schedule_id
-        ),
-    )
 
 
 def _resolve_active_schedule_id(agent: "UniversalAgent", schedule_id: str = "") -> str:
@@ -819,7 +797,8 @@ def update_scheduled_job(
     switches the schedule to a fixed interval, while `cron_expression` switches it to
     cron, read in the schedule's time zone (the person's own unless `cron_timezone`,
     an IANA name, sets another). `repeat_count=-1` leaves repeat count unchanged, `0` makes recurring jobs
-    infinite, and positive values set a finite remaining policy. Expiration is never
+    infinite, and positive values set a finite remaining policy. A one-time job (no interval or cron)
+    always runs once: `0` keeps it at one run and more than one is refused. Expiration is never
     inferred; provide `expires_at_utc` explicitly or `clear_expiration=True`.
     Schedule memory is a compact recurring-task policy/state/ledger envelope.
     Use `notify` with one of "on_change", "always", or "never" to persist
@@ -906,51 +885,62 @@ def record_scheduled_run(
             return json.dumps(denial)
         assert scheduled_message is not None
 
-        if scheduled_message.schedule_memory is None:
-            scheduled_message.schedule_memory = ScheduleTaskMemory()
-        memory = scheduled_message.schedule_memory
         now = schedule_memory_now()
         normalized_outcome = str(outcome or "success").strip().lower() or "success"
         if normalized_outcome == "failed":
             normalized_outcome = "failure"
         material_change = bool(state_changed or normalized_outcome == "changed")
         failure = normalized_outcome in SCHEDULE_FAILURE_OUTCOMES
-
         parsed_notify_on_failure = parse_schedule_bool(
             notify_on_failure, field_name="notify_on_failure"
         )
-        policy_changes = apply_schedule_policy_update(
-            memory,
-            policy_json=policy_json,
-            notify=notify,
-            evidence_required=evidence_required,
-            notify_on_failure=parsed_notify_on_failure,
+        evidence = parse_schedule_json_object(
+            evidence_json, field_name="evidence_json"
         )
-        state_changes = {}
-        if (
+        update_state = bool(
             not failure
             or state_json.strip()
             or domain_state_json.strip()
             or state_summary.strip()
-        ):
-            state_changes = _apply_schedule_state_update(
+        )
+
+        def record(memory: ScheduleTaskMemory) -> dict[str, Any]:
+            # Runs on the run notes as stored now, inside the store's write
+            # transaction, so a concurrent change to the schedule is never undone.
+            policy_changes = apply_schedule_policy_update(
                 memory,
-                state_json=state_json,
-                domain_state_json=domain_state_json,
-                state_summary=state_summary,
-                state_changed=material_change,
-                observed_at=now,
+                policy_json=policy_json,
+                notify=notify,
+                evidence_required=evidence_required,
+                notify_on_failure=parsed_notify_on_failure,
             )
+            state_changes = (
+                _apply_schedule_state_update(
+                    memory,
+                    state_json=state_json,
+                    domain_state_json=domain_state_json,
+                    state_summary=state_summary,
+                    state_changed=material_change,
+                    observed_at=now,
+                )
+                if update_state
+                else {}
+            )
+            should_notify = record_run_observation(
+                memory, outcome=normalized_outcome, state_changed=material_change,
+                summary=state_summary, evidence=evidence, error=error_text, at=now,
+            )
+            return {"memory": memory, "policy_changes": policy_changes, "state_changes": state_changes, "should_notify": should_notify}
 
-        evidence = parse_schedule_json_object(
-            evidence_json, field_name="evidence_json"
+        recorded = store.edit_schedule_memory(
+            resolved_schedule_id,
+            record,
+            owner_guard=OwnerGuard(owner_canonical_user_id_for_schedule(scheduled_message)),
         )
-        should_notify = record_run_observation(
-            memory, outcome=normalized_outcome, state_changed=material_change,
-            summary=state_summary, evidence=evidence, error=error_text, at=now,
-        )
-
-        _persist_schedule_memory(store, scheduled_message)
+        if recorded is None:
+            return json.dumps({"schedule_id": resolved_schedule_id, "recorded": False, "error": SCHEDULE_NOT_FOUND})
+        memory = recorded["memory"]
+        should_notify = recorded["should_notify"]
         return json.dumps(
             {
                 "schedule_id": resolved_schedule_id,
@@ -960,8 +950,8 @@ def record_scheduled_run(
                 "should_notify": should_notify,
                 "notify": memory.policy.notify,
                 "notify_on_failure": memory.policy.notify_on_failure,
-                "policy_changes": policy_changes,
-                "state_changes": state_changes,
+                "policy_changes": recorded["policy_changes"],
+                "state_changes": recorded["state_changes"],
                 "schedule_memory": memory.model_dump(mode="json"),
                 "next_step": (
                     "Call notify_user if a user-facing notification is still appropriate."
@@ -971,6 +961,8 @@ def record_scheduled_run(
             },
             default=str,
         )
+    except ScheduleWriteConflict as exc:
+        return json.dumps({"schedule_id": exc.schedule_id, "recorded": False, "error": str(exc), "reason_code": exc.reason_code})
     except Exception as exc:
         return json.dumps({"error": str(exc)})
 

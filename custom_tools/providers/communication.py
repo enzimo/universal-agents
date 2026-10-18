@@ -55,10 +55,8 @@ from custom_tools.providers._runtime import (
     _schedule_store,
 )
 from custom_agents.schedule_fields import schedule_memory_now
-from custom_tools.providers.schedules import (
-    _persist_schedule_memory,
-    _resolve_active_schedule_id,
-)
+from custom_agents.schedule_store import OwnerGuard, owner_canonical_user_id_for_schedule
+from custom_tools.providers.schedules import _owned_or_denial, _resolve_active_schedule_id
 
 _MEMORY_NOTIFICATION_REASON_MARKERS = (
     "memory",
@@ -581,28 +579,35 @@ def _record_schedule_notification_if_active(
         return {"recorded": False, "reason": "no_active_schedule"}
     try:
         store = _schedule_store(agent)
-        scheduled_message = store.get_scheduled_message(schedule_id)
-        if scheduled_message is None:
+        # The same check as record_scheduled_run: the person's own schedule, or
+        # in system work only the schedule its signed context names.
+        scheduled_message, denial = _owned_or_denial(agent, store, schedule_id, flag="recorded")
+        if denial is not None or scheduled_message is None:
+            return {"recorded": False, "reason": "schedule_not_recordable", "schedule_id": schedule_id}
+        summary = _compact_notify_user_message(message)
+
+        def record(memory: ScheduleTaskMemory) -> bool:
+            # Runs on the run notes as stored now, inside the store's write transaction.
+            now = schedule_memory_now()
+            memory.ledger.total_notifications += 1
+            memory.ledger.last_notification_at = now
+            memory.ledger.recent_notifications.append(
+                {
+                    "at": now,
+                    "notification_id": notification_id,
+                    "reason": str(reason or "").strip() or None,
+                    "summary": summary,
+                }
+            )
+            return True
+
+        owner_guard = OwnerGuard(owner_canonical_user_id_for_schedule(scheduled_message))
+        if store.edit_schedule_memory(schedule_id, record, owner_guard=owner_guard) is None:
             return {
                 "recorded": False,
                 "reason": "schedule_not_found",
                 "schedule_id": schedule_id,
             }
-        if scheduled_message.schedule_memory is None:
-            scheduled_message.schedule_memory = ScheduleTaskMemory()
-        memory = scheduled_message.schedule_memory
-        now = schedule_memory_now()
-        memory.ledger.total_notifications += 1
-        memory.ledger.last_notification_at = now
-        memory.ledger.recent_notifications.append(
-            {
-                "at": now,
-                "notification_id": notification_id,
-                "reason": str(reason or "").strip() or None,
-                "summary": _compact_notify_user_message(message),
-            }
-        )
-        _persist_schedule_memory(store, scheduled_message)
         return {"recorded": True, "schedule_id": schedule_id}
     except Exception as exc:
         logger.warning(
