@@ -42,6 +42,12 @@ After upgrading to a release with this check, each agent's first start may log o
 releases left records of finished tasks in saved snapshots; they are dropped when
 the snapshot is read. No action is needed.
 
+Going back to an earlier release is not supported while agents hold unfinished
+work. This release records an action the runtime held back (for example an answer
+kept for a final review) with the outbox status `held_back`, which earlier releases
+do not know: they refuse a saved snapshot that contains it, so that agent cannot
+restore its work. Finish or abandon in-flight work before downgrading.
+
 The active task snapshot layout now uses strict version-3 records and does not read
 the previous monolithic layout. Before deploying this change, finish or explicitly
 abandon in-flight work and stop affected runtimes. Back up the database before

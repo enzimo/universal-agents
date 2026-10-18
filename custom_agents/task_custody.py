@@ -23,9 +23,10 @@ An agent receiving a task that someone else holds:
 
 The takeover is a compare-and-set on the judged-gone holder in the
 admission's save, so a racing recovery or a second copy cannot both win; the
-loser drops its copy. A holder that released the task meanwhile was alive
-after all: a copy the lead re-sent after that holder's handback is admitted
-as a free task; any other copy is dropped, and no fresh row is claimed for it
+loser drops its copy. The same transaction reads the finished-task archive.
+A holder that released or finished the task meanwhile was alive after all: a
+copy the lead re-sent after that holder's handback is admitted as a free
+task; any other copy is dropped, and no fresh row is claimed for it
 (``task_message_runtime``). A holder wrongly judged gone that is still
 running finds the task taken at its next save and drops it
 (``custom_agents.custody_loss``).

@@ -165,6 +165,9 @@ class TaskManager(
         self._task_terminal_callbacks: list[
             Callable[[str, ProgressState, str], None]
         ] = []
+        # Called for a task another agent took over, before it is dropped
+        # (``add_task_release_callback``).
+        self._task_release_callbacks: list[Callable[[str], None]] = []
         self._db_path = (
             storage_settings.sqlite_path
             if storage_settings and storage_settings.sqlite_path
@@ -353,6 +356,7 @@ class TaskManager(
                 emit_activity=self._emit_activity,
                 ensure_task_plan_link=self._ensure_task_plan_link,
                 forget_task=self._forget_task,
+                notify_task_released=self._run_task_release_callbacks,
                 objectives_enabled=self._objectives_enabled,
                 plans_enabled=self._plans_enabled,
                 sync_plan_from_task=self._sync_plan_from_task,
@@ -3658,6 +3662,29 @@ class TaskManager(
 
         if callback not in self._task_terminal_callbacks:
             self._task_terminal_callbacks.append(callback)
+
+    def add_task_release_callback(self, callback: Callable[[str], None]) -> None:
+        """Register one in-process cleanup callback for a task another agent took over.
+
+        It runs on the task lane before the task is dropped, so the task's
+        pending subtasks and waits can still be read. The task does not end:
+        its new holder runs it, so nothing may record an outcome or a
+        cancellation for the task itself (``RuntimeSnapshotCoordinator._release_taken_tasks``).
+        """
+
+        if callback not in self._task_release_callbacks:
+            self._task_release_callbacks.append(callback)
+
+    def _run_task_release_callbacks(self, task_id: str) -> None:
+        for callback in tuple(self._task_release_callbacks):
+            try:
+                callback(task_id)
+            except Exception:
+                # The task is still dropped: its new holder runs it.
+                self._logger.exception(
+                    "Task release callback failed. event=task_release_callback_failed task_id=%s",
+                    task_id,
+                )
 
     def get_task_from_db(
         self,

@@ -13,8 +13,9 @@ row names the agent whose saved work last claimed the task:
 
 - a task entering an owner's snapshot claims its row; a row held by another
   agent refuses the save (``TaskCustodyConflict``) unless the caller names
-  that holder as the one it takes over from (compare-and-set on that holder;
-  a row the holder released meanwhile is never claimed afresh,
+  that holder as the one it takes over from (compare-and-set on that holder,
+  plus a read of the finished-task archive in the same transaction; a row the
+  holder released, or a task it finished, meanwhile is never claimed afresh,
   ``TaskCustodyReleased``);
 - a task that stays in the snapshot but whose row another agent took over
   refuses the save (``TaskCustodyTakenOver``) before anything is written; the
@@ -46,7 +47,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
-from storage.sql_dialect import SqlDialect
+from storage.sql_dialect import POSTGRES, SqlDialect
 
 CUSTODY_TABLE = "runtime_task_custody"
 
@@ -61,7 +62,7 @@ class TaskCustodyConflict(RuntimeError):
 
 
 class TaskCustodyReleased(TaskCustodyConflict):
-    """The holder a takeover named released the task before the takeover's save.
+    """The holder a takeover named released or finished the task before the takeover's save.
 
     It finished the task, handed it back or dropped it, so it was alive after
     all. The takeover never claims a fresh row for such a task: the admitting
@@ -199,7 +200,11 @@ def _take_over(
     A row that is gone means the holder released the task meanwhile (it was
     alive after all): nothing is inserted, ``TaskCustodyReleased``. Before
     2026-10-17 the claim inserted a new row first, so a copy was admitted
-    after its holder had finished the task.
+    after its holder had finished the task. A task in the finished-task
+    archive is refused the same way, read after the update in this
+    transaction: the holder archives before its save releases the row, so a
+    holder that finished between the admission's archive read and this save
+    is caught too.
     """
 
     bind = dialect.bind
@@ -210,12 +215,47 @@ def _take_over(
         (owner_agent_id, owner_named_agent_type, _now(), team_id, task_id, takeover.from_holder_agent_id),
     )
     if moved.rowcount == 1:
+        if finished_by_team(conn, dialect, team_id=team_id, task_id=task_id):
+            # The holder archived the task after the admission read the archive,
+            # and has not saved its release yet: it was alive and finished it.
+            raise TaskCustodyReleased(task_id, takeover.from_holder_agent_id)
         return
     row = read_rows(conn, dialect, team_id, [task_id]).get(task_id)
     if row is None:
         raise TaskCustodyReleased(task_id, takeover.from_holder_agent_id)
     if row.holder_agent_id != owner_agent_id:
         raise TaskCustodyConflict(task_id, row.holder_agent_id)
+
+
+# The finished-task archive (``storage.task_archive_repository``) lives in the
+# same database as the snapshots: both repositories are built from the same
+# storage settings. A takeover reads it inside its own transaction; this is
+# the one place custody reads another repository's table (intentional coupling).
+ARCHIVE_TABLE = "completed_tasks"
+
+
+def finished_by_team(conn: Any, dialect: SqlDialect, *, team_id: str, task_id: str) -> bool:
+    """Whether any agent of the team archived the task, read in the caller's transaction.
+
+    A holder archives a task before its save releases custody. Read after the
+    takeover's compare-and-set, this closes the gap between the admission's
+    own archive read and its save (2026-10-17). A database without the archive
+    table (a store used on its own) has no finished tasks.
+    """
+
+    bind = dialect.bind
+    if dialect == POSTGRES:
+        exists = conn.execute("SELECT to_regclass(%s)", (ARCHIVE_TABLE,)).fetchone()[0] is not None
+    else:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (ARCHIVE_TABLE,)
+        ).fetchone() is not None
+    if not exists:
+        return False
+    return conn.execute(
+        f"SELECT 1 FROM {ARCHIVE_TABLE} WHERE task_id = {bind} AND team_id = {bind} LIMIT 1",
+        (task_id, team_id),
+    ).fetchone() is not None
 
 
 def taken_over(
@@ -320,6 +360,7 @@ __all__ = [
     "TaskCustodyTakenOver",
     "TaskCustodyTakeover",
     "claim_entering",
+    "finished_by_team",
     "ensure_schema",
     "executed_task_ids",
     "read_rows",

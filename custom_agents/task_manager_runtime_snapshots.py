@@ -122,13 +122,17 @@ class RuntimeSnapshotCoordinator:
         """Drop tasks another agent took over, without saving, ending or replying.
 
         That agent judged this one gone and admitted a copy (2026-10-17); it
-        runs the task and answers. Each pass drops at least one task, so the
-        save that follows ends.
+        runs the task again from the start and answers. Before each task is
+        dropped, the release callbacks stop the work it delegated and withdraw
+        the access requests it waited on (``TaskManager.add_task_release_callback``):
+        the new holder delegates and asks again for itself. Each pass drops at
+        least one task, so the save that follows ends.
         """
         released = tuple(sorted(task_id for task_id in taken.holders if task_id in self.task_state.tasks))
         if not released:
             raise RuntimeError(f"A save was refused for tasks this agent does not hold: {sorted(taken.holders)}")
         for task_id in released:
+            self.operations.notify_task_released(task_id)
             self.operations.forget_task(task_id)
         self._logger.warning(
             "Another agent took over tasks of this agent's saved work; dropped them from memory "

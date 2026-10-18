@@ -535,20 +535,19 @@ def test_a_delegation_never_sent_is_stopped_when_retries_end(tmp_path, caplog) -
     assert any("event=delegated_task_never_published" in r.getMessage() for r in caplog.records)
 
 
-def test_a_delegation_a_worker_took_is_treated_as_sent_when_retries_end(tmp_path, caplog) -> None:
-    """Regression (2026-10-17 review round 2): JetStream stored the task and a worker
-    claimed it, but every publish call reported a failure (lost acknowledgement).
-    When retries ended the subtask was failed while the worker ran it. A claimed
-    record shows the publish went through: the subtask keeps running and the action
-    is recorded dispatched."""
+def test_a_delegation_a_worker_took_is_finished_as_sent_and_its_batch_goes_on(tmp_path, caplog) -> None:
+    """Regression (2026-10-17 review rounds 2 and 3): JetStream stored the task and a
+    worker claimed it, but the publish call reported a failure (lost acknowledgement).
+    Round 2 failed the subtask; then it went through model recovery, which blocked the
+    rest of the batch and lost the check-back. A claim proves the publish: the action
+    finishes as sent, its post-publish steps run, and the next action runs."""
     from custom_agents.delegated_work_runtime import delegated_tasks
-    from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
 
     manager = _make_task_manager(tmp_path)
     parent = _add_active_parent_task(manager)
+    task_info = manager.get_task_info(parent.task_id)
     agent = _make_agent(tmp_path, task_manager=manager)
     agent._probe_live_named_agent_type = AsyncMock()
-    object.__setattr__(agent, "_turn_action_outbox_config", lambda: {"max_auto_attempts": 0})
 
     async def stored_and_claimed_but_ack_lost(*, message, routing_key):
         delegated_tasks(agent).record_claim(
@@ -558,18 +557,71 @@ def test_a_delegation_a_worker_took_is_treated_as_sent_when_retries_end(tmp_path
         raise TimeoutError("nats: timeout")
 
     agent.team_comms.send_message = stored_and_claimed_but_ack_lost
-    with caplog.at_level(logging.WARNING), pytest.raises(TurnActionRecoveryScheduled):
-        _delegate(agent, manager, parent, named_type="WebResearchAgent")
+    decision = StructuredAgentTurnDecision(
+        actions=[
+            DelegateTaskAction(
+                task=StructuredTaskPayload(task_type=MessageMetaType.REQUEST, problem_statement="Research flights."),
+                target_named_agent_type="WebResearchAgent",
+                requester_type=RequesterType.AGENT_REQUESTER,
+                check_back_after_minutes=30,
+            ),
+            TaskResponseAction(task=StructuredTaskPayload(task_type=MessageMetaType.RESPONSE, answer="Working on it.")),
+        ]
+    )
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(
+            agent._execute_turn_decision_outbox(
+                decision=decision,
+                incoming_content=parent,
+                incoming_header=task_info.header,
+                incoming_meta=task_info.meta,
+            )
+        )
 
     (child,) = _subtasks(manager, parent)
     assert manager.get_task_info(child).state != ProgressState.FAILED
     assert not manager.is_execution_cancelled(child)
     record = delegated_tasks(agent).get(str(agent.team_id), child)
     assert (record.status, record.holder_agent_id) == ("running", "worker_9")
-    (action,) = [item for item in manager.execution_state.turn_action_outbox.values() if item.action_type == "delegate_task"]
-    assert action.status == "dispatched"
-    assert action.side_effects["publish_confirmed_by_claim"] == "worker_9"
+    assert delegated_tasks(agent).get_wait(str(agent.team_id), parent.task_id).check_back_at_utc is not None
+    delegation, answer = sorted(manager.execution_state.turn_action_outbox.values(), key=lambda item: item.action_index)
+    assert (delegation.status, delegation.phase) == ("completed", "complete")
+    assert delegation.side_effects["publish_confirmed_by_claim"] == "worker_9"
+    # The batch went on: the answer ran (held back while the delegated task runs), not blocked.
+    assert answer.status == "held_back"
+    assert manager.get_task_info(parent.task_id).state == ProgressState.WAITING
     assert any("event=delegated_task_publish_confirmed_by_claim" in r.getMessage() for r in caplog.records)
+
+
+def test_a_claim_that_arrives_while_recovery_is_scheduled_still_keeps_the_task(tmp_path, monkeypatch) -> None:
+    """The narrow fallback: the claim lands after the first check, while the outbox
+    schedules its recovery. The subtask is not failed and the action stays dispatched."""
+    from custom_agents import turn_action_outbox_runtime
+    from custom_agents.delegated_work_runtime import delegated_tasks
+    from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent._probe_live_named_agent_type = AsyncMock()
+    object.__setattr__(agent, "_turn_action_outbox_config", lambda: {"max_auto_attempts": 0})
+    monkeypatch.setattr(turn_action_outbox_runtime, "delegation_holder", lambda _agent, _task_id: None)
+
+    async def stored_and_claimed_but_ack_lost(*, message, routing_key):
+        delegated_tasks(agent).record_claim(
+            team_id=str(agent.team_id), task_id=message.msg_content.task_id, worker_agent_id="worker_9",
+            worker_agent_name="worker-9", claimed_at=datetime.now(timezone.utc),
+        )
+        raise TimeoutError("nats: timeout")
+
+    agent.team_comms.send_message = stored_and_claimed_but_ack_lost
+    with pytest.raises(TurnActionRecoveryScheduled):
+        _delegate(agent, manager, parent, named_type="WebResearchAgent")
+
+    (child,) = _subtasks(manager, parent)
+    assert manager.get_task_info(child).state != ProgressState.FAILED
+    (action,) = list(manager.execution_state.turn_action_outbox.values())
+    assert action.status == "dispatched" and action.side_effects["publish_confirmed_by_claim"] == "worker_9"
 
 
 def test_a_delegation_still_retrying_or_already_sent_is_left_alone(tmp_path) -> None:

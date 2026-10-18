@@ -90,3 +90,31 @@ async def test_a_task_this_agent_holds_again_is_its_own():
     assert not custody_moved(agent, "t1", RuntimeError())
     agent.task_manager.get_task_info = lambda task_id: None
     assert not custody_moved(agent, "t1", RuntimeError())  # it left the released set
+
+
+def test_a_released_task_withdraws_its_access_requests_but_keeps_the_request_access(monkeypatch):
+    """Regression (2026-10-17 review round 3): a task another agent took over kept its
+    access request open in the person's Inbox, so the person could be asked twice.
+    The request this agent's run waited on is withdrawn; access bound to the person's
+    request stays, because the task goes on with its new holder."""
+    from custom_agents import access_runtime
+
+    withdrawn: list[tuple[str, str]] = []
+    service = SimpleNamespace(
+        store=SimpleNamespace(waiting_for_task=lambda team, agent_id, task_id: [SimpleNamespace(request_id="req_1")]),
+        end_task_grants=lambda ids: pytest.fail("a released task must not end the request's access"),
+    )
+    requests = SimpleNamespace(service=service, withdraw=lambda request_id, why: withdrawn.append((request_id, why)))
+    monkeypatch.setattr(access_runtime, "runtime_requests", lambda _agent: requests)
+    released: list = []
+    manager = SimpleNamespace(
+        add_task_terminal_callback=lambda _callback: None, add_task_release_callback=released.append,
+    )
+    agent = SimpleNamespace(id="worker_1", team_id="team", is_team_lead=False, task_manager=manager)
+
+    access_runtime.register_task_access_cleanup(agent)
+    (callback,) = released
+    callback("T")
+
+    assert [request_id for request_id, _why in withdrawn] == ["req_1"]
+    assert "moved to another agent" in withdrawn[0][1]

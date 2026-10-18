@@ -137,6 +137,13 @@ def record_publish_sequence(agent: Any, *, subtask_id: str, publish_sequence: Op
     )
 
 
+def delegation_holder(agent: Any, subtask_id: str) -> Optional[str]:
+    """The worker that claimed a delegated task, or None while no worker holds it. Task lane."""
+
+    record = delegated_tasks(agent).get(str(agent.team_id), subtask_id)
+    return record.holder_agent_id if record is not None else None
+
+
 def record_check_back(agent: Any, *, parent_task_id: str, minutes: float) -> None:
     """Remember when the requester's model wants to look at this request again.
 
@@ -212,9 +219,9 @@ def end_unpublished_delegation(
     """
 
     manager = agent.task_manager
-    record = delegated_tasks(agent).get(str(agent.team_id), subtask_id)
-    if record is not None and record.holder_agent_id:
-        return UnpublishedDelegationOutcome(claimed_by=record.holder_agent_id)
+    holder = delegation_holder(agent, subtask_id)
+    if holder:
+        return UnpublishedDelegationOutcome(claimed_by=holder)
     now = datetime.now(timezone.utc).isoformat()
     if manager.identity.team_id:
         manager.record_execution_graph_cancelled(
@@ -659,6 +666,7 @@ __all__ = [
     "NEVER_PUBLISHED_REASON",
     "TASK_ALREADY_ENDED_REASON",
     "UnpublishedDelegationOutcome",
+    "delegation_holder",
     "delegated_tasks",
     "end_unpublished_delegation",
     "fail_after_worker_losses",

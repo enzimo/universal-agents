@@ -173,10 +173,12 @@ each. They run in parallel on as many workers as the team allows:
   reached the worker (fixed 2026-10-17). A record that has a holder never goes
   back to "waiting" except through a handback by that holder. A delegation the
   outbox gives up publishing (its automatic retries are over) is failed with a
-  cancellation record and its record closed (`event=delegated_task_never_published`),
-  unless a worker already claimed it: then the publish went through and only its
-  acknowledgement was lost, so the task keeps running and the action is recorded
-  sent (`event=delegated_task_publish_confirmed_by_claim`). As a safeguard, the
+  cancellation record and its record closed (`event=delegated_task_never_published`).
+  A failed publish call whose task a worker already claimed did go through and
+  only its acknowledgement was lost: the action is finished as sent, its
+  post-publish steps run (the parent waits, a requested check-back is kept) and
+  the rest of the turn's actions run (`event=delegated_task_publish_confirmed_by_claim`).
+  As a safeguard, the
   watchdog checks and times out a "waiting" record without a stream sequence once
   no outbox action is still trying to publish it
   (`event=delegated_record_never_published`); the record's age alone misjudged a
@@ -191,24 +193,34 @@ each. They run in parallel on as many workers as the team allows:
   takes it over when the holder is gone or handed it back after losing its
   lease (`custom_agents/task_custody.py`, `event=task_copy_dropped_held_elsewhere`
   or `event=task_custody_takeover`). The takeover moves the row only while the
-  judged-gone holder still holds it; a holder that released the task meanwhile
-  was alive after all, so the copy is dropped (or, if the lead re-sent it after
-  that holder's handback, admitted as a free task) and no fresh row is claimed
-  for it. A holder wrongly judged gone that keeps running finds its next save
-  refused for that task: it drops the task from memory, stops its running turn
-  without a reply and keeps working (`custom_agents/custody_loss.py`,
-  `event=task_custody_taken_over`). Admission reads custody before the
+  judged-gone holder still holds it and the task is not in the finished-task
+  archive, both checked in the takeover's own transaction; a holder that
+  released or finished the task meanwhile was alive after all, so the copy is
+  dropped (or, if the lead re-sent it after that holder's handback, admitted as
+  a free task) and no fresh row is claimed for it. A holder wrongly judged gone
+  that keeps running finds its next save refused for that task: it drops the
+  task from memory, stops its running turn without a reply, stops the work the
+  task had delegated and withdraws the access requests it waited on, and keeps
+  working (`custom_agents/custody_loss.py`, `event=task_custody_taken_over`);
+  the task itself gets no cancellation record, because its new holder runs it.
+  Admission reads custody before the
   finished-task archive, because a holder archives a task before its save
   releases custody. A copy of a task any agent of the team already finished is
   dropped too, and a replacement taking over a gone worker's saved work leaves
   out tasks another agent holds or finished, together with that work's records of
   the tasks it delegated, whose workers are told to stop
   (`orphaned_subtasks.stop_left_out_delegations`). If custody changes while a
-  starting agent adopts saved work, it reads the saved work again once; a second
-  conflict stops the start with `RuntimeRecoveryStartFailed`. A copy dropped
-  while its holder looked alive relies on that takeover if the holder stops
-  later, so it is not run when `agent.same_role_runtime_takeover_enabled` is off. Before 2026-10-17 each agent
-  checked only its own records, so such a task ran twice.
+  starting agent adopts saved work, it reads the saved work again once. A
+  second conflict while taking over gone agents' work starts without that work
+  (`event=role_takeover_lost_race`, logged as an error): it stays saved with
+  its holder, the lead's replacement pass adopts it if that holder is gone, and
+  a startup agent that stopped here would stop the whole runtime. A second
+  conflict on the agent's own saved work stops the start
+  (`RuntimeRecoveryStartFailed`): starting without it could leave it unrun or
+  let the agent's first save replace it. A copy dropped while its holder looked
+  alive relies on that takeover if the holder stops later, so it is not run
+  when `agent.same_role_runtime_takeover_enabled` is off. Before 2026-10-17
+  each agent checked only its own records, so such a task ran twice.
   Every delegation gets a generated task id, never one the model chose, so a
   new task can never look like a copy of an earlier one.
 - **Worker pool controller** (`custom_agents/worker_pool_controller.py`, trusted

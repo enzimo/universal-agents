@@ -6,6 +6,7 @@ rules; a real TaskManager for saves, removals, clearing and recovery.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import replace
@@ -61,10 +62,11 @@ def store(request, tmp_path):
         config = {"backend": "postgres", "postgres": {"dsn": dsn}}
     else:
         config = {"backend": "sqlite", "sqlite": {"path": str(tmp_path / "state.db")}}
-    repo = create_runtime_state_repository(resolve_storage_settings(config))
+    settings = resolve_storage_settings(config)
+    repo = create_runtime_state_repository(settings)
     run = uuid4().hex[:8]
     world = SimpleNamespace(
-        repo=repo, team=f"team_{run}", owners=[f"agent_{run}_{n}" for n in range(3)],
+        repo=repo, settings=settings, team=f"team_{run}", owners=[f"agent_{run}_{n}" for n in range(3)],
         task=lambda name: f"{name}_{run}",
     )
     yield world
@@ -141,6 +143,27 @@ def test_a_record_of_a_task_this_owner_delegated_is_not_its_custody(store):
     _save(store, b, _snapshot(child))
     _save(store, a, _snapshot(parent, child))
     assert (_holder(store, parent), _holder(store, child)) == (a, b)
+
+
+def test_a_takeover_never_claims_a_task_its_holder_finished_before_releasing_it(store):
+    """Regression (2026-10-17 review round 3): a holder judged gone archived the task
+    after the admission's archive read but before its own save released custody. The
+    compare-and-set still found its row and the task ran twice. The takeover now reads
+    the archive inside its transaction and refuses."""
+    from storage.task_archive_repository import create_task_archive_repository
+
+    a, b, _c = store.owners
+    work = store.task("work")
+    _save(store, a, _snapshot(work))
+    create_task_archive_repository(store.settings).save_completed_task(
+        archive_id=f"archive_{work}", task_id=work, owner_agent_id=a, owner_agent_name=a, team_id=store.team,
+        task_json=Task(task_id=work, task_type=MessageMetaType.REQUEST, problem_statement="w").model_dump_json(),
+        status="completed",
+    )  # finished; a's save that releases custody has not happened yet
+    with pytest.raises(TaskCustodyReleased):
+        _save(store, b, _snapshot(work), takeover=TaskCustodyTakeover(work, a))
+    assert _holder(store, work) == a
+    assert store.repo.load_task_runtime_by_owner(b) == []
 
 
 def test_a_takeover_never_claims_a_task_its_holder_released_meanwhile(store):
@@ -243,6 +266,42 @@ def test_a_holder_wrongly_judged_gone_drops_the_task_at_its_next_save(tmp_path, 
     assert (holders["taken"].holder_agent_id, holders["kept"].holder_agent_id) == ("worker_b", "worker_a")
     assert old_holder.get_task_from_db("taken") is None  # not ended, so not archived
     assert any("event=task_custody_taken_over" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_released_task_stops_its_delegated_work_but_is_not_cancelled(tmp_path, caplog):
+    """Regression (2026-10-17 review round 3): worker 1, alive but judged gone, ran T,
+    which had escalated C to TeamArchitect; worker 2 took T over and starts it again.
+    Worker 1 dropped T at its next save but C kept running with no barrier or stop.
+    Now C gets its own cancellation record and a stop; T itself is not cancelled."""
+    from custom_agents.delegated_work_runtime import delegated_tasks, record_publication
+    from custom_agents.orphaned_subtasks import register_parent_end_stops
+
+    old_holder = _manager(tmp_path, "worker_1")
+    _admit(old_holder, "T")
+    _delegate_child(old_holder, "T", "C")
+    agent = SimpleNamespace(
+        id="worker_1", team_id="team", task_manager=old_holder, _request_subtask_stop=AsyncMock(return_value=True),
+    )
+    record_publication(agent, subtask_id="C", parent_task_id="T", named_agent_type="TeamArchitect",
+                       target_agent_name=None, publish_sequence=5)
+    delegated_tasks(agent).record_claim(team_id="team", task_id="C", worker_agent_id="lead",
+                                        worker_agent_name="lead", claimed_at=datetime.now(timezone.utc))
+    register_parent_end_stops(agent)
+    taker = _manager(tmp_path, "worker_2")
+    assert _admit(taker, "T", takeover_from="worker_1")
+
+    with caplog.at_level(logging.WARNING):
+        old_holder._persist_runtime_state()  # any save of the old holder
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    assert old_holder.get_task_info("T") is None and old_holder.get_task_info("C") is None
+    assert old_holder.is_execution_cancelled("C")
+    assert not taker.is_execution_cancelled("T")
+    stop = agent._request_subtask_stop.await_args.kwargs
+    assert (stop["parent_task_id"], stop["subtask_info"].task.task_id) == ("T", "C")
+    assert "event=released_task_subtasks_stopping" in caplog.text
 
 
 def test_handing_a_task_back_releases_its_custody(tmp_path):
@@ -404,7 +463,10 @@ async def test_startup_stops_the_delegated_work_of_a_task_it_leaves_out(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_startup_fails_with_a_clear_error_when_saved_work_conflicts_twice(tmp_path, monkeypatch, caplog):
+async def test_startup_skips_gone_agents_work_that_conflicts_twice(tmp_path, monkeypatch, caplog):
+    """A takeover of gone agents' work that conflicts on both reads starts without that
+    work: it stays saved with its holder, and the lead's replacement pass adopts it if
+    that holder is gone; a startup agent that stopped here would stop the runtime."""
     from custom_agents import runtime_recovery
 
     gone = _manager(tmp_path, "worker_gone")
@@ -419,12 +481,40 @@ async def test_startup_fails_with_a_clear_error_when_saved_work_conflicts_twice(
         raise RuntimeRecoveryConflict("Runtime recovery source or destination changed.")
 
     monkeypatch.setattr(starting.runtime_state_store, "commit_task_runtime_recovery", always_changed)
-    with caplog.at_level(logging.WARNING), pytest.raises(runtime_recovery.RuntimeRecoveryStartFailed) as failed:
+    with caplog.at_level(logging.WARNING):
         await runtime_recovery.recover_runtime_after_restart(_starting_agent(starting))
-    assert (failed.value.agent_id, failed.value.team_id, failed.value.named_agent_type) == ("worker_new", "team", "Worker")
-    assert "event=runtime_recovery_conflict_start_failed" in caplog.text
+
+    lost = [r for r in caplog.records if "event=role_takeover_lost_race" in r.getMessage()]
+    assert len(lost) == 1 and lost[0].levelno == logging.ERROR
+    assert "agent_id=worker_new team_id=team owner_agent_ids=['worker_gone']" in lost[0].getMessage()
     assert starting.get_task_info("t1") is None  # nothing adopted
     assert gone.runtime_state_store.load_task_runtime_by_owner("worker_gone") != []
+
+
+@pytest.mark.asyncio
+async def test_startup_stops_when_its_own_saved_work_conflicts_twice(tmp_path, monkeypatch, caplog):
+    """Starting without the agent's own saved work could leave it unrun or let its first
+    save replace it, so a second conflict there stops the start with a clear error."""
+    from custom_agents import runtime_recovery
+
+    starting = _manager(tmp_path, "worker_new")
+    _admit(starting, "mine")
+    restarted = _manager(tmp_path, "worker_new")
+    monkeypatch.setattr(
+        runtime_recovery, "filter_stale_role_takeover_owner_ids", AsyncMock(return_value=[]),
+    )
+
+    def always_changed(**_kwargs):
+        raise RuntimeRecoveryConflict("Runtime recovery source or destination changed.")
+
+    monkeypatch.setattr(restarted.runtime_state_store, "commit_task_runtime_recovery", always_changed)
+    with caplog.at_level(logging.WARNING), pytest.raises(runtime_recovery.RuntimeRecoveryStartFailed) as failed:
+        await runtime_recovery.recover_runtime_after_restart(_starting_agent(restarted))
+    assert (failed.value.agent_id, failed.value.team_id, failed.value.named_agent_type) == ("worker_new", "team", "Worker")
+    assert "event=runtime_recovery_conflict_retrying" in caplog.text
+    assert "event=runtime_recovery_conflict_start_failed" in caplog.text
+    assert restarted.get_task_info("mine") is None
+    assert restarted.runtime_state_store.load_task_runtime_by_owner("worker_new") != []
 
 
 # -- admission decision --------------------------------------------------------

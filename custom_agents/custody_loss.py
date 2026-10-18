@@ -12,7 +12,12 @@ How a refusal is handled:
 
 1. The task snapshot coordinator (``task_manager_runtime_snapshots``) drops
    the taken-over tasks from memory in the same task-lane step, saves the
-   rest, and calls the listener installed here.
+   rest, and calls the listener installed here. Before each task is dropped,
+   the task-release callbacks stop the work it delegated (cancellation
+   records under each child's own root, ``orphaned_subtasks``) and withdraw
+   the access requests it waited on (``access_runtime``): the new holder
+   starts the task again, delegates and asks for itself, and the task itself
+   gets no cancellation record.
 2. The listener runs on the storage thread and moves to the agent's event loop.
 3. If a turn of a released task is running, it is stopped. The stop is marked
    as a transfer (``control_runtime.consume_handback_interrupt``), so the task

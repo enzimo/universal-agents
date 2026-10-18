@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from default_values import AGENT_DEFAULTS
 
 from custom_agents.delegated_work_runtime import (
+    delegation_holder,
     end_unpublished_delegation,
     record_check_back,
     record_publication,
@@ -735,9 +736,11 @@ async def _end_unpublished_delegation(self: Any, record: Any, exc: Exception) ->
     terminal failure (``delegated_work_runtime.end_unpublished_delegation``).
     A delegation whose publish already succeeded (status ``dispatched``) is
     left alone: a worker may hold it. One a worker claimed although no publish
-    call returned (its acknowledgement was lost) was sent after all: its
-    action is recorded dispatched and True is returned, so the recovery that
-    follows does not mark it failed.
+    call returned is normally finished before any recovery starts
+    (``_finish_claim_confirmed_delegation``); a claim that arrives while the
+    recovery is being scheduled is caught here instead: the action is recorded
+    dispatched and True is returned, so the recovery that follows does not
+    mark it failed.
     """
     subtask_id = (record.side_effects or {}).get("delegated_task_id")
     if record.action_type != _DELEGATE_ACTION or not subtask_id or record.status == "dispatched":
@@ -1673,60 +1676,14 @@ async def _execute_turn_action_record(
         and content.task_type == MessageMetaType.REQUEST
         and content.parent_task_id
     ):
-        wait_notification_sent = await _notify_user_delegated_work_started(
+        await _after_delegation_published(
             self,
-            parent_task_id=content.parent_task_id,
-            delegated_task_id=delegated_child_task_id,
-            target_named_agent_type=delegated_target_type,
-        )
-        if wait_notification_sent:
-            await self.task_manager.operations_runtime.run(
-                self.task_manager.mark_turn_action_record,
-                record_id,
-                side_effects={"delegation_wait_notification_sent": True},
-            )
-        parent_root_task_id = (
-            await self.task_manager.operations_runtime.run(
-                self.task_manager.resolve_root_task_id, content.parent_task_id
-            )
-            or content.parent_task_id
-        )
-        if (
-            await self.task_manager.operations_runtime.run(
-                self.task_manager.get_active_runtime_lease, parent_root_task_id
-            )
-            is None
-        ):
-            await self.task_manager.operations_runtime.run(
-                self.task_manager.update_main_task_state,
-                content.parent_task_id,
-                ProgressState.WAITING,
-                datetime.now(timezone.utc).isoformat(),
-            )
-        # The task waits in its worker type's shared queue until a free worker
-        # takes it (ADR-019); its record (written before publishing) gets the
-        # stream sequence so a stop can withdraw it while no worker holds it.
-        await self.task_manager.operations_runtime.run(
-            partial(
-                record_publish_sequence,
-                self,
-                subtask_id=content.task_id,
-                publish_sequence=publish_sequence,
-            )
-        )
-        if isinstance(action, DelegateTaskAction) and action.check_back_after_minutes:
-            await self.task_manager.operations_runtime.run(
-                partial(
-                    record_check_back,
-                    self,
-                    parent_task_id=content.parent_task_id,
-                    minutes=action.check_back_after_minutes,
-                )
-            )
-        await self.task_manager.operations_runtime.run(
-            self.task_manager.mark_turn_action_record,
-            record_id,
-            side_effects={"delegated_publish_sequence": publish_sequence},
+            record_id=record_id,
+            action=action,
+            content=content,
+            delegated_child_task_id=delegated_child_task_id,
+            delegated_target_type=delegated_target_type,
+            publish_sequence=publish_sequence,
         )
     elif (
         isinstance(content, TaskQuery)
@@ -1847,6 +1804,141 @@ async def _execute_turn_action_record(
     return content
 
 
+async def _after_delegation_published(
+    self: Any,
+    *,
+    record_id: str,
+    action: Any,
+    content: Task,
+    delegated_child_task_id: Optional[str],
+    delegated_target_type: Optional[str],
+    publish_sequence: Optional[int],
+) -> None:
+    """What follows a published delegation: notice, parent wait, stream sequence, check-back."""
+    wait_notification_sent = await _notify_user_delegated_work_started(
+        self,
+        parent_task_id=content.parent_task_id,
+        delegated_task_id=delegated_child_task_id,
+        target_named_agent_type=delegated_target_type,
+    )
+    if wait_notification_sent:
+        await self.task_manager.operations_runtime.run(
+            self.task_manager.mark_turn_action_record,
+            record_id,
+            side_effects={"delegation_wait_notification_sent": True},
+        )
+    parent_root_task_id = (
+        await self.task_manager.operations_runtime.run(
+            self.task_manager.resolve_root_task_id, content.parent_task_id
+        )
+        or content.parent_task_id
+    )
+    if (
+        await self.task_manager.operations_runtime.run(
+            self.task_manager.get_active_runtime_lease, parent_root_task_id
+        )
+        is None
+    ):
+        await self.task_manager.operations_runtime.run(
+            self.task_manager.update_main_task_state,
+            content.parent_task_id,
+            ProgressState.WAITING,
+            datetime.now(timezone.utc).isoformat(),
+        )
+    # The task waits in its worker type's shared queue until a free worker
+    # takes it (ADR-019); its record (written before publishing) gets the
+    # stream sequence so a stop can withdraw it while no worker holds it.
+    await self.task_manager.operations_runtime.run(
+        partial(
+            record_publish_sequence,
+            self,
+            subtask_id=content.task_id,
+            publish_sequence=publish_sequence,
+        )
+    )
+    if isinstance(action, DelegateTaskAction) and action.check_back_after_minutes:
+        await self.task_manager.operations_runtime.run(
+            partial(
+                record_check_back,
+                self,
+                parent_task_id=content.parent_task_id,
+                minutes=action.check_back_after_minutes,
+            )
+        )
+    await self.task_manager.operations_runtime.run(
+        self.task_manager.mark_turn_action_record,
+        record_id,
+        side_effects={"delegated_publish_sequence": publish_sequence},
+    )
+
+
+async def _finish_claim_confirmed_delegation(
+    self: Any, *, record_id: str, action: Any, exc: Exception
+) -> Optional[Task]:
+    """Finish a delegation whose publish call failed although a worker already took the task.
+
+    JetStream stored the message and only its acknowledgement was lost: the
+    worker's claim (the delegated record has a holder) proves the publish.
+    The action is finished as dispatched, its post-publish steps run, and
+    the caller goes on with the rest of the batch; the outbox recovery (later
+    actions blocked, the parent PARTIAL with a recovery turn, the check-back
+    lost) would treat a sent task as a failure (2026-10-17). Returns the
+    delegated task as the action's result, or None when the publish is not
+    confirmed.
+    """
+    if not isinstance(action, DelegateTaskAction):
+        return None
+    record = await self.task_manager.operations_runtime.run(
+        self.task_manager.get_turn_action_record, record_id
+    )
+    if record is None or (record.status, record.phase) != ("dispatching", "publish"):
+        return None
+    subtask_id = (record.side_effects or {}).get("delegated_task_id")
+    holder = (
+        await self.task_manager.operations_runtime.run(partial(delegation_holder, self, str(subtask_id)))
+        if subtask_id
+        else None
+    )
+    task_info = (
+        await self.task_manager.operations_runtime.run(self.task_manager.get_task_info, str(subtask_id))
+        if holder
+        else None
+    )
+    if task_info is None:
+        return None
+    content = self._task_request_transport_copy(task_info.task)
+    await self.task_manager.operations_runtime.run(
+        self.task_manager.mark_turn_action_record,
+        record_id,
+        status="dispatched",
+        side_effects={"publish_confirmed_by_claim": holder},
+    )
+    self._logger.warning(
+        "A delegated task's publish reported a failure, but a worker took the task, so it was "
+        "sent. event=delegated_task_publish_confirmed_by_claim agent_id=%s task_id=%s subtask_id=%s "
+        "action_id=%s holder_agent_id=%s error_type=%s",
+        self.id,
+        record.source_task_id,
+        subtask_id,
+        record_id,
+        holder,
+        type(exc).__name__,
+    )
+    await _after_delegation_published(
+        self,
+        record_id=record_id,
+        action=action,
+        content=content,
+        delegated_child_task_id=str(subtask_id),
+        delegated_target_type=(record.side_effects or {}).get("target_named_agent_type"),
+        publish_sequence=None,
+    )
+    await self.task_manager.operations_runtime.run(
+        self.task_manager.mark_turn_action_record, record_id, status="completed", phase="complete"
+    )
+    return content
+
+
 async def _execute_turn_action_with_recovery(
     self,
     *,
@@ -1870,12 +1962,33 @@ async def _execute_turn_action_with_recovery(
     except TurnActionRecoveryScheduled:
         raise
     except Exception as exc:
+        confirmed = await _finish_claim_confirmed_delegation_or_none(
+            self, record_id=record_id, action=action, exc=exc
+        )
+        if confirmed is not None:
+            return confirmed
         await self._schedule_turn_action_recovery(
             batch_id=batch_id,
             action_id=record_id,
             exc=exc,
         )
         raise
+
+
+async def _finish_claim_confirmed_delegation_or_none(
+    self: Any, *, record_id: str, action: Any, exc: Exception
+) -> Optional[Task]:
+    """``_finish_claim_confirmed_delegation``; a failure while finishing falls back to the outbox recovery (logged)."""
+    try:
+        return await _finish_claim_confirmed_delegation(self, record_id=record_id, action=action, exc=exc)
+    except Exception:
+        self._logger.exception(
+            "Could not finish a delegated task a worker already took; the outbox recovery handles it. "
+            "event=delegated_task_confirm_failed agent_id=%s action_id=%s",
+            self.id,
+            record_id,
+        )
+        return None
 
 
 async def _current_exact_route(
