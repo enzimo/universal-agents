@@ -11,6 +11,7 @@ service through ``custom_agents.code_access``.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -22,10 +23,11 @@ import threading
 import uuid
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Tuple, Union
 from urllib.parse import urlparse
 
 from strands import tool
+from strands.types.tools import ToolContext
 
 from access_control.sensitive_paths import (
     ENV_FILE_SUFFIX,
@@ -55,14 +57,18 @@ from custom_tools.code_sandbox import (
 )
 from custom_tools.openshell_sandboxes import OpenShellSandboxError, ensure_sandbox, workspace_mount
 from custom_tools.runtime_context import get_agent_ref
+from runtime_hosting.process_run import PROCESS_RUN_ENV_PREFIX
 from runtime_settings.security import SECURITY_LAYER_MODE_BROKER, SECURITY_LAYER_MODE_OPENSHELL
 from custom_tools.shell_execution import (
+    AnyCancel,
+    CancelSignal,
     ProcessRequest,
     RtkCommandPlan,
     plan_rtk_command,
     run_process,
     validate_environment_keys,
 )
+from custom_tools.tool_stop import ToolStop, tracked_tool_call
 
 
 logger = logging.getLogger(__name__)
@@ -191,6 +197,9 @@ def _build_env() -> Dict[str, str]:
     env = {}
     for key, value in os.environ.items():
         upper = key.upper()
+        if upper.startswith(PROCESS_RUN_ENV_PREFIX):
+            # Identifies this agent process's run; never for the commands it runs.
+            continue
         if key in allowlist:
             env[key] = value
             continue
@@ -406,7 +415,7 @@ def _plan_command_with_rtk(
     cwd: str,
     env: Dict[str, str],
     timeout: int,
-    cancel_event: threading.Event | None = None,
+    cancel_event: CancelSignal | None = None,
 ) -> RtkCommandPlan:
     plan = plan_rtk_command(
         command,
@@ -494,7 +503,8 @@ def _execute_with_openshell(
     command_timeout: int,
     env: Dict[str, str],
     scope: Any,
-    cancel_event: threading.Event | None = None,
+    cancel_event: CancelSignal | None = None,
+    on_spawn: Callable[[int], None] | None = None,
 ) -> Dict[str, Any]:
     openshell_path = shutil.which("openshell", path=env.get("PATH"))
     if not openshell_path:
@@ -551,6 +561,7 @@ def _execute_with_openshell(
             timeout_seconds=command_timeout + 15,
         ),
         cancel_event=cancel_event,
+        on_spawn=on_spawn,
     )
     stdout_mode, output = _extract_openshell_rtk_mode(completed.stdout, marker)
     stderr_mode, error = _extract_openshell_rtk_mode(completed.stderr, marker)
@@ -603,19 +614,29 @@ REASON_OPENSHELL_UNAVAILABLE = "openshell_sandbox_unavailable"
 def _code_access(scope: Any, *, tool_id: str, unconfined: bool) -> Any:
     """What this command may reach (custom_agents.code_access).
 
-    Commands always run for an agent; embedded use without one (and tests)
-    gets the task's folders as in single-person mode, which is logged.
+    Commands always run for an agent. One with no agent is refused, except in
+    code that embeds the tools on purpose (``code_access.embedded_commands``),
+    where it gets the task's folders as in single-person mode; both are logged.
     """
 
-    from custom_agents.code_access import code_access, code_access_without_agent
+    from custom_agents.code_access import code_access, code_access_without_agent, no_agent_refusal_reason
 
     agent = get_agent_ref()
     if agent is None:
-        logger.warning(
-            "A command runs with no agent; using the task's folders as in single-person mode. "
-            "event=code_access_without_agent tool_id=%s",
-            tool_id,
-        )
+        refusal = no_agent_refusal_reason()
+        if refusal is not None:
+            logger.error(
+                "Refusing a command that has no agent behind it. "
+                "event=code_refused_without_agent tool_id=%s reason=%s",
+                tool_id,
+                refusal,
+            )
+        else:
+            logger.warning(
+                "A command runs with no agent in embedded use; using the task's folders as in "
+                "single-person mode. event=code_access_without_agent tool_id=%s",
+                tool_id,
+            )
         return code_access_without_agent(scope, unconfined=unconfined)
     return code_access(
         agent, scope, tool_id=tool_id, unconfined=unconfined, data_folders=configured_data_folders(agent)
@@ -653,6 +674,21 @@ def _refused(cmd_str: str, error: str, **extra: Any) -> Dict[str, Any]:
         "output": "",
         "error": error,
         "status": "error",
+        **extra,
+    }
+
+
+def _cancelled(cmd_str: str, error: str, **extra: Any) -> Dict[str, Any]:
+    """A command that was stopped before it ran (exit code 130, like Ctrl-C)."""
+
+    return {
+        "command": cmd_str,
+        "executed_command": "",
+        "exit_code": 130,
+        "output": "",
+        "error": error,
+        "status": "error",
+        "termination_reason": "cancelled",
         **extra,
     }
 
@@ -724,7 +760,8 @@ def _run_in_sandbox(
     env: Dict[str, str],
     work_dir: str,
     timeout: int,
-    cancel_event: threading.Event | None,
+    cancel_event: CancelSignal | None,
+    on_spawn: Callable[[int], None] | None,
 ) -> Dict[str, Any]:
     """Run the planned command in the code sandbox and describe what happened."""
 
@@ -750,6 +787,7 @@ def _run_in_sandbox(
         completed = run_process(
             ProcessRequest(argv=sandboxed.argv, cwd=work_dir, env=sandboxed.env, timeout_seconds=timeout),
             cancel_event=cancel_event,
+            on_spawn=on_spawn,
         )
     finally:
         release_sandboxed_command(sandboxed)
@@ -782,13 +820,22 @@ def _execute_single_command(
     default_work_dir: str,
     default_timeout: int,
     extra_env: Dict[str, str] | None = None,
-    cancel_event: threading.Event | None = None,
+    cancel_event: CancelSignal | None = None,
+    on_spawn: Callable[[int], None] | None = None,
     code_tool: str = CODE_SHELL_TOOL_ID,
     unconfined: bool = False,
 ) -> Dict[str, Any]:
-    """Check, plan and run one command; every refusal comes back as a result, never an exception."""
+    """Check, plan and run one command; every refusal comes back as a result, never an exception.
+
+    ``on_spawn`` records the process group of the command the supervisor
+    starts (ToolStop.process_group_recorder).
+    """
 
     cmd_str, cmd_opts = _validate_command(command)
+    if cancel_event is not None and cancel_event.is_set():
+        # Checked before planning too, so a stopped task never starts an
+        # OpenShell sandbox or an RTK rewrite for a command it will not run.
+        return _cancelled(cmd_str, _TASK_STOPPED_ERROR)
     refusal = _policy_refusal(cmd_str)
     if refusal is not None:
         return refusal
@@ -811,21 +858,13 @@ def _execute_single_command(
             env=env,
             scope=scope,
             cancel_event=cancel_event,
+            on_spawn=on_spawn,
         )
     plan = _plan_command_with_rtk(
         cmd_str, cwd=command_work_dir, env=env, timeout=command_timeout, cancel_event=cancel_event
     )
     if plan.cancelled:
-        return {
-            "command": cmd_str,
-            "executed_command": "",
-            "exit_code": 130,
-            "output": "",
-            "error": "Command cancelled before execution",
-            "status": "error",
-            "rtk_mode": plan.mode,
-            "termination_reason": "cancelled",
-        }
+        return _cancelled(cmd_str, "Command cancelled before execution", rtk_mode=plan.mode)
     result = _run_in_sandbox(
         cmd_str,
         plan,
@@ -834,6 +873,7 @@ def _execute_single_command(
         work_dir=command_work_dir,
         timeout=command_timeout,
         cancel_event=cancel_event,
+        on_spawn=on_spawn,
     )
     if plan.warning:
         result["warning"] = plan.warning
@@ -850,21 +890,41 @@ def execute_non_interactive_command(
     code_tool: str,
     extra_env: Dict[str, str] | None = None,
     unconfined: bool = False,
+    tool_stop: ToolStop | None = None,
+    tool_name: str = "",
 ) -> Dict[str, Any]:
     """Execute one validated non-interactive command for another code tool.
 
     ``code_tool`` is the calling tool (``code:python`` for python_env), named
-    in access logs. The public `shell` tool does not expose `extra_env` to
-    agents.
+    in access logs. ``tool_stop`` is the calling turn's stop
+    (``custom_tools.tool_stop``), and ``tool_name`` names the tool in its
+    logs. The public `shell` tool does not expose `extra_env` to agents.
     """
+    cancel_event, on_spawn = _stop_controls(tool_stop, tool_name or code_tool)
     return _execute_single_command(
         command,
         default_work_dir=default_work_dir,
         default_timeout=default_timeout,
         extra_env=extra_env,
+        cancel_event=cancel_event,
+        on_spawn=on_spawn,
         code_tool=code_tool,
         unconfined=unconfined,
     )
+
+
+_SIBLING_FAILED_ERROR = "Command cancelled because another parallel command failed"
+_TASK_STOPPED_ERROR = "Command not started because the task was stopped"
+
+
+def _stop_controls(
+    tool_stop: ToolStop | None, tool_name: str
+) -> tuple[CancelSignal | None, Callable[[int], None] | None]:
+    """The stop signal and process-group recorder a tool call's commands use."""
+
+    if tool_stop is None:
+        return None, None
+    return tool_stop.event, tool_stop.process_group_recorder(tool_name)
 
 
 def _execute_commands(
@@ -875,80 +935,103 @@ def _execute_commands(
     work_dir: str,
     timeout: int,
     unconfined: bool = False,
+    tool_stop: ToolStop | None = None,
 ) -> List[Dict[str, Any]]:
+    """Run the commands of one shell call; ``tool_stop`` is the turn's stop.
+
+    Once the turn stops, a running command is ended and every command not yet
+    started comes back cancelled without running. Each command's process
+    group is recorded, so processes it leaves running are ended if the turn
+    stops later.
+    """
+
+    stop_event, on_spawn = _stop_controls(tool_stop, "shell")
+
     def execute_one(
         item: Union[str, Dict[str, Any]],
         current_work_dir: str,
-        cancel_event: threading.Event | None = None,
+        cancel_event: CancelSignal | None,
     ) -> Dict[str, Any]:
         return _execute_single_command(
             item,
             default_work_dir=current_work_dir,
             default_timeout=timeout,
             cancel_event=cancel_event,
+            on_spawn=on_spawn,
             unconfined=unconfined,
         )
 
     if parallel:
-        cancel_event = threading.Event()
-        ordered_results: list[Dict[str, Any] | None] = [None] * len(commands)
-        with ThreadPoolExecutor() as executor:
-            futures = {
-                executor.submit(
-                    execute_one,
-                    command,
-                    work_dir,
-                    cancel_event,
-                ): index
-                for index, command in enumerate(commands)
-            }
-            for future in as_completed(futures):
-                index = futures[future]
-                try:
-                    result = future.result()
-                except CancelledError:
-                    cmd_str, _ = _validate_command(commands[index])
-                    result = {
-                        "command": cmd_str,
-                        "executed_command": "",
-                        "exit_code": 130,
-                        "output": "",
-                        "error": "Command cancelled because another parallel command failed",
-                        "status": "error",
-                        "termination_reason": "cancelled",
-                    }
-                ordered_results[index] = result
-                if not ignore_errors and result["status"] == "error":
-                    cancel_event.set()
-                    for pending in futures.keys():
-                        pending.cancel()
-        results: List[Dict[str, Any]] = []
-        for index, result in enumerate(ordered_results):
-            if result is None:
-                cmd_str, _ = _validate_command(commands[index])
-                result = {
-                    "command": cmd_str,
-                    "executed_command": "",
-                    "exit_code": 130,
-                    "output": "",
-                    "error": "Command cancelled because another parallel command failed",
-                    "status": "error",
-                    "termination_reason": "cancelled",
-                }
-            results.append(result)
-        return results
-
+        return _execute_parallel(
+            commands, execute_one, work_dir=work_dir, ignore_errors=ignore_errors, stop_event=stop_event
+        )
     results = []
     current_dir = work_dir
     for command in commands:
         cmd_str, _ = _validate_command(command)
-        result = execute_one(command, current_dir)
+        result = execute_one(command, current_dir, stop_event)
         results.append(result)
         if result["status"] == "success":
             current_dir = _update_context_dir(current_dir, cmd_str)
         if not ignore_errors and result["status"] == "error":
             break
     return results
+
+
+def _execute_parallel(
+    commands: List[Union[str, Dict[str, Any]]],
+    execute_one: Any,
+    *,
+    work_dir: str,
+    ignore_errors: bool,
+    stop_event: CancelSignal | None,
+) -> List[Dict[str, Any]]:
+    """Run commands side by side, keeping input order in the results.
+
+    Each command stops when the turn stops or, without ``ignore_errors``, when
+    a sibling fails; neither signal sets the other.
+    """
+
+    sibling_failed = threading.Event()
+    cancel = AnyCancel(stop_event, sibling_failed)
+    ordered_results: list[Dict[str, Any] | None] = [None] * len(commands)
+    with ThreadPoolExecutor() as executor:
+        # Pool threads do not inherit context variables, and the agent of
+        # this call (custom_tools.runtime_context) is one. Without it each
+        # command ran with code_access_without_agent: internet always on,
+        # no person folder. So each command runs in its own copy of this
+        # thread's context (a context cannot be entered by two threads).
+        futures = {
+            executor.submit(contextvars.copy_context().run, execute_one, command, work_dir, cancel): index
+            for index, command in enumerate(commands)
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            try:
+                result = future.result()
+            except CancelledError:
+                result = _not_started(commands[index], stop_event)
+            ordered_results[index] = result
+            if not ignore_errors and result["status"] == "error":
+                sibling_failed.set()
+                for pending in futures.keys():
+                    pending.cancel()
+    return [
+        result if result is not None else _not_started(commands[index], stop_event)
+        for index, result in enumerate(ordered_results)
+    ]
+
+
+def _not_started(command: Union[str, Dict[str, Any]], stop_event: CancelSignal | None) -> Dict[str, Any]:
+    """A parallel command cancelled before it started, with the right reason.
+
+    A command the turn's stop ended fails, which also cancels its waiting
+    siblings; those were not started because the task stopped, not because a
+    sibling failed.
+    """
+
+    stopped = stop_event is not None and stop_event.is_set()
+    return _cancelled(_validate_command(command)[0], _TASK_STOPPED_ERROR if stopped else _SIBLING_FAILED_ERROR)
 
 
 def _format_tool_content(
@@ -988,9 +1071,10 @@ def _format_tool_content(
     return status, content
 
 
-@tool
+@tool(context=True)
 def shell(
     command: str | list[str | dict[str, Any]],
+    tool_context: ToolContext,
     parallel: bool = False,
     ignore_errors: bool = False,
     timeout: int | None = None,
@@ -1038,24 +1122,31 @@ def shell(
         if timeout is None
         else int(timeout)
     )
-    home = ensure_scope_home(current_workspace_scope())
-    resolved_work_dir = _resolve_work_dir(work_dir or str(home), None)
 
-    try:
-        # Whether this agent may run code at all is decided before the call
-        # (custom_agents.access_runtime); path rules and the sandbox apply here.
-        results = _execute_commands(
-            commands,
-            parallel=parallel,
-            ignore_errors=ignore_errors,
-            work_dir=resolved_work_dir,
-            timeout=timeout_seconds,
-            unconfined=bool(unconfined),
-        )
-        status, content = _format_tool_content(results)
-        return {"status": status, "content": content}
-    except Exception as exc:
-        return {
-            "status": "error",
-            "content": [{"text": f"Non-interactive shell error: {exc}"}],
-        }
+    # Whether this agent may run code at all is decided before the call
+    # (custom_agents.access_runtime); path rules and the sandbox apply here.
+    # The call counts as running until its commands end, keeps its task (and
+    # person) throughout, and its commands stop when the task stops
+    # (custom_tools.tool_stop).
+    with tracked_tool_call(tool_context, "shell") as tool_stop:
+        if tool_stop is not None and tool_stop.is_requested():
+            return {"status": "error", "content": [{"text": _TASK_STOPPED_ERROR}]}
+        home = ensure_scope_home(current_workspace_scope())
+        resolved_work_dir = _resolve_work_dir(work_dir or str(home), None)
+        try:
+            results = _execute_commands(
+                commands,
+                parallel=parallel,
+                ignore_errors=ignore_errors,
+                work_dir=resolved_work_dir,
+                timeout=timeout_seconds,
+                unconfined=bool(unconfined),
+                tool_stop=tool_stop,
+            )
+        except Exception as exc:
+            return {
+                "status": "error",
+                "content": [{"text": f"Non-interactive shell error: {exc}"}],
+            }
+    status, content = _format_tool_content(results)
+    return {"status": status, "content": content}

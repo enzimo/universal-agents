@@ -284,8 +284,9 @@ def test_context_debug_redaction_preserves_token_accounting_and_redacts_secret_t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested_like_a_real_turn"])
 async def test_model_call_observer_captures_normal_and_forced_calls_with_optional_details(
-    tmp_path: Path,
+    tmp_path: Path, nested: bool
 ) -> None:
     from strands._middleware.registry import MiddlewareRegistry
     from strands._middleware.stages import InvokeModelContext, InvokeModelStage
@@ -314,6 +315,10 @@ async def test_model_call_observer_captures_normal_and_forced_calls_with_optiona
             "model_id": "test-model",
         }
     }
+    if nested:
+        # A real turn passes callback_handler as an extra keyword, so Strands
+        # nests the turn's invocation_state (runtime_context.caller_invocation_state).
+        invocation_state = {"callback_handler": print, "invocation_state": invocation_state}
 
     async def invoke(context: InvokeModelContext, usage: dict[str, int]) -> None:
         async def terminal(_context):
