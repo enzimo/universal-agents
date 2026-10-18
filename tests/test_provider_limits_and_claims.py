@@ -132,12 +132,19 @@ def _claim(worker: str, task_id: str = "sub_1") -> DelegatedTaskClaimedV1:
 
 def _requester(tmp_path, monkeypatch, *, retries: int = 1):
     from custom_agents.delegated_work_runtime import record_publication
+    from custom_agents.task_manager import TaskManager
 
     storage = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "r.db")}})
+    lifecycle = TaskManager(storage_settings=storage)
+    lifecycle.set_owner_identity("lead", "lead", "team_t", "TeamArchitect")
     subtask = SimpleNamespace(task=Task(task_id="sub_1", parent_task_id="parent_1", task_type=MessageMetaType.REQUEST), state=ProgressState.ACCEPTED)
     manager = SimpleNamespace(
         storage_settings=storage,
         operations_runtime=_Runtime(),
+        # Claim validation reads the real lifecycle stores even while this
+        # fixture isolates task transitions and the worker-loss retry count.
+        runtime_state_store=lifecycle.runtime_state_store,
+        get_task_from_db=lifecycle.get_task_from_db,
         get_task_info=lambda task_id: subtask if task_id == "sub_1" else None,
         get_parent_task_id=lambda task_id: "parent_1" if task_id == "sub_1" else None,
         is_terminal_state=lambda state: state in {ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.CANCELLED},
