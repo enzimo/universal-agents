@@ -19,17 +19,17 @@ _SUBMITTING_TASK: ContextVar[Optional["asyncio.Task[Any]"]] = ContextVar("submit
 
 
 def submitting_task() -> Optional["asyncio.Task[Any]"]:
-    """The asyncio task a task operation runs for: its lane submitter, else the current task.
+    """The asyncio task a task operation runs for: the current task, else its lane submitter.
 
-    None in a thread that is neither the lane nor the event loop.
+    On the event loop the running task is always the answer, so a task started
+    from a lane operation never inherits the submitter. On the lane thread
+    (no running loop) it is the task that submitted the operation; None in any
+    other thread.
     """
-    task = _SUBMITTING_TASK.get()
-    if task is not None:
-        return task
     try:
         return asyncio.current_task()
     except RuntimeError:
-        return None
+        return _SUBMITTING_TASK.get()
 
 
 def _detached_operation(
