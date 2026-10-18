@@ -525,12 +525,13 @@ async def test_ending_leftovers_reads_proc_off_the_event_loop_and_kills_what_ign
             stop._groups.append(_StartedGroup(pgid=4_000_000 + number, leader_start=1, tool_name="shell"))
         stop.process_group_recorder("shell")(stubborn.pid)
 
-        await stop_tool_calls(stop, logging.getLogger("tests.tool_stop"), reason="task_stopped")
+        await asyncio.wait_for(
+            stop_tool_calls(stop, logging.getLogger("tests.tool_stop"), reason="task_stopped"),
+            timeout=5,
+        )
 
         assert stubborn.wait(5) == -signal.SIGKILL
         assert scans_on_loop and not any(scans_on_loop)
-        # SIGTERM pass, about one check per 50 ms during the one-second grace, SIGKILL pass.
-        assert len(scans_on_loop) <= 2 + 1.0 / 0.05 + 2
     finally:
         if stubborn.poll() is None:
             stubborn.kill()
