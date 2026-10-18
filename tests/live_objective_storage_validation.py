@@ -30,11 +30,11 @@ from custom_tools.runtime_context import set_agent_ref
 from live_storage_utils import (
     query_storage,
     storage_bind,
-    redact_dsn,
     reset_postgres_storage,
     resolve_live_storage_settings,
 )
 from id_generation import new_id_suffix
+from storage.postgres_connection import redact_postgres_dsn
 
 try:
     from dotenv import load_dotenv
@@ -351,7 +351,7 @@ def run_validation(*, config_path: str | None = None) -> dict[str, Any]:
     return {
         "status": "passed",
         "storage_backend": settings.backend,
-        "storage": redact_dsn(settings.postgres_dsn or "") if settings.backend == "postgres" else settings.sqlite_path,
+        "storage": redact_postgres_dsn(settings.postgres_dsn or "") if settings.backend == "postgres" else settings.sqlite_path,
         "owner_agent_id": owner_agent_id,
         "replacement_owner_agent_id": replacement_owner_agent_id,
         "durable_owner_agent_id": durable_owner_agent_id,

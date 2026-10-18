@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from uuid import uuid4
 from types import TracebackType
 from .sql_dialect import POSTGRES
@@ -47,44 +47,18 @@ UNREADABLE_POSTGRES_DSN = "<unreadable PostgreSQL connection string>"
 def redact_postgres_dsn(raw_dsn: str) -> str:
     """The connection string with its password and other settings hidden, for logs and errors.
 
-    libpq accepts two forms and both are handled: a URL
+    libpq accepts two forms and parses both here: a URL
     (``postgresql://user:password@host/db?sslmode=require``) and keyword settings
-    (``host=db user=ua password=...``). The user, host, port and database stay
-    readable; a string that cannot be read is replaced as a whole.
+    (``host=db user=ua password=...``). Both become redacted keyword settings.
+    The user, host, port and database stay readable; an invalid connection
+    string is replaced as a whole.
     """
 
     if not raw_dsn:
         return raw_dsn
-    if "://" in raw_dsn:
-        return _redact_url_dsn(raw_dsn)
-    return _redact_keyword_dsn(raw_dsn)
-
-
-def _shown_setting(name: str, value: str) -> str:
-    return value if name.lower() in _SHOWN_POSTGRES_SETTINGS else _HIDDEN_VALUE
-
-
-def _redact_url_dsn(raw_dsn: str) -> str:
-    try:
-        parts = urlsplit(raw_dsn)
-        settings = parse_qsl(parts.query, keep_blank_values=True)
-    except ValueError:
-        return UNREADABLE_POSTGRES_DSN
-    netloc = parts.netloc
-    if "@" in netloc:
-        userinfo, hostinfo = netloc.rsplit("@", 1)
-        if ":" in userinfo:
-            userinfo = f"{userinfo.split(':', 1)[0]}:{_HIDDEN_VALUE}"
-        netloc = f"{userinfo}@{hostinfo}"
-    query = urlencode(
-        [(name, _shown_setting(name, value)) for name, value in settings], safe="*"
-    )
-    return urlunsplit((parts.scheme, netloc, parts.path, query, ""))
-
-
-def _redact_keyword_dsn(raw_dsn: str) -> str:
-    # psycopg's parser applies libpq's own quoting rules, so a quoted password
-    # with spaces is recognised exactly as the connection itself reads it.
+    # URL-valued keyword settings and URI passwords containing ? or # are valid
+    # in libpq. Generic URL parsing interprets them differently and can log the
+    # password, so use the connection's parser for both forms before formatting.
     from psycopg import Error as PsycopgError
     from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
@@ -92,7 +66,10 @@ def _redact_keyword_dsn(raw_dsn: str) -> str:
         settings = conninfo_to_dict(raw_dsn)
         return make_conninfo(
             "",
-            **{name: _shown_setting(name, str(value)) for name, value in settings.items()},
+            **{
+                name: value if name in _SHOWN_POSTGRES_SETTINGS else _HIDDEN_VALUE
+                for name, value in settings.items()
+            },
         )
     except PsycopgError:
         return UNREADABLE_POSTGRES_DSN
