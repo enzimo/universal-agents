@@ -42,6 +42,7 @@ from custom_agents.strands_model_factory import StrandsModelFactoryConfig, build
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
+from custom_tools.tool_stop import ToolStop
 from tests.llm_turn_fixtures import turn_executor_for
 
 _FAST = ModelStreamLimits(idle_timeout_seconds=0.3, call_timeout_seconds=5.0)
@@ -339,6 +340,7 @@ async def test_turn_ends_a_stalled_model_call_with_the_provider_timeout_message(
     turn.context_request = turn.assembly = None
     turn.invoke_kwargs = {"invocation_state": {}}
     turn.runtime_instruction_parts = []
+    turn.tool_stop = ToolStop(agent_id="lead", task_id=task.task_id)  # set by _prepare_turn
 
     with caplog.at_level(logging.WARNING), pytest.raises(ProviderTimeoutError) as raised:
         await asyncio.wait_for(turn_executor_for(subject)._invoke_model(turn), 5)

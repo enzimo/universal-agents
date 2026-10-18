@@ -32,6 +32,7 @@ from custom_messages.enums import (
     ProgressState,
     TaskSteeringType,
 )
+from custom_tools.tool_stop import ToolStop
 
 
 @pytest.fixture
@@ -181,8 +182,9 @@ async def test_access_resume_clears_old_blocker_before_final_review(
         _pending_interrupt_responses={task.task_id: steering},
         _strands_agent=sdk,
         _strands_agent_replacement_required=True,
-        _set_active_execution_context=lambda _: None,
+        _set_active_execution_context=lambda task_id: ToolStop(agent_id="manager", task_id=task_id),
         _clear_active_execution_context=lambda: None,
+        _logger=logging.getLogger(__name__),
         _refresh_self_agent_state=AsyncMock(),
         _apply_task_processing_result=AsyncMock(),
         _execute_turn_decision_outbox=dispatch,

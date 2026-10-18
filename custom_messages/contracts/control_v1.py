@@ -281,7 +281,16 @@ class AgentStatus(BaseModel):
     agent_role: Optional[str] = Field(description="Agent's self-reported role")
     last_seen_at: Optional[str] = Field(
         default=None,
-        description="ISO 8601 UTC timestamp of when this agent's status was last received.",
+        description="ISO 8601 UTC timestamp of when the agent sent this status.",
+    )
+    process_identity: Optional[str] = Field(
+        default=None,
+        description=(
+            "The agent's own process (runtime run, host, process number and start time; "
+            "runtime_hosting.process_run), so other agents can prove whether it still runs. "
+            "Set only by agents that are their own process (startup agents and the team lead); "
+            "workers started inside another process leave it empty and their start record decides."
+        ),
     )
     info_type: ControlType = Field(
         default=ControlType.STATUS_REQUEST_BASIC
@@ -299,6 +308,12 @@ class AgentStatus(BaseModel):
             self.is_executing = self.is_busy
         if self.is_busy is None and self.is_executing is not None:
             self.is_busy = self.is_executing
+
+
+# Fields agents exchange for liveness checks (custom_agents.agent_liveness) that
+# are never shown to a model or a person: process numbers and host names say
+# nothing useful there.
+AGENT_STATUS_RUNTIME_ONLY_FIELDS = frozenset({"process_identity"})
 
 
 class AgentStatusMap(BaseModel):
@@ -405,6 +420,44 @@ class RuntimeObjectiveSummary(BaseModel):
     available_actions: List[Literal["pause", "resume", "stop", "abandon", "delete"]] = (
         Field(default_factory=list)
     )
+
+
+# A person's Objective controls (``ManagerRuntimeWorkCommand.action``) and the
+# word ``RuntimeObjectiveSummary.available_actions`` offers for each. The
+# manager decides with these and the gateway words its replies with them.
+PAUSE_OBJECTIVE = "pause_objective"
+RESUME_OBJECTIVE = "resume_objective"
+STOP_OBJECTIVE = "stop_objective"
+ABANDON_OBJECTIVE = "abandon_objective"
+DELETE_OBJECTIVE = "delete_objective"
+OBJECTIVE_CONTROL_WORDS: dict[str, str] = {
+    PAUSE_OBJECTIVE: "pause",
+    RESUME_OBJECTIVE: "resume",
+    STOP_OBJECTIVE: "stop",
+    ABANDON_OBJECTIVE: "abandon",
+    DELETE_OBJECTIVE: "delete",
+}
+
+# Reply codes (``ManagerRuntimeWorkCommand.message``) of an Objective control.
+# A code with details carries them after a colon, for example
+# ``objective_control_incomplete:schedule:sched_1,policy:pol_2``.
+OBJECTIVE_NOT_FOUND = "objective_not_found"
+OBJECTIVE_OWNER_MISMATCH = "objective_owner_mismatch"
+OBJECTIVE_CHANGED = "objective_changed"
+OBJECTIVE_ACTION_UNAVAILABLE = "objective_action_unavailable"
+OBJECTIVE_UPDATE_FAILED = "objective_update_failed"
+OBJECTIVE_CONTROL_INCOMPLETE = "objective_control_incomplete"
+OBJECTIVE_DELETION_INCOMPLETE = "objective_deletion_incomplete"
+OBJECTIVE_DELETED = "objective_deleted"
+OBJECTIVE_ALREADY_DELETED = "objective_already_deleted"
+# The parts an incomplete reply names, as ``<part>:<id>``: a linked schedule
+# or heartbeat item, the work policy, a task whose stop was not confirmed, or
+# the Objective itself when it could not record which links changed.
+OBJECTIVE_PART_SCHEDULE = "schedule"
+OBJECTIVE_PART_HEARTBEAT = "heartbeat"
+OBJECTIVE_PART_POLICY = "policy"
+OBJECTIVE_PART_TASK = "task"
+OBJECTIVE_PART_RECORD = "objective"
 
 
 class RuntimeWorkCancellationReceipt(BaseModel):

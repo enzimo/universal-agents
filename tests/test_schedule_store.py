@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import datetime, timedelta, timezone
 
-from custom_agents.schedule_store import ScheduleStore, compute_next_fire_at
+from custom_agents.schedule_store import AdvanceOutcome, ScheduleStore, compute_next_fire_at
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage as ScheduledMessageModel, ScheduleTaskMemory
 from custom_messages.contracts.task_v1 import Task
@@ -59,10 +59,10 @@ class TestScheduleStoreBasics:
             interval_ms=1000,
         )
 
-        def fail_add(**_kwargs):
+        def fail_add(*_args, **_kwargs):
             raise sqlite3.OperationalError("simulated persistence failure")
 
-        monkeypatch.setattr(store._repository, "add_schedule_row", fail_add)
+        monkeypatch.setattr(store._repository, "write_locked", fail_add)
         with pytest.raises(sqlite3.OperationalError, match="simulated persistence failure"):
             store.add(msg)
 
@@ -191,7 +191,7 @@ class TestScheduleStoreBasics:
             schedule_memory=ScheduleTaskMemory(),
         )
         store.add(msg)
-        assert store.update_after_fire(msg.schedule_id)
+        assert store.update_after_fire(msg.schedule_id) == AdvanceOutcome.ADVANCED
         updated_next_fire_at = next(
             row["next_fire_at"]
             for row in store.get_all()
@@ -225,14 +225,14 @@ class TestScheduleStoreFireLogic:
         store.add(msg)
 
         # Fire 1: 3 → 2
-        assert store.update_after_fire(msg.schedule_id) is True
+        assert store.update_after_fire(msg.schedule_id) == AdvanceOutcome.ADVANCED
         assert store.count_enabled() == 1  # still alive
 
         # Fire 2: 2 → 1
-        assert store.update_after_fire(msg.schedule_id) is True
+        assert store.update_after_fire(msg.schedule_id) == AdvanceOutcome.ADVANCED
 
         # Fire 3: 1 → 0 → removed
-        assert store.update_after_fire(msg.schedule_id) is False
+        assert store.update_after_fire(msg.schedule_id) == AdvanceOutcome.FINISHED
         assert store.count_enabled() == 0
 
     def test_claim_next_due_scopes_to_named_agent_type_and_releases(self, store):
@@ -311,7 +311,8 @@ class TestScheduleStoreFireLogic:
             msg.schedule_id,
             claim_token=claimed["claim_token"],
             claimer_agent_id="manager_1",
-        ) is True
+            due_at=claimed["next_fire_at"],
+        ) == AdvanceOutcome.ADVANCED
         rows = store.get_all()
         assert rows[0]["claimed_by_agent_id"] is None
         assert rows[0]["claim_token"] is None
@@ -368,7 +369,7 @@ class TestScheduleStoreFireLogic:
         )
         store.add(msg)
 
-        assert store.update_after_fire(msg.schedule_id) is False
+        assert store.update_after_fire(msg.schedule_id) == AdvanceOutcome.FINISHED
         assert store.get_scheduled_message(msg.schedule_id) is None
 
 

@@ -271,14 +271,15 @@ class HostedMCPServerChangeService:
         )
         # One entry per tool (access_control.grant_entries): nothing new where
         # an agent type already holds the server.
-        plan = service.plan_grants(list(grants))
-        service.store.apply_together(
+        planned = list(grants)
+        plan, _outcome = service.store.apply_together(
             service.team_id,
-            grants=plan.new,
-            replaced=plan.replaced,
+            # Planned inside the store's write transaction.
+            plan=lambda: service.plan_grants(planned),
             actor=SubjectRefV1(kind=SubjectKind.USER, id=approval.approved_by),
             at=now,
         )
+        assert plan is not None
         grants = plan.new + list(plan.covered.values())
         logger.warning(
             "An approved hosted MCP server install let its agents use it for everyone's work. "

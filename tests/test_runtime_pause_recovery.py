@@ -83,7 +83,6 @@ async def test_restart_preserves_waiting_task_with_durable_human_interaction_blo
         task_manager=restored_manager,
         _agent_state_store=None,
         _logger=logging.getLogger("test.runtime_human_interaction_recovery"),
-        _role_takeover_liveness_grace_seconds=lambda: 60.0,
     )
 
     await recover_runtime_after_restart(agent)

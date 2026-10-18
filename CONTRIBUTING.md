@@ -157,6 +157,27 @@ records its arguments; they do not start real sandboxes.
 Run the relevant live NATS or PostgreSQL validation when a change affects
 messaging, persistence, routing, recovery, or deployment wiring.
 
+PostgreSQL connection strings in logs and error messages go through
+`storage.postgres_connection.redact_postgres_dsn`. It uses psycopg's libpq parser
+for both URLs and keyword settings, then writes redacted keyword settings.
+Generic URL parsing is unsafe here: libpq accepts `?` and `#` in URL passwords,
+and a keyword value may itself contain `://`. Invalid strings are replaced as
+a whole. Connection strings used to connect or stored in settings are unchanged.
+Live storage validation logs and saved reports use this same helper.
+
+The PostgreSQL tests are the ones marked `postgres`: the knowledge store tests
+and the PostgreSQL variants of the storage, runtime recovery, snapshot and
+schedule-worker transaction tests. The CI PostgreSQL job runs exactly that
+marker, so a new PostgreSQL variant must carry it next to `live`
+(`tests/test_ci_workflows.py` fails otherwise). Run them against an isolated
+database created with UTF-8 encoding; on a `SQL_ASCII` database psycopg returns
+bytes and most of them fail:
+
+```bash
+LIVE_TEST_POSTGRES_DSN=postgresql://postgres@127.0.0.1:5432/ua_live_tests \
+  .venv/bin/pytest tests -m postgres -q
+```
+
 Credential-state or model-key changes also require the real Sealbox suite:
 
 ```bash

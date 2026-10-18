@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 import shlex
 import tomllib
@@ -216,3 +217,71 @@ def test_evidence_storage_cannot_skip_tests_or_hide_verification_failures() -> N
     assert upload["with"]["retention-days"] == "7"
     assert warning["if"] == "always() && steps.canary-evidence.outcome == 'failure'"
     assert "::warning::" in warning["run"]
+
+
+def test_postgres_live_job_runs_every_postgres_test() -> None:
+    steps = _workflow("tests.yml")["jobs"]["postgres-live"]["steps"]
+    run_tests = next(step for step in steps if step.get("name") == "Run every PostgreSQL test")
+
+    assert run_tests["run"].startswith("python -m pytest tests -m postgres ")
+
+
+def _is_postgres_mark(node: ast.expr) -> bool:
+    return ast.unparse(node) == "pytest.mark.postgres"
+
+
+def _marks_include_postgres(marks: ast.expr | None) -> bool:
+    if marks is None:
+        return False
+    items = marks.elts if isinstance(marks, (ast.List, ast.Tuple)) else [marks]
+    return any(_is_postgres_mark(item) for item in items)
+
+
+def _reads_test_database_address(function: ast.AST) -> bool:
+    return any(
+        isinstance(node, ast.Call)
+        and ast.unparse(node.func) in {"os.environ.get", "os.getenv"}
+        and bool(node.args)
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "LIVE_TEST_POSTGRES_DSN"
+        for node in ast.walk(function)
+    )
+
+
+def test_every_postgres_test_is_marked_for_the_postgres_job() -> None:
+    """The PostgreSQL CI job selects tests by the postgres marker.
+
+    A Postgres variant marked only live is skipped by the fast job (no database)
+    and never selected by the PostgreSQL job, so it silently never runs.
+    """
+
+    unmarked = []
+    for path in sorted((PROJECT_ROOT / "tests").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        module_marked = any(
+            isinstance(node, ast.Assign)
+            and any(ast.unparse(target) == "pytestmark" for target in node.targets)
+            and _marks_include_postgres(node.value)
+            for node in tree.body
+        )
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and ast.unparse(node.func) == "pytest.param"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "postgres"
+            ):
+                marks = next((kw.value for kw in node.keywords if kw.arg == "marks"), None)
+                if not _marks_include_postgres(marks):
+                    unmarked.append(f"{path.name}:{node.lineno} pytest.param('postgres')")
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name.startswith("test_")
+                and _reads_test_database_address(node)
+                and not module_marked
+                and not any(_is_postgres_mark(decorator) for decorator in node.decorator_list)
+            ):
+                unmarked.append(f"{path.name}:{node.lineno} {node.name}")
+
+    assert unmarked == []

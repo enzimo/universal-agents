@@ -59,6 +59,11 @@ PROCESS_RUN_PROVEN_ENV = "UA_PROCESS_RUN_PROVEN"
 # for its whole life and marks it not inheritable so its own children do not
 # keep the lock after it exits.
 PROCESS_RUN_LOCK_FD_ENV = "UA_PROCESS_RUN_LOCK_FD"
+# The prefix all three share. Only agent processes themselves read them; the
+# commands agents run never get them (custom_tools.non_interactive_shell), so
+# a command never looks like a supervised agent process
+# (custom_agents.code_access refuses commands without an agent there).
+PROCESS_RUN_ENV_PREFIX = "UA_PROCESS_RUN_"
 
 # Version tag of the process identity text stored in start records.
 _IDENTITY_TAG = "run1"

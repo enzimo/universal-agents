@@ -10,7 +10,7 @@ from storage.postgres_connection import connect_postgres
 from storage.sqlite_connection import connect_sqlite
 
 
-@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.live)])
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=[pytest.mark.live, pytest.mark.postgres])])
 def connection(request, tmp_path):
     if request.param == "postgres":
         dsn = os.environ.get("LIVE_TEST_POSTGRES_DSN")
@@ -40,6 +40,7 @@ def test_iteration_retains_transaction_and_does_not_limit_candidates(connection)
 
 
 @pytest.mark.live
+@pytest.mark.postgres
 def test_postgres_idempotent_column_add_preserves_prior_transaction_work():
     from storage.memory_graph_repository import PostgresMemoryGraphRepository
 

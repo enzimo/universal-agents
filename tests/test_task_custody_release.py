@@ -17,6 +17,7 @@ import pytest
 
 from custom_agents.control_runtime import consume_handback_interrupt, handle_interrupted_turn
 from custom_agents.custody_loss import custody_moved, install_custody_listeners
+from custom_agents.sdk.strands.turn_tool_stop import CUSTODY_LOST_REASON
 from custom_agents.turn_failure_runtime import fail_task_after_turn_error
 
 
@@ -31,6 +32,7 @@ def _agent(running_task_id: str | None, held: set[str]) -> SimpleNamespace:
         id="worker_a",
         _logger=logging.getLogger("custody-release-test"),
         task_manager=manager,
+        deferred_inbox=SimpleNamespace(on_custody_lost=None),
         _active_execution_task_id=running_task_id,
         listener=listener,
     )
@@ -41,8 +43,8 @@ async def test_a_released_running_turn_is_stopped_as_a_transfer_without_a_reply(
     agent = _agent("taken", held={"kept"})
     stops: list[tuple[str, set[str]]] = []
 
-    async def interrupt_turn(_agent, *, root_task_id, graph_task_ids):
-        stops.append((root_task_id, set(graph_task_ids)))
+    async def interrupt_turn(_agent, *, root_task_id, graph_task_ids, reason):
+        stops.append((root_task_id, set(graph_task_ids), reason))
         return asyncio.current_task()
 
     install_custody_listeners(agent, interrupt_turn=interrupt_turn)
@@ -56,7 +58,7 @@ async def test_a_released_running_turn_is_stopped_as_a_transfer_without_a_reply(
             break
     await agent._custody_release.interrupt
 
-    assert stops == [("taken", {"taken"})]
+    assert stops == [("taken", {"taken"}, CUSTODY_LOST_REASON)]
     # The stopped turn is a transfer: no cancellation record, consumed once.
     assert consume_handback_interrupt(agent, "taken")
     assert not consume_handback_interrupt(agent, "taken")

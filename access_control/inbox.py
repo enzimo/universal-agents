@@ -28,7 +28,7 @@ class StoredAccessInbox:
         """Nothing beyond the stored request; the gateway announces it."""
 
     def send_notice(self, notice: AccessNoticeV1) -> None:
-        self.store.create_notice(notice)
+        self.store.create_notice_if_absent(notice)
 
     def request_finished(self, request: AccessRequestV1) -> None:
         if self.on_finished is not None:

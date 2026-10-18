@@ -40,6 +40,7 @@ from custom_agents.schedule_repair_guidance import (
 )
 from custom_agents.schedule_store import (
     DEFAULT_SCHEDULE_CLAIM_TTL_SECONDS,
+    is_final_run,
     owner_canonical_user_id_for_schedule,
 )
 from custom_agents.stuck_work import (
@@ -103,12 +104,6 @@ def not_running(store: Any, schedule: Any, *, now: datetime) -> tuple[str, str] 
     if not row or not overdue_unclaimed(row, team_id=str(schedule.claim_team_id or ""), now=now):
         return None
     return str(row["next_fire_at"]), schedule_block_reason(store, schedule)
-
-
-def _final_run(schedule: Any, row: dict[str, Any]) -> bool:
-    remaining = row.get("remaining_count")
-    recurring = bool(schedule.interval_ms or schedule.cron_expression)
-    return remaining == 1 or (not recurring and remaining is None)
 
 
 def _label(schedule: Any) -> str:
@@ -228,7 +223,7 @@ class StuckSchedules:
             if (
                 schedule is None
                 or is_system_managed_schedule(schedule)
-                or not _final_run(schedule, row)
+                or not is_final_run(row)
             ):
                 continue
             due_text = str(row["next_fire_at"])
@@ -253,14 +248,25 @@ class StuckSchedules:
         return missed
 
 
-def _turn_off(store: Any, schedule_id: str) -> bool:
-    return bool(store.set_enabled(schedule_id, False))
+def _turn_off(store: Any, missed: MissedRun, now: datetime) -> bool:
+    """Turn the schedule off only if its missed run is still waiting, unclaimed (one conditional write).
+
+    The rows were read in an earlier step; a worker may have claimed and
+    started the run since. Then nothing changes and nobody is told it was missed.
+    """
+    return bool(store.turn_off_missed_run(missed.schedule_id, due_at=missed.due, now=now))
 
 
 async def _turn_off_missed_final_runs(agent: Any, source: StuckSchedules, now: datetime, late_after: timedelta) -> None:
     runtime = agent.task_manager.operations_runtime
     for missed in await runtime.run(partial(source.missed_final_runs, now, late_after)):
-        if not await runtime.run(_turn_off, source.store, missed.schedule_id):
+        if not await runtime.run(_turn_off, source.store, missed, now):
+            agent._logger.info(
+                "A missed final run was not turned off: it is running or changed meanwhile. "
+                "event=schedule_final_run_turn_off_skipped schedule_id=%s due=%s",
+                missed.schedule_id,
+                missed.due,
+            )
             continue
         owner, message = missed.owner, missed.message
         notice_id = f"missed_run:{missed.schedule_id}:{missed.due}"

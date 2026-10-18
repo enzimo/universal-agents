@@ -5,6 +5,12 @@ live NATS server; only the model is a stand-in. Worker A starts a user task
 whose model call blocks, then loses its launch lease. A must interrupt the run,
 hand the task to the lead and exit; the lead must send it out again; worker B
 must run it with the note about the interrupted run and answer the user once.
+
+In the second run, worker A's model is a real Strands agent whose scripted
+model asks for the real shell tool, so Strands runs the command in a worker
+thread with the turn's real invocation keywords (the nested invocation_state
+included). Worker A must end that command before it hands the task back, so
+it is gone before worker B reruns the task and never finishes.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from strands import Agent
 
 import custom_agents.lease_loss_wind_down as wind_down
 import custom_agents.task_message_runtime as task_message_runtime
@@ -38,6 +45,10 @@ from storage.worker_handback_repository import (
     HANDBACK_STATUS_REDISPATCHED,
     WorkerHandbackRepository,
 )
+from custom_tools.non_interactive_shell import shell
+from custom_tools.runtime_context import set_agent_ref
+from custom_tools.workspace_scope import current_workspace_scope
+from tests.turn_tool_stop_support import ScriptedShellModel, kill_if_alive, process_alive
 from tests.test_live_multi_agent_state_boundaries import (
     FakeStrandsAgent,
     _agent,
@@ -72,6 +83,60 @@ class _BlockingModel(FakeStrandsAgent):
             raise
 
 
+class _ShellRun:
+    """Worker A's model in the shell run: a real Strands agent with the real shell tool.
+
+    Its scripted model asks for one shell command, which records its process
+    id, sleeps two minutes and would then write a file. The shell ignores
+    SIGTERM, but RTK's wrapper still ends it at once, so this run does not show
+    the forced kill; ``test_tool_stop`` covers that at the process supervisor.
+    """
+
+    COMMAND = "trap '' TERM; echo $$ > worker-a.pid; sleep 120; touch worker-a-finished.txt"
+
+    def __init__(self) -> None:
+        self.model = ScriptedShellModel([self.COMMAND], Path("."))
+        self.agent = Agent(model=self.model, tools=[shell], callback_handler=None)
+        self.work_dir: Path | None = None
+
+    def use_folder(self, work_dir: Path) -> None:
+        self.work_dir = self.model.work_dir = work_dir
+
+    @property
+    def pid_file(self) -> Path:
+        assert self.work_dir is not None
+        return self.work_dir / "worker-a.pid"
+
+    @property
+    def finished_file(self) -> Path:
+        assert self.work_dir is not None
+        return self.work_dir / "worker-a-finished.txt"
+
+    def command_alive(self) -> bool:
+        text = self.pid_file.read_text().strip() if self.pid_file.exists() else ""
+        return text.isdigit() and process_alive(int(text))
+
+    async def wait_until(self, alive: bool, timeout: float) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while self.command_alive() != alive:
+            if asyncio.get_running_loop().time() > deadline:
+                raise AssertionError(f"The shell command never became alive={alive}")
+            await asyncio.sleep(0.05)
+
+
+class _RerunModel(FakeStrandsAgent):
+    """Worker B's model; records whether worker A's command still ran when B started."""
+
+    def __init__(self, command_alive, *responses) -> None:
+        super().__init__(*responses)
+        self.command_alive = command_alive
+        self.alive_at_rerun: list[bool] = []
+
+    async def invoke_async(self, prompt: str, **kwargs: object):
+        self.alive_at_rerun.append(self.command_alive())
+        return await super().invoke_async(prompt, **kwargs)
+
+
 def _ready_launch(worker) -> AgentLaunchV1:
     """Give a test worker the launch record the lead validates handbacks with."""
 
@@ -94,7 +159,8 @@ def _ready_launch(worker) -> AgentLaunchV1:
     return launch
 
 
-async def test_lost_lease_hands_the_running_task_to_another_worker(monkeypatch) -> None:
+@pytest.mark.parametrize("runs_shell_command", [False, True], ids=["model_call", "shell_command"])
+async def test_lost_lease_hands_the_running_task_to_another_worker(monkeypatch, runs_shell_command) -> None:
     monkeypatch.setattr(wind_down, "WIND_DOWN_POLL_SECONDS", 0.05)
     monkeypatch.setattr(wind_down, "HANDBACK_PUBLISH_RETRY_SECONDS", 0.05)
     monkeypatch.setattr(handback_runtime, "interruption_limit", lambda agent: 3)
@@ -106,12 +172,27 @@ async def test_lost_lease_hands_the_running_task_to_another_worker(monkeypatch) 
         return await real_apply(agent, task_id, meta)
 
     monkeypatch.setattr(task_message_runtime, "apply_redispatch_notice", record_admission)
+    alive_at_handback: list[bool] = []
+    publish_handback = wind_down._publish_handback
+
+    async def record_handback(agent, state, handed_back):
+        if shell_run is not None:
+            alive_at_handback.append(shell_run.command_alive())
+        return await publish_handback(agent, state, handed_back)
+
+    monkeypatch.setattr(wind_down, "_publish_handback", record_handback)
 
     team_id = new_id("team_handback")
     task_id = new_id("handback_task")
     lead_llm = FakeStrandsAgent()
-    worker_a_llm = _BlockingModel()
-    worker_b_llm = FakeStrandsAgent(_task_response("Worker B finished the report."))
+    shell_run = _ShellRun() if runs_shell_command else None
+    blocking_model = None if shell_run is not None else _BlockingModel()
+    worker_a_llm = shell_run.agent if shell_run is not None else blocking_model
+    finished = _task_response("Worker B finished the report.")
+    if shell_run is not None:
+        worker_b_llm = _RerunModel(shell_run.command_alive, finished)
+    else:
+        worker_b_llm = FakeStrandsAgent(finished)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -147,6 +228,16 @@ async def test_lost_lease_hands_the_running_task_to_another_worker(monkeypatch) 
                 db_path=db_path,
                 workspace_dir=workspace_dir,
             )
+            if shell_run is not None:
+                # The live request carries no gateway-signed context, which code
+                # needs with authorization on; with it off code runs in the
+                # task's folders (custom_agents.code_access).
+                worker_a.authorization_config = {"enabled": False}
+                # The runtime puts its configured model on the Strands agent each
+                # turn (person_model_runtime.apply_model); here that is the script.
+                worker_a._strands_model = shell_run.model
+                shell_run.use_folder(current_workspace_scope(worker_a).home)
+                shell_run.work_dir.mkdir(parents=True, exist_ok=True)
             agent_tasks = []
             connection = await _connect_nats(team_id)
             try:
@@ -155,7 +246,12 @@ async def test_lost_lease_hands_the_running_task_to_another_worker(monkeypatch) 
                     new_id("usr_handback"), durable=False, auto_delete=True
                 )
                 for agent in (lead, worker_a):
+                    # Each agent's tasks copy this context when they start: the
+                    # runtime gives each agent its own agent reference this way
+                    # (custom_agents.strands_team), and the shell tool needs it.
+                    set_agent_ref(agent)
                     agent_tasks.append((agent, await _start_agent(agent)))
+                set_agent_ref(None)
 
                 request = MessageEnvelope(
                     msg_content=Task(
@@ -179,7 +275,10 @@ async def test_lost_lease_hands_the_running_task_to_another_worker(monkeypatch) 
                     ),
                 )
                 await _publish_envelope(channel, f"{team_id}_{WORKER_TYPE}", request)
-                await asyncio.wait_for(worker_a_llm.started.wait(), timeout=20)
+                if shell_run is not None:
+                    await shell_run.wait_until(alive=True, timeout=20)
+                else:
+                    await asyncio.wait_for(blocking_model.started.wait(), timeout=20)
 
                 # Worker B joins while A is alive, so it does not adopt A's tasks.
                 worker_b = _agent(
@@ -196,7 +295,10 @@ async def test_lost_lease_hands_the_running_task_to_another_worker(monkeypatch) 
                 worker_a._worker_launch = launch
                 wind_down.start_lease_loss_wind_down(worker_a, reason="stale_launch_lease")
 
-                await asyncio.wait_for(worker_a_llm.cancelled.wait(), timeout=10)
+                if shell_run is not None:
+                    await shell_run.wait_until(alive=False, timeout=15)
+                else:
+                    await asyncio.wait_for(blocking_model.cancelled.wait(), timeout=10)
                 response = await _wait_for_response(user_queue, timeout=40)
                 worker_a_task = next(task for agent, task in agent_tasks if agent is worker_a)
                 await asyncio.wait_for(asyncio.shield(worker_a_task), timeout=20)
@@ -226,6 +328,15 @@ async def test_lost_lease_hands_the_running_task_to_another_worker(monkeypatch) 
                     task_id
                 ]
                 assert await user_queue.get(timeout=1) is None
+                if shell_run is not None:
+                    # Worker A ended its command before handing the task back.
+                    assert alive_at_handback == [False]
+                    assert worker_b_llm.alive_at_rerun == [False]
+                    assert not shell_run.command_alive()
+                    assert not shell_run.finished_file.exists()
             finally:
+                if shell_run is not None and shell_run.work_dir is not None:
+                    kill_if_alive(shell_run.pid_file)
+                set_agent_ref(None)
                 await _stop_agents(agent_tasks)
                 await connection.close()

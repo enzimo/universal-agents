@@ -96,6 +96,7 @@ from storage.sql_dialect import POSTGRES, SQLITE, SqlDialect
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
 from .config import StorageSettings
 from .postgres_connection import (
+    KNOWLEDGE_WRITE_LOCK_KEY,
     DatabaseRow,
     PostgresConnection,
     connect_postgres,
@@ -127,8 +128,6 @@ KNOWLEDGE_RECEIPTS_PERSON_COLUMN = "work_person_id"
 # (2026-10 benchmark: any-word searches over common words were 20-40x slower).
 _ANY_WORD_FALLBACK_BELOW = 3
 _SNIPPET_WORDS = 16
-# Fixed advisory lock key for knowledge writes in PostgreSQL.
-_PG_WRITE_LOCK_KEY = 7_302_211_551
 _COUNTED_OUTCOMES = (WriteOutcome.APPLIED.value, WriteOutcome.PENDING.value)
 _PAGE_STATE_VALUES = tuple(action.value for action in PAGE_STATE_ACTIONS)
 
@@ -2165,7 +2164,7 @@ class PostgresKnowledgeRepository(_RelationalKnowledgeRepository):
         return connect_postgres(self._dsn)
 
     def _take_write_lock(self, conn: Any) -> None:
-        conn.execute("SELECT pg_advisory_xact_lock(%s)", (_PG_WRITE_LOCK_KEY,))
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (KNOWLEDGE_WRITE_LOCK_KEY,))
 
     def _search_index_statements(self) -> list[str]:
         return [

@@ -1084,28 +1084,40 @@ class AccessService:
         return self.plan_grants([spec.model_copy(update={"status": GrantStatus.ACTIVE})]).covered.get(spec.grant_id)
 
     def _store_grant(self, grant: GrantV1) -> GrantV1:
-        """Store one new grant as one entry: returns the stored grant, or the one that already covers it."""
+        """Store one new grant as one entry: returns the stored grant, or the one that already covers it.
 
-        plan = self.plan_grants([grant])
+        The plan runs inside the store's write transaction
+        (``AccessRepository.store_planned``), so a grant stored at the same
+        moment by another process is seen: the two never sit side by side in
+        one entry, and a tool grant never stays outside its tool set's entry.
+        Inside a person's decision (``AccessRepository.decision_transaction``)
+        the whole decision is that transaction.
+        """
+
+        stored, plan = self.store.store_planned(grant, lambda: self.plan_grants([grant]))
         cover = plan.covered.get(grant.grant_id)
+        # Logged once stored: inside a decision that rolls back, nothing was.
         if cover is not None:
-            logger.info(
-                "Access already covered; nothing new stored. event=grant_already_covered subject=%s:%s "
-                "target=%s level=%s covered_by=%s",
-                grant.subject.kind.value,
-                grant.subject.id,
-                grant.target.id,
-                grant.level.value,
-                cover.grant_id,
+            self.store.after_commit(
+                lambda: logger.info(
+                    "Access already covered; nothing new stored. event=grant_already_covered subject=%s:%s "
+                    "target=%s level=%s covered_by=%s",
+                    grant.subject.kind.value,
+                    grant.subject.id,
+                    grant.target.id,
+                    grant.level.value,
+                    cover.grant_id,
+                )
             )
             return cover
         replaced = plan.replaced_by(grant.grant_id)
-        stored = self.store.create(grant, replaces=replaced)
         if replaced:
-            logger.info(
-                "Broader access replaced narrower access. event=grants_replaced grant_id=%s replaced=%s",
-                stored.grant_id,
-                ",".join(replaced),
+            self.store.after_commit(
+                lambda: logger.info(
+                    "Broader access replaced narrower access. event=grants_replaced grant_id=%s replaced=%s",
+                    stored.grant_id,
+                    ",".join(replaced),
+                )
             )
         return stored
 
@@ -1348,20 +1360,22 @@ class AccessService:
         if self.grant_refusal(person, grant) is not None:
             raise HandDownRefused("Only the target's approver can approve this hand-down.")
         actor = SubjectRefV1(kind=SubjectKind.USER, id=person.person_id)
-        plan = self.plan_grants([grant.model_copy(update={"status": GrantStatus.ACTIVE})])
-        cover = plan.covered.get(grant_id)
-        if cover is not None:
-            # Access already in force covers it: the waiting hand-down is not needed.
-            self.store.set_status(grant_id, GrantStatus.DENIED, actor=actor, at=self.clock())
-            logger.info(
-                "An approved hand-down was already covered. event=grant_already_covered grant_id=%s covered_by=%s",
-                grant_id,
-                cover.grant_id,
-            )
-            return cover
-        return self.store.set_status(
-            grant_id, GrantStatus.ACTIVE, actor=actor, at=self.clock(), replaces=plan.replaced_by(grant_id)
+        active = grant.model_copy(update={"status": GrantStatus.ACTIVE})
+        # Planned inside the store's write transaction, as in _store_grant.
+        approved, activated = self.store.approve_pending(
+            grant_id, actor=actor, at=self.clock(), plan=lambda: self.plan_grants([active])
         )
+        if not activated:
+            # Access already in force covers it: the waiting hand-down was not needed and is denied.
+            self.store.after_commit(
+                lambda: logger.info(
+                    "An approved hand-down was already covered. event=grant_already_covered grant_id=%s "
+                    "covered_by=%s",
+                    grant_id,
+                    approved.grant_id,
+                )
+            )
+        return approved
 
     def revoke(self, grant_id: str, *, actor: SubjectRefV1) -> list[str]:
         """Revoke without an authority check; for trusted code that already checked."""

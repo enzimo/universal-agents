@@ -4,18 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
-from custom_agents.agent_liveness import lookup_owner_status, owner_gone_by_launch
-from custom_agents.liveness_observation import heartbeat_checks_deferred
+from custom_agents.agent_liveness import LivenessPurpose, gone_owner_ids
 from custom_agents.orphaned_subtasks import stop_left_out_delegations
 from custom_agents.task_human_interaction_blockers import (
     has_pending_human_interaction,
 )
 from custom_agents.task_manager import TaskInfo
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
-from custom_messages.enums import ProgressState, TaskHistoryImportance, TaskHistoryType
-from storage.runtime_state_repository import RuntimeRecoveryConflict
+from custom_messages.enums import ProgressState, TaskHistoryImportance, TaskHistoryType, TaskQueryDecision
+from storage.runtime_custody import CustodyStore, RuntimeRecoveryConflict
 
 
 def should_fail_stale_executing_recovery(
@@ -131,53 +130,6 @@ async def tell_task_about_its_restarts(agent: Any, task_id: str, now_ts: str) ->
     )
 
 
-async def filter_stale_role_takeover_owner_ids(
-    agent: Any, owner_agent_ids: List[str]
-) -> List[str]:
-    stale_owner_ids: List[str] = []
-    now = datetime.now(timezone.utc)
-    grace_seconds = agent._role_takeover_liveness_grace_seconds()
-
-    for owner_agent_id in owner_agent_ids:
-        if not owner_agent_id or owner_agent_id == agent.id:
-            continue
-        # A launch record decides when the owner has one: a heartbeat can be
-        # stale while a slow worker still runs (custom_agents.agent_liveness).
-        gone = owner_gone_by_launch(agent, owner_agent_id)
-        if gone is True:
-            stale_owner_ids.append(owner_agent_id)
-            continue
-        if gone is False:
-            agent._logger.info(
-                "Skipping role takeover: the owner's worker start has not ended. "
-                "event=role_takeover_owner_launch_live owner_agent_id=%s",
-                owner_agent_id,
-            )
-            continue
-        owner_status = lookup_owner_status(agent, owner_agent_id)
-        if owner_status is not None and owner_status.is_exiting:
-            stale_owner_ids.append(owner_agent_id)
-            continue
-        if heartbeat_checks_deferred(agent):
-            continue
-        if owner_status is None:
-            stale_owner_ids.append(owner_agent_id)
-            continue
-        last_seen_at = agent._parse_iso_timestamp(owner_status.last_seen_at)
-        if last_seen_at is None:
-            stale_owner_ids.append(owner_agent_id)
-            continue
-        age_seconds = (now - last_seen_at).total_seconds()
-        if age_seconds > grace_seconds:
-            stale_owner_ids.append(owner_agent_id)
-            continue
-        agent._logger.info(
-            f"[{agent.id}] Skipping role takeover for live owner {owner_agent_id}; "
-            f"last_seen_at={owner_status.last_seen_at} age={age_seconds:.1f}s."
-        )
-    return stale_owner_ids
-
-
 async def discard_runtime_state_for_team_change(
     agent: Any, previous_team_id: str
 ) -> None:
@@ -230,6 +182,22 @@ async def discard_runtime_state_for_team_change(
             )
 
 
+def _has_delayed_retry_decision(manager: Any, task_id: str) -> bool:
+    """A resolved retry choice still holds its pause until its timer requeues it.
+
+    The deferred reply may still be installing that timer after a crash, or
+    may already have committed it. Neither case makes the task an orphaned
+    pause. Only the latest pause's decision counts for a later pause.
+    """
+    records = [record for record in manager.task_state.recoverable_pause_records.values() if record.task_id == task_id]
+    if not records:
+        return False
+    latest = max(records, key=lambda record: record.created_at)
+    return latest.user_decision in {
+        TaskQueryDecision.RETRY_IN_5_MINUTES.value, TaskQueryDecision.RETRY_IN_10_MINUTES.value,
+    }
+
+
 async def _preserve_or_requeue_recovered_pause(
     agent: Any,
     *,
@@ -242,6 +210,12 @@ async def _preserve_or_requeue_recovered_pause(
     if await agent.task_manager.operations_runtime.run(
         partial(has_explicit_queue_pause, agent.task_manager), task_id,
     ):
+        return
+    if await agent.task_manager.operations_runtime.run(partial(_has_delayed_retry_decision, agent.task_manager), task_id):
+        agent._logger.info(
+            "Recovery kept the task paused until its chosen retry timer. "
+            "event=recovery_preserved_delayed_retry agent_id=%s task_id=%s", agent.id, task_id,
+        )
         return
     pending_guidance = await agent.task_manager.operations_runtime.run(
         agent.task_manager.get_pending_recoverable_pause, task_id
@@ -279,6 +253,73 @@ async def _preserve_or_requeue_recovered_pause(
     )
 
 
+def _log_lost_takeover_race(agent: Any, store: CustodyStore, owner_agent_ids: List[str]) -> None:
+    agent._logger.warning(
+        "Could not take over this saved work: another agent took it over first, or its "
+        "owner saved it again meanwhile (so it was not gone). Starting without it. "
+        "event=role_takeover_lost_race agent_id=%s store=%s owner_agent_ids=%s",
+        agent.id,
+        store.value,
+        owner_agent_ids,
+    )
+
+
+async def _take_over_saved_tasks(agent: Any, *, last_attempt: bool = False) -> Optional[Dict[str, Any]]:
+    """Adopt the saved tasks of gone agents of this type (``agent_liveness``).
+
+    Two agents of one type can start together, for example two startup agents
+    or a startup agent and a pool worker, and decide the same owner is gone.
+    The custody transfer lets only one of them commit; the other gets
+    ``RuntimeRecoveryConflict``, and ``_restore_with_one_retry`` reads again:
+    the work has its new holder, so the second read adopts only what is left.
+    A conflict on that last read starts without the contested work: it stays
+    saved with its holder, the lead's replacement pass adopts it if that
+    holder is gone (``orphaned_work_takeover``), and a startup agent that
+    stopped here would stop the whole runtime.
+    """
+    if not agent.team_id or not agent.named_agent_type:
+        return None
+    candidates = agent.task_manager.runtime_state_store.peek_task_runtime_by_role(
+        agent.team_id, agent.named_agent_type
+    )
+    owner_ids = await gone_owner_ids(
+        agent, [row.owner_agent_id for row in candidates], purpose=LivenessPurpose.STARTUP_TAKEOVER
+    )
+    try:
+        restored: Optional[Dict[str, Any]] = await agent.task_manager.operations_runtime.run(
+            agent.task_manager.restore_runtime_state_for_owner_ids, owner_ids
+        )
+    except RuntimeRecoveryConflict as conflict:
+        if not last_attempt:
+            raise
+        agent._logger.error(
+            "Saved work of gone agents changed again while this agent took it over; starting without it. "
+            "event=role_takeover_lost_race agent_id=%s team_id=%s owner_agent_ids=%s error=%s",
+            agent.id,
+            agent.team_id,
+            owner_ids,
+            conflict,
+        )
+        return None
+    return restored
+
+
+async def _take_over_deferred_messages(agent: Any) -> bool:
+    """Adopt the deferred messages of gone agents of this type; a lost race is logged (see above)."""
+    decided: List[str] = []
+
+    async def gone(owner_ids: List[str]) -> List[str]:
+        decided.extend(await gone_owner_ids(agent, owner_ids, purpose=LivenessPurpose.DEFERRED_TAKEOVER))
+        return decided
+
+    try:
+        restored: bool = await agent.deferred_inbox.restore_role(stale_owner_filter=gone)
+    except RuntimeRecoveryConflict:
+        _log_lost_takeover_race(agent, CustodyStore.DEFERRED_MESSAGES, decided)
+        return False
+    return restored
+
+
 class RuntimeRecoveryStartFailed(RuntimeError):
     """Restoring this agent's own saved work conflicted twice at start; the agent does not start.
 
@@ -303,7 +344,7 @@ class RuntimeRecoveryStartFailed(RuntimeError):
 
 async def _restore_saved_tasks(
     agent: Any, same_role_takeover_enabled: bool, *, last_attempt: bool = False
-) -> Optional[dict[str, Any]]:
+) -> Optional[Dict[str, Any]]:
     """Adopt the saved work of gone agents of this type, else restore this agent's own.
 
     On the last attempt a conflict is final: a contested takeover is skipped
@@ -312,7 +353,7 @@ async def _restore_saved_tasks(
     """
     restored_runtime = None
     if same_role_takeover_enabled:
-        restored_runtime = await _take_over_gone_owners(agent, last_attempt=last_attempt)
+        restored_runtime = await _take_over_saved_tasks(agent, last_attempt=last_attempt)
     if not restored_runtime:
         try:
             restored_runtime = await agent.task_manager.operations_runtime.run(
@@ -333,45 +374,7 @@ async def _restore_saved_tasks(
     return restored_runtime
 
 
-async def _take_over_gone_owners(agent: Any, *, last_attempt: bool) -> Optional[dict[str, Any]]:
-    """Adopt the saved work of gone agents of this type; a final conflict starts without it.
-
-    That work stays saved with whoever holds it now, and the lead's
-    replacement pass adopts it if that holder is gone
-    (``orphaned_work_takeover``); a startup agent that stopped here would stop
-    the whole runtime.
-    """
-    role_runtime_candidates = (
-        agent.task_manager.runtime_state_store.peek_task_runtime_by_role(
-            agent.team_id,
-            agent.named_agent_type,
-        )
-        if agent.team_id and agent.named_agent_type
-        else []
-    )
-    stale_owner_ids = await filter_stale_role_takeover_owner_ids(
-        agent,
-        [row.owner_agent_id for row in role_runtime_candidates],
-    )
-    try:
-        return await agent.task_manager.operations_runtime.run(
-            agent.task_manager.restore_runtime_state_for_owner_ids, stale_owner_ids
-        )
-    except RuntimeRecoveryConflict as conflict:
-        if not last_attempt:
-            raise
-        agent._logger.error(
-            "Saved work of gone agents changed again while this agent took it over; starting without it. "
-            "event=role_takeover_lost_race agent_id=%s team_id=%s owner_agent_ids=%s error=%s",
-            agent.id,
-            agent.team_id,
-            stale_owner_ids,
-            conflict,
-        )
-        return None
-
-
-async def _restore_with_one_retry(agent: Any, same_role_takeover_enabled: bool) -> Optional[dict[str, Any]]:
+async def _restore_with_one_retry(agent: Any, same_role_takeover_enabled: bool) -> Optional[Dict[str, Any]]:
     """Restore saved work; after a custody conflict, read the whole restore again once.
 
     Startup did not handle ``RuntimeRecoveryConflict`` before 2026-10-17: a
@@ -426,11 +429,7 @@ async def recover_runtime_after_restart(agent: Any) -> None:
         await agent.deferred_inbox.clear()
     else:
         if same_role_takeover_enabled:
-            restored_deferred = await agent.deferred_inbox.restore_role(
-                stale_owner_filter=lambda owner_ids: (
-                    filter_stale_role_takeover_owner_ids(agent, owner_ids)
-                ),
-            )
+            restored_deferred = await _take_over_deferred_messages(agent)
         if not restored_deferred:
             restored_deferred = await agent.deferred_inbox.restore()
 

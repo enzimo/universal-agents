@@ -7,7 +7,6 @@ from custom_agents.task_runtime_state import RuntimeOwnerIdentity
 from custom_agents.task_runtime_state import ObjectiveRuntimeState
 from custom_agents.task_runtime_state import PlanRuntimeState
 from custom_agents.task_runtime_state import TaskRuntimeState
-from custom_agents.task_runtime_state import cache_task_objective
 import logging
 from custom_agents.objective_work_sessions import ObjectiveWorkSessionCoordinator
 from storage.plan_repository import PlanRepository
@@ -21,6 +20,7 @@ from custom_agents.task_records import TaskInfo
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import ExecutionDigest, Task, TaskAnswer
 from custom_messages.enums import ExecutionPlanItemStatus, ExecutionUnknownStatus, MessageMetaType, ObjectiveEventType, PlanActionStatus, PlanActionType, PlanStatus, PlanStepFailurePolicy, ProgressState, RequesterType, TaskActivityStage, TaskActivityType, TaskHistoryImportance, TaskHistorySource, TaskHistoryType
+from custom_messages.records.objectives import ObjectiveRecord
 from custom_messages.records.plans import PlanActionRecord, PlanRecord, PlanStepRecord
 from id_generation import new_id
 
@@ -264,31 +264,34 @@ class PlanCoordinator:
             self._logger.error("Failed to persist plan %s for task %s: %s", plan_id, task_id, exc)
             return None
         if objective is not None:
-            changed = False
-            if plan_id not in objective.plan_ids:
-                objective.plan_ids.append(plan_id)
-                changed = True
-                self.operations.append_objective_event(
-                    objective,
-                    ObjectiveEventType.PLAN_LINKED,
-                    f"Linked plan {plan_id} to objective.",
-                    task_id=task_id,
-                    plan_id=plan_id,
-                    user_visible=False,
-                )
-            if objective.current_plan_id != plan_id:
-                objective.current_plan_id = plan_id
-                changed = True
             related_task_ids = self._related_task_ids_for_plan(plan_id, plan)
-            for related_task_id in related_task_ids:
-                if related_task_id not in objective.related_task_ids:
-                    objective.related_task_ids.append(related_task_id)
-                    cache_task_objective(
-                        self.task_state, self.objective_state, related_task_id, objective.objective_id
-                    )
+
+            def follow_plan(stored: ObjectiveRecord) -> bool:
+                changed = False
+                if plan_id not in stored.plan_ids:
+                    stored.plan_ids.append(plan_id)
                     changed = True
-            if changed:
-                self.operations.save_objective(objective, step="plan_followed_task")
+                    self.operations.append_objective_event(
+                        stored,
+                        ObjectiveEventType.PLAN_LINKED,
+                        f"Linked plan {plan_id} to objective.",
+                        task_id=task_id,
+                        plan_id=plan_id,
+                        user_visible=False,
+                    )
+                if stored.current_plan_id != plan_id:
+                    stored.current_plan_id = plan_id
+                    changed = True
+                for related_task_id in related_task_ids:
+                    if related_task_id not in stored.related_task_ids:
+                        stored.related_task_ids.append(related_task_id)
+                        changed = True
+                return changed
+
+            # The save records the task and plan lookups for the related tasks.
+            self.operations.change_objective(
+                objective.objective_id, follow_plan, step="plan_followed_task"
+            )
         return plan
 
     def get_plan(self, plan_id: str) -> Optional[PlanRecord]:

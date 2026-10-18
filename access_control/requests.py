@@ -41,7 +41,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import Callable, Protocol
 
 from access_control.decisions import AccessService, HandDownRefused
 from access_control.entities import (
@@ -75,7 +75,9 @@ from custom_messages.contracts.access_v2 import (
     TargetRefV1,
 )
 from id_generation import new_id
-from storage.access_repository import AccessStoreConflict
+from storage.access_repository import (
+    AccessStoreConflict, DecisionClaim, DecisionInProgress, DecisionRecovery, store_unavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +102,27 @@ ACCESS_PROPOSAL_CHANGE = "access_proposal"
 APPLIED_AT_DECISION = frozenset({FILE_DELIVERY_CHANGE, ACCESS_PROPOSAL_CHANGE})
 BLOCKABLE_TARGETS = frozenset(
     {TargetKind.TOOL_SET, TargetKind.TOOL, TargetKind.OPERATION, TargetKind.FOLDER, TargetKind.FILE}
+)
+# How long the claim of a change applied at the decision lasts before another
+# decision may take over (``DecisionClaim``; access decisions take no claim,
+# they are one transaction). A live decision renews it before and after each
+# long step (``renew_claim``): the longest, one program download, ends after
+# ``DOWNLOAD_DEADLINE_SECONDS`` (300) from connecting to its last byte
+# (``access_control.cli_binaries``). A decision whose process ended keeps the
+# request claimed until then; the next decision takes it over.
+DECISION_CLAIM_SECONDS = 600
+DECISION_NOT_SAVED = (
+    "The decision couldn't be saved because the access store was busy or could not be reached. Nothing was "
+    "changed; try again."
+)
+DECISION_UNCONFIRMED = (
+    "The access store could not yet confirm this decision. Check its Inbox card after the store is available "
+    "again; do not repeat it yet."
+)
+DECIDING_NOW = (
+    "Someone is deciding this request right now; its card shows the outcome when they finish. If that decision "
+    f"stopped (for example the gateway restarted), the request can be decided again within "
+    f"{DECISION_CLAIM_SECONDS // 60} minutes."
 )
 SAVED_BEFORE_WORK_IDS = (
     "This request was made before an upgrade, for a task that has ended, so it can only be denied. "
@@ -128,6 +151,38 @@ class AccessInbox(Protocol):
         """Close the request's review and wake the task waiting on it."""
 
 
+@dataclass(frozen=True)
+class Decided:
+    """What a person decided, before it is stored (see ``AccessRequests.decide``)."""
+
+    reviewer: PersonPrincipal
+    choice: AccessReviewChoice
+    note: str
+    at: datetime
+    kept_item_ids: tuple[str, ...] = ()
+    keep: bool | None = None
+    keep_hours: int | None = None
+    hand_on: bool | None = None
+
+    def fields(self) -> dict[str, object]:
+        """The request fields that record the decision."""
+
+        return {
+            "decided_by": SubjectRefV1(kind=SubjectKind.USER, id=self.reviewer.person_id),
+            "decision": self.choice,
+            "decision_note": self.note,
+            "decided_at_utc": self.at,
+        }
+
+
+class DecisionRecoveryPending(HandDownRefused):
+    """External work needs reconciliation before its claim may be released."""
+
+
+class DecisionOutcomeUnknown(DecisionRecoveryPending):
+    """The store could not prove whether the outcome committed; keep its effects and claim for reconciliation."""
+
+
 class ChangeApplier(Protocol):
     """Trusted code that applies one kind of change when a person approves it.
 
@@ -136,12 +191,22 @@ class ChangeApplier(Protocol):
     reviewer's verified roles are known: access proposals (Phase 6) and files
     a person sends into another person's folder (decision D15). ``apply``
     re-checks everything against the reviewer's authority, stores its effects
-    together with ``finished`` (the request's outcome), and returns the stored
+    together with ``finished`` (the request's outcome) under ``claim`` (the
+    decision's claim, so only one approval applies), and returns the stored
     outcome; it raises ``HandDownRefused`` when anything fails, leaving
     nothing applied.
     """
 
-    def apply(self, request: AccessRequestV1, reviewer: PersonPrincipal, finished: AccessRequestV1) -> AccessRequestV1: ...
+    def apply(
+        self, request: AccessRequestV1, reviewer: PersonPrincipal, finished: AccessRequestV1, claim: DecisionClaim
+    ) -> AccessRequestV1: ...
+
+    def recover(
+        self, requests: AccessRequests, recovery: DecisionRecovery,
+        current: AccessRequestV1 | None, claimed_elsewhere: bool,
+    ) -> AccessRequestV1 | None:
+        """Keep a committed decision's effects or undo only this decision's work, under the access-store lock."""
+        ...
 
 
 class RequestWatcher(Protocol):
@@ -760,14 +825,38 @@ class AccessRequests:
         decision 2026-09-30: the box starts ticked). The web card sends the
         box as ticked or not. ``kept_item_ids`` are the rows of a change (a
         proposal) the reviewer kept; the others last for the task.
+
+        Each request is decided once. A decision stores its grants and its
+        outcome in one transaction (``AccessRepository.decision_transaction``):
+        a second decision made at the same moment (a double click, a chat
+        button and the web card, two reviewers) waits and then finds the
+        request decided, other writers never see a grant before its outcome,
+        and a decision that fails stores nothing. A change applied at the
+        decision does work outside the database first, so it claims the
+        request instead (``_apply_with_claim``).
         """
 
         if keep_hours is not None and not 1 <= keep_hours <= MAX_REQUEST_HOURS:
             raise HandDownRefused(f"Keep access for between 1 and {MAX_REQUEST_HOURS} hours, or until removed.")
 
         request = self.waiting_request(request_id)
+        choice = self._checked_choice(request, reviewer, choice)
+        decided = Decided(reviewer, choice, note, self.service.clock(), kept_item_ids, keep, keep_hours, hand_on)
+        applier = self._applier(request, choice)
+        if applier is not None:
+            finished = self._apply_with_claim(request_id, applier, decided)
+        else:
+            finished = self._decide_in_one_transaction(request_id, decided)
+        self._decided(finished)
+        return finished
+
+    def _checked_choice(
+        self, request: AccessRequestV1, reviewer: PersonPrincipal, choice: AccessReviewChoice
+    ) -> AccessReviewChoice:
+        """Refuse a decision this reviewer may not make, before anything is stored."""
+
         if request.kind is AccessRequestKind.CHANGE:
-            return self._decide_change(request, reviewer, choice, note, kept_item_ids, keep_hours)
+            return self._checked_change_choice(request, reviewer, choice)
         if not self.may_decide(reviewer, request):
             raise HandDownRefused(
                 "Only the person this work is for decides this request."
@@ -778,125 +867,149 @@ class AccessRequests:
             raise HandDownRefused(SAVED_BEFORE_WORK_IDS)
         if choice is AccessReviewChoice.APPROVE_TASK and not request.work_id:
             raise HandDownRefused("This request is not for a task, so it cannot be approved for one task only.")
-        if choice is AccessReviewChoice.APPROVE_ALL:
-            choice = AccessReviewChoice.APPROVE
-        decided = {
-            "decided_by": SubjectRefV1(kind=SubjectKind.USER, id=reviewer.person_id),
-            "decision": choice,
-            "decision_note": note,
-            "decided_at_utc": self.service.clock(),
-        }
-        if choice is AccessReviewChoice.DENY:
-            self._deny_pending(request, reviewer)
-            return self._finish(request.model_copy(update={**decided, "status": AccessRequestStatus.DENIED}), [])
-        created = self._approve(request, reviewer, choice, keep, keep_hours=keep_hours, hand_on=hand_on is not False)
-        finished = request.model_copy(
-            update={**decided, "status": AccessRequestStatus.GRANTED, "grant_ids": tuple(g.grant_id for g in created)}
-        )
-        return self._finish(finished, created)
+        return AccessReviewChoice.APPROVE if choice is AccessReviewChoice.APPROVE_ALL else choice
 
-    def _decide_change(
-        self,
-        request: AccessRequestV1,
-        reviewer: PersonPrincipal,
-        choice: AccessReviewChoice,
-        note: str,
-        kept_item_ids: tuple[str, ...] = (),
-        keep_hours: int | None = None,
-    ) -> AccessRequestV1:
-        """A change is approved as staged or denied.
-
-        The approval itself creates no grant, except for kinds trusted code
-        applies at the decision (``appliers``): those are applied here, with
-        the outcome stored in the same transaction.
-        """
-
+    def _checked_change_choice(
+        self, request: AccessRequestV1, reviewer: PersonPrincipal, choice: AccessReviewChoice
+    ) -> AccessReviewChoice:
+        assert request.change is not None
         if choice not in {AccessReviewChoice.APPROVE, AccessReviewChoice.APPROVE_ALL, AccessReviewChoice.DENY}:
             raise HandDownRefused("A staged change is approved as it is or denied.")
         if not self.may_decide(reviewer, request):
             raise HandDownRefused("Only a team administrator, or the person the change is for, can decide it.")
-        status = AccessRequestStatus.DENIED if choice is AccessReviewChoice.DENY else AccessRequestStatus.GRANTED
-        assert request.change is not None
-        keepable = {item.item_id for item in request.change.items if item.keepable}
-        if choice is AccessReviewChoice.APPROVE_ALL:
-            kept_item_ids = tuple(sorted(keepable))
-        finished = request.model_copy(
+        applied_here = request.change.kind in APPLIED_AT_DECISION
+        if choice is not AccessReviewChoice.DENY and applied_here and request.change.kind not in self.appliers:
+            raise HandDownRefused(
+                "This change is applied when it is approved in the gateway; decide it in the Inbox or in chat."
+            )
+        return choice
+
+    def _applier(self, request: AccessRequestV1, choice: AccessReviewChoice) -> ChangeApplier | None:
+        """The applier of an approved change applied at the decision; None for everything else."""
+
+        if request.change is None or choice is AccessReviewChoice.DENY:
+            return None
+        return self.appliers.get(request.change.kind)
+
+    # -- deciding in one transaction --------------------------------------------------
+
+    def _decide_in_one_transaction(self, request_id: str, decided: "Decided") -> AccessRequestV1:
+        """Store the decision's grants and its outcome together (see ``decide``)."""
+
+        try:
+            with self.service.store.decision_transaction(request_id, at=decided.at) as request:
+                finished = self._outcome(request, decided)
+                self.service.store.finish_request(finished)
+        except DecisionInProgress as exc:
+            raise HandDownRefused(DECIDING_NOW) from exc
+        except AccessStoreConflict as exc:
+            raise HandDownRefused(str(exc)) from exc
+        except Exception as exc:
+            # A lost PostgreSQL commit answer may hide an outcome that was stored.
+            stored = None
+            if store_unavailable(exc):
+                stored = self.outcome_stored_despite(exc, request_id, decided.reviewer, decided.at)
+            if stored is None:
+                self._not_saved(exc, request_id, decided.reviewer)
+                raise
+            finished = stored
+        return finished
+
+    @staticmethod
+    def _not_saved(error: Exception, request_id: str, reviewer: PersonPrincipal) -> None:
+        """Log a decision that failed for a reason other than an access rule (call inside ``except``).
+
+        A busy or unreachable database is raised to the person as a plain
+        refusal they can act on (the gateway shows refusals); anything else
+        returns, and the caller raises it again as it was.
+        """
+
+        logger.error(
+            "An access decision could not be saved; nothing was changed. event=access_decision_failed "
+            "request_id=%s by=%s error_type=%s error=%s",
+            request_id,
+            reviewer.person_id,
+            type(error).__name__,
+            error,
+        )
+        if store_unavailable(error):
+            raise HandDownRefused(DECISION_NOT_SAVED) from error
+
+    def _outcome(self, request: AccessRequestV1, decided: "Decided") -> AccessRequestV1:
+        """The decided request; an approved access request's grants are stored on the way."""
+
+        if request.kind is AccessRequestKind.CHANGE:
+            return self._change_outcome(request, decided)
+        if decided.choice is AccessReviewChoice.DENY:
+            return request.model_copy(update={**decided.fields(), "status": AccessRequestStatus.DENIED})
+        given = self._approve(request, decided)
+        return request.model_copy(
             update={
-                "status": status,
-                "decided_by": SubjectRefV1(kind=SubjectKind.USER, id=reviewer.person_id),
-                "decision": choice,
-                "decision_note": note,
-                "decided_at_utc": self.service.clock(),
-                "kept_item_ids": tuple(item for item in kept_item_ids if item in keepable),
-                "keep_hours": keep_hours,
+                **decided.fields(),
+                "status": AccessRequestStatus.GRANTED,
+                "grant_ids": tuple(grant.grant_id for grant in given),
             }
         )
-        applier = self.appliers.get(request.change.kind)
-        if choice is AccessReviewChoice.DENY:
-            return self._finish(finished, [])
-        if applier is None:
-            if request.change.kind in APPLIED_AT_DECISION:
-                raise HandDownRefused(
-                    "This change is applied when it is approved in the gateway; decide it in the Inbox or in chat."
-                )
-            return self._finish(finished, [])
-        applied = applier.apply(request, reviewer, finished)
-        logger.info(
-            "Change approved and applied. event=change_applied_at_decision request_id=%s kind=%s by=%s grants=%s",
-            applied.request_id,
-            request.change.kind,
-            reviewer.person_id,
-            ",".join(applied.grant_ids),
-        )
-        self.inbox.request_finished(applied)
-        return applied
 
-    def _approve(
-        self,
-        request: AccessRequestV1,
-        reviewer: PersonPrincipal,
-        choice: AccessReviewChoice,
-        keep: bool | None = None,
-        *,
-        keep_hours: int | None = None,
-        hand_on: bool = False,
-    ) -> list[GrantV1]:
+    def _change_outcome(self, request: AccessRequestV1, decided: "Decided") -> AccessRequestV1:
+        """A change is approved as staged (with the rows the reviewer kept) or denied."""
+
+        assert request.change is not None
+        denied = decided.choice is AccessReviewChoice.DENY
+        keepable = {item.item_id for item in request.change.items if item.keepable}
+        kept = tuple(sorted(keepable)) if decided.choice is AccessReviewChoice.APPROVE_ALL else decided.kept_item_ids
+        return request.model_copy(
+            update={
+                **decided.fields(),
+                "status": AccessRequestStatus.DENIED if denied else AccessRequestStatus.GRANTED,
+                "kept_item_ids": tuple(item for item in kept if item in keepable),
+                "keep_hours": decided.keep_hours,
+            }
+        )
+
+    def _approve(self, request: AccessRequestV1, decided: "Decided") -> list[GrantV1]:
+        """The grants that serve an approved access request, stored inside the decision's transaction.
+
+        They include grants already in force that cover the request
+        (``access_control.grant_entries``). The request's other hand-downs
+        waiting for approval are denied when its outcome is stored
+        (``AccessRepository.finish_request``).
+        """
+
+        reviewer, choice, keep = decided.reviewer, decided.choice, decided.keep
         pending = [grant for grant in self._grants(request) if grant.status is GrantStatus.PENDING]
         if choice is AccessReviewChoice.APPROVE and keep is not False and pending:
             return [self.service.approve_pending(reviewer, grant.grant_id) for grant in pending]
-        self._deny_pending(request, reviewer)
         level = AccessLevel.READ if choice is AccessReviewChoice.APPROVE_READ else request.level
-        lifetime, expires_at = self._chosen_lifetime(request, choice, keep, keep_hours)
+        lifetime, expires_at = self._chosen_lifetime(request, choice, keep, decided.keep_hours)
         reviewer_ref = SubjectRefV1(kind=SubjectKind.USER, id=reviewer.person_id)
         specs = self.approval_specs(
-            request, level=level, lifetime=lifetime, expires_at=expires_at, granted_by=reviewer_ref, hand_on=hand_on
+            request,
+            level=level,
+            lifetime=lifetime,
+            expires_at=expires_at,
+            granted_by=reviewer_ref,
+            hand_on=decided.hand_on is not False,
         )
+        return self._give_specs(request, reviewer, specs)
+
+    def _give_specs(self, request: AccessRequestV1, reviewer: PersonPrincipal, specs: list[GrantV1]) -> list[GrantV1]:
+        """Store the approval's grants with the reviewer's authority."""
+
         # The person's own grant first: an agent's grant for their work needs it.
         specs.sort(key=lambda spec: spec.subject.kind is not SubjectKind.USER)
-        # What this approval stored: a grant already in force that covers the
-        # request is used as it is (access_control.grant_entries) and is never
-        # undone if a later step fails.
-        created: list[GrantV1] = []
+        lead_subject = self.lead().type_subject()
+        kept_by_lead = any(spec.subject == lead_subject for spec in specs) and request.subject != lead_subject
         given: list[GrantV1] = []
-        try:
-            lead_subject = self.lead().type_subject()
-            kept_by_lead = any(spec.subject == lead_subject for spec in specs) and request.subject != lead_subject
-            for spec in specs:
-                spec = spec.model_copy(update={"approval_id": request.request_id})
-                if kept_by_lead and spec.subject == request.subject:
-                    # The worker's access for this task comes from what the team
-                    # lead now keeps, so removing that also ends it.
-                    grant = self.service.hand_down(
-                        self.lead(), spec, task_id=request.work_id, person_id=request.person_id
-                    )
-                else:
-                    grant = self.service.grant_by_person(reviewer, spec)
-                given.append(grant)
-                if grant.approval_id == request.request_id:
-                    created.append(grant)
-        except HandDownRefused:
-            self._undo(created, reviewer_ref)
-            raise
+        for spec in specs:
+            spec = spec.model_copy(update={"approval_id": request.request_id})
+            if kept_by_lead and spec.subject == request.subject:
+                # The worker's access for this task comes from what the team
+                # lead now keeps, so removing that also ends it.
+                grant = self.service.hand_down(self.lead(), spec, task_id=request.work_id, person_id=request.person_id)
+            else:
+                grant = self.service.grant_by_person(reviewer, spec)
+            given.append(grant)
         return given
 
     def _chosen_lifetime(
@@ -913,26 +1026,210 @@ class AccessRequests:
     def _grants(self, request: AccessRequestV1) -> list[GrantV1]:
         return [grant for grant_id in request.grant_ids if (grant := self.service.store.get(grant_id)) is not None]
 
-    def _deny_pending(self, request: AccessRequestV1, actor: PersonPrincipal | None) -> None:
-        ref = (
-            SubjectRefV1(kind=SubjectKind.USER, id=actor.person_id)
-            if actor
-            else SubjectRefV1(kind=SubjectKind.TEAM, id=self.service.team_id)
-        )
-        for grant in self._grants(request):
-            if grant.status is GrantStatus.PENDING:
-                self.service.store.set_status(grant.grant_id, GrantStatus.DENIED, actor=ref, at=self.service.clock())
+    # -- changes applied at the decision (claims) -------------------------------------
 
-    def _undo(self, grants: list[GrantV1], actor: SubjectRefV1) -> None:
-        for grant in grants:
-            self.service.revoke(grant.grant_id, actor=actor)
+    def _apply_with_claim(self, request_id: str, applier: ChangeApplier, decided: "Decided") -> AccessRequestV1:
+        """Claim the request, let the applier do its work and store the outcome under the claim.
 
-    def _finish(self, finished: AccessRequestV1, created: list[GrantV1]) -> AccessRequestV1:
+        The applier writes files, programs or MCP records before its
+        transaction, so the claim keeps any other decision away meanwhile
+        (``AccessRepository.decision_transaction`` refuses while it is
+        current). The applier takes back its own work when it fails; the
+        claim is then given up, so the request waits again.
+        """
+
+        request, claim = self._claim(request_id)
+        finished = self._change_outcome(request, decided)
         try:
-            self.service.store.finish_request(finished)
+            applied = applier.apply(request, decided.reviewer, finished, claim)
+        except DecisionRecoveryPending:
+            # Its durable recovery record must establish what committed before
+            # files are removed or a new decision takes over.
+            raise
+        except BaseException as exc:
+            self._release(claim, decided.reviewer, exc)
+            if isinstance(exc, AccessStoreConflict):
+                raise HandDownRefused(str(exc)) from exc
+            if isinstance(exc, Exception) and not isinstance(exc, HandDownRefused):
+                self._not_saved(exc, request_id, decided.reviewer)
+            raise
+        assert request.change is not None
+        logger.info(
+            "Change approved and applied. event=change_applied_at_decision request_id=%s kind=%s by=%s grants=%s",
+            applied.request_id,
+            request.change.kind,
+            decided.reviewer.person_id,
+            ",".join(applied.grant_ids),
+        )
+        return applied
+
+    def _claim(self, request_id: str) -> tuple[AccessRequestV1, DecisionClaim]:
+        """Claim the waiting request for a decision with work outside the database; returns it and the claim."""
+
+        claim = DecisionClaim(request_id=request_id, claim_id=new_id("decision"))
+        now = self.service.clock()
+        try:
+            request = self.service.store.claim_decision(
+                request_id,
+                claim_id=claim.claim_id,
+                at=now,
+                until=now + timedelta(seconds=DECISION_CLAIM_SECONDS),
+            )
+        except DecisionInProgress as exc:
+            raise HandDownRefused(DECIDING_NOW) from exc
         except AccessStoreConflict as exc:
-            self._undo(created, finished.decided_by or SubjectRefV1(kind=SubjectKind.TEAM, id=self.service.team_id))
             raise HandDownRefused(str(exc)) from exc
+        return request, claim
+
+    def renew_claim(self, claim: DecisionClaim) -> None:
+        """Extend this decision's claim before or after a long step; raises if the decision lost it.
+
+        A decision that lost its claim (the request was closed, or the claim
+        ran out and another decision took it) must stop before it changes
+        anything else.
+        """
+
+        self.service.store.renew_decision(
+            claim, until=self.service.clock() + timedelta(seconds=DECISION_CLAIM_SECONDS)
+        )
+
+    def outcome_stored_despite(
+        self, error: BaseException, request_id: str, reviewer: PersonPrincipal, decided_at: datetime | None
+    ) -> AccessRequestV1 | None:
+        """The outcome an applier stored although storing it reported ``error``, or None.
+
+        A PostgreSQL connection that drops while the outcome commits may have
+        committed it. The stored request is this decision's outcome when it no
+        longer waits and records this reviewer at this decision's time; then
+        the applier keeps its work. A failed read leaves the outcome unknown,
+        never rolled back: appliers preserve their files and their durable
+        recovery record until the gateway can reconcile it.
+        """
+
+        if decided_at is None:
+            return None
+        try:
+            stored = self.service.store.get_request(request_id)
+        except Exception as exc:  # noqa: BLE001 - preserve effects until the store answers
+            logger.exception(
+                "Could not confirm an access decision's outcome; its external work is kept for reconciliation. "
+                "event=access_decision_readback_failed request_id=%s",
+                request_id,
+            )
+            raise DecisionOutcomeUnknown(DECISION_UNCONFIRMED) from exc
+        if (
+            stored is None
+            or stored.status not in {AccessRequestStatus.GRANTED, AccessRequestStatus.DENIED}
+            or stored.decided_by != SubjectRefV1(kind=SubjectKind.USER, id=reviewer.person_id)
+            or stored.decided_at_utc != decided_at
+        ):
+            return None
+        logger.warning(
+            "Storing an access decision reported a failure, but the decision was stored; it stands. "
+            "event=access_decision_stored_despite_error request_id=%s status=%s error=%s",
+            request_id,
+            stored.status.value,
+            type(error).__name__,
+        )
+        return stored
+
+    def recovery_record(
+        self, claim: DecisionClaim, finished: AccessRequestV1, effects: dict[str, object]
+    ) -> DecisionRecovery:
+        return DecisionRecovery(
+            claim, finished, effects, self.service.clock() + timedelta(seconds=DECISION_CLAIM_SECONDS)
+        )
+
+    def clear_recovery(self, claim: DecisionClaim) -> None:
+        """A known outcome stands even if deleting its recovery record needs another pass."""
+
+        try:
+            self.service.store.clear_decision_recovery(claim)
+        except Exception:  # noqa: BLE001 - the durable record is retried by Inbox maintenance
+            logger.exception(
+                "The decision stands; its recovery record will be cleared by the Inbox. "
+                "event=access_decision_recovery_clear_failed request_id=%s claim_id=%s",
+                claim.request_id, claim.claim_id,
+            )
+
+    def reconcile_decision(
+        self, recovery: DecisionRecovery,
+        reconcile: Callable[[DecisionRecovery, AccessRequestV1 | None, bool], AccessRequestV1 | None],
+        *, require_record: bool = False,
+    ) -> AccessRequestV1 | None:
+        """Check the outcome and claim without a takeover racing the local cleanup."""
+
+        try:
+            with self.service.store.decision_cleanup_transaction(
+                recovery.claim, require_record=require_record, now=self.service.clock()
+            ) as state:
+                if state is None:
+                    return None
+                current, elsewhere, latest = state
+                return reconcile(latest or recovery, current, elsewhere)
+        except Exception as exc:
+            logger.exception(
+                "Could not reconcile an access decision; its external work is kept for the next Inbox pass. "
+                "event=access_decision_recovery_deferred request_id=%s claim_id=%s",
+                recovery.claim.request_id, recovery.claim.claim_id,
+            )
+            if store_unavailable(exc):
+                raise DecisionOutcomeUnknown(DECISION_UNCONFIRMED) from exc
+            raise DecisionRecoveryPending(
+                "The decision could not be completed. Some files still need cleanup; check its Inbox card "
+                "after storage is available again."
+            ) from exc
+
+    def recover_decisions(self) -> None:
+        """Resume durable reconciliation after an outage or a gateway restart, never grant access."""
+
+        for recovery in self.service.store.decision_recoveries(self.service.team_id, now=self.service.clock()):
+            assert recovery.finished.change is not None
+            try:
+                applier = self.appliers[recovery.finished.change.kind]
+                self.reconcile_decision(
+                    recovery,
+                    lambda latest, current, elsewhere: applier.recover(self, latest, current, elsewhere),
+                    require_record=True,
+                )
+                logger.info(
+                    "Reconciled an access decision's external work. event=access_decision_recovered "
+                    "request_id=%s claim_id=%s",
+                    recovery.claim.request_id, recovery.claim.claim_id,
+                )
+            except Exception:  # noqa: BLE001 - one failed recovery must not stop the other Inbox work
+                logger.exception(
+                    "Could not reconcile an access decision; it will be checked again. "
+                    "event=access_decision_recovery_failed request_id=%s claim_id=%s",
+                    recovery.claim.request_id, recovery.claim.claim_id,
+                )
+
+    def _release(self, claim: DecisionClaim, reviewer: PersonPrincipal, error: BaseException) -> None:
+        """Give up the claim of an applied change that failed (its applier took back its own work)."""
+
+        released = False
+        try:
+            released = self.service.store.release_decision(claim.request_id, claim.claim_id)
+        except Exception:  # noqa: BLE001 - logged; the claim runs out by itself
+            logger.exception(
+                "Could not give up the claim of a change that failed to apply; it runs out by itself. "
+                "event=access_decision_release_failed request_id=%s claim_id=%s",
+                claim.request_id,
+                claim.claim_id,
+            )
+        logger.warning(
+            "A change applied at the decision failed; the request waits again unless it was closed meanwhile. "
+            "event=access_decision_abandoned request_id=%s claim_id=%s by=%s error=%s claim_released=%s",
+            claim.request_id,
+            claim.claim_id,
+            reviewer.person_id,
+            type(error).__name__,
+            released,
+        )
+
+    def _decided(self, finished: AccessRequestV1) -> None:
+        """Log a stored outcome and close its review (after the outcome is stored)."""
+
         logger.info(
             "Access request decided. event=access_request_decided request_id=%s status=%s decision=%s by=%s grants=%s",
             finished.request_id,
@@ -942,7 +1239,6 @@ class AccessRequests:
             ",".join(finished.grant_ids),
         )
         self.inbox.request_finished(finished)
-        return finished
 
     def close_requests_saved_before_work_ids(self) -> list[str]:
         """Withdraw waiting requests for one task saved before the upgrade (the team lead's startup check).
@@ -968,20 +1264,31 @@ class AccessRequests:
         return closed
 
     def withdraw(self, request_id: str, *, why: str) -> AccessRequestV1:
-        """The waiting task ended first; close the review."""
+        """The waiting task ended first (or its person left); close the review.
+
+        A decision in progress holds the store's write lock, so the withdrawal
+        waits for it and then finds the request decided. A change applied at
+        the decision does its outside work before its transaction: the
+        withdrawal closes the request even while it runs, and that decision
+        then fails to store its outcome and takes back its work. Waiting
+        hand-downs are denied in the same transaction
+        (``AccessRepository.finish_request``).
+        """
 
         request = self.waiting_request(request_id)
-        self._deny_pending(request, None)
-        return self._finish(
-            request.model_copy(
-                update={
-                    "status": AccessRequestStatus.WITHDRAWN,
-                    "decision_note": why,
-                    "decided_at_utc": self.service.clock(),
-                }
-            ),
-            [],
+        withdrawn = request.model_copy(
+            update={
+                "status": AccessRequestStatus.WITHDRAWN,
+                "decision_note": why,
+                "decided_at_utc": self.service.clock(),
+            }
         )
+        try:
+            self.service.store.finish_request(withdrawn)
+        except AccessStoreConflict as exc:
+            raise HandDownRefused(str(exc)) from exc
+        self._decided(withdrawn)
+        return withdrawn
 
     # -- agents handing on, restricting and revoking ---------------------------
 

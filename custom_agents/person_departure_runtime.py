@@ -317,7 +317,7 @@ def _clear_schedules(agent: Any, person_id: str, outcome: PersonWorkOutcomeV1) -
         if schedule is None or owner_canonical_user_id_for_schedule(schedule) != person_id:
             continue
         if _is_team_schedule(schedule):
-            _move_team_schedule(agent, store, schedule, row, person_id, moves, outcome)
+            _move_team_schedule(agent, store, schedule, person_id, moves, outcome)
         else:
             _delete_schedule(agent, store, schedule, person_id, outcome)
     outcome.team_schedules_moved.extend(moves.moved)
@@ -364,7 +364,6 @@ def _move_team_schedule(
     agent: Any,
     store: Any,
     schedule: Any,
-    row: dict[str, Any],
     person_id: str,
     moves: _ScheduleMoves,
     outcome: PersonWorkOutcomeV1,
@@ -408,7 +407,9 @@ def _move_team_schedule(
         candidate=candidate,
     )
     try:
-        store.add(candidate, remaining_count_override=row.get("remaining_count"), system_mutation_permit=permit)
+        # Saved against the schedule as read: refused (and retried by the next
+        # sweep) when it changed or went away meanwhile; never recreated.
+        store.update(candidate, base=schedule, system_mutation_permit=permit)
     except Exception:  # noqa: BLE001 - reported; it keeps its old owner and does not run
         logger.exception(
             "Could not move a team schedule to another administrator. event=team_schedule_move_failed "
@@ -504,7 +505,10 @@ def _forget_records(agent: Any, person_id: str, outcome: PersonWorkOutcomeV1) ->
     """Removal: delete task records, objectives, memory-review jobs and the sandbox; hold memory and conversations."""
 
     store = departure_store(agent)
-    deleted = store.delete_person_records(person_id)
+    # In the manager's operation lane: an Objective change in progress loads
+    # and saves within one operation, so it cannot save the person's
+    # Objective (or plan) back after this deletes it.
+    deleted = agent.task_manager.operations_runtime.run_sync(store.delete_person_records, person_id)
     outcome.task_records_deleted += deleted.get("completed_tasks", 0)
     outcome.objectives_deleted += deleted.get("objectives", 0)
     outcome.memory_review_jobs_deleted += store.delete_memory_review_jobs(person_id)

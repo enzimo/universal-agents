@@ -18,7 +18,8 @@ import copy
 import ipaddress
 import logging
 import os
-from collections.abc import Iterable
+import tempfile
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -118,7 +119,10 @@ def private_host_names(hosts: Iterable[str]) -> list[str]:
     return found
 
 
-def write_instance_tool(instance_root: str | Path, tool: ProposedHttpToolV1 | ProposedCliToolV1) -> Path:
+def write_instance_tool(
+    instance_root: str | Path, tool: ProposedHttpToolV1 | ProposedCliToolV1,
+    *, before_write: Callable[[Path, int, bytes, Path], None] | None = None,
+) -> Path:
     """Write the tool's catalog file; refuses to replace an existing one."""
 
     directory = InstanceLayout.at(instance_root).instance_tools_dir
@@ -126,12 +130,24 @@ def write_instance_tool(instance_root: str | Path, tool: ProposedHttpToolV1 | Pr
     path = directory / f"{PROPOSED_FILE_PREFIX}{tool.tool_id.replace(':', '-')}.yaml"
     document = cli_document(tool) if isinstance(tool, ProposedCliToolV1) else tool_document(tool)
     text = yaml.safe_dump({"tools": [document]}, sort_keys=False)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".proposed-", suffix=".tmp", dir=directory)
+    temporary = Path(temporary_name)
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
-    except FileExistsError as exc:
-        raise CatalogError(f"A catalog file for {tool.tool_id} already exists: {path.name}") from exc
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(text)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            if before_write is not None:
+                before_write(path, handle.fileno(), text.encode("utf-8"), temporary)
+            handle.write(text)
+            handle.flush()
+            os.fchmod(handle.fileno(), 0o644)
+        # Publish complete YAML without replacing a different proposal's file.
+        # The journal names both links, so recovery also handles a process
+        # stopping between this link and removing the temporary name.
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise CatalogError(f"A catalog file for {tool.tool_id} already exists: {path.name}") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
     logger.warning(
         "A tool was added to the catalog. event=instance_tool_written tool_id=%s hosts=%s path=%s",
         tool.tool_id,

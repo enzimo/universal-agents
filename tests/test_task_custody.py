@@ -10,7 +10,7 @@ import asyncio
 import logging
 import os
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -18,15 +18,16 @@ from uuid import uuid4
 import pytest
 
 from custom_agents import task_custody
+from custom_agents.agent_liveness import LivenessPurpose
 from custom_agents.task_manager import TaskManager
-from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import RuntimeSnapshotV3, TaskSnapshotRecord
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState
 from storage.config import resolve_storage_settings
 from storage.runtime_snapshot_layout import canonical_json
-from storage.runtime_state_repository import RuntimeRecoveryConflict, create_runtime_state_repository
+from storage.runtime_custody import RuntimeRecoveryConflict
+from storage.runtime_state_repository import create_runtime_state_repository
 from storage.task_custody_repository import (
     TaskCustodyConflict, TaskCustodyReleased, TaskCustodyTakenOver, TaskCustodyTakeover,
 )
@@ -78,6 +79,7 @@ def _save(world, owner, snapshot, *, takeover=None):
     world.repo.save_task_runtime(
         owner_agent_id=owner, owner_agent_name=owner, team_id=world.team,
         owner_named_agent_type="Worker", runtime_state_json=snapshot, custody_takeover=takeover,
+        expect_existing=False,
     )
 
 
@@ -131,6 +133,43 @@ def test_a_save_that_still_lists_a_task_another_agent_took_over_is_refused(store
     assert _holder(store, store.task("new")) is None  # the refused save claimed nothing
     _save(store, a, _snapshot(other, store.task("new")))  # without the taken task it saves
     assert (_holder(store, work), _holder(store, other)) == (b, a)
+
+
+def test_a_save_refused_for_a_taken_task_neither_consumes_nor_loses_its_deferred_message(store):
+    """With main's exact-message hand-off (2026-10-18 merge): a deferred request's
+    admission save that the taken-over check refuses rolls back before the message
+    is checked or consumed. The coordinator's next save, without the taken task,
+    consumes it once."""
+    import json
+
+    a, b, _c = store.owners
+    work, other, request = store.task("work"), store.task("other"), store.task("request")
+    _save(store, a, _snapshot(work, other))
+    _save(store, b, _snapshot(work), takeover=TaskCustodyTakeover(work, a))
+    envelope = {"msg_header": {"message_id": request}, "msg_content": {"task_id": request}}
+    store.repo.add_deferred_message(
+        owner_agent_id=a, owner_agent_name=a, team_id=store.team, owner_named_agent_type="Worker",
+        message_id=request, envelope_json=json.dumps(envelope), first=False, expect_existing=False,
+    )
+
+    def deferred_ids():
+        rows = store.repo.load_deferred_messages_by_owner(a)
+        return [item["msg_header"]["message_id"] for row in rows for item in json.loads(row.messages_json)]
+
+    def admit(*task_ids):
+        store.repo.save_task_runtime(
+            owner_agent_id=a, owner_agent_name=a, team_id=store.team, owner_named_agent_type="Worker",
+            runtime_state_json=_snapshot(*task_ids), expect_existing=True,
+            deferred_message_id=request, consume_deferred_message=True,
+        )
+
+    with pytest.raises(TaskCustodyTakenOver):
+        admit(work, other, request)
+    assert deferred_ids() == [request]
+    assert _holder(store, request) is None
+    admit(other, request)  # the coordinator dropped the taken task
+    assert deferred_ids() == []
+    assert (_holder(store, request), _holder(store, work)) == (a, b)
 
 
 def test_a_record_of_a_task_this_owner_delegated_is_not_its_custody(store):
@@ -205,7 +244,7 @@ def test_recovery_creates_missing_rows_for_snapshots_saved_before_custody(store)
     legacy = store.task("legacy")
     store.repo.save_task_runtime(
         owner_agent_id=a, owner_agent_name=a, team_id=None, owner_named_agent_type="Worker",
-        runtime_state_json=_snapshot(legacy),
+        runtime_state_json=_snapshot(legacy), expect_existing=False,
     )  # no team id: no row, as for snapshots saved by earlier releases
     sources = store.repo.load_task_runtime_by_owner(a)
     store.repo.commit_task_runtime_recovery(
@@ -407,8 +446,8 @@ async def test_startup_reads_saved_work_again_after_a_custody_conflict(tmp_path,
     _admit(gone, "free")
     starting = _manager(tmp_path, "worker_new")
     monkeypatch.setattr(
-        runtime_recovery, "filter_stale_role_takeover_owner_ids",
-        AsyncMock(side_effect=lambda _agent, ids: [owner for owner in ids if owner == "worker_gone"]),
+        runtime_recovery, "gone_owner_ids",
+        AsyncMock(side_effect=lambda _agent, ids, **_kw: [owner for owner in ids if owner == "worker_gone"]),
     )
     store = starting.runtime_state_store
     real_commit = store.commit_task_runtime_recovery
@@ -446,8 +485,8 @@ async def test_startup_stops_the_delegated_work_of_a_task_it_leaves_out(tmp_path
     assert _admit(taker, "P", takeover_from="worker_gone")
     starting = _manager(tmp_path, "worker_new")
     monkeypatch.setattr(
-        runtime_recovery, "filter_stale_role_takeover_owner_ids",
-        AsyncMock(side_effect=lambda _agent, ids: [owner for owner in ids if owner == "worker_gone"]),
+        runtime_recovery, "gone_owner_ids",
+        AsyncMock(side_effect=lambda _agent, ids, **_kw: [owner for owner in ids if owner == "worker_gone"]),
     )
     agent = _starting_agent(starting)
     agent._request_subtask_stop = AsyncMock(return_value=True)
@@ -473,8 +512,8 @@ async def test_startup_skips_gone_agents_work_that_conflicts_twice(tmp_path, mon
     _admit(gone, "t1")
     starting = _manager(tmp_path, "worker_new")
     monkeypatch.setattr(
-        runtime_recovery, "filter_stale_role_takeover_owner_ids",
-        AsyncMock(side_effect=lambda _agent, ids: [owner for owner in ids if owner == "worker_gone"]),
+        runtime_recovery, "gone_owner_ids",
+        AsyncMock(side_effect=lambda _agent, ids, **_kw: [owner for owner in ids if owner == "worker_gone"]),
     )
 
     def always_changed(**_kwargs):
@@ -501,7 +540,7 @@ async def test_startup_stops_when_its_own_saved_work_conflicts_twice(tmp_path, m
     _admit(starting, "mine")
     restarted = _manager(tmp_path, "worker_new")
     monkeypatch.setattr(
-        runtime_recovery, "filter_stale_role_takeover_owner_ids", AsyncMock(return_value=[]),
+        runtime_recovery, "gone_owner_ids", AsyncMock(return_value=[]),
     )
 
     def always_changed(**_kwargs):
@@ -520,49 +559,46 @@ async def test_startup_stops_when_its_own_saved_work_conflicts_twice(tmp_path, m
 # -- admission decision --------------------------------------------------------
 
 
-def _agent(tmp_path, agent_id="worker_b", holder="worker_a", holder_status=None, launch_gone=None, monkeypatch=None):
+def _agent(tmp_path, agent_id="worker_b", holder="worker_a", holder_gone=False, monkeypatch=None):
     manager = _manager(tmp_path, holder)
     _admit(manager, "t1")
     agent = SimpleNamespace(
         id=agent_id, team_id="team", task_manager=_manager(tmp_path, agent_id),
         _logger=logging.getLogger("custody-test"),
     )
-    monkeypatch.setattr(task_custody, "owner_gone_by_launch", lambda _agent, _holder: launch_gone)
-    monkeypatch.setattr(task_custody, "lookup_owner_status", lambda _agent, _holder: holder_status)
-    monkeypatch.setattr(task_custody, "heartbeat_checks_deferred", lambda _agent: False)
+    _liveness(monkeypatch, holder_gone)
     return agent
 
 
-def _status(seen_seconds_ago: float, exiting: bool = False) -> AgentStatus:
-    return AgentStatus(
-        self_id="worker_a", team_id="team", named_agent_type="Worker", name="a", agent_role="worker",
-        is_paused=False, is_executing=True, has_execution_capacity=False,
-        status_type=MessageMetaType.RESPONSE, is_exiting=exiting,
-        last_seen_at=(datetime.now(timezone.utc) - timedelta(seconds=seen_seconds_ago)).isoformat(),
-    )
+def _liveness(monkeypatch, gone: bool) -> list:
+    """The team's owner-liveness rule (agent_liveness, tested there) decides; custody asks it."""
+    asked: list = []
+
+    def decide(_agent, holder, *, purpose, now=None, **_kwargs):
+        asked.append((holder, purpose))
+        return SimpleNamespace(gone=gone)
+
+    monkeypatch.setattr(task_custody, "owner_liveness", decide)
+    return asked
 
 
 def test_admission_drops_a_copy_while_its_holder_lives(tmp_path, monkeypatch):
-    agent = _agent(tmp_path, holder_status=_status(5), monkeypatch=monkeypatch)
+    agent = _agent(tmp_path, holder_gone=False, monkeypatch=monkeypatch)
     decision = task_custody.decide_admission(agent, "t1", None)
     assert (decision.admit, decision.reason, decision.holder_agent_id) == (False, task_custody.CUSTODY_HELD, "worker_a")
     assert task_custody.decide_admission(agent, "free_task", None).reason == task_custody.CUSTODY_FREE
 
 
 def test_admission_takes_over_from_a_gone_holder_or_one_that_handed_it_back(tmp_path, monkeypatch):
-    live = _agent(tmp_path, holder_status=_status(5), monkeypatch=monkeypatch)
+    live = _agent(tmp_path, holder_gone=False, monkeypatch=monkeypatch)
     handed_back = task_custody.decide_admission(live, "t1", "worker_a")
     assert (handed_back.admit, handed_back.takeover_from) == (True, "worker_a")
-    for status, launch_gone in ((_status(5, exiting=True), None), (_status(5), True), (None, None), (_status(3600), None)):
-        monkeypatch.setattr(task_custody, "owner_gone_by_launch", lambda _a, _h, gone=launch_gone: gone)
-        monkeypatch.setattr(task_custody, "lookup_owner_status", lambda _a, _h, s=status: s)
-        decision = task_custody.decide_admission(live, "t1", None)
-        assert (decision.admit, decision.reason, decision.takeover_from) == (
-            True, task_custody.CUSTODY_HOLDER_GONE, "worker_a"
-        )
-    # A live launch record keeps the holder alive however old its heartbeat.
-    monkeypatch.setattr(task_custody, "owner_gone_by_launch", lambda _a, _h: False)
-    assert not task_custody.decide_admission(live, "t1", None).admit
+    asked = _liveness(monkeypatch, True)
+    decision = task_custody.decide_admission(live, "t1", None)
+    assert (decision.admit, decision.reason, decision.takeover_from) == (
+        True, task_custody.CUSTODY_HOLDER_GONE, "worker_a"
+    )
+    assert asked == [("worker_a", LivenessPurpose.CUSTODY_ADMISSION)]
 
 
 @pytest.mark.asyncio
@@ -663,7 +699,7 @@ def test_postgres_recovery_never_overwrites_a_claim_made_meanwhile(monkeypatch):
     team, gone, taker, replacement, task = (f"{name}_{run}" for name in ("team", "gone", "taker", "repl", "task"))
     repo.save_task_runtime(
         owner_agent_id=gone, owner_agent_name=gone, team_id=None, owner_named_agent_type="Worker",
-        runtime_state_json=_snapshot(task),
+        runtime_state_json=_snapshot(task), expect_existing=False,
     )
     sources = repo.load_task_runtime_by_owner(gone)
     real_now = custody._now
@@ -673,7 +709,7 @@ def test_postgres_recovery_never_overwrites_a_claim_made_meanwhile(monkeypatch):
     def admit_copy() -> None:
         other.save_task_runtime(
             owner_agent_id=taker, owner_agent_name=taker, team_id=team, owner_named_agent_type="Worker",
-            runtime_state_json=_snapshot(task),
+            runtime_state_json=_snapshot(task), expect_existing=False,
         )
         admitted.append(taker)
 

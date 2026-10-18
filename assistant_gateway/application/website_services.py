@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
+from assistant_gateway.application.objective_control_text import objective_control_text
 from assistant_gateway.application.gateway_application import (
     GatewayApplicationResponse,
     GatewayDeliveryEvent,
@@ -107,7 +108,7 @@ from assistant_gateway.domain.transcript import (
 )
 from assistant_gateway.ports.repositories import DeliveryRepository, SessionRepository
 from custom_messages.contracts.runtime_v1 import DELIVERY_CHANNEL_WEBSITE
-from custom_messages.contracts.common_v1 import contract_sha256
+from custom_messages.contracts.schedule_v1 import schedule_listing_digest
 from custom_messages.contracts.control_v1 import PINNED_MEMORY_SORT_NEWEST, ManagerRuntimeWorkCommand, PinnedMemoryCommandPayload, PinnedMemoryFactPayload
 from custom_messages.enums import ScheduleManagementClass
 from assistant_gateway.application.website_application import (
@@ -1237,7 +1238,7 @@ class WebsiteOperationsApplication:
                 else "unknown"
             ),
             success=bool(response.success),
-            message=response.message,
+            message=objective_control_text(response, for_web=True) or response.message,
             cancellation_receipts=tuple(
                 item.model_dump(mode="json") for item in response.cancellation_receipts
             ),
@@ -1269,7 +1270,7 @@ class WebsiteOperationsApplication:
             projected.append(
                 WebScheduleV1(
                     schedule_id=schedule.schedule_id,
-                    record_digest=contract_sha256(schedule.model_dump(mode="json")),
+                    record_digest=schedule_listing_digest(schedule),
                     schedule_name=schedule.schedule_name,
                     objective_id=schedule.objective_id,
                     management_class=schedule.management_class.value,

@@ -14,6 +14,7 @@ from custom_agents.objective_work_config import load_objective_work_execution_co
 from custom_agents.sdk.strands.turn import (
     _finalize_objective_work_invocation,
 )
+from custom_agents.manager_control_runtime import CommandPerson, _apply_objective_control
 from custom_agents.scheduled_runtime import enqueue_fired_scheduled_task
 from custom_agents.schedule_store import ScheduleStore
 from custom_agents.task_manager import TaskManager
@@ -25,12 +26,14 @@ from custom_messages.contracts.routing_v1 import (
     MessageMeta,
     GatewayContext,
 )
+from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import (
     ProgressState,
     ExecutionPlanItemStatus,
     MessageMetaType,
+    ObjectiveEventType,
     ObjectiveHealthDisposition,
     ScheduleManagementClass,
     SystemScheduleKind,
@@ -49,7 +52,9 @@ from custom_tools.providers.objective_work import (
     objective_work_sessions,
     propose_objective_work_profile,
 )
+from custom_tools.providers.objectives import objectives
 from custom_tools.runtime_context import set_agent_ref
+from custom_tools.tool_stop import ToolStop
 from runtime_settings.instance_layout import InstanceLayout
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
@@ -621,6 +626,7 @@ def test_token_boundary_uses_reserved_checkpoint_invocation_and_accounts_split_u
             tool_call_limit_handler=None,
             msg_content=task,
             active_task_id=task.task_id,
+            tool_stop=ToolStop(agent_id="agent", task_id=task.task_id),
         )
     )
 
@@ -1186,3 +1192,281 @@ def test_builtin_policy_has_live_calibrated_token_headroom() -> None:
     assert policy.custom_profiles.budget_bounds.minimum.active_seconds == 300
     assert policy.custom_profiles.budget_bounds.maximum.active_seconds == 28_800
     assert policy.custom_profiles.budget_bounds.maximum.total_tokens == 3_000_000
+
+
+def test_a_failed_objective_work_schedule_replacement_restores_controls_and_keeps_new_notes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Install and rollback change definitions; notes written meanwhile stay current."""
+
+    manager = _manager(tmp_path, policy=True, focused_profile=True)
+    task, objective = _objective(manager)
+    _agent, schedule_store = _tool_agent(manager, task.task_id, monkeypatch)
+    first = yaml.safe_load(
+        objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the daily profile.", profile_name="daily", confirmed=True)
+    )
+    assert "error" not in first, first
+    [daily_row] = schedule_store.get_all()
+
+    def prior_note(memory):
+        memory.state.summary = "Notes from the prior run"
+
+    schedule_store.edit_schedule_memory(daily_row["schedule_id"], prior_note)
+    daily = schedule_store.get_scheduled_message(daily_row["schedule_id"])
+
+    def fail_link(*_args, **_kwargs):
+        installed = schedule_store.get_scheduled_message(daily.schedule_id)
+        assert installed.schedule_memory.state.summary == "Notes from the prior run"
+
+        def new_note(memory):
+            memory.state.summary = "Notes written during reconfiguration"
+
+        schedule_store.edit_schedule_memory(daily.schedule_id, new_note)
+        raise RuntimeError("Injected Objective link failure")
+
+    monkeypatch.setattr(manager, "link_schedule_to_objective", fail_link)
+    replaced = yaml.safe_load(
+        objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the focused profile.", profile_name="focused", confirmed=True)
+    )
+
+    assert "error" in json.dumps(replaced)
+    restored = schedule_store.get_scheduled_message(daily.schedule_id)
+    assert (restored.cron_expression, restored.interval_ms) == (daily.cron_expression, daily.interval_ms)
+    assert restored.payload.problem_statement == daily.payload.problem_statement
+    assert restored.schedule_memory.state.summary == "Notes written during reconfiguration"
+
+
+@pytest.mark.parametrize("first_install", [False, True])
+def test_failed_objective_schedule_install_keeps_a_concurrent_operator_stop(tmp_path, monkeypatch, first_install):
+    from custom_agents.schedule_management import (
+        ScheduleMutationAuthorityMode,
+        ScheduleMutationOperation,
+        build_schedule_mutation_permit,
+    )
+
+    manager = _manager(tmp_path, policy=True, focused_profile=True)
+    task, objective = _objective(manager)
+    _agent, store = _tool_agent(manager, task.task_id, monkeypatch)
+    if not first_install:
+        first = yaml.safe_load(
+            objective_work_sessions(
+                action="enable", objective_id=objective.objective_id, confirmation_summary="Use daily sessions.",
+                profile_name="daily", confirmed=True,
+            )
+        )
+        assert "error" not in first, first
+    stopped = []
+
+    def stop_then_fail(*_args, **_kwargs):
+        [row] = store.get_all()
+        installed = store.get_scheduled_message(row["schedule_id"])
+        permit = build_schedule_mutation_permit(
+            schedule=installed,
+            operation=ScheduleMutationOperation.DISABLE,
+            authority_mode=ScheduleMutationAuthorityMode.TRUSTED_RUNTIME,
+            actor_principal_id="operator",
+            owner_canonical_user_id=installed.payload_meta.gateway_context.canonical_user_id,
+            team_id=installed.claim_team_id,
+            candidate=installed.model_copy(update={"enabled": False}),
+        )
+        assert store.set_enabled(installed.schedule_id, False, system_mutation_permit=permit)
+        stopped.append(store.get_scheduled_message(installed.schedule_id))
+        raise RuntimeError("Injected Objective link failure after an operator stop")
+
+    monkeypatch.setattr(manager, "link_schedule_to_objective", stop_then_fail)
+    result = yaml.safe_load(
+        objective_work_sessions(
+            action="enable", objective_id=objective.objective_id, confirmation_summary="Use focused sessions.",
+            profile_name="focused", confirmed=True,
+        )
+    )
+
+    assert "error" in json.dumps(result)
+    assert len(stopped) == 1
+    assert store.get_scheduled_message(stopped[0].schedule_id) == stopped[0]
+
+
+# -- Objective lifecycle changes and the work policy ----------------------------------
+
+
+def _policy_objective(tmp_path: Path):
+    manager = _manager(tmp_path, policy=True)
+    task, objective = _objective(manager)
+    manager.objective_work_coordinator.enable_policy(
+        objective.objective_id,
+        profile_name="daily",
+        accepted_by_task_id=task.task_id,
+        acceptance_summary="User explicitly chose daily bounded work sessions.",
+        owner_canonical_user_id="objective-user",
+    )
+    return manager, task, objective
+
+
+def _event_types(manager: TaskManager, objective_id: str) -> list[ObjectiveEventType]:
+    return [event.event_type for event in manager.get_objective(objective_id).event_log]
+
+
+def _policy(manager: TaskManager, objective_id: str):
+    return manager.objective_work_repository.get_policy(
+        objective_id, owner_agent_id=manager.durable_manager_scope_id()
+    )
+
+
+def _control(manager: TaskManager, objective_id: str, action: str) -> ManagerRuntimeWorkCommand:
+    agent = SimpleNamespace(
+        task_manager=manager,
+        _logger=logging.getLogger("test.objective.work.control"),
+        _ensure_schedule_store=lambda: ScheduleStore(
+            db_path=manager._db_path, storage_settings=manager.storage_settings
+        ),
+        _scheduler_wake=SimpleNamespace(set=lambda: None),
+    )
+    command = ManagerRuntimeWorkCommand(
+        command_id=f"cmd_{action}", action=action, scope="objective", target_objective_id=objective_id
+    )
+    response = command.model_copy(deep=True)
+    asyncio.run(
+        _apply_objective_control(
+            agent,
+            command=command,
+            person=CommandPerson(canonical_user_id="objective-user", team_id="team", roles=("owner",)),
+            response=response,
+        )
+    )
+    return response
+
+
+def test_a_persons_pause_and_resume_keep_the_work_policy_events(tmp_path: Path) -> None:
+    """The policy's own Objective event survives the control that caused it.
+
+    The control used to save the Objective copy it held from before the
+    policy changed, erasing the policy event every time.
+    """
+    manager, _task, objective = _policy_objective(tmp_path)
+
+    paused = _control(manager, objective.objective_id, "pause_objective")
+
+    assert (paused.success, paused.message) == (True, "objective_paused")
+    policy = _policy(manager, objective.objective_id)
+    assert (policy.status.value, policy.disabled_by_objective_control) == ("disabled", True)
+    assert _event_types(manager, objective.objective_id)[-2:] == [
+        ObjectiveEventType.STATUS_CHANGED,
+        ObjectiveEventType.WORK_SESSION_POLICY_DISABLED,
+    ]
+
+    # Stopping a paused Objective (to end its current work) records nothing new.
+    events_before = _event_types(manager, objective.objective_id)
+    stopped = _control(manager, objective.objective_id, "stop_objective")
+    assert (stopped.success, stopped.message) == (True, "objective_paused")
+    assert _event_types(manager, objective.objective_id) == events_before
+
+    resumed = _control(manager, objective.objective_id, "resume_objective")
+
+    assert (resumed.success, resumed.message) == (True, "objective_active")
+    policy = _policy(manager, objective.objective_id)
+    assert (policy.status.value, policy.disabled_by_objective_control) == ("active", False)
+    stored = manager.get_objective(objective.objective_id)
+    assert [event.event_type for event in stored.event_log][-2:] == [
+        ObjectiveEventType.STATUS_CHANGED,
+        ObjectiveEventType.WORK_SESSION_POLICY_ENABLED,
+    ]
+    assert stored.event_log[-1].summary == "Resumed bounded Objective work sessions after Objective control."
+
+
+def test_a_resume_leaves_a_policy_the_person_turned_off(tmp_path: Path) -> None:
+    manager, _task, objective = _policy_objective(tmp_path)
+    manager.objective_work_coordinator.disable_policy(
+        objective.objective_id, owner_canonical_user_id="objective-user"
+    )
+    _control(manager, objective.objective_id, "pause_objective")
+    _control(manager, objective.objective_id, "resume_objective")
+
+    policy = _policy(manager, objective.objective_id)
+    assert (policy.status.value, policy.disabled_by_objective_control) == ("disabled", False)
+    assert _event_types(manager, objective.objective_id).count(ObjectiveEventType.WORK_SESSION_POLICY_DISABLED) == 1
+
+
+def test_the_team_leads_pause_and_resume_follow_the_work_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tool's pause and resume use the same lifecycle change as the person's controls.
+
+    Before, the tool left the policy alone: after a person paused in Runtime
+    controls and asked the team lead to resume, work sessions never ran again.
+    """
+    manager, task, objective = _policy_objective(tmp_path)
+    _tool_agent(manager, task.task_id, monkeypatch)
+
+    paused = json.loads(objectives(action="update_status", status="paused", objective_id=objective.objective_id))
+
+    assert paused["objective"]["status"] == "paused"
+    assert "lifecycle_warnings" not in paused
+    assert _policy(manager, objective.objective_id).disabled_by_objective_control is True
+    assert _event_types(manager, objective.objective_id)[-1] == ObjectiveEventType.WORK_SESSION_POLICY_DISABLED
+
+    resumed = json.loads(objectives(action="update_status", status="active", objective_id=objective.objective_id))
+
+    assert resumed["objective"]["status"] == "active"
+    policy = _policy(manager, objective.objective_id)
+    assert (policy.status.value, policy.disabled_by_objective_control) == ("active", False)
+    assert _event_types(manager, objective.objective_id)[-1] == ObjectiveEventType.WORK_SESSION_POLICY_ENABLED
+
+
+def test_a_fired_work_session_opens_inside_one_task_operation(tmp_path: Path) -> None:
+    """Opening the session runs as a task operation, like every Objective change.
+
+    It ran on the event loop outside the lane, so it could write between
+    another operation's load and save of the Objective, and that save erased
+    the WORK_SESSION_STARTED event; it also changed the task and its queue
+    outside the lane.
+    """
+    manager, task, objective = _policy_objective(tmp_path)
+    schedule = ScheduledMessage(
+        schedule_id="objwork_sched_lane",
+        schedule_name=f"objective_work_session:{objective.objective_id}",
+        management_class=ScheduleManagementClass.SYSTEM,
+        system_schedule_kind=SystemScheduleKind.OBJECTIVE_WORK_SESSION,
+        objective_id=objective.objective_id,
+        payload=Task(
+            task_id="task_work_window_lane",
+            parent_task_id=task.task_id,
+            task_type=MessageMetaType.REQUEST,
+            problem_statement="Resume this Objective for one bounded window.",
+        ),
+        payload_header=MessageHeader(from_agent_id="manager", agent_signature=""),
+        payload_meta=MessageMeta(
+            from_agent_name="Manager", conversation_id="conversation", objective_id=objective.objective_id
+        ),
+        cron_expression="0 9 * * *",
+        cron_timezone="UTC",
+        repeat_count=None,
+        next_fire_at="2026-08-22T00:00:00+00:00",
+    )
+    agent = SimpleNamespace(
+        id="manager",
+        name="Manager",
+        team_id="team",
+        task_manager=manager,
+        paused=False,
+        is_executing=True,
+        _conversation_store=None,
+        _ensure_request_timezone=lambda meta, top_level_request: meta,
+        _logger=logging.getLogger("test.objective.work.schedule"),
+    )
+    inside: list[bool] = []
+    start_session = manager.objective_work_coordinator.start_session
+
+    def start_and_note(*args, **kwargs):
+        inside.append(manager.operations_runtime.inside_operation())
+        return start_session(*args, **kwargs)
+
+    manager.objective_work_coordinator.start_session = start_and_note
+
+    assert asyncio.run(
+        enqueue_fired_scheduled_task(agent, schedule.schedule_id, schedule, from_runtime_mailbox=True)
+    )
+    assert inside == [True]
+    stored = manager.get_objective(objective.objective_id)
+    assert ObjectiveEventType.WORK_SESSION_STARTED in [event.event_type for event in stored.event_log]
+    assert manager.get_task_info("task_work_window_lane").meta.objective_work_session_id

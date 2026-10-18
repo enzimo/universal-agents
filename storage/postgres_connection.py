@@ -5,10 +5,20 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from uuid import uuid4
 from types import TracebackType
 from .sql_dialect import POSTGRES
+
+# Transaction-level advisory lock keys (``pg_advisory_xact_lock``), one per
+# store that serializes its own writes in PostgreSQL the way ``BEGIN
+# IMMEDIATE`` does in SQLite. A store's read-then-write steps (a uniqueness
+# check before an insert, a read-modify-write of a JSON record) are only
+# exact when its writers take turns; PostgreSQL's default READ COMMITTED
+# isolation does not make them take turns. Each store has its own key, so
+# unrelated stores never wait for each other. Keys must stay distinct.
+KNOWLEDGE_WRITE_LOCK_KEY = 7_302_211_551
+ACCESS_STORE_WRITE_LOCK_KEY = 7_302_211_552
 
 
 def ensure_storage_parent_dir(path: Optional[str]) -> None:
@@ -21,24 +31,58 @@ def ensure_storage_parent_dir(path: Optional[str]) -> None:
     directory.mkdir(parents=True, exist_ok=True)
 
 
+# Connection settings that may appear in logs and error messages. Every other
+# setting is hidden, so a setting that carries a secret (``password``,
+# ``sslpassword``, or one a later libpq adds) never shows just because nobody
+# listed it here.
+_SHOWN_POSTGRES_SETTINGS = frozenset(
+    {
+        "host",
+        "hostaddr",
+        "port",
+        "dbname",
+        "user",
+        "sslmode",
+        "connect_timeout",
+        "application_name",
+        "target_session_attrs",
+    }
+)
+_HIDDEN_VALUE = "***"
+# Shown instead of a connection string that cannot be read, because reading it
+# is what tells the redaction which parts are secret.
+UNREADABLE_POSTGRES_DSN = "<unreadable PostgreSQL connection string>"
+
+
 def redact_postgres_dsn(raw_dsn: str) -> str:
+    """The connection string with its password and other settings hidden, for logs and errors.
+
+    libpq accepts two forms and parses both here: a URL
+    (``postgresql://user:password@host/db?sslmode=require``) and keyword settings
+    (``host=db user=ua password=...``). Both become redacted keyword settings.
+    The user, host, port and database stay readable; an invalid connection
+    string is replaced as a whole.
+    """
+
     if not raw_dsn:
         return raw_dsn
-    parts = urlsplit(raw_dsn)
-    netloc = parts.netloc
-    if "@" in netloc:
-        userinfo, hostinfo = netloc.rsplit("@", 1)
-        if ":" in userinfo:
-            username, _password = userinfo.split(":", 1)
-            userinfo = f"{username}:***"
-        netloc = f"{userinfo}@{hostinfo}"
-    query = urlencode(
-        [
-            (key, "***" if "password" in key.lower() else value)
-            for key, value in parse_qsl(parts.query)
-        ]
-    )
-    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+    # URL-valued keyword settings and URI passwords containing ? or # are valid
+    # in libpq. Generic URL parsing interprets them differently and can log the
+    # password, so use the connection's parser for both forms before formatting.
+    from psycopg import Error as PsycopgError
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    try:
+        settings = conninfo_to_dict(raw_dsn)
+        return make_conninfo(
+            "",
+            **{
+                name: value if name in _SHOWN_POSTGRES_SETTINGS else _HIDDEN_VALUE
+                for name, value in settings.items()
+            },
+        )
+    except PsycopgError:
+        return UNREADABLE_POSTGRES_DSN
 
 
 # A deployment that runs its own PostgreSQL (the Docker bundle) names that
@@ -144,12 +188,21 @@ class PostgresConnection:
     dialect = POSTGRES
 
     def begin_write(self) -> None:
-        # psycopg begins on the first statement. SELECT FOR UPDATE belongs to
-        # the repository operation because its lock set is domain-specific.
-        pass
+        """Start a write: take the store's write lock when it has one.
 
-    def __init__(self, dsn: str):
+        psycopg begins the transaction on the first statement. A store opened
+        with ``write_lock_key`` takes its transaction-level advisory lock here,
+        released at commit or rollback, so its writers take turns as they do in
+        SQLite. Other stores lock the rows they change (SELECT FOR UPDATE),
+        because their lock sets are domain-specific.
+        """
+
+        if self._write_lock_key is not None:
+            self.execute("SELECT pg_advisory_xact_lock(%s)", (self._write_lock_key,))
+
+    def __init__(self, dsn: str, *, write_lock_key: int | None = None):
         self._dsn = dsn
+        self._write_lock_key = write_lock_key
         self._conn = _connect_psycopg(dsn)
         from storage.read_only import repositories_are_read_only
 
@@ -202,8 +255,10 @@ class PostgresConnection:
         self._conn.close()
 
 
-def connect_postgres(dsn: str) -> PostgresConnection:
-    return PostgresConnection(dsn)
+def connect_postgres(dsn: str, *, write_lock_key: int | None = None) -> PostgresConnection:
+    """Open a connection; ``write_lock_key`` makes ``begin_write`` take that store's write lock."""
+
+    return PostgresConnection(dsn, write_lock_key=write_lock_key)
 
 
 def validate_postgres_connection(dsn: str) -> None:

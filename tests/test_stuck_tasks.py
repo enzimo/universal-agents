@@ -118,6 +118,7 @@ def record(task_id, *, state=ProgressState.IN_PROGRESS, parent=None, signed=True
 def save(lead, owner, agent_type, records, **sections):
     snapshot = RuntimeSnapshotV3(schema_version=3, tasks=list(records), **sections)
     lead.task_manager.runtime_state_store.save_task_runtime(
+        expect_existing=False,
         owner_agent_id=owner,
         owner_agent_name=owner,
         team_id="team",

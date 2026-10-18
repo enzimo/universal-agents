@@ -489,7 +489,10 @@ def test_start_local_nats_rejects_partial_auth(tmp_path: Path, monkeypatch) -> N
 
 def test_seed_postgres_from_targets_creates_role_with_literal_password(
     monkeypatch,
+    caplog,
 ) -> None:
+    import psycopg
+
     admin_queries: list[tuple[object, object]] = []
     target_queries: list[tuple[object, object]] = []
     connect_dsns: list[str] = []
@@ -559,8 +562,10 @@ def test_seed_postgres_from_targets_creates_role_with_literal_password(
             return FakeConnection(admin_queries)
         return FakeConnection(target_queries)
 
-    fake_psycopg = types.SimpleNamespace(connect=fake_connect, sql=FakeSqlModule())
-    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+    # Keep the real connection-string parser in the seeding log path.
+    monkeypatch.setattr(psycopg, "connect", fake_connect)
+    monkeypatch.setattr(psycopg, "sql", FakeSqlModule())
+    caplog.set_level(logging.INFO, logger="docker.run_bundle")
 
     seed_postgres_from_targets(
         [
@@ -582,6 +587,8 @@ def test_seed_postgres_from_targets_creates_role_with_literal_password(
     assert all(
         "ALTER EXTENSION" not in query for query in rendered_admin_target_queries
     )
+    assert "secret" not in caplog.text
+    assert "password=***" in caplog.text
 
 
 def test_run_supervised_bundle_skips_postgres_for_sqlite_runtime(

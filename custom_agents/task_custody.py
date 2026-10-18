@@ -43,12 +43,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from functools import partial
 from typing import Any, Optional
 
-from custom_agents.agent_liveness import lookup_owner_status, owner_gone_by_launch, parse_utc
-from custom_agents.liveness_observation import heartbeat_checks_deferred
+from custom_agents.agent_liveness import LivenessPurpose, owner_liveness
 
 logger = logging.getLogger(__name__)
 
@@ -77,34 +76,15 @@ class CustodyDecision:
 
 
 def holder_gone(agent: Any, holder_agent_id: str, *, now: Optional[datetime] = None) -> bool:
-    """Whether a task's holder has provably stopped.
+    """Whether a task's holder has provably stopped: the team's owner-liveness rule.
 
-    One seam for the team's liveness rule, so it can move to the shared
-    owner-liveness helper in ``agent_liveness`` without touching custody. It
-    uses the same rule as orphaned-work takeover: the holder's launch record
-    decides when it has one (ended, or its process is provably absent);
-    otherwise its heartbeat, gone when it reports exiting, has no status row,
-    or is older than ``agent.schedule_maintenance.stuck_tasks.owner_gone_after_seconds``.
-    Right after this host was suspended the heartbeat proves nothing
-    (``liveness_observation``), so the holder counts as alive.
+    One seam (``agent_liveness.owner_liveness``, logged with purpose
+    ``custody_admission``): the holder's launch record decides when it has
+    one, otherwise its heartbeat and process identity. Under that rule a live
+    process counts as alive even after it announced its exit.
     """
 
-    gone = owner_gone_by_launch(agent, holder_agent_id)
-    if gone is not None:
-        return gone
-    status = lookup_owner_status(agent, holder_agent_id)
-    if status is not None and status.is_exiting:
-        return True
-    if heartbeat_checks_deferred(agent):
-        return False
-    if status is None:
-        return True
-    from custom_agents.stuck_tasks import stuck_task_settings
-
-    last_seen = parse_utc(status.last_seen_at)
-    gone_after = stuck_task_settings(agent).owner_gone_after_seconds
-    moment = now or datetime.now(timezone.utc)
-    return last_seen is None or (moment - last_seen).total_seconds() >= gone_after
+    return owner_liveness(agent, holder_agent_id, purpose=LivenessPurpose.CUSTODY_ADMISSION, now=now).gone
 
 
 def decide_admission(agent: Any, task_id: str, prior_worker_agent_id: Optional[str]) -> CustodyDecision:

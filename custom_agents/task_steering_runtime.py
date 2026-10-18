@@ -15,6 +15,12 @@ from custom_agents.message_routing import resolve_requester_routing_key
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.prompt_context_sanitization import render_replied_message_lines
 from custom_agents.provider_error_runtime import ProviderTimeoutError, is_provider_timeout_error
+from custom_agents.sdk.strands.turn_tool_stop import (
+    TURN_CANCELLED_REASON,
+    invoke_with_tool_stop,
+    stop_tool_calls,
+)
+from custom_tools.tool_stop import ToolStop
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError, settle_failed_turn
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND
 from custom_agents.task_human_interaction_blockers import (
@@ -823,28 +829,35 @@ async def resume_interrupted_task_turn(agent: Any, task_id: str) -> Optional[Any
         task_id,
         _answered_access_ids(steering),
     )
-    agent._set_active_execution_context(task_id)
+    # A resumed turn is a new turn: it gets its own stop for its commands.
+    tool_stop = agent._set_active_execution_context(task_id)
     try:
-        await agent.task_manager.operations_runtime.run(
-            agent.task_manager.update_main_task_state,
-            task_id,
-            ProgressState.IN_PROGRESS,
-            datetime.now(timezone.utc).isoformat(),
-        )
-        return await _run_resumed_turn(agent, session, steering, task_info, response_blocks)
-    except Exception as exc:
-        # The task holds the execution slot (IN_PROGRESS above). Unhandled, it
-        # kept it and no queued task ever started again (turn_failure_runtime).
-        agent._interrupted_turn_sessions.pop(task_id, None)
-        agent._logger.warning(
-            "A resumed turn failed; ending its task. event=resumed_turn_failed "
-            "task_id=%s steering_id=%s error_type=%s",
-            task_id,
-            steering.steering_id,
-            type(exc).__name__,
-        )
-        await settle_failed_turn(agent, task_id, task_info, _as_provider_timeout(exc))
-        return None
+        try:
+            await agent.task_manager.operations_runtime.run(
+                agent.task_manager.update_main_task_state,
+                task_id,
+                ProgressState.IN_PROGRESS,
+                datetime.now(timezone.utc).isoformat(),
+            )
+            return await _run_resumed_turn(agent, session, steering, task_info, response_blocks, tool_stop)
+        except Exception as exc:
+            # The task holds the execution slot (IN_PROGRESS above). Unhandled, it
+            # kept it and no queued task ever started again (turn_failure_runtime).
+            agent._interrupted_turn_sessions.pop(task_id, None)
+            agent._logger.warning(
+                "A resumed turn failed; ending its task. event=resumed_turn_failed "
+                "task_id=%s steering_id=%s error_type=%s",
+                task_id,
+                steering.steering_id,
+                type(exc).__name__,
+            )
+            await settle_failed_turn(agent, task_id, task_info, _as_provider_timeout(exc))
+            return None
+    except asyncio.CancelledError:
+        # Like a fresh turn (sdk.strands.turn): end the turn's tool work
+        # wherever the stop landed, including while settling a failure.
+        await stop_tool_calls(tool_stop, agent._logger, reason=TURN_CANCELLED_REASON)
+        raise
     finally:
         agent._clear_active_execution_context()
         await agent._refresh_self_agent_state()
@@ -866,12 +879,17 @@ async def _run_resumed_turn(
     steering: TaskSteering,
     task_info: Any,
     response_blocks: list[dict[str, Any]],
+    tool_stop: ToolStop,
 ) -> Optional[Any]:
     """Answer the SDK interrupt, then apply the turn's decision to the task."""
 
     task_id = session.task_id
-    result = await session.strands_agent.invoke_async(
-        response_blocks, **session.invoke_kwargs
+    result = await invoke_with_tool_stop(
+        session.strands_agent,
+        response_blocks,
+        tool_stop=tool_stop,
+        invoke_kwargs=session.invoke_kwargs,
+        logger=agent._logger,
     )
     result = agent.turn_executor._apply_agent_result_transformer(
         session.msg_content, result

@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import logging
-import hashlib
-import json
 import shlex
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from assistant_gateway.application.commands import (
     ManagerControlCommandRequest,
@@ -92,18 +90,6 @@ class _MCPControlTarget:
     action: MCPControlAction
     digest: str
     lifecycle: str
-
-
-def _record_digest(payload: Mapping[str, object]) -> str:
-    """Hash a rendered control record without importing runtime contracts."""
-
-    canonical = json.dumps(
-        dict(payload),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _render_mcp_inventory(connections: Any, hosted: Any) -> str:
@@ -567,7 +553,8 @@ class GatewayManagerControlCommandService:
         method: Any = getattr(self._schedules, selection.action)
         kwargs: dict[str, Any] = {
             "session_key": request.current_session_key,
-            "expected_record_digest": _record_digest(schedule.model_dump(mode="json")),
+            # The digest the manager's store checks (one shared function).
+            "expected_record_digest": self._schedules.listing_digest(schedule),
         }
         if selection.action == "pause":
             kwargs["paused_until"] = selection.paused_until

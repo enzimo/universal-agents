@@ -94,6 +94,7 @@ def _worker(manager, *, inbox=None, wait_seconds=1800.0, monkeypatch=None):
         _should_exit=asyncio.Event(),
         _active_execution_task=None,
         _active_execution_task_id=None,
+        _active_tool_stop=None,
         _strands_agent=None,
         _worker_launch=SimpleNamespace(
             launch_id="launch_1",
@@ -181,6 +182,71 @@ def test_wait_timeout_setting_defaults_to_thirty_minutes_and_is_bounded():
 
 
 # --- worker wind-down -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_running_command_ends_before_its_task_is_handed_back(
+    manager, monkeypatch, tmp_path, commands_without_agent
+):
+    """Another worker reruns a handed-back task; the old command must not still be running."""
+
+    from custom_agents.sdk.strands.turn_tool_stop import HANDBACK_REASON, invoke_with_tool_stop
+    from custom_tools.tool_stop import ToolStop
+    from tests.turn_tool_stop_support import (
+        agents_folder,
+        kill_if_alive,
+        long_command,
+        process_alive,
+        shell_agent,
+        turn_invoke_kwargs,
+        wait_for_pid,
+    )
+
+    set_agent_ref(None)
+    work_dir = agents_folder(tmp_path, monkeypatch)
+    pid_file = work_dir / "cmd.pid"
+    sdk = shell_agent([long_command(pid_file)], work_dir)
+    _add(manager, "running", ProgressState.IN_PROGRESS)
+    agent = _worker(manager, monkeypatch=monkeypatch)
+    alive_at_handback: dict[str, bool] = {}
+    publish = wind_down._publish_handback
+
+    async def recording_publish(agent_, state, handed_back):
+        alive_at_handback[handed_back.task_id] = process_alive(int(pid_file.read_text()))
+        return await publish(agent_, state, handed_back)
+
+    monkeypatch.setattr(wind_down, "_publish_handback", recording_publish)
+
+    async def running_turn():
+        agent._active_tool_stop = ToolStop(agent_id=agent.id, task_id="running")
+        try:
+            await invoke_with_tool_stop(
+                sdk,
+                "go",
+                tool_stop=agent._active_tool_stop,
+                invoke_kwargs=turn_invoke_kwargs("running"),
+                logger=agent._logger,
+            )
+        except asyncio.CancelledError:
+            await handle_interrupted_turn(agent, task_id="running", task_info=manager.get_task_info("running"))
+            raise
+
+    agent._active_execution_task = asyncio.create_task(running_turn())
+    agent._active_execution_task_id = "running"
+    try:
+        pid = await wait_for_pid(pid_file)
+        turn_stop = agent._active_tool_stop
+
+        wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease", recent_scheduler_errors=[])
+        await _wait_for_exit(agent, timeout=15)
+    finally:
+        kill_if_alive(pid_file)
+
+    assert alive_at_handback == {"running": False}
+    assert not process_alive(pid)
+    assert turn_stop.reason == HANDBACK_REASON
+    assert [item.handed_back.task_id for item in agent.team_comms.handbacks()] == ["running"]
+    assert not manager.is_execution_cancelled("running")
 
 
 @pytest.mark.asyncio

@@ -786,7 +786,10 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
             return
         payload = preview_knowledge.answer_get(route, urllib_parse.parse_qs(urllib_parse.urlparse(self.path).query))
         if payload is None:
-            self._write_json_error(HTTPStatus.NOT_FOUND, "There is no such page in the preview.")
+            self._write_json(
+                {"status": "refused", "error": {"code": "not_found", "message": "There is no such page in the preview."}},
+                status=HTTPStatus.NOT_FOUND,
+            )
             return
         self._write_json(payload)
 

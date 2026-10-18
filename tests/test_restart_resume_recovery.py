@@ -91,7 +91,6 @@ def _restarted_agent(root: Path, agent_type: str = "TeamArchitect") -> SimpleNam
         instance_root=str(root),
         _agent_state_store=None,
         _logger=logging.getLogger("test.restart_resume"),
-        _role_takeover_liveness_grace_seconds=lambda: 60.0,
         _recovery_retry_deadline_seconds=lambda: 900.0,
         _parse_iso_timestamp=lambda value: datetime.fromisoformat(value) if value else None,
     )

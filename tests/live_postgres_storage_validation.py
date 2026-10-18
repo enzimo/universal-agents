@@ -14,7 +14,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 try:
     import psycopg
@@ -49,7 +48,7 @@ from custom_agents.schedule_management import (
     SystemScheduleMutationDenied,
     build_schedule_mutation_permit,
 )
-from custom_agents.schedule_store import ScheduleStore
+from custom_agents.schedule_store import AdvanceOutcome, ScheduleStore
 from custom_messages.contracts.routing_v1 import PERSON_GATEWAY_FIELDS
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.control_v1 import AgentStatus
@@ -68,7 +67,7 @@ from storage.adapter_host_repository import create_adapter_host_repository
 from storage.after_action_report_repository import create_after_action_report_repository
 from storage.memory_graph_repository import create_memory_graph_repository
 from storage.multi_user_owner_migration import migrate_legacy_null_owner_rows
-from storage.postgres_connection import connect_postgres
+from storage.postgres_connection import connect_postgres, redact_postgres_dsn
 from storage.solution_variation_repository import create_solution_variation_repository
 from live_storage_utils import resolve_live_storage_settings
 from tests.after_action_report_repository_support import assert_report_person_scoping
@@ -88,26 +87,6 @@ def write_json_file(path: Path, payload: dict[str, Any] | list[Any]) -> None:
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8"
     )
-
-
-def redact_dsn(raw_dsn: str) -> str:
-    if not raw_dsn:
-        return raw_dsn
-    parts = urlsplit(raw_dsn)
-    netloc = parts.netloc
-    if "@" in netloc:
-        userinfo, hostinfo = netloc.rsplit("@", 1)
-        if ":" in userinfo:
-            username, _password = userinfo.split(":", 1)
-            userinfo = f"{username}:***"
-        netloc = f"{userinfo}@{hostinfo}"
-    query = urlencode(
-        [
-            (key, "***" if "password" in key.lower() else value)
-            for key, value in parse_qsl(parts.query)
-        ]
-    )
-    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
 
 
 def require_postgres_settings() -> StorageSettings:
@@ -190,6 +169,7 @@ def exercise_agent_state_store(
         tools=["search"],
         team_id="team_live_pg",
         agent_role="Manager",
+        last_seen_at="2026-10-17T00:00:00+00:00",
     )
     second = AgentStatus(
         status_type=MessageMetaType.RESPONSE,
@@ -212,7 +192,9 @@ def exercise_agent_state_store(
     assert len(all_rows) == 2
     assert store.get_by_id("agent_live_1") is not None
     assert store.remove("agent_live_2") is True
-    assert store.remove_by_team_id("team_live_pg") is True
+    # A row is pruned only while it still holds the heartbeat that was read.
+    assert store.remove_unseen("agent_live_1", "2026-10-16T00:00:00+00:00") is False
+    assert store.remove_unseen("agent_live_1", first.last_seen_at) is True
     assert store.get_all() == []
     record_check(report, "agent_state_store", {"inserted": 2, "removed": 2})
 
@@ -229,6 +211,7 @@ def exercise_runtime_state_store(
 
     runtime_payload = snapshot_json("task_live_1")
     store.save_task_runtime(
+        expect_existing=False,
         owner_agent_id="agent_runtime_1",
         owner_agent_name="Live Runtime",
         team_id="team_live_pg",
@@ -246,13 +229,17 @@ def exercise_runtime_state_store(
     assert store.load_task_runtime_by_owner("agent_runtime_1") == []
     assert len(store.load_task_runtime_by_owner("agent_runtime_replacement")) == 1
 
-    deferred_payload = json.dumps([{"message_id": "msg_1", "content": "deferred"}])
-    store.save_deferred_messages(
+    deferred_message = {"msg_header": {"message_id": "msg_1"}, "content": "deferred"}
+    deferred_payload = json.dumps([deferred_message])
+    store.add_deferred_message(
         owner_agent_id="agent_runtime_2",
         owner_agent_name="Live Deferred",
         team_id="team_live_pg",
         owner_named_agent_type="TeamArchitect",
-        messages_json=deferred_payload,
+        message_id="msg_1",
+        envelope_json=json.dumps(deferred_message),
+        first=False,
+        expect_existing=False,
     )
     assert store.get_deferred_messages_team_id("agent_runtime_2") == "team_live_pg"
     deferred_rows = store.load_deferred_messages_by_owner("agent_runtime_2")
@@ -567,7 +554,7 @@ def exercise_schedule_store(settings: StorageSettings, report: dict[str, Any]) -
         )
         is True
     )
-    assert store.update_after_fire(msg.schedule_id) is True
+    assert store.update_after_fire(msg.schedule_id) == AdvanceOutcome.ADVANCED
     restored = store.get_scheduled_message(msg.schedule_id)
     assert restored is not None
     assert restored.repeat_count == 2
@@ -1228,15 +1215,15 @@ def main() -> None:
         settings = require_postgres_settings()
         report["storage"] = {
             "backend": settings.backend,
-            "dsn": redact_dsn(settings.postgres_dsn or ""),
+            "dsn": redact_postgres_dsn(settings.postgres_dsn or ""),
         }
         logger.info(
             "Resetting Postgres validation database: %s",
-            redact_dsn(settings.postgres_dsn or ""),
+            redact_postgres_dsn(settings.postgres_dsn or ""),
         )
         reset_postgres_database(settings.postgres_dsn or "")
         record_check(
-            report, "baseline_reset", {"dsn": redact_dsn(settings.postgres_dsn or "")}
+            report, "baseline_reset", {"dsn": redact_postgres_dsn(settings.postgres_dsn or "")}
         )
 
         exercise_agent_state_store(settings, report)

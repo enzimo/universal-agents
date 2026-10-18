@@ -20,6 +20,8 @@ from custom_agents.task_runtime_state import ObjectiveRuntimeState
 from custom_agents.task_runtime_state import PlanRuntimeState
 from custom_agents.task_runtime_state import TaskRuntimeState
 import logging
+from custom_agents.deferred_message_runtime import DeferredHandoff, pending_deferred_handoff
+from storage.runtime_custody import CustodyStore, RuntimeCustodyLost, RuntimeRecoveryConflict
 from storage.runtime_state_repository import RuntimeStateRepository
 from custom_agents.task_runtime_state import WorkflowRuntimeState
 
@@ -36,6 +38,18 @@ from custom_messages.enums import TaskActivityStage, TaskActivityType
 
 class RuntimeSnapshotCoordinator:
     """Persist and restore TaskManager active-runtime snapshots.
+
+    It remembers whether this owner holds a saved row (``_holds_custody``)
+    and which tasks that row held (``_saved_task_ids``): after its first save
+    or an adopted recovery it holds one, after it clears its row it does not.
+    A save made while holding one must find the row; when it is gone another
+    agent took the work over (``RuntimeCustodyLost``). The coordinator then
+    drops every task from memory in the same task-lane operation, so nothing
+    here can run or save them again, and tells the custody listener
+    (``custom_agents.custody_loss``) which tasks were taken over: only those in
+    the last saved row. A task added by the refused save itself was never
+    saved here; its caller rolls the admission back and its delivery is
+    retried as a new one.
 
     A save refused because another agent took over some of this agent's
     tasks (``TaskCustodyTakenOver``) drops those tasks from memory, saves the
@@ -67,11 +81,46 @@ class RuntimeSnapshotCoordinator:
         self.state = WorkflowRuntimeState(
             task_state, plan_state, objective_state, execution_state
         )
+        self._holds_custody = False
+        self._saved_task_ids: frozenset[str] = frozenset()
         self._custody_lost_listener: Optional[Callable[[tuple[str, ...]], None]] = None
 
     def set_custody_lost_listener(self, listener: Optional[Callable[[tuple[str, ...]], None]]) -> None:
-        """Called with the released task ids when a save finds tasks taken over."""
+        """Called with the released task ids when a save finds the work taken over."""
         self._custody_lost_listener = listener
+
+    def _release_lost_custody(self, lost: RuntimeCustodyLost) -> None:
+        """Forget all work in memory: its saved row now belongs to another agent."""
+        released = tuple(sorted(self._saved_task_ids))
+        never_saved = sorted(set(self.task_state.tasks) - self._saved_task_ids)
+        self.state.restore(
+            WorkflowRuntimeState(
+                TaskRuntimeState(), PlanRuntimeState(), ObjectiveRuntimeState(), ExecutionRuntimeState()
+            )
+        )
+        self._holds_custody = False
+        self._saved_task_ids = frozenset()
+        self._logger.warning(
+            "Another agent took this agent's saved work over; dropped it from memory without "
+            "saving or replying. event=runtime_custody_lost owner_agent_id=%s store=%s task_ids=%s "
+            "unsaved_task_ids=%s",
+            lost.owner_agent_id,
+            lost.store.value,
+            list(released),
+            never_saved,
+        )
+        if self._custody_lost_listener is None:
+            return
+        try:
+            self._custody_lost_listener(released)
+        except Exception:
+            # The refusal itself must still reach the caller; the work is already released.
+            self._logger.exception(
+                "Could not tell the agent about released work. event=custody_listener_failed "
+                "owner_agent_id=%s store=%s",
+                lost.owner_agent_id,
+                lost.store.value,
+            )
 
     def _export_runtime_state(self) -> Dict[str, Any]:
         return capture_runtime_snapshot(
@@ -81,42 +130,74 @@ class RuntimeSnapshotCoordinator:
         ).model_dump(mode="json")
 
     def _persist_runtime_state(
-        self,
-        *,
-        schedule_admission: "ScheduleOccurrenceV1 | None" = None,
+        self, *, schedule_admission: "ScheduleOccurrenceV1 | None" = None,
+        deferred_admission_task_id: Optional[str] = None,
         custody_takeover: TaskCustodyTakeover | None = None,
     ) -> None:
-        if not self.identity.owner_agent_id:
+        owner_agent_id = self.identity.owner_agent_id
+        if not owner_agent_id:
             if schedule_admission is not None:
                 raise ValueError("Schedule admission requires durable runtime identity")
             return
 
+        # Every save checks the dispatch's exact message. Only the request's
+        # explicit admission can remove it before the whole handler finishes.
+        handoff = pending_deferred_handoff()
         try:
+            if handoff is not None and isinstance(handoff.failure, RuntimeCustodyLost):
+                raise handoff.failure
             while True:
                 try:
-                    self._write_runtime_state(schedule_admission, custody_takeover)
+                    self._write_runtime_state(
+                        owner_agent_id, schedule_admission, handoff, deferred_admission_task_id, custody_takeover
+                    )
                     return
                 except TaskCustodyTakenOver as taken:
                     self._release_taken_tasks(taken)
-        except Exception as e:
-            self._logger.error(f"Failed to persist active runtime state: {e}")
+        except Exception as error:
+            self._note_failed_save(error, handoff)
             raise
 
     def _write_runtime_state(
-        self, schedule_admission: "ScheduleOccurrenceV1 | None", custody_takeover: TaskCustodyTakeover | None,
+        self, owner_agent_id: str, schedule_admission: "ScheduleOccurrenceV1 | None",
+        handoff: Optional[DeferredHandoff], deferred_admission_task_id: Optional[str],
+        custody_takeover: TaskCustodyTakeover | None,
     ) -> None:
         if not self.task_state.tasks:
-            self.runtime_state_store.clear_task_runtime(self.identity.owner_agent_id)
+            self.runtime_state_store.clear_task_runtime(owner_agent_id)
+            self._holds_custody = False
+            self._saved_task_ids = frozenset()
             return
+        consume_message = (
+            handoff is not None and deferred_admission_task_id is not None
+            and deferred_admission_task_id == handoff.admission_task_id
+        )
         self.runtime_state_store.save_task_runtime(
-            owner_agent_id=self.identity.owner_agent_id,
+            owner_agent_id=owner_agent_id,
             owner_agent_name=self.identity.owner_agent_name,
             team_id=self.identity.team_id,
             owner_named_agent_type=self.identity.owner_named_agent_type,
             runtime_state_json=json.dumps(self._export_runtime_state()),
-            schedule_admission=schedule_admission,
+            expect_existing=self._holds_custody,
+            deferred_message_id=None if handoff is None else handoff.message_id,
+            consume_deferred_message=consume_message,
             custody_takeover=custody_takeover,
+            **({"schedule_admission": schedule_admission} if schedule_admission is not None else {}),
         )
+        self._holds_custody = True
+        self._saved_task_ids = frozenset(self.task_state.tasks)
+        if handoff is not None and consume_message:
+            handoff.committed = True
+
+    def _note_failed_save(self, error: Exception, handoff: Optional[DeferredHandoff]) -> None:
+        if handoff is not None:
+            handoff.failure = error
+        if not isinstance(error, RuntimeCustodyLost):
+            self._logger.error(f"Failed to persist active runtime state: {error}")
+        elif error.store is CustodyStore.TASK_RUNTIME:
+            self._release_lost_custody(error)
+        # A refused deferred row leaves this agent's task row and tasks alone;
+        # the inbox drops its messages (deferred_message_runtime).
 
     def _release_taken_tasks(self, taken: TaskCustodyTakenOver) -> None:
         """Drop tasks another agent took over, without saving, ending or replying.
@@ -158,13 +239,37 @@ class RuntimeSnapshotCoordinator:
     def persist_task_history(self, task_id: str) -> None:
         if not self.identity.owner_agent_id:
             return
-        self.runtime_state_store.save_task_runtime_task(
-            owner_agent_id=self.identity.owner_agent_id,
-            task=capture_task(self.task_state.tasks[task_id]),
-            task_plan_links=self.plan_state.task_to_plan_id if self.operations.plans_enabled() else {},
-            task_objective_links=self.objective_state.task_to_objective_id if self.operations.objectives_enabled() else {},
-            plan_objective_links=self.objective_state.plan_to_objective_id if self.operations.objectives_enabled() else {},
+        handoff = pending_deferred_handoff()
+        try:
+            if handoff is not None and isinstance(handoff.failure, RuntimeCustodyLost):
+                raise handoff.failure
+            self.runtime_state_store.save_task_runtime_task(
+                owner_agent_id=self.identity.owner_agent_id,
+                task=capture_task(self.task_state.tasks[task_id]),
+                task_plan_links=self.plan_state.task_to_plan_id if self.operations.plans_enabled() else {},
+                task_objective_links=self.objective_state.task_to_objective_id if self.operations.objectives_enabled() else {},
+                plan_objective_links=self.objective_state.plan_to_objective_id if self.operations.objectives_enabled() else {},
+                deferred_message_id=None if handoff is None else handoff.message_id,
+            )
+            return
+        except RuntimeCustodyLost as lost:
+            if handoff is not None:
+                handoff.failure = lost
+            if lost.store is CustodyStore.DEFERRED_MESSAGES:
+                # The task row is still ours; only this message was transferred.
+                raise
+            if self._holds_custody:
+                self._release_lost_custody(lost)
+                raise
+        # Never saved: the task was not admitted durably, so nothing was taken
+        # over. Raised outside the handler so no custody loss travels with it.
+        self._logger.error(
+            "A task history write came before this agent ever saved the task. "
+            "event=task_history_before_admission owner_agent_id=%s task_id=%s",
+            self.identity.owner_agent_id,
+            task_id,
         )
+        raise RuntimeRecoveryConflict("Task history requires existing durable task custody")
 
     def get_stored_runtime_team_id(self) -> Optional[str]:
         if not self.identity.owner_agent_id:
@@ -209,6 +314,8 @@ class RuntimeSnapshotCoordinator:
                 ),
             )
             committed = True
+            self._holds_custody = True
+            self._saved_task_ids = frozenset(self.task_state.tasks)
             self._reconcile_restored_plans()
             self._persist_runtime_state()
             self._logger.info("Restored %s active tasks for %s", len(restored.task_state.tasks), self.identity.owner_agent_id)

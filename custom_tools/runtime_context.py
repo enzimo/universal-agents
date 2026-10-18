@@ -8,6 +8,8 @@ remote runtime installs its own local context and ACP-backed service adapters.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +19,11 @@ if TYPE_CHECKING:
 
 
 _agent_ctx: ContextVar[UniversalAgent | None] = ContextVar("agent_ctx", default=None)
+# The task a running tool call works on, fixed when the call started
+# (bind_tool_call_task). Without it, a call still running when the agent moved
+# on to its next task would read that task, and its person, for every later
+# step, such as each further command of a shell command list.
+_tool_call_task: ContextVar[str | None] = ContextVar("tool_call_task", default=None)
 
 
 def set_agent_ref(agent: UniversalAgent | None) -> None:
@@ -29,14 +36,50 @@ def get_agent_ref() -> UniversalAgent | None:
     return _agent_ctx.get()
 
 
+@contextmanager
+def bind_tool_call_task(task_id: str | None) -> Iterator[None]:
+    """Make ``task_id`` the active task for the rest of this tool call (this context).
+
+    Threads the call starts with a copy of this context, such as the parallel
+    shell's pool threads, keep the same task.
+    """
+
+    token = _tool_call_task.set(task_id)
+    try:
+        yield
+    finally:
+        _tool_call_task.reset(token)
+
+
+def caller_invocation_state(invocation_state: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """The invocation_state a turn passed to Strands, as Strands hands it to tools and hooks.
+
+    Strands passes the caller's dict on as it is, unless the invocation also
+    got extra keyword arguments. Then (its deprecated ``**kwargs`` path in
+    ``Agent.stream_async``) tools and hooks get
+    ``{**kwargs, "invocation_state": <the caller's dict>}``, with the caller's
+    values one level down. Every turn passes ``callback_handler`` that way
+    (custom_agents.sdk.strands.turn), so read the caller's values through
+    this, never from the top level alone.
+    """
+
+    state = invocation_state or {}
+    nested = state.get("invocation_state")
+    return nested if isinstance(nested, Mapping) else state
+
+
 def active_task_context(
     agent: UniversalAgent,
 ) -> tuple[str | None, MessageMeta | None]:
-    """Resolve the active task id and its structured request metadata."""
-    task_id = getattr(agent, "_active_execution_task_id", None) or getattr(
-        getattr(agent, "task_manager", None),
-        "current_task_id",
-        None,
+    """Resolve the active task id and its structured request metadata.
+
+    Inside a tool call the task bound when the call started wins over the
+    agent's current one (bind_tool_call_task).
+    """
+    task_id = (
+        _tool_call_task.get()
+        or getattr(agent, "_active_execution_task_id", None)
+        or getattr(getattr(agent, "task_manager", None), "current_task_id", None)
     )
     if not task_id:
         return None, None

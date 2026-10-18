@@ -36,6 +36,7 @@ from typing import Any
 from strands.types.exceptions import MaxTokensReachedException
 
 from custom_agents.custody_loss import custody_moved
+from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 from custom_agents.conversation_runtime import finalize_conversation_turn
 from custom_agents.model_failover_runtime import ProviderFailoverRequeued
 from custom_agents.model_keys import ModelKeyError, tell_administrators_about_key_problem
@@ -132,7 +133,7 @@ async def fail_task_after_turn_error(agent: Any, task_id: str, task_info: Any, e
     """Fail the task whose turn raised, and tell the requester (module docstring).
 
     A task another agent took over (``custom_agents.custody_loss``) is not
-    failed or answered here: its new holder runs it and answers.
+    failed or answered here: its new owner runs it and answers.
     """
 
     if custody_moved(agent, task_id, error):
@@ -141,7 +142,15 @@ async def fail_task_after_turn_error(agent: Any, task_id: str, task_info: Any, e
     _log_turn_failure(agent, task_id, error)
     now_ts = datetime.now(timezone.utc).isoformat()
     runtime_error = task_runtime_error_message(error)
-    await agent.task_manager.operations_runtime.run(agent.task_manager.fail_task, task_id, runtime_error, now_ts)
+    try:
+        await agent.task_manager.operations_runtime.run(agent.task_manager.fail_task, task_id, runtime_error, now_ts)
+    except RuntimeCustodyLost as lost:
+        if lost.store is not CustodyStore.TASK_RUNTIME:
+            raise
+        # Recording the failure was the first save since another agent took the
+        # task over: that agent runs it and answers.
+        _log_custody_moved(agent, task_id, error)
+        return
     await finalize_conversation_turn(
         conversation_store=agent._conversation_store,
         conversation_compactor=agent._conversation_compactor,

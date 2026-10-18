@@ -576,3 +576,26 @@ def test_a_permit_for_the_previous_owner_is_not_used(world, caplog) -> None:
     assert [type(content).__name__ for _subject, content in world.bus.published][0] == "ScheduledRunContextRequestV1"
     context = run_context(queued_run(world))
     assert (context.person_id, context.person_roles) == (DAN, ("member",))
+
+
+@needs_cedar
+def test_a_permit_run_records_its_notes_with_notify_user_as_with_record_scheduled_run(world) -> None:
+    """notify_user checks the schedule like record_scheduled_run (2026-10-17); a run carrying its permit passes both."""
+    from custom_tools.providers.communication import _record_schedule_notification_if_active
+    from custom_tools.providers.schedules import record_scheduled_run
+
+    run = _start_with_permit(world)
+    agent = access_agent(world, run)
+    agent._schedule_store = world.store
+    run.meta.gateway_context.scheduled_job_id = SCHEDULE_ID
+    set_agent_ref(agent)
+    try:
+        noted = _record_schedule_notification_if_active(agent, message="Launch moved.", notification_id="note_permit", reason="")
+        recorded = json.loads(record_scheduled_run(outcome="no_change", state_summary="No launch today."))
+    finally:
+        set_agent_ref(None)
+
+    assert noted == {"recorded": True, "schedule_id": SCHEDULE_ID}
+    assert recorded["recorded"] is True
+    memory = world.store.get_scheduled_message(SCHEDULE_ID).schedule_memory
+    assert (memory.ledger.total_notifications, memory.ledger.total_runs) == (1, 1)

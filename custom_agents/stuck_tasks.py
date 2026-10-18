@@ -11,9 +11,11 @@ read-only) and reports one incident per request and condition. A delegated
 subtask is reported as the request it belongs to (its root task), so one stuck
 request produces one message however many agents work on it. Conditions:
 
-- ``task_owner_gone``: the agent holding unfinished work stopped reporting in
-  (no status row, exiting, or last seen longer ago than the threshold) and no
-  agent took the work over. Administrators are told too.
+- ``task_owner_gone``: the agent holding unfinished work is gone by the one
+  rule of ``custom_agents.agent_liveness`` (its start record ended, its process
+  is gone, or, for an agent known only by its heartbeat, it announced its exit,
+  has no status or was silent longer than the threshold) and no agent took the
+  work over within the threshold. Administrators are told too.
 - ``task_handback_unclaimed``: a worker that lost its lease handed the task
   back, the team lead sent it out again, and no agent picked it up.
   Administrators are told too.
@@ -40,7 +42,7 @@ from typing import Any, Iterable
 
 from access_control.identity import IdentityRejected
 from custom_agents.instance_delivery_context import configured_owner_route
-from custom_agents.agent_liveness import latest_launch, lookup_owner_status, owner_gone_by_launch, parse_utc
+from custom_agents.agent_liveness import LivenessPurpose, owner_liveness, parse_utc, retain_decisions
 from custom_agents.liveness_observation import heartbeat_checks_deferred
 from custom_agents.stuck_work import (
     ChatRoute,
@@ -82,9 +84,7 @@ _LABEL_LENGTH = 80
 
 
 def stuck_task_settings(agent: Any) -> StuckTaskSettings:
-    return StuckTaskSettings.model_validate(
-        (getattr(agent, "schedule_maintenance", {}) or {}).get("stuck_tasks") or {}
-    )
+    return StuckTaskSettings.from_schedule_maintenance(getattr(agent, "schedule_maintenance", None))
 
 
 _utc = parse_utc
@@ -170,26 +170,20 @@ class StuckTasks:
     def owner_gone_since(self, owner: OwnerWork, now: datetime) -> datetime | None:
         """When an agent other than the lead stopped, or None while it may still run.
 
-        The same rule as takeover (``agent_liveness.owner_gone_by_launch``):
-        a launch record decides when the owner has one; otherwise its heartbeat.
-        Either way the person is told only after ``owner_gone_after_seconds``,
-        which gives the replacement time to take the work over first.
+        Whether it is gone is the one rule of ``agent_liveness.owner_liveness``,
+        the same as takeover. The person is told only once it has been gone for
+        ``owner_gone_after_seconds``, which gives a replacement time to take the
+        work over first.
         """
         if owner.owner_agent_id == self.agent.id:
             return None
-        gone_after = timedelta(seconds=self.settings.owner_gone_after_seconds)
-        by_launch = owner_gone_by_launch(self.agent, owner.owner_agent_id)
-        if by_launch is False:
+        decision = owner_liveness(
+            self.agent, owner.owner_agent_id, purpose=LivenessPurpose.STUCK_TASK_NOTICE, now=now
+        )
+        if not decision.gone:
             return None
-        if by_launch is True:
-            launch = latest_launch(self.agent, owner.owner_agent_id)
-            since = _utc(getattr(launch, "updated_at_utc", None)) or owner.updated_at or now
-            return since if now - since >= gone_after else None
-        status = lookup_owner_status(self.agent, owner.owner_agent_id)
-        last_seen = None if status is None else _utc(status.last_seen_at)
-        if status is not None and not status.is_exiting and last_seen is not None:
-            return last_seen if now - last_seen >= gone_after else None
-        since = last_seen or owner.updated_at or now
+        since = decision.gone_since(owner.updated_at) or now
+        gone_after = timedelta(seconds=self.settings.owner_gone_after_seconds)
         return since if now - since >= gone_after else None
 
     # -- who and where ----------------------------------------------------------
@@ -298,6 +292,8 @@ class StuckTasks:
     def _owners_gone(self, owners: list[OwnerWork], held: dict[str, HeldTask], now: datetime, add: Any) -> set[str]:
         """Report the work of owners that are gone; return the live owners' ids."""
         live = set()
+        # Forget decisions about owners whose saved work is gone (agent_liveness).
+        retain_decisions(self.agent, LivenessPurpose.STUCK_TASK_NOTICE, [owner.owner_agent_id for owner in owners])
         for owner in owners:
             gone_since = self.owner_gone_since(owner, now)
             if gone_since is None:
