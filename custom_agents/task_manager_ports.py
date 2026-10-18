@@ -127,13 +127,24 @@ class PlansEnabledOperation(Protocol):
     def __call__(self) -> bool: ...
 
 
-class SaveObjectiveOperation(Protocol):
-    """Save an Objective for a step that goes on without it; False when the write failed.
+class ObjectiveChange(Protocol):
+    """Edit a freshly loaded Objective in place; False when there is nothing to save."""
 
-    ``ObjectiveCoordinator._save_objective_logged``: the failure is logged with ``step``.
+    def __call__(self, objective: ObjectiveRecord, /) -> bool: ...
+
+
+class ChangeObjectiveOperation(Protocol):
+    """Change the stored Objective for a step that goes on without it.
+
+    ``ObjectiveCoordinator.change_objective`` with ``step``: it loads the
+    stored record, applies ``change`` and saves, all in the caller's one
+    operation, so nothing stored since an earlier read is lost. A failed save
+    is logged with ``step`` and returns None, as does a missing Objective.
     """
 
-    def __call__(self, objective: ObjectiveRecord, *, step: str) -> bool: ...
+    def __call__(
+        self, objective_id: str, change: ObjectiveChange, *, step: str
+    ) -> Optional[ObjectiveRecord]: ...
 
 
 class SavePlanOperation(Protocol):
@@ -316,7 +327,7 @@ class PlanCoordinatorOperations:
     new_plan_id: NewPlanIdOperation
     persist_runtime_state: PersistRuntimeStateOperation
     plans_enabled: PlansEnabledOperation
-    save_objective: SaveObjectiveOperation
+    change_objective: ChangeObjectiveOperation
     add_task: AddTaskOperation
     append_history_entry: AppendHistoryEntryOperation
     append_history_entry_to_archived_task: AppendHistoryEntryToArchivedTaskOperation
@@ -382,7 +393,7 @@ class ObjectiveWorkSessionCoordinatorOperations:
     enqueue_next_plan_step_task: EnqueueNextPlanStepTaskOperation
     objectives_enabled: ObjectivesEnabledOperation
     persist_runtime_state: PersistRuntimeStateOperation
-    save_objective: SaveObjectiveOperation
+    change_objective: ChangeObjectiveOperation
     save_plan: SavePlanOperation
     durable_manager_scope_id: DurableManagerScopeIdOperation
     get_objective: GetObjectiveOperation

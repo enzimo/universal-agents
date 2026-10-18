@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from assistant_gateway.runtime_config import load_runtime_config_file
 from custom_tools.non_interactive_shell import _execute_single_command
+from runtime_settings.instance_layout import InstanceLayout
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -42,19 +43,23 @@ def _load_live_configuration() -> None:
 
 
 def test_live_host_shell_execution_boundary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands_without_agent
 ) -> None:
     """Exercise real RTK, stream separation, stdin closure, and timeout cleanup."""
 
     _load_live_configuration()
     if shutil.which("rtk") is None:
         raise AssertionError("RTK is required for the live shell execution test")
-    monkeypatch.setenv("AGENT_WORKSPACE_DIR", str(tmp_path))
+    layout = InstanceLayout.at(tmp_path / "instance")
+    layout.ensure_directories()
+    monkeypatch.setenv("TEAM_INSTANCE_ROOT", str(layout.root))
+    monkeypatch.setenv("AGENT_WORKSPACE_DIR", str(layout.workspaces_dir))
     monkeypatch.setenv("SECURITY_LAYER_MODE", "broker")
+    work_dir = str(layout.agents_dir)
 
     init_result = _execute_single_command(
         "git init -q",
-        default_work_dir=str(tmp_path),
+        default_work_dir=work_dir,
         default_timeout=10,
     )
     assert init_result["status"] == "success", init_result
@@ -62,7 +67,7 @@ def test_live_host_shell_execution_boundary(
 
     status_result = _execute_single_command(
         "git status --short",
-        default_work_dir=str(tmp_path),
+        default_work_dir=work_dir,
         default_timeout=10,
     )
     assert status_result["status"] == "success", status_result
@@ -70,7 +75,7 @@ def test_live_host_shell_execution_boundary(
 
     stream_result = _execute_single_command(
         "printf ua-live-stdout; printf ua-live-stderr >&2",
-        default_work_dir=str(tmp_path),
+        default_work_dir=work_dir,
         default_timeout=10,
     )
     assert stream_result["status"] == "success", stream_result
@@ -80,7 +85,7 @@ def test_live_host_shell_execution_boundary(
 
     stdin_result = _execute_single_command(
         "if read value; then exit 9; else printf stdin-eof; fi",
-        default_work_dir=str(tmp_path),
+        default_work_dir=work_dir,
         default_timeout=10,
     )
     assert stdin_result["status"] == "success", stdin_result
@@ -88,7 +93,7 @@ def test_live_host_shell_execution_boundary(
 
     timeout_result = _execute_single_command(
         "sleep 60",
-        default_work_dir=str(tmp_path),
+        default_work_dir=work_dir,
         default_timeout=1,
     )
     assert timeout_result["exit_code"] == 124, timeout_result
@@ -100,7 +105,7 @@ def test_live_host_shell_execution_boundary(
     reason="set UA_RUN_OPENSHELL_LIVE=1 for a provisioned OpenShell sandbox",
 )
 def test_live_openshell_shell_execution_boundary(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, commands_without_agent
 ) -> None:
     """Exercise RTK rewriting and separated streams through a real OpenShell sandbox."""
 

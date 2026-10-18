@@ -4,11 +4,11 @@ import os
 import sqlite3
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from config_loader import load_config
 from storage.config import StorageSettings, resolve_storage_settings
-from storage.postgres_connection import connect_postgres
+from storage.postgres_connection import connect_postgres, redact_postgres_dsn
 from storage.sqlite_connection import connect_sqlite
 from storage.sql_dialect import POSTGRES, SQLITE
 
@@ -49,23 +49,8 @@ def resolve_live_storage_settings(
 
 def storage_identifier(settings: StorageSettings) -> str:
     if settings.backend == "postgres":
-        return redact_dsn(settings.postgres_dsn or "")
+        return redact_postgres_dsn(settings.postgres_dsn or "")
     return settings.sqlite_path or ""
-
-
-def redact_dsn(raw_dsn: str) -> str:
-    if not raw_dsn:
-        return raw_dsn
-    parts = urlsplit(raw_dsn)
-    netloc = parts.netloc
-    if "@" in netloc:
-        userinfo, hostinfo = netloc.rsplit("@", 1)
-        if ":" in userinfo:
-            username, _password = userinfo.split(":", 1)
-            userinfo = f"{username}:***"
-        netloc = f"{userinfo}@{hostinfo}"
-    query = urlencode([(key, "***" if "password" in key.lower() else value) for key, value in parse_qsl(parts.query)])
-    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
 
 
 def apply_storage_env(env: dict[str, str], settings: StorageSettings) -> dict[str, str]:

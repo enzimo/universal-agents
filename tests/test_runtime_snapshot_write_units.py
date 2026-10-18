@@ -16,7 +16,7 @@ from storage.config import resolve_storage_settings
 from storage.runtime_state_repository import RuntimeRecoveryConflict
 
 
-@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.live)])
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=[pytest.mark.live, pytest.mark.postgres])])
 def manager(request, tmp_path):
     if request.param == "postgres":
         dsn = os.environ.get("LIVE_TEST_POSTGRES_DSN")

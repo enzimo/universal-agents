@@ -340,6 +340,7 @@ from custom_messages.contracts.access_v2 import AccessRequestResolvedV1
 from custom_agents.access_request_runtime import handle_access_request_resolved
 from custom_messages.contracts.worker_handback_v1 import WorkerTaskHandbackV1
 from custom_tools.comms_tools import TeamComms
+from custom_tools.tool_stop import ToolStop
 from storage.memory_graph_repository import create_memory_graph_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from storage.knowledge_repository import create_knowledge_repository
@@ -1193,6 +1194,8 @@ class UniversalAgent(BaseModel):
     _liveness_decisions: Dict[Any, Any] = PrivateAttr(default_factory=dict)
     _status_clock_ahead: set[str] = PrivateAttr(default_factory=set)
     _active_execution_task_id: Optional[str] = PrivateAttr(default=None)
+    # The running turn's stop for its tool commands (custom_tools.tool_stop).
+    _active_tool_stop: Optional[ToolStop] = PrivateAttr(default=None)
     _stop_reasons_by_task_id: Dict[str, str] = PrivateAttr(default_factory=dict)
     # Set once this worker loses its launch lease; see lease_loss_wind_down.
     _lease_loss_wind_down: Any = PrivateAttr(default=None)
@@ -2250,9 +2253,13 @@ class UniversalAgent(BaseModel):
             msg_meta=msg_meta,
         )
 
-    def _set_active_execution_context(self, task_id: Optional[str]) -> None:
+    def _set_active_execution_context(self, task_id: Optional[str]) -> ToolStop:
+        """Mark the current task as the running turn; returns the turn's new ToolStop."""
+
         self._active_execution_task = asyncio.current_task()
         self._active_execution_task_id = task_id
+        self._active_tool_stop = ToolStop(agent_id=self.id, task_id=task_id)
+        return self._active_tool_stop
 
     def _clear_active_execution_context(self) -> None:
         current_task = asyncio.current_task()
@@ -2262,6 +2269,7 @@ class UniversalAgent(BaseModel):
         if self._active_execution_task is current_task:
             self._active_execution_task = None
             self._active_execution_task_id = None
+            self._active_tool_stop = None
 
     def _consume_stop_reason(self, task_id: str) -> Optional[str]:
         return self._stop_reasons_by_task_id.pop(task_id, None)

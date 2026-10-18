@@ -69,3 +69,17 @@ def restore_process_environment_between_tests():
         if os.environ != saved:
             os.environ.clear()
             os.environ.update(saved)
+
+
+@pytest.fixture
+def commands_without_agent():
+    """Let the shell and Python tools run commands with no agent behind them.
+
+    The runtime refuses such commands (custom_agents.code_access); tests that
+    call the tools directly opt in explicitly through this fixture.
+    """
+
+    from custom_agents.code_access import embedded_commands
+
+    with embedded_commands():
+        yield

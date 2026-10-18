@@ -29,13 +29,29 @@ function renderWithNodes(document, node, markdown) {
   node.append(paragraph);
 }
 
-function fixture({ getSessionKey = () => Promise.resolve("sess_1"), onUnauthorized } = {}) {
+function fixture({ getSessionKey = () => Promise.resolve("sess_1"), onUnauthorized,
+  url = "http://example.test/webchat?view=knowledge" } = {}) {
   const env = fakeBrowser();
+  const events = new EventTarget();
+  const lifecycle = new AbortController();
+  const addresses = [];
+  env.browser.addEventListener = events.addEventListener.bind(events);
+  env.browser.dispatchEvent = events.dispatchEvent.bind(events);
+  env.browser.location = new URL(url);
+  env.browser.history = Object.fromEntries(["pushState", "replaceState"].map(method => [method, (_state, _title, address) => {
+    addresses.push({ method, address });
+    env.browser.location = new URL(address);
+  }]));
   const nodes = withElements(env.document, [
     ["knowledge-app", "section"],
     ["knowledge-status", "p", "knowledge-app"],
     ["knowledge-refresh", "button", "knowledge-app"],
     ["knowledge-new", "button", "knowledge-app"],
+    ["knowledge-home", "button", "knowledge-app"],
+    ["knowledge-browse", "button", "knowledge-app"],
+    ["knowledge-layout", "div", "knowledge-app"],
+    ["knowledge-directory", "aside", "knowledge-layout"],
+    ["knowledge-pagination", "div", "knowledge-directory"],
     ["knowledge-team-tab", "button", "knowledge-app"],
     ["knowledge-personal-tab", "button", "knowledge-app"],
     ["knowledge-proposals-tab", "button", "knowledge-app"],
@@ -53,11 +69,13 @@ function fixture({ getSessionKey = () => Promise.resolve("sess_1"), onUnauthoriz
   client.setCsrfToken("csrf_1");
   const rendered = [];
   const page = createKnowledgePage({
-    browser: env.browser, client, formatTime,
+    browser: env.browser, client, formatTime, signal: lifecycle.signal,
     getSessionKey,
     renderMarkdown: (node, markdown) => { rendered.push(markdown); renderWithNodes(env.document, node, markdown); },
     nodes: {
       status: nodes["knowledge-status"], refreshButton: nodes["knowledge-refresh"], newButton: nodes["knowledge-new"],
+      homeButton: nodes["knowledge-home"], browseButton: nodes["knowledge-browse"], layout: nodes["knowledge-layout"],
+      directory: nodes["knowledge-directory"], pagination: nodes["knowledge-pagination"],
       tabs: { team: nodes["knowledge-team-tab"], personal: nodes["knowledge-personal-tab"], proposals: nodes["knowledge-proposals-tab"] },
       searchForm: nodes["knowledge-search"], searchInput: nodes["knowledge-query"], list: nodes["knowledge-list"],
       pageStatus: nodes["knowledge-page-status"], proposalsCount: nodes["knowledge-proposals-count"],
@@ -65,7 +83,7 @@ function fixture({ getSessionKey = () => Promise.resolve("sess_1"), onUnauthoriz
       viewerTools: nodes["knowledge-viewer-tools"], viewer: nodes["knowledge-viewer"],
     },
   });
-  return { ...env, nodes, page, rendered, client };
+  return { ...env, nodes, page, rendered, client, addresses, lifecycle };
 }
 
 const summary = (name, title, extra = {}) => ({
@@ -113,9 +131,150 @@ test("the list shows one space, asks with the session's thread and pages twenty 
   assert.equal(query.get("status"), "active");
   assert.equal(query.get("offset"), "0");
   assert.match(f.nodes["knowledge-list"].textContent, /DeploysDeploy on \[Tuesdays\]Changed Oct 10, 2026/);
-  const pager = byClass(f.nodes["knowledge-list"], "list-pagination")[0];
+  const pager = byClass(f.nodes["knowledge-pagination"], "list-pagination")[0];
   assert.deepEqual([pager.settings.total, pager.settings.pageSize], [23, 20]);
-  assert.equal(f.nodes["knowledge-viewer-title"].textContent, "Select a page");
+  assert.equal(f.nodes["knowledge-viewer-title"].textContent, "Home");
+});
+
+test("Home is the reading view and All pages reveals a bounded directory with a separate pager", async () => {
+  const f = fixture();
+  const loading = f.page.load();
+  await answer(f.requests, `${KNOWLEDGE_API}/pages/team/home?`, jsonResponse({ status: "ok",
+    page: detail({ page: "home", title: "Home", body: "Start with [[deploys]].", links: [
+      { written: "deploys", space: "team", page: "deploys", exists: true },
+    ] }) }));
+  await answer(f.requests, `${KNOWLEDGE_API}/pages?`, jsonResponse({ status: "ok",
+    pages: Array.from({ length: 20 }, (_, i) => summary(`page-${i}`, `Page ${i}`)), total: 3000 }));
+  await loading;
+  assert.equal(f.nodes["knowledge-viewer-title"].textContent, "Home");
+  assert.equal(f.nodes["knowledge-directory"].hidden, true);
+  assert.equal(byClass(f.nodes["knowledge-viewer"], "knowledge-page-link").length, 1);
+  click(f.nodes["knowledge-browse"]);
+  assert.equal(f.nodes["knowledge-directory"].hidden, false);
+  assert.equal(f.nodes["knowledge-browse"].getAttribute("aria-expanded"), "true");
+  assert.equal(byClass(f.nodes["knowledge-list"], "knowledge-list-button").length, 20);
+  assert.equal(byClass(f.nodes["knowledge-list"], "list-pagination").length, 0);
+  assert.equal(byClass(f.nodes["knowledge-pagination"], "list-pagination")[0].settings.total, 3000);
+});
+
+test("a missing personal Home offers an explicit ordinary page creation, while service failures stay errors", async () => {
+  const f = fixture({ url: "http://example.test/webchat?view=knowledge&space=personal" });
+  f.page.load();
+  await answer(f.requests, `${KNOWLEDGE_API}/pages/personal/home?`, refusal(404, "not_found", "No page."));
+  assert.match(f.nodes["knowledge-viewer"].textContent, /no Home page yet/);
+  assert.equal(f.requests.some(request => request.method === "POST"), false);
+  click(buttonNamed(f.nodes["knowledge-viewer-tools"], "Create Home page"));
+  const editor = byClass(f.nodes["knowledge-viewer"], "knowledge-editor")[0];
+  const title = byTag(editor, "input")[0];
+  assert.equal(title.value, "Home");
+  assert.equal(title.readOnly, true);
+  byTag(editor, "textarea")[0].value = "My topics: [[travel]].";
+  submit(editor);
+  const saved = await answer(f.requests, `${KNOWLEDGE_API}/pages/personal`, jsonResponse({ status: "ok",
+    page: detail({ space: "personal", page: "home", title: "Home" }) }));
+  assert.deepEqual([saved.method, saved.body.title, saved.body.base_revision], ["POST", "Home", 0]);
+  assert.equal(f.browser.location.searchParams.get("page"), "personal/home");
+  click(f.nodes["knowledge-home"]);
+  await answer(f.requests, `${KNOWLEDGE_API}/pages/personal/home?`, refusal(503, "runtime_error", "The manager did not answer."));
+  assert.match(f.nodes["knowledge-viewer"].textContent, /manager did not answer/);
+  assert.equal(buttonNamed(f.nodes["knowledge-viewer-tools"], "Create Home page"), undefined);
+});
+
+test("article addresses restore space and revision and browser navigation cannot fetch after sign-out", async () => {
+  const f = fixture({ url: "http://example.test/webchat?view=knowledge&space=personal&page=team%2Fdeploys&revision=1" });
+  f.page.load();
+  const read = await answer(f.requests, `${KNOWLEDGE_API}/pages/team/deploys?`, jsonResponse({ status: "ok",
+    page: detail({ shown_revision: 1 }) }));
+  assert.equal(new URL(read.path, "http://x").searchParams.get("revision"), "1");
+  assert.equal(f.nodes["knowledge-personal-tab"].getAttribute("aria-selected"), "true");
+  assert.match(f.nodes["knowledge-viewer"].textContent, /looking at revision 1/);
+  f.browser.location = new URL("http://example.test/webchat?view=knowledge&space=team&page=team%2Fhome");
+  f.browser.dispatchEvent(new Event("popstate"));
+  await answer(f.requests, `${KNOWLEDGE_API}/pages/team/home?`, jsonResponse({ status: "ok",
+    page: detail({ page: "home", title: "Home" }) }));
+  assert.equal(f.nodes["knowledge-viewer-title"].textContent, "Home");
+  assert.equal(f.nodes["knowledge-team-tab"].getAttribute("aria-selected"), "true");
+  assert.equal(f.addresses.length, 0, "Back and Forward do not append history entries");
+  f.page.clear();
+  const count = f.requests.length;
+  f.browser.dispatchEvent(new Event("popstate"));
+  await settle();
+  assert.equal(f.requests.length, count);
+});
+
+test("reverting an addressed historical revision makes reload open the new current page", async () => {
+  const f = fixture({ url: "http://example.test/webchat?view=knowledge&space=team&page=team%2Fdeploys&revision=1" });
+  f.page.load();
+  await answer(f.requests, `${KNOWLEDGE_API}/pages/team/deploys?`, jsonResponse({
+    status: "ok", page: detail({ shown_revision: 1 }),
+  }));
+  const revert = buttonNamed(f.nodes["knowledge-viewer-tools"], "Revert to this revision");
+  click(revert);
+  click(revert);
+  const request = await answer(f.requests, `${KNOWLEDGE_API}/pages/team/deploys/revert`, jsonResponse({
+    status: "ok", page: detail({ revision: 3 }),
+  }));
+  assert.deepEqual([request.body.revision, request.body.base_revision], [1, 2]);
+  assert.match(f.nodes["knowledge-viewer-meta"].textContent, /Revision 3/);
+  assert.equal(f.browser.location.searchParams.has("revision"), false);
+  assert.deepEqual(f.addresses.map(entry => entry.method), ["replaceState"]);
+
+  const reloaded = fixture({ url: f.browser.location.href });
+  reloaded.page.load();
+  const read = await answer(reloaded.requests, `${KNOWLEDGE_API}/pages/team/deploys?`, jsonResponse({
+    status: "ok", page: detail({ revision: 3 }),
+  }));
+  assert.equal(new URL(read.path, "http://x").searchParams.has("revision"), false);
+  assert.deepEqual(buttonLabels(reloaded.nodes["knowledge-viewer-tools"]), ["Edit", "History", "Archive"]);
+  f.page.clear();
+  reloaded.page.clear();
+});
+
+test("removing the last row on the final directory page returns to a reachable page", async () => {
+  const f = fixture();
+  f.page.load();
+  await answer(f.requests, `${KNOWLEDGE_API}/pages?`, jsonResponse({ status: "ok", pages: [summary("first", "First")], total: 21 }));
+  byClass(f.nodes["knowledge-pagination"], "list-pagination")[0].settings.onPage(20);
+  await answer(f.requests, `${KNOWLEDGE_API}/pages?`, jsonResponse({ status: "ok", pages: [], total: 20 }));
+  const corrected = await answer(f.requests, `${KNOWLEDGE_API}/pages?`, jsonResponse({ status: "ok",
+    pages: [summary("first", "First")], total: 20 }));
+  assert.equal(new URL(corrected.path, "http://x").searchParams.get("offset"), "0");
+  assert.match(f.nodes["knowledge-list"].textContent, /First/);
+  assert.equal(f.nodes["knowledge-pagination"].hidden, true);
+});
+
+test("inactive Knowledge cleanup preserves Chat and incoming bookmarks, and disposal retires pending navigation", async () => {
+  for (const url of ["http://example.test/webchat", "http://example.test/webchat?view=knowledge&page=team%2Fdeploys"]) {
+    const f = fixture({ url });
+    f.page.clear();
+    assert.equal(f.browser.location.href, url);
+  }
+  const f = fixture({ url: "http://example.test/webchat?view=knowledge&page=team%2Fdeploys" });
+  f.page.load();
+  await settle();
+  const url = f.browser.location.href;
+  f.lifecycle.abort();
+  const requests = f.requests.length;
+  f.browser.dispatchEvent(new Event("popstate"));
+  await answer(f.requests, `${KNOWLEDGE_API}/pages/team/deploys?`, jsonResponse({ status: "ok", page: detail() }));
+  assert.equal(f.browser.location.href, url);
+  assert.equal(f.requests.length, requests);
+  assert.doesNotMatch(f.nodes["knowledge-viewer"].textContent, /Deploy on/);
+  assert.equal([...f.intervals.values()].some(timer => timer.delay === 30000), false);
+});
+
+test("an article opened from My proposals has an address that restores the article beside that list", async () => {
+  const f = fixture();
+  f.page.switchTab("proposals");
+  await openDeploys(f);
+  const url = f.browser.location.href;
+  assert.equal(new URL(url).searchParams.get("page"), "team/deploys");
+  const reloaded = fixture({ url });
+  reloaded.page.load();
+  await answer(reloaded.requests, `${KNOWLEDGE_API}/pages/team/deploys?`, jsonResponse({ status: "ok", page: detail() }));
+  assert.equal(reloaded.nodes["knowledge-proposals-tab"].getAttribute("aria-selected"), "true");
+  assert.equal(reloaded.nodes["knowledge-viewer-title"].textContent, "Deploys");
+  assert.equal(reloaded.nodes["knowledge-directory"].hidden, false);
 });
 
 test("a page shows its text through the Markdown renderer, who changed it, links in and open notes", async () => {
@@ -413,7 +572,7 @@ test("archived pages stay searchable and paginated, can be restored, and reset o
   assert.equal(new URL(filtered.path, "http://x").searchParams.get("status"), "archived");
   assert.doesNotMatch(f.nodes["knowledge-list"].textContent, /Current/);
   assert.match(f.nodes["knowledge-list"].textContent, /Archived/);
-  byClass(f.nodes["knowledge-list"], "list-pagination")[0].settings.onPage(20);
+  byClass(f.nodes["knowledge-pagination"], "list-pagination")[0].settings.onPage(20);
   const secondPage = await answer(f.requests, `${KNOWLEDGE_API}/pages?`, jsonResponse({ status: "ok", pages: [], total: 21 }));
   assert.deepEqual(["status", "offset"].map(key => new URL(secondPage.path, "http://x").searchParams.get(key)), ["archived", "20"]);
   f.nodes["knowledge-query"].value = "deploy";
@@ -815,7 +974,7 @@ test("a decision refreshes the count after switching tabs during the decision or
         await answer(f.requests, `${KNOWLEDGE_COUNTS_PATH}?`, jsonResponse({ status: "ok", pending_proposals: 0 }));
         assert.equal(f.nodes["knowledge-proposals-count"].hidden, true);
         assert.equal(f.nodes["knowledge-team-tab"].getAttribute("aria-selected"), "true");
-        assert.equal(f.nodes["knowledge-viewer-title"].textContent, "Select a page");
+        assert.equal(f.nodes["knowledge-viewer-title"].textContent, "Home");
         f.page.clear();
       });
     }

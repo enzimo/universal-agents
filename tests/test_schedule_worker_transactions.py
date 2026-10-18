@@ -36,7 +36,7 @@ from tests.runtime_snapshot_fixtures import snapshot_json
 @pytest.fixture(
     params=[
         "sqlite",
-        pytest.param("postgres", marks=[pytest.mark.live, pytest.mark.integration]),
+        pytest.param("postgres", marks=[pytest.mark.live, pytest.mark.postgres, pytest.mark.integration]),
     ]
 )
 def stores(tmp_path, request):

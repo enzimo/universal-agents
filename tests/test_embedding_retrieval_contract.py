@@ -12,7 +12,7 @@ from storage.memory_graph_repository import (
 )
 
 
-@pytest.fixture(params=["sqlite", "python", pytest.param("postgres", marks=pytest.mark.live)])
+@pytest.fixture(params=["sqlite", "python", pytest.param("postgres", marks=[pytest.mark.live, pytest.mark.postgres])])
 def graph(request, tmp_path):
     if request.param == "postgres":
         dsn = os.environ.get("LIVE_TEST_POSTGRES_DSN")

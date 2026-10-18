@@ -31,7 +31,7 @@ def layout(tmp_path) -> InstanceLayout:
 
 
 def test_generic_file_and_shell_boundaries_block_soul_writes(
-    layout, monkeypatch
+    layout, monkeypatch, commands_without_agent
 ) -> None:
     # TeamArchitect's SOUL.md lives in control/, outside every folder agent
     # tools may open; tasks for no person work in workspaces/agents.

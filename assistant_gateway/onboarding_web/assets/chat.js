@@ -404,6 +404,7 @@ authenticationState.knowledgeClient = createKnowledgeClient({
 
 authenticationState.knowledgeControls = createKnowledgePage({
     browser: window,
+    signal: lifecycle.signal,
     client: authenticationState.knowledgeClient,
     getSessionKey: () => authentication.ensureRuntimeControlsSession(),
     // Page text goes through the same escaped Markdown renderer as chat messages.
@@ -412,6 +413,11 @@ authenticationState.knowledgeControls = createKnowledgePage({
       status: document.getElementById("knowledge-status"),
       refreshButton: document.getElementById("knowledge-refresh"),
       newButton: document.getElementById("knowledge-new"),
+      homeButton: document.getElementById("knowledge-home"),
+      browseButton: document.getElementById("knowledge-browse"),
+      layout: document.getElementById("knowledge-layout"),
+      directory: document.getElementById("knowledge-directory"),
+      pagination: document.getElementById("knowledge-pagination"),
       tabs: {
         team: document.getElementById("knowledge-team-tab"),
         personal: document.getElementById("knowledge-personal-tab"),

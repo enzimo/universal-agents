@@ -386,8 +386,10 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
 2. It returns each task it has not started, and the task it is executing, to the
    TeamLead as a `WorkerTaskHandbackV1` message, one task per message with a
    deterministic handback id. The running turn is interrupted without a
-   cancellation record, so the task can run elsewhere. New requests that still
-   reach the worker go to the TeamLead the same way.
+   cancellation record, so the task can run elsewhere, and its running shell
+   and Python commands end before the handback is sent, so the rerun never
+   overlaps them. New requests that still reach the worker go to the TeamLead
+   the same way.
 3. It keeps tasks that already started and now wait on a person or subtask,
    because replies are addressed to this worker's id. They may finish until
    `agent.schedule_workers.lease_loss_wait_timeout_seconds` (default 30 minutes)
@@ -451,6 +453,13 @@ Known limits of the lease-loss handling:
 - Replies addressed to a worker's id after that worker exits (for example a
   subtask result for a task it failed at the wind-down deadline) are not
   delivered anywhere; the requester already received a failed result.
+- The handback waits at most 10 seconds for the interrupted turn's tool calls.
+  A call the process supervisor cannot end (an HTTP request, OpenShell sandbox
+  creation) may still run after the handback; it is logged as
+  `event=tool_work_outlived_turn`, and none of the stopped turn's remaining
+  commands start. A process that moved itself into a new session or process
+  group (`setsid`, daemonizing) is not ended at all, and is logged only while it
+  keeps its command's output open (the call then counts as still running).
 
 Abandoned memory-review claims become inactive review records after a grace period
 and checks for live or saved work. InternalImprovementAgent reviews their metadata
@@ -480,6 +489,42 @@ The final deletion status, completion timestamp and summary are saved together.
 A failed completion therefore leaves the Objective deleting and retryable;
 there is no later metadata write after the record becomes deleted, because
 repeated deletion commands return immediately for a completed deletion.
+
+Every Objective change loads the stored record, changes it and saves it inside
+one operation of the team lead's task operation lane
+(`ObjectiveCoordinator.change_objective` in
+`custom_agents/task_manager_objectives.py`). The store writes whole records, so
+a copy kept from an earlier operation and saved later would erase whatever was
+stored in between. Until 2026-10-17 this happened: a person's pause or resume
+erased the work-session policy's own event every time, and the team lead's
+status tool could erase a progress update or a schedule linked by a parallel
+tool call. A static test keeps every other module from saving Objective
+records, and a lane refuses an operation submitted from inside one of its own
+operations (`NestedTaskOperation`) instead of waiting for itself.
+
+A lifecycle change (`custom_agents/objective_lifecycle.py`) is one such
+operation for both a person's Runtime controls and the team lead's
+`objectives(action="update_status")`: it saves the status, then turns the
+bounded work policy and the managed schedules and heartbeat items off, or back
+on after an earlier control, and records which links changed. Each caller
+passes its own rules for switching schedules (the person's gateway-signed
+permit, or the agent rule that leaves system-managed schedules to
+`apply_change`); a schedule the agent rule leaves alone, or a switch that
+fails, is reported instead of recorded as switched. Runtime controls check
+ownership and the actions the current status offers in the same operation as
+the change, and refuse other actions with a plain reply and no new status. A
+record digest in the request is checked in that operation too. The Web page
+sends the digest of the record it showed, so a change made after the person
+looked is refused; a chat command takes the digest just before it sends, which
+guards only against a change in that moment; a trusted stop (a departing
+person's Objectives) sends none. A control whose status is already stored is
+accepted as a retry: it records no new status or policy event and switches only
+the links that did not switch before, so a pause or abandon whose schedule
+failed can be repeated. The team lead cannot set `deleting` or `deleted`:
+deletion is the person's control. A task that ends while its Objective is
+paused or being deleted keeps that status. Objective changes from the host
+command line were removed, because they wrote the record from another process
+while the team lead ran.
 
 The memory system has the five stores the README lists, which agents recall
 from (conversation history, user memory, team memory, the memory graph and the
@@ -630,7 +675,8 @@ Runtime snapshots and idempotent admission let processes recover queued work,
 waiting subtasks, deferred messages, and recent in-flight Tasks. Outboxes record
 ordered actions before external effects. Execution attempts and worker starts
 use leases and fencing, so a stale holder cannot commit after another takes
-over. Saved runtime snapshots and deferred messages move only from an agent
+over. A stopped or handed-back turn ends its running commands before the task
+is archived or handed back. Saved runtime snapshots and deferred messages move only from an agent
 that counts as gone, in one transaction that deletes its row. A previous owner
 that is still running finds its row gone at its next save, which is refused
 (`RuntimeCustodyLost`) before anything is written; it then drops that work from
@@ -895,7 +941,18 @@ refused rather than run with the network open. Landlock does not cover UDP,
 so internal services such as the local NATS server still require credentials
 that sandboxed code cannot read. Writable folders get every right except making device files;
 links may be made (Python environments need them) because trusted code never
-follows them.
+follows them. `shell(parallel=true)` runs its commands in a thread pool, and
+pool threads do not inherit context variables, so each command runs in a copy
+of the calling thread's context; without it, parallel commands ran as if no
+agent were present, with the network open and without the person's folder.
+A command with no agent behind it is now refused (`event=code_refused_without_agent`)
+instead of running with that open fallback: nothing would decide what it may
+reach. Only code that embeds the tools on purpose (tests, scripts) may run
+such commands, inside `custom_agents.code_access.embedded_commands()`, and
+never in a process the supervisor started (`UA_PROCESS_RUN_ID` set,
+`runtime_hosting/process_run.py`), where a missing agent is always a fault.
+The commands agents run never get the `UA_PROCESS_RUN_*` variables: only the
+agent process itself reads them.
 
 Running a command outside the sandbox is its own catalog tool,
 `code:unconfined`, so network access never implies host access:
@@ -918,6 +975,65 @@ created on first use with copies of only their folder, `team/` and `agents/`;
 work for no person uses a shared one. The operator's OpenShell policy decides
 the network and anything else there; folder grants and the network rule above
 do not apply.
+
+Commands stop with their task. Strands runs the `shell` and `python_env` tools
+in a worker thread, and cancelling a turn does not stop that thread, so a
+command used to keep running after a person stopped its task, after a
+lease-loss handback while another worker reran the task in the same folders,
+and through shutdown. Each turn now gets a stop signal that Universal Agents
+owns (`custom_tools/tool_stop.py`). The turn passes it to Strands as the
+invocation's `cancel_signal` and to the tools through `invocation_state`.
+Strands' own `agent.cancel_signal` cannot carry the stop: Strands clears it as
+soon as the invocation ends, and a stopped turn ends before a tool thread looks.
+Every turn also passes `callback_handler` to Strands as an extra keyword, so
+Strands hands tools the turn's `invocation_state` one level down; tools read
+it through `custom_tools.runtime_context.caller_invocation_state`, which
+handles both shapes.
+
+A stop sets the signal before it cancels the turn. The process supervisor then
+ends the running command's whole process group (SIGTERM, then SIGKILL a second
+later) and starts none of the turn's remaining commands; a tool call that
+starts after the stop does nothing. A command can leave processes running in
+its group after it returns (`server &`), so each command's process group is
+recorded, also when the command already exited (its leader is then a zombie
+the supervisor has not collected yet). On a stop, wherever it lands (during
+the model call or after it, while the turn applies its result or handles an
+error), the groups that still have processes get SIGTERM, then SIGKILL a second later
+(`event=tool_background_processes_ended`). Each check reads `/proc` once for
+all groups, in a worker thread, so the agent's event loop keeps running. The
+stat parser reads bytes: Linux process names need not be UTF-8, and truncating
+a name can split a character. An unrelated process name must never abort
+cleanup. A group is signalled only while its number still belongs to that command: the
+number cannot be reused while any member lives, and a process holding it with
+a different start time is a reuse and left alone. A turn that ends normally
+leaves its background processes running, as before. A tool call keeps the task
+it started for until it returns (`runtime_context.bind_tool_call_task`), so a
+call that outlives its turn never picks up the next task's person and folders.
+
+The cancelled turn waits up to 10 seconds for its running tool calls to end,
+then gives leftover processes one second after SIGTERM and up to one more
+second to exit after SIGKILL (`custom_agents/sdk/strands/turn_tool_stop.py`), so the stop reply, the
+cancellation record, the next queued task, the lease-loss handback and shutdown
+all come after its commands ended. The stop path's own wait is that plus two
+seconds, 14 seconds in all, within the gateway's 15-second control timeout. The
+wait sits in the turn rather than in each stop path because the code that runs
+the turn archives the task and frees the execution slot as soon as the turn
+ends, whoever stopped it. Each turn retains one cleanup task, so overlapping
+stops, a lease-loss handback and shutdown all join the same work without
+restarting its grace period. Further cancellation cannot cut cleanup short;
+the caller propagates it only after cleanup finishes. Both turn runners own
+this cancellation handling outside their error handlers too, because writing
+context or settling a failed resumed turn may still be in progress at a stop.
+A process still present after SIGKILL is logged with its group and process ids
+(`event=tool_process_groups_outlived_kill`); uninterruptible kernel work can
+delay its exit. A tool call still running after the wait is logged
+(`event=tool_work_outlived_turn`) and the stop goes ahead; it can only be work
+the supervisor cannot end, such as an HTTP request or OpenShell sandbox
+creation, or a process that moved itself into a new session or group and still
+holds its command's output open. Such a process that closed its output is not
+seen at all. In OpenShell mode the supervisor ends the local
+`openshell sandbox exec` client; whether that ends the command inside the
+sandbox has not yet been verified.
 
 Who a task works for is signed, not claimed. The gateway signs a task context
 (Ed25519) naming the person and their current team roles when it admits a
@@ -2237,8 +2353,12 @@ known to one process.
 ### Knowledge page
 
 People read and write the knowledge base from Web Chat (`/webchat?view=knowledge`,
-`knowledge_page.mjs`): Team and Personal lists with search and a Current pages /
-Archived pages filter, a page with its links
+`knowledge_page.mjs`): Team and Personal open their ordinary `home` article as
+an editable wiki landing page. Home is a page convention, not a separate
+setting or stored navigation tree, so normal ownership, revision checks,
+content review and transfer behavior apply. A missing Home offers explicit
+creation and browsing; reading never creates it. **All pages** reveals the
+searchable directory with a Current pages / Archived pages filter, and a page with its links
 in, open notes and history, an editor, revert and archive, and **My proposals**
 (the person's own pending team contributions, published or withdrawn by them).
 `GET /api/web-chat/knowledge/counts` answers only how many proposals wait for
@@ -2284,6 +2404,30 @@ publication copies the current page fields and changes only its status, with the
 same optimistic revision check as other writes. Archive proposals therefore have
 no edit option. The browser retains the displayed page's full space and slug for
 Refresh, and discards replies from a previous view or signed-in session.
+
+The directory reads at most 20 rows per request. Rows retain their full height
+inside one scrolling pane; the shared pagination controls and visible range
+stay in a separate footer. This avoids CSS grid compressing and clipping the
+list while its parent reports no overflow. When a removal empties the last
+page, the browser reads the last remaining page. The Home reader occupies the
+full width until the person opens All pages; proposals keep their list visible.
+`knowledge_navigation.mjs` reads and builds article addresses, including a full
+space/page reference and optional revision. Browser Back/Forward and reload
+read through the existing gateway routes. Creating an article adds a history
+entry; editing keeps that entry. A successful revert replaces the historical
+address with the current article, so reload opens the new current revision.
+Addresses convey no authority and
+personal always means the signed-in person's own space. A linked team article
+can be read while the Personal directory stays selected. Sign-out clears the
+article address and stops history navigation from fetching until sign-in.
+
+Every Web Chat module, including nested imports such as
+`knowledge_navigation.mjs`, belongs in `WEB_CHAT_MODULE_ASSETS` in
+`interactive_apps/website_support.py`. That registry supplies both public asset
+routes and the shell's content revision. A missing entry stops the browser's
+entire module load before sign-in can start, even when the independent background
+animation still runs. The operator UI HTTP test follows nested imports and
+checks that each file is served with `Cache-Control: no-store`.
 
 ## Deployment and observability
 

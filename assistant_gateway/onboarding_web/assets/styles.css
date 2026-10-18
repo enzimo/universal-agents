@@ -8422,8 +8422,14 @@ body.is-theme-customizing {
   grid-row: 2;
 }
 
-.knowledge-tabs {
+.knowledge-navigation {
   grid-row: 3;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 .knowledge-layout {
@@ -8431,7 +8437,30 @@ body.is-theme-customizing {
 }
 
 .knowledge-tabs {
-  margin-bottom: 12px;
+  margin: 0;
+}
+
+.knowledge-browse-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.knowledge-browse-actions .button {
+  width: auto;
+  white-space: nowrap;
+}
+
+.knowledge-layout.is-reading {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.knowledge-list-pane {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.knowledge-list-pane[hidden] {
+  display: none;
 }
 
 .knowledge-search {
@@ -8451,12 +8480,33 @@ body.is-theme-customizing {
 }
 
 .knowledge-list {
+  grid-row: 2;
   min-height: 0;
   overflow: auto;
-  display: grid;
-  align-content: start;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   padding: 12px;
+}
+
+/* Rows retain their full height so this pane, rather than a clipped list,
+   owns scrolling. The directory's page controls stay outside that scroll. */
+.knowledge-list > * {
+  flex-shrink: 0;
+}
+
+.knowledge-pagination {
+  grid-row: 3;
+  padding: 0 12px 12px;
+}
+
+.knowledge-pagination .list-pagination {
+  margin-top: 0;
+}
+
+.knowledge-page-range {
+  margin: 0 0 8px;
+  text-align: center;
 }
 
 .knowledge-list-items,
@@ -8766,8 +8816,35 @@ body.is-theme-customizing {
 }
 
 @media (max-width: 900px) {
+  /* The file browser's 190px minimum cannot hold Knowledge's search,
+     two-line pager and usable rows. The outer layout scrolls both panes. */
+  .knowledge-layout:not(.is-reading) {
+    grid-template-rows: minmax(360px, 45vh) minmax(320px, 1fr);
+  }
+
+  .knowledge-tabs .permission-tab {
+    padding-inline: 9px;
+  }
+
   .knowledge-revision {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 620px) {
+  .knowledge-tabs {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 4px;
+  }
+
+  .knowledge-app .workspace-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .knowledge-app .workspace-actions .button {
+    min-width: 0;
+    padding-inline: 8px;
   }
 }
 

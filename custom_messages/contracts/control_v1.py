@@ -422,6 +422,44 @@ class RuntimeObjectiveSummary(BaseModel):
     )
 
 
+# A person's Objective controls (``ManagerRuntimeWorkCommand.action``) and the
+# word ``RuntimeObjectiveSummary.available_actions`` offers for each. The
+# manager decides with these and the gateway words its replies with them.
+PAUSE_OBJECTIVE = "pause_objective"
+RESUME_OBJECTIVE = "resume_objective"
+STOP_OBJECTIVE = "stop_objective"
+ABANDON_OBJECTIVE = "abandon_objective"
+DELETE_OBJECTIVE = "delete_objective"
+OBJECTIVE_CONTROL_WORDS: dict[str, str] = {
+    PAUSE_OBJECTIVE: "pause",
+    RESUME_OBJECTIVE: "resume",
+    STOP_OBJECTIVE: "stop",
+    ABANDON_OBJECTIVE: "abandon",
+    DELETE_OBJECTIVE: "delete",
+}
+
+# Reply codes (``ManagerRuntimeWorkCommand.message``) of an Objective control.
+# A code with details carries them after a colon, for example
+# ``objective_control_incomplete:schedule:sched_1,policy:pol_2``.
+OBJECTIVE_NOT_FOUND = "objective_not_found"
+OBJECTIVE_OWNER_MISMATCH = "objective_owner_mismatch"
+OBJECTIVE_CHANGED = "objective_changed"
+OBJECTIVE_ACTION_UNAVAILABLE = "objective_action_unavailable"
+OBJECTIVE_UPDATE_FAILED = "objective_update_failed"
+OBJECTIVE_CONTROL_INCOMPLETE = "objective_control_incomplete"
+OBJECTIVE_DELETION_INCOMPLETE = "objective_deletion_incomplete"
+OBJECTIVE_DELETED = "objective_deleted"
+OBJECTIVE_ALREADY_DELETED = "objective_already_deleted"
+# The parts an incomplete reply names, as ``<part>:<id>``: a linked schedule
+# or heartbeat item, the work policy, a task whose stop was not confirmed, or
+# the Objective itself when it could not record which links changed.
+OBJECTIVE_PART_SCHEDULE = "schedule"
+OBJECTIVE_PART_HEARTBEAT = "heartbeat"
+OBJECTIVE_PART_POLICY = "policy"
+OBJECTIVE_PART_TASK = "task"
+OBJECTIVE_PART_RECORD = "objective"
+
+
 class RuntimeWorkCancellationReceipt(BaseModel):
     """Manager-confirmed result for one execution-root cancellation."""
 

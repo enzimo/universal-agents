@@ -508,6 +508,65 @@ def test_completed_linked_task_leaves_objective_owned_plan_active(tmp_path: Path
     assert review_events[-1].details["conclusion"] == "plan_work_remains"
 
 
+@pytest.mark.parametrize(
+    ("held_status", "conclusion"),
+    [(ObjectiveStatus.PAUSED, "objective_paused"), (ObjectiveStatus.DELETING, "objective_deletion_pending")],
+)
+@pytest.mark.parametrize("task_ends", ["completed", "failed"])
+def test_a_task_ending_keeps_a_persons_pause_or_pending_deletion(
+    tmp_path: Path, held_status: ObjectiveStatus, conclusion: str, task_ends: str
+) -> None:
+    """A task that was running when the person paused (or started deleting) its Objective ends.
+
+    The review used to set the Objective active (task completed) or blocked
+    (task failed) because its active Plan was checked first, leaving its
+    schedules and work policy off and Resume no longer offered.
+    """
+    manager = _task_manager(tmp_path)
+    task = _add_root_task(manager)
+    objective = manager.create_objective(
+        task_id=task.task_id,
+        title="Keep the person's control",
+        desired_outcome="A pause or deletion outlasts the task that was running.",
+        why="The person decides when the Objective runs again.",
+        horizon=ObjectiveHorizon.FINITE,
+    )
+    assert objective is not None
+    manager.update_objective_status(objective.objective_id, held_status, summary="Set by the person.")
+    events_before = len(manager.get_objective(objective.objective_id).event_log)
+
+    if task_ends == "completed":
+        manager.complete_task(task.task_id, "2026-05-23T10:00:00+00:00")
+    else:
+        manager.fail_task(task.task_id, "verification failed", "2026-05-23T10:00:00+00:00")
+
+    refreshed = manager.get_objective(objective.objective_id)
+    assert refreshed.status == held_status
+    assert manager.get_plan(objective.current_plan_id).status == PlanStatus.ACTIVE
+    new_events = refreshed.event_log[events_before:]
+    assert [event.event_type for event in new_events] == [
+        ObjectiveEventType.REVIEW_REQUESTED,
+        ObjectiveEventType.REVIEW_COMPLETED,
+    ]
+    assert new_events[-1].details["conclusion"] == conclusion
+    assert new_events[-1].details["active_plan_ids"] == [objective.current_plan_id]
+
+
+def test_a_repeated_status_change_records_nothing(tmp_path: Path) -> None:
+    manager = _task_manager(tmp_path)
+    task = _add_root_task(manager)
+    objective = manager.create_objective(
+        task_id=task.task_id, title="Pause twice", desired_outcome="One record.", why="Retries happen."
+    )
+    paused = manager.update_objective_status(objective.objective_id, ObjectiveStatus.PAUSED, summary="Paused.")
+    again = manager.update_objective_status(objective.objective_id, ObjectiveStatus.PAUSED, summary="Paused.")
+
+    assert again.event_log == paused.event_log
+    assert again.updated_at == paused.updated_at
+    status_events = [event for event in again.event_log if event.event_type == ObjectiveEventType.STATUS_CHANGED]
+    assert [event.details["new_status"] for event in status_events] == ["paused"]
+
+
 def test_terminal_linked_task_blocks_objective_waiting_for_user_confirmation(tmp_path: Path) -> None:
     manager = _task_manager(tmp_path)
     task = _add_root_task(manager)

@@ -21,7 +21,7 @@ from custom_messages.contracts.runtime_snapshot_v3 import decode_runtime_snapsho
 from tests.runtime_snapshot_fixtures import snapshot_json
 
 
-@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.live)])
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=[pytest.mark.live, pytest.mark.postgres])])
 def seeded_store(request, tmp_path):
     schema = "snapshot_retirement_" + uuid4().hex
     if request.param == "postgres":

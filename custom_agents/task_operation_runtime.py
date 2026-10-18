@@ -31,13 +31,32 @@ def submitting_task() -> Optional["asyncio.Task[Any]"]:
     except RuntimeError:
         return _SUBMITTING_TASK.get()
 
+# The lane whose operation is running, if any. An operation that asks its own
+# lane for another operation would wait for itself forever: the lane runs one
+# operation at a time and the outer one holds it. ``run_sync`` turns that hang
+# into an error. Another manager's lane in the same process is not affected.
+_RUNNING_LANE: ContextVar["TaskOperationRuntime | None"] = ContextVar(
+    "task_operation_lane", default=None
+)
+
+
+class NestedTaskOperation(RuntimeError):
+    """A task operation asked its own lane for another operation while it ran."""
+
 
 def _detached_operation(
-    operation: Callable[..., _T], args: tuple[Any, ...], kwargs: dict[str, Any]
+    lane: "TaskOperationRuntime",
+    operation: Callable[..., _T],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
 ) -> _T:
     # Requests and returned records are data. A caller must use another operation
     # to change owned task state, rather than retaining a live TaskInfo reference.
-    result = operation(*deepcopy(args), **deepcopy(kwargs))
+    token = _RUNNING_LANE.set(lane)
+    try:
+        result = operation(*deepcopy(args), **deepcopy(kwargs))
+    finally:
+        _RUNNING_LANE.reset(token)
     return deepcopy(result)
 
 
@@ -56,10 +75,18 @@ class TaskOperationRuntime:
         Before runtime start, synchronous initialization has exclusive custody.
         Once a loop owns the manager, tools must wait for its operation result;
         a timeout must never report failure while a mutation continues unseen.
+        Code that already runs inside an operation calls the manager directly:
+        asking the lane again raises ``NestedTaskOperation``, before the loop
+        starts too, so tests find the call that would hang a running manager.
         """
+        if self.inside_operation():
+            raise NestedTaskOperation(
+                f"{getattr(operation, '__qualname__', operation)!s} was submitted from "
+                "inside a running task operation; call it directly instead."
+            )
         loop = self.loop
         if loop is None or not loop.is_running():
-            return _detached_operation(operation, args, kwargs)
+            return _detached_operation(self, operation, args, kwargs)
         try:
             current = asyncio.get_running_loop()
         except RuntimeError:
@@ -80,6 +107,11 @@ class TaskOperationRuntime:
         self.loop = loop
         token = _SUBMITTING_TASK.set(asyncio.current_task())
         try:
-            return await self._io.run(_detached_operation, operation, args, kwargs)
+            return await self._io.run(_detached_operation, self, operation, args, kwargs)
         finally:
             _SUBMITTING_TASK.reset(token)
+
+    def inside_operation(self) -> bool:
+        """Whether the calling code runs inside one of this lane's operations."""
+
+        return _RUNNING_LANE.get() is self
