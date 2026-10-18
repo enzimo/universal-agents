@@ -216,65 +216,6 @@ function renderStandby() {
     return meter;
   }
 
-function stopLiveAgentStatusRefresh() {
-    if (sharedState.state.liveAgentStatusRefreshTimer) {
-      lifecycle.clearTimeout(sharedState.state.liveAgentStatusRefreshTimer);
-      sharedState.state.liveAgentStatusRefreshTimer = 0;
-    }
-  }
-
-function scheduleLiveAgentStatusRefresh() {
-    if (sharedState.state.liveAgentStatusRefreshTimer || sharedState.pages[sharedState.state.pageIndex].id !== "status") {
-      return;
-    }
-    sharedState.state.liveAgentStatusRefreshTimer = lifecycle.timeout(function () {
-      sharedState.state.liveAgentStatusRefreshTimer = 0;
-      if (sharedState.pages[sharedState.state.pageIndex].id === "status") {
-        fetchLiveAgentStatus(true);
-        scheduleLiveAgentStatusRefresh();
-      }
-    }, 5000);
-  }
-
-function fetchLiveAgentStatus(force) {
-    var now = Date.now();
-    if (sharedState.state.liveAgentStatusInFlight) {
-      return;
-    }
-    if (!force && sharedState.state.liveAgentStatusLastFetchAt && now - sharedState.state.liveAgentStatusLastFetchAt < 4500) {
-      return;
-    }
-    sharedState.state.liveAgentStatusInFlight = true;
-    sharedState.state.liveAgentStatusLastFetchAt = now;
-    requestClient.fetch("/api/agents/status", { cache: "no-store" }).then(function (response) {
-      return response.text().then(function (text) {
-        var payload = {};
-        if (text) {
-          try {
-            payload = JSON.parse(text);
-          } catch (error) {
-            payload = { message: responseErrorMessage(text, "Live agent status is unavailable in this preview.") };
-          }
-        }
-        if (!response.ok) {
-          throw new Error(payload.message || "Could not fetch live agent status.");
-        }
-        sharedState.state.liveAgentStatus = payload.status || "ok";
-        sharedState.state.liveAgents = Array.isArray(payload.agents) ? payload.agents : [];
-        sharedState.state.liveAgentStatusMessage = payload.message || "";
-      });
-    }).catch(function (error) {
-      sharedState.state.liveAgentStatus = "unavailable";
-      sharedState.state.liveAgents = [];
-      sharedState.state.liveAgentStatusMessage = error.message || "Activity Collector agent status could not be reached yet.";
-    }).finally(function () {
-      sharedState.state.liveAgentStatusInFlight = false;
-      if (sharedState.pages[sharedState.state.pageIndex].id === "status") {
-        operations.renderCurrentPage();
-      }
-    });
-  }
-
 function textLooksLikeHtml(text) {
     var normalized = String(text || "").trim().slice(0, 80).toLowerCase();
     return normalized.indexOf("<!doctype") === 0 || normalized.indexOf("<html") === 0 || normalized.indexOf("<!doctype html") >= 0;
@@ -321,167 +262,18 @@ function providerTestHttpErrorMessage(response, text) {
     return responseErrorMessage(text, fallback);
   }
 
-function liveAgentDisplayName(agent) {
-    return String(agent.name || agent.agent_name || agent.named_agent_type || agent.agent_id || "Agent");
-  }
-
-function liveAgentIdentifier(agent) {
-    return String(agent.agent_id || liveAgentDisplayName(agent)).trim();
-  }
-
-function liveAgentType(agent) {
-    return String(agent.named_agent_type || "Unknown").trim();
-  }
-
-function latestAgentActivity(agent) {
-    var recent = Array.isArray(agent.recent_activity) ? agent.recent_activity : [];
-    if (!recent.length) {
-      return null;
-    }
-    return recent[recent.length - 1] || null;
-  }
-
-function liveAgentState(agent) {
-    if (agent.is_exiting) {
-      return { label: "exiting", dot: "red" };
-    }
-    if (agent.is_paused) {
-      return { label: "paused", dot: "amber" };
-    }
-    if (agent.is_executing) {
-      return { label: "busy", dot: "green" };
-    }
-    if (agent.has_execution_capacity === false) {
-      return { label: "busy", dot: "green" };
-    }
-    return { label: "online", dot: "green" };
-  }
-
-function formatStatusValue(value, fallback) {
-    if (value === null || value === undefined || value === "") {
-      return fallback || "Not reported";
-    }
-    return String(value);
-  }
-
-function formatUptime(agent) {
-    var diagnostic = agent && typeof agent.diagnostic === "object" ? agent.diagnostic : {};
-    var seconds = Number(diagnostic.uptime_seconds || diagnostic.uptime);
-    if (!Number.isFinite(seconds) || seconds <= 0) {
-      return "Not reported by Activity Collector";
-    }
-    if (seconds < 120) {
-      return Math.round(seconds) + " seconds";
-    }
-    if (seconds < 7200) {
-      return Math.round(seconds / 60) + " minutes";
-    }
-    return Math.round(seconds / 3600) + " hours";
-  }
-
-function liveAgentTaskSummary(agent) {
-    var recent = latestAgentActivity(agent);
-    if (recent && recent.summary) {
-      return recent.summary;
-    }
-    var diagnostic = agent && typeof agent.diagnostic === "object" ? agent.diagnostic : {};
-    if (diagnostic.latest_stage) {
-      return "Latest stage: " + diagnostic.latest_stage;
-    }
-    return "Standing by";
-  }
-
-function renderStatusAgent(agent) {
-    var agentId = liveAgentIdentifier(agent);
-    var expanded = sharedState.state.expandedStatusAgent === agentId;
-    var agentState = liveAgentState(agent);
-    var item = document.createElement("section");
-    item.className = "status-agent" + (expanded ? " is-expanded" : "");
-    var row = document.createElement("div");
-    row.className = "status-item";
-    row.title = liveAgentType(agent) + " - " + agentState.label;
-    row.setAttribute("role", "button");
-    row.tabIndex = 0;
-    lifecycle.listen(row, "click", function () {
-      sharedState.state.expandedStatusAgent = expanded ? "" : agentId;
-      operations.renderCurrentPage();
-    });
-    lifecycle.listen(row, "keydown", function (event) {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        sharedState.state.expandedStatusAgent = expanded ? "" : agentId;
-        operations.renderCurrentPage();
-      }
-    });
-    var dot = document.createElement("span");
-    dot.className = "status-dot " + agentState.dot;
-    var label = document.createElement("strong");
-    label.textContent = liveAgentDisplayName(agent);
-    var stateLabel = document.createElement("span");
-    stateLabel.textContent = agentState.label;
-    row.appendChild(dot);
-    row.appendChild(label);
-    row.appendChild(stateLabel);
-    item.appendChild(row);
-
-    var recent = latestAgentActivity(agent);
-    var details = document.createElement("dl");
-    details.className = "status-agent-details";
-    details.hidden = !expanded;
-    [
-      ["Name", liveAgentDisplayName(agent)],
-      ["Id", agentId],
-      ["Type", liveAgentType(agent)],
-      ["Uptime", formatUptime(agent)],
-      ["Task", liveAgentTaskSummary(agent)],
-      ["Last Seen", formatStatusValue(agent.last_seen_at || (recent && recent.created_at), "No activity yet")],
-      ["Queue", formatStatusValue(agent.top_level_queue_depth, "0")],
-      ["Deferred", formatStatusValue(agent.deferred_message_count, "0")],
-    ].forEach(function (detail) {
-      var term = document.createElement("dt");
-      term.textContent = detail[0];
-      var value = document.createElement("dd");
-      value.textContent = detail[1];
-      details.appendChild(term);
-      details.appendChild(value);
-    });
-    item.appendChild(details);
-    return item;
-  }
-
 function renderStatus() {
     var stack = document.createElement("div");
     stack.className = "status-stack";
-    var list = document.createElement("div");
-    list.className = "status-list";
-    fetchLiveAgentStatus(false);
-    scheduleLiveAgentStatusRefresh();
-    if (sharedState.state.liveAgents.length) {
-      sharedState.state.liveAgents.forEach(function (agent) {
-        list.appendChild(renderStatusAgent(agent));
-      });
-    } else {
-      var statusNote = document.createElement("p");
-      statusNote.className = "status-docs-note status-live-note";
-      if (sharedState.state.liveAgentStatusInFlight) {
-        statusNote.textContent = "Checking live agent status from Activity Collector...";
-      } else if (sharedState.state.liveAgentStatus === "ok") {
-        statusNote = document.createElement("div");
-        statusNote.className = "status-live-success";
-        var successIcon = document.createElement("span");
-        successIcon.className = "status-live-success-icon";
-        successIcon.innerHTML = operations.iconMarkup("party");
-        statusNote.appendChild(successIcon);
-        statusNote.setAttribute("role", "img");
-        statusNote.setAttribute("aria-label", "Activity Collector reachable");
-        statusNote.title = "Activity Collector reachable";
-      } else {
-        statusNote.textContent = sharedState.state.liveAgentStatusMessage || "Waiting for live agent status from Activity Collector...";
-      }
-      list.appendChild(statusNote);
-    }
-    stack.appendChild(list);
+    var note = document.createElement("p");
+    note.className = "status-docs-note";
+    note.textContent = "Sign in to see your team status.";
+    stack.appendChild(note);
     return stack;
+  }
+
+function openStatus() {
+    window.location.href = operations.webChatUrl() + "?view=status";
   }
 
 function optionalNumber(value) {
@@ -857,5 +649,5 @@ function pollRuntimeAfterRestart() {
       sharedState.state.runtimePollInFlight = false;
     });
   }
-return { buildOnboardingPayload, configurationStatusClassName, environmentSecretsSummary, currentActivityCollectorSettings, currentFailoverSettings, currentSecurityLayerSettings, downloadRuntimeFile, fetchLiveAgentStatus, finalizationErrorMessage, finalizeConfiguration, formatStatusValue, formatUptime, latestAgentActivity, launchFinalizedConfiguration, liveAgentDisplayName, liveAgentIdentifier, liveAgentState, liveAgentTaskSummary, liveAgentType, numberOrDefault, optionalBooleanSelect, optionalNumber, pollRuntimeAfterRestart, providerTestHttpErrorMessage, renderDownloadButtons, renderMissingSecrets, renderReview, renderReviewSummary, renderStandby, renderStatus, renderStatusAgent, responseErrorMessage, reviewWarnings, scheduleLiveAgentStatusRefresh, stopLiveAgentStatusRefresh, summarizeSkillsRepositoryCompletion, textLooksLikeHtml };
+return { buildOnboardingPayload, configurationStatusClassName, environmentSecretsSummary, currentActivityCollectorSettings, currentFailoverSettings, currentSecurityLayerSettings, downloadRuntimeFile, finalizationErrorMessage, finalizeConfiguration, launchFinalizedConfiguration, numberOrDefault, optionalBooleanSelect, optionalNumber, openStatus, pollRuntimeAfterRestart, providerTestHttpErrorMessage, renderDownloadButtons, renderMissingSecrets, renderReview, renderReviewSummary, renderStandby, renderStatus, responseErrorMessage, reviewWarnings, summarizeSkillsRepositoryCompletion, textLooksLikeHtml };
 }

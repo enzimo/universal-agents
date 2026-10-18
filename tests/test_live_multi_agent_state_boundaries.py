@@ -1267,9 +1267,24 @@ def _register_manager_delegation(
     )
 
 
+@pytest.mark.parametrize("lose_claim", [False, True])
 async def test_live_manager_two_specialists_keep_state_separate_and_record_aar(
     signed_person: Callable[[str], GatewayContext],
+    monkeypatch,
+    lose_claim,
 ) -> None:
+    if lose_claim:
+        from custom_tools.comms_tools import TeamComms
+        from custom_messages.contracts.delegated_work_v1 import DelegatedTaskClaimedV1
+
+        publish = TeamComms.send_message
+
+        async def publish_without_claim(self, message, *args, **kwargs):
+            if isinstance(message.msg_content, DelegatedTaskClaimedV1):
+                raise TimeoutError("Admission claim could not be published.")
+            return await publish(self, message, *args, **kwargs)
+
+        monkeypatch.setattr(TeamComms, "send_message", publish_without_claim)
     team_id = new_id("team_live_state")
     parent_task_id = new_id("parent")
     research_task_id = new_id("research")

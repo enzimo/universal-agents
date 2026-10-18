@@ -31,6 +31,26 @@ from custom_messages.enums import MessageMetaType, RequesterType
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 
 
+SCHEDULE_REQUIRES_CONTINUATION = (
+    "schedule_message must be followed by a task_response or an action that waits for a result."
+)
+
+
+def _validate_action_batch_end(actions: List[Any]) -> None:
+    """A saved schedule is a side effect, not an answer to the accepted task."""
+    if not any(action.action_type == "schedule_message" for action in actions):
+        return
+    continuations = {
+        "task_response", "delegate_task", "manager_escalation", "task_query",
+        "secure_credential_collection_request", "signup_automation_request",
+    }
+    ending = actions[-1]
+    if ending.action_type not in continuations or (
+        ending.action_type == "delegate_task" and not ending.is_response_requested
+    ):
+        raise ValueError(SCHEDULE_REQUIRES_CONTINUATION)
+
+
 class StructuredTaskPayload(BaseModel):
     """
     Direct contract for a `Task` payload.
@@ -139,7 +159,8 @@ Choose exactly the action that matches the turn:
   `escalation` payload. Then wait for TeamArchitect's reply instead of
   contacting the user or another specialist directly.
 - To create a schedule, use `action_type="schedule_message"` with
-  `actions[].scheduled_message`.
+  `actions[].scheduled_message`, followed by `task_response` to confirm it,
+  or an action that waits for a result. A schedule cannot finish a task turn.
 {credential_guidance}
 - If no outbound effect is needed outside an accepted task turn, use
   `action_type="noop"` with a concise reason.
@@ -817,6 +838,7 @@ class ModelAgentTurnDecision(BaseModel):
 
     @model_validator(mode="after")
     def validate_action_order(self) -> "ModelAgentTurnDecision":
+        _validate_action_batch_end(self.actions)
         terminal_response_indexes = [
             index for index, action in enumerate(self.actions)
             if isinstance(action, ModelTaskResponseAction)
@@ -1266,6 +1288,7 @@ class StructuredAgentTurnDecision(BaseModel):
 
     @model_validator(mode="after")
     def validate_action_order(self) -> "StructuredAgentTurnDecision":
+        _validate_action_batch_end(self.actions)
         terminal_response_indexes = [
             index for index, action in enumerate(self.actions)
             if isinstance(action, TaskResponseAction)

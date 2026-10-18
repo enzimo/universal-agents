@@ -13,6 +13,7 @@ from custom_agents.worker_handback_runtime import handle_worker_task_handback
 from custom_agents.task_queue_notifications import QueuePressureNotifications
 from custom_agents.dead_letter_watch import DeadLetterWatchState
 from custom_agents.task_admission_runtime import handle_busy_delivery
+from custom_agents.delegated_work_runtime import send_rejection_claim
 from custom_agents import task_steering_runtime
 from runtime_hosting.blocking_io import BlockingIOLane
 from runtime_hosting.agent_execution import AgentExecutionGate
@@ -2697,6 +2698,12 @@ class UniversalAgent(BaseModel):
             repair_recorder=self._record_runtime_repair_anomaly,
         )
         publish_team_id = self._extract_team_id_from_routing_value(routing_key)
+        # Admission failures have no saved task custody. Announce the worker
+        # reporting the rejection before its result; a failed send leaves the
+        # original delivery available for retry.
+        await send_rejection_claim(
+            self, task=task_request, header=msg_header, meta=msg_meta, routing_key=routing_key,
+        )
         await self.team_comms.send_message(
             message=MessageEnvelope(
                 msg_content=error_task, msg_meta=error_meta, msg_header=header
@@ -4260,7 +4267,12 @@ class UniversalAgent(BaseModel):
             target_task_id = getattr(msg_content, "target_task_id", None)
             target_correlation_id = getattr(msg_content, "target_correlation_id", None)
             if target_task_id:
-                return self.task_manager.get_task_info(target_task_id) is not None
+                # A directly addressed receiver must answer STALE when the
+                # task ended. Unaddressed fanout still belongs only to the
+                # worker holding the exact task, never a correlation sibling.
+                return bool(target_agent_id or target_agent_name) or (
+                    self.task_manager.get_task_info(target_task_id) is not None
+                )
             if (
                 target_correlation_id
                 and self.task_manager.find_task_info_by_correlation_id(

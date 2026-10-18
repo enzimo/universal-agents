@@ -2327,11 +2327,19 @@ this model remain (`assistant_cli.py execution-retire-old-records`).
 The runtime sets message sender names from the sending agent. New delegated
 tasks use `delegate_task`; `send_message` handles other structured messages.
 Delegated results must match the saved parent and the worker holding the task.
+Active custody, then the completed-task archive, verifies admitted work even
+when its claim announcement was lost. Claims cannot override those records.
+Rejections before admission publish their claim before the error; an error
+arriving before its claim is recorded keeps broker custody for retry.
 Questions and escalation choices remain in the lead's prompt, and a lead's
 question to a person uses the preserved gateway reply route. Steering that
 names a task applies only to that task. Accepted guidance and duplicate keys
 are saved with its history, and guidance survives a restart until the model
 turn records its decision.
+An explicitly addressed receiver answers `STALE` for a missing task so the
+gateway can submit the person's message as new work. A schedule action must
+be followed by a final response or a waiting action; saving a timer does not
+finish its originating request.
 
 Delivery receipts use the durable team-lead route, so they can wait for a
 replacement lead before discovery completes. Repeated publication of one
@@ -2346,6 +2354,8 @@ replies omit the agent's plan and execution history. Notification results and
 prompt delivery settings omit raw chat and thread addresses. The agent-status
 HTTP endpoint requires a signed-in Web Chat session; collector API tokens go
 in headers.
+Onboarding completion opens the existing authenticated Status page through
+**Open Status**. It does not request private agent data before sign-in.
 
 The gateway gives people the places to decide; it never decides access itself.
 The access Inbox (`assistant_gateway/access_inbox.py`) lists access and change

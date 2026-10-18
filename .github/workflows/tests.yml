@@ -172,7 +172,7 @@ jobs:
         working-directory: assistant_gateway/interactive_apps/photon_sidecar
         run: npm ci --no-audit --no-fund
       - name: Test browser page lifecycle
-        run: node --test tests/browser_lifecycle.test.mjs tests/access_inbox.test.mjs tests/access_map.test.mjs tests/chat_links.test.mjs tests/chat_assistant_name.test.mjs tests/chat_delivery.test.mjs tests/workflow_page.test.mjs tests/workflow_card.test.mjs tests/chat_transcript_view.test.mjs tests/settings_controls.test.mjs tests/appearance_customizer.test.mjs tests/ui_motion.test.mjs tests/intro_word.test.mjs tests/panel_motion.test.mjs tests/chat_sign_in.test.mjs tests/team_controls.test.mjs tests/memory_controls.test.mjs tests/status_page.test.mjs tests/knowledge_page.test.mjs tests/team_transfer_review.test.mjs tests/onboarding_secrets_source.test.mjs tests/onboarding_account_sharing.test.mjs
+        run: node --test tests/browser_lifecycle.test.mjs tests/access_inbox.test.mjs tests/access_map.test.mjs tests/chat_links.test.mjs tests/chat_assistant_name.test.mjs tests/chat_delivery.test.mjs tests/workflow_page.test.mjs tests/workflow_card.test.mjs tests/chat_transcript_view.test.mjs tests/settings_controls.test.mjs tests/appearance_customizer.test.mjs tests/ui_motion.test.mjs tests/intro_word.test.mjs tests/panel_motion.test.mjs tests/chat_sign_in.test.mjs tests/team_controls.test.mjs tests/memory_controls.test.mjs tests/status_page.test.mjs tests/knowledge_page.test.mjs tests/team_transfer_review.test.mjs tests/onboarding_secrets_source.test.mjs tests/onboarding_account_sharing.test.mjs tests/onboarding_status_handoff.test.mjs
       - name: Test Photon sidecar
         working-directory: assistant_gateway/interactive_apps/photon_sidecar
         run: npm test
