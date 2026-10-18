@@ -626,6 +626,70 @@ def test_a_claim_that_arrives_while_recovery_is_scheduled_still_keeps_the_task(t
     assert action.status == "dispatched" and action.side_effects["publish_confirmed_by_claim"] == "worker_9"
 
 
+def test_a_published_delegation_is_never_cancelled_when_a_later_step_keeps_failing(tmp_path) -> None:
+    """Regression (2026-10-18 owner review O1, from the review probe): the publish went
+    through, then storing its stream sequence failed, so the action waited for a retry
+    with status retry_scheduled. The retry published again, that publish failed, the
+    retries ran out and the cleanup cancelled the task a worker could already be
+    running. Publishing is now recorded apart from the status (it survives a
+    restart), so the retry only runs the steps after publishing and nothing cancels
+    the published task."""
+    import sqlite3
+
+    from custom_agents.delegated_work_runtime import delegated_tasks
+    from custom_agents.turn_action_outbox_runtime import PUBLISH_CONFIRMED, TurnActionRecoveryScheduled
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent._probe_live_named_agent_type = AsyncMock()
+    object.__setattr__(agent, "_turn_action_outbox_config", lambda: {"max_auto_attempts": 2})
+    with patch(
+        "custom_agents.turn_action_outbox_runtime.record_publish_sequence",
+        side_effect=sqlite3.OperationalError("database is locked"),
+    ), pytest.raises(TurnActionRecoveryScheduled):
+        _delegate(agent, manager, parent, named_type="WebResearchAgent")
+    (record,) = manager.execution_state.turn_action_outbox.values()
+    child = record.side_effects["delegated_task_id"]
+    assert record.status == "retry_scheduled" and record.side_effects[PUBLISH_CONFIRMED]
+    assert agent.team_comms.send_message.await_count == 1
+
+    # A restart keeps the confirmation: it is saved with the record.
+    restarted = _make_task_manager(tmp_path)
+    restarted.restore_runtime_state()
+    assert restarted.get_turn_action_record(record.action_id).side_effects[PUBLISH_CONFIRMED]
+
+    manager.mark_turn_action_record(record.action_id, next_retry_at="2000-01-01T00:00:00+00:00")
+    agent.team_comms.send_message = AsyncMock(side_effect=TimeoutError("broker unavailable on retry"))
+    assert asyncio.run(agent._drain_due_turn_action_outbox())
+
+    agent.team_comms.send_message.assert_not_awaited()  # not published a second time
+    finished = manager.get_turn_action_record(record.action_id)
+    assert (finished.status, finished.phase) == ("completed", "complete")
+    assert manager.get_task_info(child).state != ProgressState.FAILED
+    assert not manager.is_execution_cancelled(child)
+    assert delegated_tasks(agent).get(str(agent.team_id), child).status == "queued"
+    assert manager.get_task_info(parent.task_id).state == ProgressState.WAITING
+
+
+def test_a_published_delegation_is_still_waiting_for_the_watchdog_after_its_action_failed(tmp_path) -> None:
+    """The watchdog's never-published safeguard reads the confirmation too: a
+    delegation published before its action failed for good is not untracked work."""
+    from custom_agents.turn_action_outbox_runtime import PUBLISH_CONFIRMED, delegation_publish_given_up
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    batch = manager.create_turn_action_batch(parent.task_id, [{"action_type": "delegate_task"}])
+    (record,) = manager.list_turn_action_records(batch.batch_id)
+    manager.mark_turn_action_record(
+        record.action_id, status="failed_terminal",
+        side_effects={"delegated_task_id": "child_1", PUBLISH_CONFIRMED: "publish_call"},
+    )
+    assert not delegation_publish_given_up(manager, "child_1")
+    manager.mark_turn_action_record(record.action_id, side_effects={PUBLISH_CONFIRMED: None})
+    assert delegation_publish_given_up(manager, "child_1")
+
+
 def test_a_delegation_still_retrying_or_already_sent_is_left_alone(tmp_path) -> None:
     from custom_agents.delegated_work_runtime import delegated_tasks
     from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled

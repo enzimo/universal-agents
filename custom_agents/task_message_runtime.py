@@ -15,10 +15,15 @@ from custom_agents.lease_loss_wind_down import may_start_next_task
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.delegated_work_runtime import send_task_claim
 from custom_agents.task_custody import (
-    CUSTODY_HANDED_BACK, CUSTODY_RELEASED_MEANWHILE, CUSTODY_TAKEN_MEANWHILE, CustodyDecision, log_dropped_copy,
+    CUSTODY_FINISHED_MEANWHILE,
+    CUSTODY_HANDED_BACK,
+    CUSTODY_RELEASED_MEANWHILE,
+    CUSTODY_TAKEN_MEANWHILE,
+    CustodyDecision,
+    log_dropped_copy,
 )
 from custom_agents.task_custody import check_admission as check_task_custody
-from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyReleased
+from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyFinished, TaskCustodyReleased
 from custom_agents.worker_handback_runtime import apply_redispatch_notice
 from custom_agents.conversation_delivery_runtime import handle_delivery_receipt
 from custom_agents.conversation_runtime import (
@@ -1190,6 +1195,9 @@ async def _admit_with_custody(
     """Run the admission save with the custody decision; None when the copy was dropped (logged)."""
     try:
         return await admit(custody.takeover_from)
+    except TaskCustodyFinished as finished:
+        await _drop_finished_copy(self, finished, msg_header, source_queue_name)
+        return None
     except TaskCustodyReleased as released:
         return await _admit_after_holder_released(
             self, custody, released, admit, msg_header, source_queue_name
@@ -1227,9 +1235,24 @@ async def _admit_after_holder_released(
         return None
     try:
         return await admit(None)
+    except TaskCustodyFinished as finished:
+        await _drop_finished_copy(self, finished, msg_header, source_queue_name)
+        return None
     except TaskCustodyConflict as conflict:
         log_dropped_copy(self, task_id, CUSTODY_TAKEN_MEANWHILE, conflict.holder_agent_id)
         return None
+
+
+async def _drop_finished_copy(
+    self: Any, finished: TaskCustodyFinished, msg_header: MessageHeader, source_queue_name: Optional[str]
+) -> None:
+    """Drop a copy whose claim found the task finished, in the claim's own transaction (logged).
+
+    The team's archive read before the claim did not show it: the agent that
+    finished it archived and released it in between (2026-10-18).
+    """
+    if not await _finished_by_team(self, finished.task_id, msg_header, source_queue_name):
+        log_dropped_copy(self, finished.task_id, CUSTODY_FINISHED_MEANWHILE, finished.finished_by)
 
 
 async def _handle_task_request(

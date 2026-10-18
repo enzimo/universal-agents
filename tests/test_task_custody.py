@@ -29,7 +29,7 @@ from storage.runtime_snapshot_layout import canonical_json
 from storage.runtime_custody import RuntimeRecoveryConflict
 from storage.runtime_state_repository import create_runtime_state_repository
 from storage.task_custody_repository import (
-    TaskCustodyConflict, TaskCustodyReleased, TaskCustodyTakenOver, TaskCustodyTakeover,
+    TaskCustodyConflict, TaskCustodyFinished, TaskCustodyReleased, TaskCustodyTakenOver, TaskCustodyTakeover,
 )
 
 
@@ -199,10 +199,74 @@ def test_a_takeover_never_claims_a_task_its_holder_finished_before_releasing_it(
         task_json=Task(task_id=work, task_type=MessageMetaType.REQUEST, problem_statement="w").model_dump_json(),
         status="completed",
     )  # finished; a's save that releases custody has not happened yet
-    with pytest.raises(TaskCustodyReleased):
+    with pytest.raises(TaskCustodyFinished):
         _save(store, b, _snapshot(work), takeover=TaskCustodyTakeover(work, a))
     assert _holder(store, work) == a
     assert store.repo.load_task_runtime_by_owner(b) == []
+
+
+def _archive(store, task_id, finished_by):
+    from storage.task_archive_repository import create_task_archive_repository
+
+    create_task_archive_repository(store.settings).save_completed_task(
+        archive_id=f"archive_{task_id}_{finished_by}", task_id=task_id, owner_agent_id=finished_by,
+        owner_agent_name=finished_by, team_id=store.team,
+        task_json=Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="w").model_dump_json(),
+        status="completed",
+    )
+
+
+def test_a_fresh_claim_never_claims_a_task_the_team_already_finished(store):
+    """Regression (2026-10-18 owner review F1): a worker passed the admission reads,
+    then another worker finished and released the task; the fresh claim inserted a
+    new row and the finished task was queued again. The claim now reads the archive
+    in its own transaction."""
+    a, b, _c = store.owners
+    work = store.task("work")
+    _archive(store, work, a)  # a finished it and its save released the row
+    with pytest.raises(TaskCustodyFinished) as refused:
+        _save(store, b, _snapshot(work))
+    assert (refused.value.task_id, refused.value.finished_by) == (work, a)
+    assert _holder(store, work) is None
+    assert store.repo.load_task_runtime_by_owner(b) == []
+
+
+def test_recovery_never_adopts_a_task_finished_after_its_reads(store):
+    """Regression (2026-10-18 owner review F1): recovery's transaction moved custody of
+    a task another agent finished after recovery read the archive."""
+    a, _b, c = store.owners
+    work = store.task("work")
+    _save(store, a, _snapshot(work))
+    sources = store.repo.load_task_runtime_by_owner(a)
+    _archive(store, work, "taker")
+    with pytest.raises(RuntimeRecoveryConflict, match="already finished"):
+        store.repo.commit_task_runtime_recovery(sources=sources, replacement=replace(sources[0], owner_agent_id=c))
+    assert _holder(store, work) == a
+    assert store.repo.load_task_runtime_by_owner(a) != []
+
+
+@pytest.mark.parametrize("taker_finished", [True, False])
+def test_a_save_that_still_lists_a_task_given_up_elsewhere_is_refused(store, taker_finished):
+    """Regression (2026-10-18 owner review F2): the agent that took the task over
+    finished it (or handed it back) and deleted its row before the old holder saved;
+    the old holder's save then went through and it kept running the task. A row that
+    is gone for a task this owner still lists refuses the save, naming who finished it."""
+    a, b, _c = store.owners
+    work, other = store.task("work"), store.task("other")
+    _save(store, a, _snapshot(work, other))
+    _save(store, b, _snapshot(work), takeover=TaskCustodyTakeover(work, a))
+    if taker_finished:
+        _archive(store, work, b)
+    _save(store, b, _snapshot(store.task("b_next")))  # b's save without the task releases its row
+    before = store.repo.load_task_runtime_by_owner(a)[0].runtime_state_json
+    with pytest.raises(TaskCustodyTakenOver) as refused:
+        _save(store, a, _snapshot(work, other))
+    assert refused.value.holders == {}
+    assert refused.value.released == {work: b if taker_finished else None}
+    assert store.repo.load_task_runtime_by_owner(a)[0].runtime_state_json == before
+    # Never a misfire for a task this owner releases, or admits, in the same save.
+    _save(store, a, _snapshot(other, store.task("new")))
+    assert (_holder(store, work), _holder(store, other), _holder(store, store.task("new"))) == (None, a, a)
 
 
 def test_a_takeover_never_claims_a_task_its_holder_released_meanwhile(store):
@@ -344,6 +408,82 @@ async def test_a_released_task_stops_its_delegated_work_but_is_not_cancelled(tmp
     assert "event=released_task_subtasks_stopping" in caplog.text
 
 
+@pytest.mark.parametrize("taker_finishes", [True, False])
+def test_an_old_holder_drops_a_task_its_taker_already_gave_up(tmp_path, caplog, taker_finishes):
+    """Regression (2026-10-18 owner review F2, from the review probe): the taker
+    finished the task (or handed it back) before the old holder's next save, so no
+    row was left and the old holder kept running it. Now it drops the task without
+    ending or answering it, and says whether the taker finished it."""
+    original, taker = _manager(tmp_path, "original"), _manager(tmp_path, "taker")
+    _admit(original, "t")
+    _admit(original, "kept")
+    released: list[tuple[str, ...]] = []
+    original.set_custody_lost_listener(released.append)
+    assert _admit(taker, "t", takeover_from="original")
+    if taker_finishes:
+        taker.complete_task("t", _iso())
+    else:
+        taker.remove_task("t")  # handed back after a lost lease
+
+    with caplog.at_level(logging.WARNING):
+        original.update_main_task_state("kept", ProgressState.IN_PROGRESS, _iso())
+
+    assert released == [("t",)]
+    assert original.get_task_info("t") is None and original.get_task_info("kept") is not None
+    archived = original.get_task_from_db("t", include_all_agents=True)
+    assert (archived["owner_agent_id"] if archived else None) == ("taker" if taker_finishes else None)
+    expected = "event=task_custody_finished_elsewhere" if taker_finishes else "event=task_custody_released_elsewhere"
+    assert expected in caplog.text
+    assert original.runtime_state_store.get_task_custody("team", ["t"]) == {}  # never claimed again
+
+
+@pytest.mark.asyncio
+async def test_a_copy_admitted_after_another_worker_finished_the_task_is_dropped(tmp_path, caplog):
+    """Regression (2026-10-18 owner review F1, from the review probe): a worker passed
+    the admission reads, then another worker finished and released the task, and the
+    first worker's fresh claim queued the finished task. The claim's transaction now
+    finds it in the archive and the copy is dropped as a duplicate."""
+    from custom_agents import task_message_runtime
+
+    first, second = _manager(tmp_path, "first"), _manager(tmp_path, "second")
+    agent = SimpleNamespace(id="second", team_id="team", task_manager=second, _logger=logging.getLogger("t"))
+    task = Task(task_id="t", parent_task_id="parent", task_type=MessageMetaType.REQUEST, problem_statement="w")
+    header = MessageHeader(from_agent_id="requester")
+    decision = await task_message_runtime._custody_for_new_task(agent, task, header, MessageMeta(), "queue")
+    assert decision is not None and decision.reason == task_custody.CUSTODY_FREE
+    _admit(first, "t")
+    first.complete_task("t", _iso())  # archived, custody released
+
+    async def admit(takeover_from):
+        return _admit(second, "t", takeover_from=takeover_from)
+
+    with caplog.at_level(logging.WARNING):
+        outcome = await task_message_runtime._admit_with_custody(agent, decision, admit, "t", header, "queue")
+    assert outcome is None
+    assert second.get_task_info("t") is None and not second.task_state.task_queue
+    assert second.runtime_state_store.get_task_custody("team", ["t"]) == {}
+    assert "event=duplicate_archived_delivery_ignored" in caplog.text
+
+
+def test_recovery_leaves_out_a_task_its_own_owner_archived_before_stopping(tmp_path, caplog):
+    """The gone owner archived a task and stopped before its save removed it. The
+    task is finished; recovery leaves it out instead of running it again, and its
+    transaction would refuse it too (2026-10-18)."""
+    gone = _manager(tmp_path, "worker_gone")
+    _admit(gone, "done")
+    _admit(gone, "open")
+    gone.task_archive_repository.save_completed_task(
+        archive_id="archive_done", task_id="done", owner_agent_id="worker_gone", owner_agent_name="worker_gone",
+        team_id="team", task_json=gone.get_task_info("done").task.model_dump_json(), status="completed",
+    )
+    replacement = _manager(tmp_path, "worker_r")
+    with caplog.at_level(logging.WARNING):
+        restored = replacement.restore_runtime_state_for_owner_ids(["worker_gone"])
+    assert restored["task_count"] == 1
+    assert replacement.get_task_info("done") is None and replacement.get_task_info("open") is not None
+    assert any(getattr(record, "reason", None) == "already_finished" for record in caplog.records)
+
+
 def test_handing_a_task_back_releases_its_custody(tmp_path):
     worker = _manager(tmp_path, "worker_a")
     _admit(worker, "t1")
@@ -469,6 +609,45 @@ async def test_startup_reads_saved_work_again_after_a_custody_conflict(tmp_path,
     holders = store.get_task_custody("team", ["contested", "free"])
     assert (holders["contested"].holder_agent_id, holders["free"].holder_agent_id) == ("worker_copy", "worker_new")
     assert "event=runtime_recovery_conflict_retrying" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_startup_reads_again_when_a_takeover_finished_the_task_during_recovery(tmp_path, monkeypatch, caplog):
+    """Regression (2026-10-18 owner review F1, from the review probe): while a starting
+    agent adopted a gone agent's work, another worker took a task over and finished
+    it; the recovery moved custody of the finished task and queued it again. The
+    recovery transaction now refuses it, and the second read leaves it out."""
+    from custom_agents import runtime_recovery
+
+    gone = _manager(tmp_path, "worker_gone")
+    _admit(gone, "t")
+    _admit(gone, "other")
+    starting = _manager(tmp_path, "worker_new")
+    monkeypatch.setattr(
+        runtime_recovery, "gone_owner_ids",
+        AsyncMock(side_effect=lambda _agent, ids, **_kw: [owner for owner in ids if owner == "worker_gone"]),
+    )
+    store = starting.runtime_state_store
+    real_commit = store.commit_task_runtime_recovery
+    attempts: list[int] = []
+
+    def commit_after_a_takeover_finished(**kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            taker = _manager(tmp_path, "worker_taker")
+            assert _admit(taker, "t", takeover_from="worker_gone")
+            taker.complete_task("t", _iso())
+        return real_commit(**kwargs)
+
+    monkeypatch.setattr(store, "commit_task_runtime_recovery", commit_after_a_takeover_finished)
+    with caplog.at_level(logging.WARNING):
+        await runtime_recovery.recover_runtime_after_restart(_starting_agent(starting))
+
+    assert len(attempts) == 2
+    assert starting.get_task_info("t") is None and starting.get_task_info("other") is not None
+    assert not starting.task_state.task_queue.count("t")
+    holders = store.get_task_custody("team", ["t", "other"])
+    assert "t" not in holders and holders["other"].holder_agent_id == "worker_new"
 
 
 @pytest.mark.asyncio

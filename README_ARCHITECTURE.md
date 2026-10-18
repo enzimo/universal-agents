@@ -178,7 +178,12 @@ each. They run in parallel on as many workers as the team allows:
   only its acknowledgement was lost: the action is finished as sent, its
   post-publish steps run (the parent waits, a requested check-back is kept) and
   the rest of the turn's actions run (`event=delegated_task_publish_confirmed_by_claim`).
-  As a safeguard, the
+  A publish that went through is recorded on the outbox action as soon as it is
+  known (`publish_confirmed`, kept across later status changes and restarts):
+  when a later step fails (for example storing the stream sequence), the retry
+  runs only the steps after publishing and never publishes or cancels the task
+  again; before 2026-10-18 a failed second publish could end with the cleanup
+  cancelling a task a worker was already running. As a safeguard, the
   watchdog checks and times out a "waiting" record without a stream sequence once
   no outbox action is still trying to publish it
   (`event=delegated_record_never_published`); the record's age alone misjudged a
@@ -194,9 +199,11 @@ each. They run in parallel on as many workers as the team allows:
   lease (`custom_agents/task_custody.py`, `event=task_copy_dropped_held_elsewhere`
   or `event=task_custody_takeover`); whether the holder is gone is the team's
   owner-liveness rule (`agent_liveness.owner_liveness`, purpose
-  `custody_admission`). The takeover moves the row only while the
-  judged-gone holder still holds it and the task is not in the finished-task
-  archive, both checked in the takeover's own transaction; a holder that
+  `custody_admission`). Every custody acquisition (a fresh claim, a takeover
+  and a recovery) reads the finished-task archive in its own transaction and
+  refuses a finished task, so a task another agent finished after the
+  admission's own archive read is never claimed and run again. The takeover
+  moves the row only while the judged-gone holder still holds it; a holder that
   released or finished the task meanwhile was alive after all, so the copy is
   dropped (or, if the lead re-sent it after that holder's handback, admitted as
   a free task) and no fresh row is claimed for it. A holder wrongly judged gone
@@ -205,6 +212,12 @@ each. They run in parallel on as many workers as the team allows:
   task had delegated and withdraws the access requests it waited on, and keeps
   working (`custom_agents/custody_loss.py`, `event=task_custody_taken_over`);
   the task itself gets no cancellation record, because its new holder runs it.
+  The same happens when the row is gone although this agent never released it:
+  the taker already finished the task (`event=task_custody_finished_elsewhere`)
+  or gave it up unfinished, for example handed it back after a lost lease
+  (`event=task_custody_released_elsewhere`). The old holder never claims such a
+  task afresh, because that would run it beside the copy the lead sends again;
+  a task an operator retired from the taker is abandoned on purpose.
   The save checks this after its own-row check and before the deferred
   message's exact-message check, so a refused save consumes no deferred
   message; the save that follows, without the taken task, does. A released
@@ -214,7 +227,8 @@ each. They run in parallel on as many workers as the team allows:
   finished-task archive, because a holder archives a task before its save
   releases custody. A copy of a task any agent of the team already finished is
   dropped too, and a replacement taking over a gone worker's saved work leaves
-  out tasks another agent holds or finished, together with that work's records of
+  out tasks another agent holds or any agent finished (the gone worker itself
+  too, if it stopped between archiving a task and saving), together with that work's records of
   the tasks it delegated, whose workers are told to stop
   (`orphaned_subtasks.stop_left_out_delegations`). If custody changes while a
   starting agent adopts saved work, it reads the saved work again once. A

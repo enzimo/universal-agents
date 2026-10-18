@@ -60,6 +60,8 @@ CUSTODY_HELD = "held_by_live_agent"
 CUSTODY_TAKEN_MEANWHILE = "taken_by_another_agent_meanwhile"
 # The holder a takeover named released the task before the takeover's save.
 CUSTODY_RELEASED_MEANWHILE = "released_by_holder_meanwhile"
+# The task was finished before the claim's own transaction (an archive row).
+CUSTODY_FINISHED_MEANWHILE = "finished_meanwhile"
 
 
 @dataclass(frozen=True)
@@ -139,6 +141,7 @@ def log_dropped_copy(agent: Any, task_id: str, reason: str, holder_agent_id: Opt
 
 
 __all__ = [
+    "CUSTODY_FINISHED_MEANWHILE",
     "CUSTODY_FREE",
     "CUSTODY_HANDED_BACK",
     "CUSTODY_HELD",

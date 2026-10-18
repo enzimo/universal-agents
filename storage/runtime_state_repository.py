@@ -271,11 +271,10 @@ class _RelationalRuntimeStateRepository:
                 adopted_task_ids=custody.executed_task_ids(records),
             )
         except TaskCustodyConflict as exc:
-            # The caller left out tasks another agent held when it read them;
-            # custody changed since. Same outcome as a concurrent recovery.
-            raise RuntimeRecoveryConflict(
-                f"Task {exc.task_id} was taken by agent {exc.holder_agent_id} during recovery."
-            ) from exc
+            # The caller left out tasks another agent held or finished when it
+            # read them; custody or the archive changed since. Same outcome as
+            # a concurrent recovery.
+            raise RuntimeRecoveryConflict(f"{exc} (during recovery)") from exc
 
     @staticmethod
     def _snapshot_values(
@@ -477,13 +476,17 @@ class _RelationalRuntimeStateRepository:
         self, conn: Any, records: dict[tuple[str, str], str], previous_task_ids: set[str], *,
         owner_agent_id: str, team_id: str,
     ) -> None:
-        """Refuse the save if another agent took over a task this owner already held.
+        """Refuse the save if a task this owner already held is no longer its own.
 
         Only the custody row moves in an admission takeover; the old holder's
         snapshot still lists the task, and a holder wrongly judged gone keeps
-        running and saving it (2026-10-17). A task the previous save had
-        delegated out is the worker's to hold, also once its record leaves the
-        delegation map, so it is not checked.
+        running and saving it (2026-10-17). Another agent may hold the row
+        now, or may already have given the task up again, finished or not, so
+        the row is gone (2026-10-18); both refuse. Only tasks this owner keeps
+        from its previous save are checked: a task it releases in this save,
+        or admits in it, is not. A task the previous save had delegated out is
+        the worker's to hold, also once its record leaves the delegation map,
+        so it is not checked either.
         """
         bind = self._dialect.bind
         previously_delegated = {row[0] for row in conn.execute(
@@ -491,11 +494,11 @@ class _RelationalRuntimeStateRepository:
             (owner_agent_id, "subtask_to_parent_map"),
         ).fetchall()}
         still_held = custody.executed_task_ids(records) & (previous_task_ids - previously_delegated)
-        holders = custody.taken_over(
+        holders, released = custody.taken_over(
             conn, self._dialect, team_id=team_id, owner_agent_id=owner_agent_id, task_ids=still_held,
         )
-        if holders:
-            raise TaskCustodyTakenOver(owner_agent_id, holders)
+        if holders or released:
+            raise TaskCustodyTakenOver(owner_agent_id, holders, released)
 
     def save_task_runtime_task(
         self, *, owner_agent_id: str, task: TaskSnapshotRecord,

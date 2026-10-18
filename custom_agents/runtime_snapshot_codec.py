@@ -34,6 +34,8 @@ CANCELLED = "cancelled"
 DUPLICATE = "duplicate"
 HELD_BY_ANOTHER_AGENT = "held_by_another_agent"
 FINISHED_BY_ANOTHER_AGENT = "finished_by_another_agent"
+# Archived by the snapshot's own owner (it stopped between archiving and saving).
+ALREADY_FINISHED = "already_finished"
 PARENT_LEFT_OUT = "parent_left_out"
 
 
@@ -252,7 +254,10 @@ def _restore_entries(
             dropped += 1
             continue
         restored = policy(key, value, workflow) if policy is not None else value
-        if restored is not None:
+        # A set's saved members carry no value (None): keep them anyway. Before
+        # 2026-10-18 they were dropped, so a final review queued before a
+        # restart was no longer marked pending (final_review_pending_task_ids).
+        if restored is not None or isinstance(collection, set):
             _put(collection, key, restored)
     return dropped
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from custom_agents.runtime_snapshot_codec import (
+    ALREADY_FINISHED,
     FINISHED_BY_ANOTHER_AGENT,
     HELD_BY_ANOTHER_AGENT,
     LeftOutDelegation,
@@ -200,40 +201,64 @@ class RuntimeSnapshotCoordinator:
         # the inbox drops its messages (deferred_message_runtime).
 
     def _release_taken_tasks(self, taken: TaskCustodyTakenOver) -> None:
-        """Drop tasks another agent took over, without saving, ending or replying.
+        """Drop tasks this agent no longer holds, without saving, ending or replying.
 
-        That agent judged this one gone and admitted a copy (2026-10-17); it
-        runs the task again from the start and answers. Before each task is
-        dropped, the release callbacks stop the work it delegated and withdraw
-        the access requests it waited on (``TaskManager.add_task_release_callback``):
-        the new holder delegates and asks again for itself. Each pass drops at
-        least one task, so the save that follows ends.
+        Another agent judged this one gone and admitted a copy (2026-10-17);
+        it runs the task again from the start and answers, or already gave it
+        up again (``taken.released``, 2026-10-18): finished by that agent, or
+        given up unfinished, for example handed back after a lost lease, when
+        the lead sends it again. Either way the task is not this agent's to
+        run, and claiming it afresh would run it beside its other copy, so it
+        is dropped the same way and logged. Before each task is dropped, the
+        release callbacks stop the work it delegated and withdraw the access
+        requests it waited on (``TaskManager.add_task_release_callback``). Each
+        pass drops at least one task, so the save that follows ends.
         """
-        released = tuple(sorted(task_id for task_id in taken.holders if task_id in self.task_state.tasks))
-        if not released:
-            raise RuntimeError(f"A save was refused for tasks this agent does not hold: {sorted(taken.holders)}")
-        for task_id in released:
+        refused = {**taken.holders, **taken.released}
+        dropped = tuple(sorted(task_id for task_id in refused if task_id in self.task_state.tasks))
+        if not dropped:
+            raise RuntimeError(f"A save was refused for tasks this agent does not hold: {sorted(refused)}")
+        for task_id in dropped:
             self.operations.notify_task_released(task_id)
             self.operations.forget_task(task_id)
-        self._logger.warning(
-            "Another agent took over tasks of this agent's saved work; dropped them from memory "
-            "without ending or answering them. event=task_custody_taken_over owner_agent_id=%s "
-            "task_ids=%s holders=%s",
-            taken.owner_agent_id,
-            list(released),
-            {task_id: taken.holders[task_id] for task_id in released},
-        )
+        self._log_released(taken, dropped)
         if self._custody_lost_listener is None:
             return
         try:
-            self._custody_lost_listener(released)
+            self._custody_lost_listener(dropped)
         except Exception:
             # The tasks are already dropped; the save must still go ahead.
             self._logger.exception(
                 "Could not tell the agent about released tasks. event=custody_listener_failed "
                 "owner_agent_id=%s task_ids=%s",
                 taken.owner_agent_id,
-                list(released),
+                list(dropped),
+            )
+
+    def _log_released(self, taken: TaskCustodyTakenOver, dropped: tuple[str, ...]) -> None:
+        held = {task_id: taken.holders[task_id] for task_id in dropped if task_id in taken.holders}
+        finished = {task_id: taken.released[task_id] for task_id in dropped if taken.released.get(task_id)}
+        given_up = [task_id for task_id in dropped if task_id in taken.released and not taken.released[task_id]]
+        if held:
+            self._logger.warning(
+                "Another agent took over tasks of this agent's saved work; dropped them from memory "
+                "without ending or answering them. event=task_custody_taken_over owner_agent_id=%s "
+                "task_ids=%s holders=%s",
+                taken.owner_agent_id, sorted(held), held,
+            )
+        if finished:
+            self._logger.warning(
+                "Another agent took over tasks of this agent's saved work and already finished them; "
+                "dropped them from memory without ending or answering them. "
+                "event=task_custody_finished_elsewhere owner_agent_id=%s task_ids=%s finished_by=%s",
+                taken.owner_agent_id, sorted(finished), finished,
+            )
+        if given_up:
+            self._logger.warning(
+                "Another agent took over tasks of this agent's saved work and gave them up unfinished; "
+                "dropped them from memory instead of claiming them again (whoever sends them again runs "
+                "them). event=task_custody_released_elsewhere owner_agent_id=%s task_ids=%s",
+                taken.owner_agent_id, given_up,
             )
 
     def persist_task_history(self, task_id: str) -> None:
@@ -338,11 +363,16 @@ class RuntimeSnapshotCoordinator:
             raise
 
     def _taken_by_other_agents(self, sources: List[SnapshotSource], source_owner_ids: set[str]) -> dict[str, str]:
-        """Saved tasks another agent of the team holds or finished; recovery must not adopt them.
+        """Saved tasks another agent of the team holds, or any agent finished; recovery must not adopt them.
 
-        That agent took the task over after this snapshot's owner stopped
+        Another agent took the task over after this snapshot's owner stopped
         (``custom_agents.task_custody``), and runs or ran it; adopting the
-        saved copy as well ran it twice (2026-10-17). Returns task id -> reason.
+        saved copy as well ran it twice (2026-10-17). A task in the team's
+        finished-task archive is finished whoever archived it, the snapshot's
+        own owner included (it stopped between archiving and saving); the
+        recovery transaction refuses it too (``task_custody_repository``), so
+        this read keeps a second read from conflicting again (2026-10-18).
+        Returns task id -> reason.
         """
         team_id = self.identity.team_id
         if not team_id:
@@ -361,8 +391,10 @@ class RuntimeSnapshotCoordinator:
             if task_id in taken:
                 continue
             archived = self.operations.get_task_from_db(task_id, include_all_agents=True)
-            if archived is not None and archived.get("team_id") == team_id and archived.get("owner_agent_id") not in allowed:
-                taken[task_id] = FINISHED_BY_ANOTHER_AGENT
+            if archived is not None and archived.get("team_id") == team_id:
+                taken[task_id] = (
+                    ALREADY_FINISHED if archived.get("owner_agent_id") in allowed else FINISHED_BY_ANOTHER_AGENT
+                )
         return taken
 
     def _reconcile_restored_plans(self) -> None:

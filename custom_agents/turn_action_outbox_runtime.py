@@ -91,6 +91,14 @@ from reply_routing_trace import (
 _DELEGATE_ACTION = DelegateTaskAction.model_fields["action_type"].default
 # Outbox statuses of an action the outbox stopped trying to carry out.
 _PUBLISH_GIVEN_UP_STATUSES = frozenset({"failed_recoverable", "failed_terminal"})
+# Outbox side effect: a delegated task's publish went through, recorded as
+# soon as it is known (the publish call returned, or a worker claimed the
+# task). Side effects are kept across later status changes and restarts, so
+# a step that fails after publishing never makes the task look unsent
+# (2026-10-18). Values: PUBLISHED_BY_CALL or PUBLISHED_BY_CLAIM.
+PUBLISH_CONFIRMED = "publish_confirmed"
+PUBLISHED_BY_CALL = "publish_call"
+PUBLISHED_BY_CLAIM = "worker_claim"
 
 
 class TurnActionRecoveryScheduled(RuntimeError):
@@ -721,13 +729,15 @@ def delegation_publish_given_up(task_manager: Any, subtask_id: str) -> bool:
     watchdog checks queued records without a stream sequence with this,
     because a record's age alone misjudged a busy or restarted requester.
     """
-    statuses = [
-        record.status
+    actions = [
+        record
         for record in task_manager.execution_state.turn_action_outbox.values()
         if record.action_type == _DELEGATE_ACTION
         and (record.side_effects or {}).get("delegated_task_id") == subtask_id
     ]
-    return all(status in _PUBLISH_GIVEN_UP_STATUSES for status in statuses)
+    if any((record.side_effects or {}).get(PUBLISH_CONFIRMED) for record in actions):
+        return False
+    return all(record.status in _PUBLISH_GIVEN_UP_STATUSES for record in actions)
 
 
 async def _end_unpublished_delegation(self: Any, record: Any, exc: Exception) -> bool:
@@ -744,7 +754,13 @@ async def _end_unpublished_delegation(self: Any, record: Any, exc: Exception) ->
     mark it failed.
     """
     subtask_id = (record.side_effects or {}).get("delegated_task_id")
-    if record.action_type != _DELEGATE_ACTION or not subtask_id or record.status == "dispatched":
+    if (
+        record.action_type != _DELEGATE_ACTION
+        or not subtask_id
+        or record.status == "dispatched"
+        or (record.side_effects or {}).get(PUBLISH_CONFIRMED)
+    ):
+        # Published (now or on an earlier attempt): a worker may hold it.
         return False
     try:
         outcome = await self.task_manager.operations_runtime.run(
@@ -772,7 +788,7 @@ async def _end_unpublished_delegation(self: Any, record: Any, exc: Exception) ->
             self.task_manager.mark_turn_action_record,
             record.action_id,
             status="dispatched",
-            side_effects={"publish_confirmed_by_claim": outcome.claimed_by},
+            side_effects={PUBLISH_CONFIRMED: PUBLISHED_BY_CLAIM, "publish_confirmed_by_claim": outcome.claimed_by},
         )
         self._logger.warning(
             "A delegated task's publish reported a failure, but a worker took the task, so it "
@@ -1161,6 +1177,12 @@ async def _execute_turn_action_record(
             phase="complete",
         )
         return action.task.to_task()
+
+    if isinstance(action, DelegateTaskAction) and (record.side_effects or {}).get(PUBLISH_CONFIRMED):
+        # Published on an earlier attempt; a later step failed. Only the steps
+        # after publishing run again: publishing again could fail and end a
+        # task a worker may already run (2026-10-18).
+        return await _complete_published_delegation(self, record=record, action=action)
 
     if isinstance(action, TaskResponseAction) and isinstance(incoming_content, Task):
         if action.task.task_id is None:
@@ -1661,6 +1683,7 @@ async def _execute_turn_action_record(
         record_id,
         status=TURN_ACTION_HELD_BACK if held_back else "dispatched",
         phase="publish",
+        side_effects=None if suppress_outbound_dispatch else _publish_confirmation(content, publish_sequence),
     )
 
     if (
@@ -1898,12 +1921,11 @@ async def _finish_claim_confirmed_delegation(
     )
     if task_info is None:
         return None
-    content = self._task_request_transport_copy(task_info.task)
     await self.task_manager.operations_runtime.run(
         self.task_manager.mark_turn_action_record,
         record_id,
         status="dispatched",
-        side_effects={"publish_confirmed_by_claim": holder},
+        side_effects={PUBLISH_CONFIRMED: PUBLISHED_BY_CLAIM, "publish_confirmed_by_claim": holder},
     )
     self._logger.warning(
         "A delegated task's publish reported a failure, but a worker took the task, so it was "
@@ -1916,17 +1938,44 @@ async def _finish_claim_confirmed_delegation(
         holder,
         type(exc).__name__,
     )
+    refreshed = await self.task_manager.operations_runtime.run(
+        self.task_manager.get_turn_action_record, record_id
+    )
+    return await _complete_published_delegation(self, record=refreshed or record, action=action)
+
+
+def _publish_confirmation(content: Any, publish_sequence: Optional[int]) -> Optional[Dict[str, Any]]:
+    """Side effects that record a delegated task's successful publish, or None for other actions."""
+    if not (isinstance(content, Task) and content.task_type == MessageMetaType.REQUEST and content.parent_task_id):
+        return None
+    return {PUBLISH_CONFIRMED: PUBLISHED_BY_CALL, "delegated_publish_sequence": publish_sequence}
+
+
+async def _complete_published_delegation(self: Any, *, record: Any, action: Any) -> Task:
+    """Run the steps after a delegated task's publish, for an action whose publish is confirmed."""
+    side_effects = record.side_effects or {}
+    subtask_id = str(side_effects.get("delegated_task_id"))
+    task_info = await self.task_manager.operations_runtime.run(self.task_manager.get_task_info, subtask_id)
+    if task_info is None:
+        raise RuntimeError(
+            f"Runtime action {record.action_id} published delegated subtask {subtask_id}, "
+            "but the local task record is missing."
+        )
+    content = self._task_request_transport_copy(task_info.task)
+    await self.task_manager.operations_runtime.run(
+        self.task_manager.mark_turn_action_record, record.action_id, status="dispatched", phase="publish",
+    )
     await _after_delegation_published(
         self,
-        record_id=record_id,
+        record_id=record.action_id,
         action=action,
         content=content,
-        delegated_child_task_id=str(subtask_id),
-        delegated_target_type=(record.side_effects or {}).get("target_named_agent_type"),
-        publish_sequence=None,
+        delegated_child_task_id=subtask_id,
+        delegated_target_type=side_effects.get("target_named_agent_type"),
+        publish_sequence=side_effects.get("delegated_publish_sequence"),
     )
     await self.task_manager.operations_runtime.run(
-        self.task_manager.mark_turn_action_record, record_id, status="completed", phase="complete"
+        self.task_manager.mark_turn_action_record, record.action_id, status="completed", phase="complete"
     )
     return content
 

@@ -296,3 +296,27 @@ def test_restore_leaves_out_delegations_of_a_parent_it_leaves_out_transitively()
     )
     assert sorted(restored.task_state.tasks) == ["K"]
     assert restored.task_state.subtask_to_parent_map == {}
+
+
+def test_restore_keeps_the_final_review_marker_of_a_restored_task(tmp_path):
+    """Regression (2026-10-18 owner review): restore dropped every member of a set
+    field, so a final review queued before a restart was no longer marked pending.
+    A delegated result that resumed the task before the review turn ran could then
+    complete it without the review (task_resume_runtime, subtask_watchdog_runtime,
+    task_message_runtime check ``is_final_review_pending``)."""
+    manager = _manager(tmp_path)
+    for task_id in ("reviewing", "done_elsewhere"):
+        assert manager.add_task(
+            Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="work"),
+            MessageHeader(from_agent_id="gateway"), MessageMeta(), owner_person_id=None,
+        )
+    manager.plan_state.final_review_pending_task_ids.update({"reviewing", "not_restored"})
+    manager.plan_state.final_review_attempt_counts["reviewing"] = 1
+    manager._persist_runtime_state()
+
+    restarted = _manager(tmp_path)
+    restarted.restore_runtime_state()
+
+    assert restarted.is_final_review_pending("reviewing")
+    assert restarted.plan_state.final_review_attempt_counts == {"reviewing": 1}
+    assert restarted.plan_state.final_review_pending_task_ids == {"reviewing"}  # only restored tasks keep one
