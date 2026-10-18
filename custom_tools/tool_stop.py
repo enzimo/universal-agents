@@ -51,7 +51,7 @@ import signal
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Coroutine, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,6 +74,10 @@ TOOL_STOP_GRACE_SECONDS = 10.0
 # How long processes a stopped turn's commands left behind get after SIGTERM
 # before SIGKILL, the same as the supervisor gives a running command.
 BACKGROUND_TERM_GRACE_SECONDS = 1.0
+
+# SIGKILL is delivered asynchronously. Observe exit before acknowledging the
+# stop, with a bound for processes stuck in uninterruptible kernel work.
+BACKGROUND_KILL_GRACE_SECONDS = 1.0
 
 # How often the waits look again. They poll on the event loop rather than
 # waiting in a thread, so a wait that is given up never leaves a thread behind.
@@ -134,13 +138,15 @@ def _read_stat(pid: int) -> _ProcessInfo | None:
     """
 
     try:
-        text = Path(f"/proc/{pid}/stat").read_text()
+        # comm is arbitrary bytes, and Linux may truncate a UTF-8 name in the
+        # middle of a character. Only the numeric suffix needs interpretation.
+        text = Path(f"/proc/{pid}/stat").read_bytes()
     except OSError:
         return None
-    fields = text.rsplit(")", 1)[-1].split()
+    fields = text.rsplit(b")", 1)[-1].split()
     if len(fields) < 20:
         return None
-    return _ProcessInfo(pgid=int(fields[2]), start=int(fields[19]), zombie=fields[0] == "Z")
+    return _ProcessInfo(pgid=int(fields[2]), start=int(fields[19]), zombie=fields[0] == b"Z")
 
 
 def _scan_processes() -> dict[int, _ProcessInfo]:
@@ -192,6 +198,18 @@ class ToolStop:
         self._keys = itertools.count()
         self._running: dict[int, RunningToolCall] = {}
         self._groups: list[_StartedGroup] = []
+        # Owned by the turn's event loop, never by a tool thread. Retaining one
+        # cleanup keeps repeated stops within the same grace period.
+        self._cleanup_task: asyncio.Task[None] | None = None
+
+    def start_cleanup(self, cleanup: Callable[[], Coroutine[Any, Any, None]]) -> asyncio.Task[None]:
+        """Start cleanup once; call only from the turn's owning event loop."""
+
+        if self._cleanup_task is None:
+            self._cleanup_task = asyncio.create_task(
+                cleanup(), name=f"tool-cleanup:{self.agent_id}:{self.task_id}"
+            )
+        return self._cleanup_task
 
     @property
     def event(self) -> threading.Event:
@@ -367,6 +385,7 @@ def tracked_tool_call(tool_context: Any, tool_name: str) -> Iterator[ToolStop | 
 
 
 __all__ = [
+    "BACKGROUND_KILL_GRACE_SECONDS",
     "BACKGROUND_TERM_GRACE_SECONDS",
     "TOOL_STOP_GRACE_SECONDS",
     "TOOL_STOP_STATE_KEY",

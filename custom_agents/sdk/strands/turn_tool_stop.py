@@ -28,6 +28,7 @@ import time
 from typing import Any
 
 from custom_tools.tool_stop import (
+    BACKGROUND_KILL_GRACE_SECONDS,
     BACKGROUND_TERM_GRACE_SECONDS,
     TOOL_STOP_GRACE_SECONDS,
     TOOL_STOP_STATE_KEY,
@@ -88,9 +89,29 @@ async def invoke_with_tool_stop(
 
 
 async def stop_tool_calls(tool_stop: ToolStop, logger: logging.Logger, *, reason: str) -> None:
-    """Ask the turn's commands to stop, wait (bounded) for its tool calls, then end leftovers."""
+    """Finish one bounded cleanup even if its caller is cancelled again.
+
+    A control stop can overlap shutdown or a lease-loss handback. Shielding
+    alone would let the caller finish before cleanup; retain and join the
+    same cleanup through every cancellation, then propagate cancellation.
+    """
 
     tool_stop.request(reason)
+    cleanup = tool_stop.start_cleanup(lambda: _finish_tool_stop(tool_stop, logger))
+    cancellation = None
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+    cleanup.result()
+    if cancellation is not None:
+        raise cancellation
+
+
+async def _finish_tool_stop(tool_stop: ToolStop, logger: logging.Logger) -> None:
+    """The turn's single cleanup, joined by every stop path."""
+
     if tool_stop.running():
         await _wait_for_tool_calls(tool_stop, logger)
     await _end_leftover_processes(tool_stop, logger)
@@ -132,15 +153,21 @@ async def _end_leftover_processes(tool_stop: ToolStop, logger: logging.Logger) -
     terminated = await asyncio.to_thread(tool_stop.signal_process_groups, signal.SIGTERM)
     if not terminated:
         return
-    deadline = time.monotonic() + BACKGROUND_TERM_GRACE_SECONDS
-    while time.monotonic() < deadline:
-        still_live = await asyncio.to_thread(tool_stop.live_process_groups)
-        if not still_live:
-            break
-        await asyncio.sleep(_POLL_SECONDS)
+    await _wait_for_process_groups(tool_stop, BACKGROUND_TERM_GRACE_SECONDS)
     killed = await asyncio.to_thread(tool_stop.signal_process_groups, signal.SIGKILL)
+    remaining = await _wait_for_process_groups(tool_stop, BACKGROUND_KILL_GRACE_SECONDS) if killed else ()
+    if remaining:
+        logger.warning(
+            "Processes remained after SIGKILL; they may be blocked in the kernel. "
+            "event=tool_process_groups_outlived_kill agent_id=%s task_id=%s reason=%s groups=%s",
+            tool_stop.agent_id,
+            tool_stop.task_id,
+            tool_stop.reason,
+            _describe_groups(remaining),
+        )
+        return
     logger.info(
-        "Ended processes that a stopped turn's commands left running. "
+        "Stopped a turn's leftover process groups. "
         "event=tool_background_processes_ended agent_id=%s task_id=%s reason=%s groups=%s killed_after_grace=%s",
         tool_stop.agent_id,
         tool_stop.task_id,
@@ -148,6 +175,18 @@ async def _end_leftover_processes(tool_stop: ToolStop, logger: logging.Logger) -
         _describe_groups(terminated),
         _describe_groups(killed) or "-",
     )
+
+
+async def _wait_for_process_groups(tool_stop: ToolStop, grace_seconds: float) -> tuple[EndedGroup, ...]:
+    """Observe group exit without blocking the loop or waiting without a bound."""
+
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        still_live = await asyncio.to_thread(tool_stop.live_process_groups)
+        if not still_live:
+            return ()
+        await asyncio.sleep(_POLL_SECONDS)
+    return await asyncio.to_thread(tool_stop.live_process_groups)
 
 
 def _describe_groups(groups: tuple[EndedGroup, ...]) -> str:

@@ -27,6 +27,7 @@ from custom_tools.shell_execution import AnyCancel, ProcessRequest, run_process
 from custom_agents.sdk.strands.turn_tool_stop import stop_tool_calls
 from custom_tools.tool_stop import (
     TOOL_STOP_STATE_KEY,
+    EndedGroup,
     ToolStop,
     _read_stat,
     _StartedGroup,
@@ -307,6 +308,60 @@ async def test_a_stop_ends_processes_a_finished_command_left_running(work_dir: P
     assert not process_alive(pid)
     assert "event=tool_background_processes_ended agent_id=agent task_id=task reason=task_stopped" in caplog.text
     assert f"pids={pid}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_non_utf8_process_names_do_not_prevent_recording_or_cleanup() -> None:
+    # Linux truncates comm at 15 bytes, even in the middle of a UTF-8 character.
+    name = b"worker-" + b"\xe2\x82\xac" * 3
+    script = (
+        "import ctypes,time; "
+        f"assert ctypes.CDLL(None).prctl(15, {name!r}, 0, 0, 0) == 0; "
+        "print('ready', flush=True); time.sleep(60)"
+    )
+    named = subprocess.Popen([sys.executable, "-c", script], start_new_session=True, stdout=subprocess.PIPE)
+    command = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        assert named.stdout.readline() == b"ready\n"
+        stop = ToolStop(agent_id="agent", task_id="task")
+        stop.process_group_recorder("shell")(command.pid)
+
+        # The unrelated process must not abort the whole-host scan.
+        await stop_tool_calls(stop, logging.getLogger("tests.tool_stop"), reason="task_stopped")
+        assert command.wait(timeout=5) == -signal.SIGTERM
+        assert named.poll() is None
+
+        # The same name is also valid when recording our own command's group.
+        named_stop = ToolStop(agent_id="agent", task_id="named-task")
+        named_stop.process_group_recorder("shell")(named.pid)
+        await stop_tool_calls(named_stop, logging.getLogger("tests.tool_stop"), reason="task_stopped")
+        assert named.wait(timeout=5) == -signal.SIGTERM
+    finally:
+        for child in (named, command):
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=5)
+        named.stdout.close()
+
+
+@pytest.mark.asyncio
+async def test_processes_that_outlive_sigkill_are_reported_with_identifiers(monkeypatch, caplog) -> None:
+    import custom_agents.sdk.strands.turn_tool_stop as turn_stop
+
+    stop = ToolStop(agent_id="agent", task_id="task")
+    remaining = (EndedGroup(pgid=4_000_000, tool_name="shell", pids=(4_000_001,)),)
+    # A process in uninterruptible kernel work may remain after both signals.
+    monkeypatch.setattr(stop, "signal_process_groups", lambda sig: remaining)
+    monkeypatch.setattr(stop, "live_process_groups", lambda: remaining)
+    monkeypatch.setattr(turn_stop, "BACKGROUND_TERM_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(turn_stop, "BACKGROUND_KILL_GRACE_SECONDS", 0.0)
+    caplog.set_level(logging.INFO, logger="tests.tool_stop")
+
+    await asyncio.wait_for(stop_tool_calls(stop, logging.getLogger("tests.tool_stop"), reason="task_stopped"), 1)
+
+    assert "event=tool_process_groups_outlived_kill agent_id=agent task_id=task reason=task_stopped" in caplog.text
+    assert "pgid=4000000:pids=4000001" in caplog.text
+    assert "event=tool_background_processes_ended" not in caplog.text
 
 
 def test_a_reused_process_group_number_is_never_signalled(tmp_path: Path) -> None:

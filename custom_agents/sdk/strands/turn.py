@@ -1917,12 +1917,20 @@ class LLMTurnExecutor:
             self.effects.clear_active_execution_context()
             return early_response
         try:
-            await self._prepare_invocation(turn)
-            await self._invoke_model(turn)
-            return await self._complete_turn(turn)
+            return await self._run_prepared_turn(turn)
         except asyncio.CancelledError:
             await self._end_tool_work_of_cancelled_turn(turn)
             raise
+        finally:
+            self.effects.clear_active_execution_context()
+
+    async def _run_prepared_turn(self, turn: _TurnState) -> ContentType:
+        """Run and recover inside the cancellation owner, including error-handler awaits."""
+
+        try:
+            await self._prepare_invocation(turn)
+            await self._invoke_model(turn)
+            return await self._complete_turn(turn)
         except ToolCallLimitExceeded as e:
             await self._write_context_debug_post_turn(
                 request=turn.context_request,
@@ -2088,9 +2096,6 @@ class LLMTurnExecutor:
                 )
             self.logger.exception(f"[{self.settings.id}] Error in LLM interaction: {e}")
             raise
-        finally:
-            self.effects.clear_active_execution_context()
-
     async def _finish_checkpointed_work_session(
         self, content: ContentType, header: MessageHeader, meta: MessageMeta,
     ) -> ContentType | None:

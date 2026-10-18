@@ -965,11 +965,13 @@ starts after the stop does nothing. A command can leave processes running in
 its group after it returns (`server &`), so each command's process group is
 recorded, also when the command already exited (its leader is then a zombie
 the supervisor has not collected yet). On a stop, wherever it lands (during
-the model call or after it, while the turn applies its result), the groups
-that still have processes get SIGTERM, then SIGKILL a second later
+the model call or after it, while the turn applies its result or handles an
+error), the groups that still have processes get SIGTERM, then SIGKILL a second later
 (`event=tool_background_processes_ended`). Each check reads `/proc` once for
-all groups, in a worker thread, so the agent's event loop keeps running. A
-group is signalled only while its number still belongs to that command: the
+all groups, in a worker thread, so the agent's event loop keeps running. The
+stat parser reads bytes: Linux process names need not be UTF-8, and truncating
+a name can split a character. An unrelated process name must never abort
+cleanup. A group is signalled only while its number still belongs to that command: the
 number cannot be reused while any member lives, and a process holding it with
 a different start time is a reuse and left alone. A turn that ends normally
 leaves its background processes running, as before. A tool call keeps the task
@@ -977,14 +979,22 @@ it started for until it returns (`runtime_context.bind_tool_call_task`), so a
 call that outlives its turn never picks up the next task's person and folders.
 
 The cancelled turn waits up to 10 seconds for its running tool calls to end,
-then up to one second for leftover processes
-(`custom_agents/sdk/strands/turn_tool_stop.py`), so the stop reply, the
+then gives leftover processes one second after SIGTERM and up to one more
+second to exit after SIGKILL (`custom_agents/sdk/strands/turn_tool_stop.py`), so the stop reply, the
 cancellation record, the next queued task, the lease-loss handback and shutdown
 all come after its commands ended. The stop path's own wait is that plus two
-seconds, 13 seconds in all, within the gateway's 15-second control timeout. The
+seconds, 14 seconds in all, within the gateway's 15-second control timeout. The
 wait sits in the turn rather than in each stop path because the code that runs
 the turn archives the task and frees the execution slot as soon as the turn
-ends, whoever stopped it. A tool call still running after the wait is logged
+ends, whoever stopped it. Each turn retains one cleanup task, so overlapping
+stops, a lease-loss handback and shutdown all join the same work without
+restarting its grace period. Further cancellation cannot cut cleanup short;
+the caller propagates it only after cleanup finishes. Both turn runners own
+this cancellation handling outside their error handlers too, because writing
+context or settling a failed resumed turn may still be in progress at a stop.
+A process still present after SIGKILL is logged with its group and process ids
+(`event=tool_process_groups_outlived_kill`); uninterruptible kernel work can
+delay its exit. A tool call still running after the wait is logged
 (`event=tool_work_outlived_turn`) and the stop goes ahead; it can only be work
 the supervisor cannot end, such as an HTTP request or OpenShell sandbox
 creation, or a process that moved itself into a new session or group and still

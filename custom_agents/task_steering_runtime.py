@@ -832,31 +832,32 @@ async def resume_interrupted_task_turn(agent: Any, task_id: str) -> Optional[Any
     # A resumed turn is a new turn: it gets its own stop for its commands.
     tool_stop = agent._set_active_execution_context(task_id)
     try:
-        await agent.task_manager.operations_runtime.run(
-            agent.task_manager.update_main_task_state,
-            task_id,
-            ProgressState.IN_PROGRESS,
-            datetime.now(timezone.utc).isoformat(),
-        )
-        return await _run_resumed_turn(agent, session, steering, task_info, response_blocks, tool_stop)
+        try:
+            await agent.task_manager.operations_runtime.run(
+                agent.task_manager.update_main_task_state,
+                task_id,
+                ProgressState.IN_PROGRESS,
+                datetime.now(timezone.utc).isoformat(),
+            )
+            return await _run_resumed_turn(agent, session, steering, task_info, response_blocks, tool_stop)
+        except Exception as exc:
+            # The task holds the execution slot (IN_PROGRESS above). Unhandled, it
+            # kept it and no queued task ever started again (turn_failure_runtime).
+            agent._interrupted_turn_sessions.pop(task_id, None)
+            agent._logger.warning(
+                "A resumed turn failed; ending its task. event=resumed_turn_failed "
+                "task_id=%s steering_id=%s error_type=%s",
+                task_id,
+                steering.steering_id,
+                type(exc).__name__,
+            )
+            await settle_failed_turn(agent, task_id, task_info, _as_provider_timeout(exc))
+            return None
     except asyncio.CancelledError:
         # Like a fresh turn (sdk.strands.turn): end the turn's tool work
-        # wherever the stop landed, also after the model call returned.
+        # wherever the stop landed, including while settling a failure.
         await stop_tool_calls(tool_stop, agent._logger, reason=TURN_CANCELLED_REASON)
         raise
-    except Exception as exc:
-        # The task holds the execution slot (IN_PROGRESS above). Unhandled, it
-        # kept it and no queued task ever started again (turn_failure_runtime).
-        agent._interrupted_turn_sessions.pop(task_id, None)
-        agent._logger.warning(
-            "A resumed turn failed; ending its task. event=resumed_turn_failed "
-            "task_id=%s steering_id=%s error_type=%s",
-            task_id,
-            steering.steering_id,
-            type(exc).__name__,
-        )
-        await settle_failed_turn(agent, task_id, task_info, _as_provider_timeout(exc))
-        return None
     finally:
         agent._clear_active_execution_context()
         await agent._refresh_self_agent_state()

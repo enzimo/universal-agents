@@ -28,13 +28,20 @@ from custom_messages.enums import (
     TaskHistoryImportance,
     TaskHistoryType,
 )
-from custom_tools.tool_stop import BACKGROUND_TERM_GRACE_SECONDS, TOOL_STOP_GRACE_SECONDS
+from custom_tools.tool_stop import (
+    BACKGROUND_KILL_GRACE_SECONDS,
+    BACKGROUND_TERM_GRACE_SECONDS,
+    TOOL_STOP_GRACE_SECONDS,
+)
 
 # How long a stop waits for the stopped turn to finish unwinding. The turn
 # itself first waits up to TOOL_STOP_GRACE_SECONDS for its running commands to
-# end, then up to BACKGROUND_TERM_GRACE_SECONDS for processes they left behind
+# end, then gives leftover groups BACKGROUND_TERM_GRACE_SECONDS to stop and
+# BACKGROUND_KILL_GRACE_SECONDS to exit after a forced kill
 # (custom_agents.sdk.strands.turn_tool_stop); the rest covers its cleanup.
-ACTIVE_STOP_GRACE_SECONDS = TOOL_STOP_GRACE_SECONDS + BACKGROUND_TERM_GRACE_SECONDS + 2.0
+ACTIVE_STOP_GRACE_SECONDS = (
+    TOOL_STOP_GRACE_SECONDS + BACKGROUND_TERM_GRACE_SECONDS + BACKGROUND_KILL_GRACE_SECONDS + 2.0
+)
 
 
 async def _record_execution_graph_cancellation(

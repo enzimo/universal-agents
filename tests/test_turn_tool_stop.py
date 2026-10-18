@@ -466,8 +466,11 @@ async def test_a_stop_after_the_model_call_still_ends_background_processes(work_
 
 
 @pytest.mark.asyncio
-async def test_a_resumed_turn_stopped_after_its_model_call_ends_background_processes(tmp_path: Path) -> None:
-    """The resumed-turn runner (task_steering_runtime) ends leftovers on a stop too."""
+@pytest.mark.parametrize("during_error_handler", [False, True], ids=["applying_result", "settling_failure"])
+async def test_a_resumed_turn_stopped_after_its_model_call_ends_background_processes(
+    tmp_path: Path, monkeypatch, during_error_handler: bool
+) -> None:
+    """Resumed turns end leftovers on a stop, including while settling a failure."""
 
     import subprocess
     from datetime import datetime, timezone
@@ -498,8 +501,15 @@ async def test_a_resumed_turn_stopped_after_its_model_call_ends_background_proce
         return SimpleNamespace(stop_reason="end_turn")
 
     async def dispatch(**kwargs):
+        if during_error_handler:
+            raise ValueError("Invalid result after the resumed command returned")
+        await wait_for_stop()
+
+    async def wait_for_stop(*args, **kwargs):
         in_post_processing.set()
         await hold.wait()
+
+    monkeypatch.setattr("custom_agents.task_steering_runtime.settle_failed_turn", wait_for_stop)
 
     now = datetime.now(timezone.utc).isoformat()
     session = StrandsInterruptedTurnSession(
