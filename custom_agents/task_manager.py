@@ -352,6 +352,7 @@ class TaskManager(
             operations=RuntimeSnapshotCoordinatorOperations(
                 emit_activity=self._emit_activity,
                 ensure_task_plan_link=self._ensure_task_plan_link,
+                forget_task=self._forget_task,
                 objectives_enabled=self._objectives_enabled,
                 plans_enabled=self._plans_enabled,
                 sync_plan_from_task=self._sync_plan_from_task,
@@ -1684,6 +1685,10 @@ class TaskManager(
         self.runtime_snapshot_coordinator._persist_runtime_state(
             schedule_admission=schedule_admission, custody_takeover=custody_takeover
         )
+
+    def set_custody_lost_listener(self, listener: Optional[Callable[[tuple[str, ...]], None]]) -> None:
+        """Hear about saved tasks another agent took over (``custom_agents.custody_loss``)."""
+        self.runtime_snapshot_coordinator.set_custody_lost_listener(listener)
 
     def get_stored_runtime_team_id(self) -> Optional[str]:
         return self.runtime_snapshot_coordinator.get_stored_runtime_team_id()
@@ -3782,6 +3787,17 @@ class TaskManager(
         """
         Completely removes a task and its associated subtasks (if it's a parent).
         """
+        if not self._forget_task(task_id):
+            return False
+        self._persist_runtime_state()
+        return True
+
+    def _forget_task(self, task_id: str) -> bool:
+        """Remove a task, its delegated subtasks and its records from memory, without saving.
+
+        ``remove_task`` saves afterwards; the snapshot coordinator calls this
+        directly while it saves, for tasks another agent took over.
+        """
         if task_id not in self.task_state.tasks:
             self._logger.warning(f"Attempted to remove non-existent task {task_id}.")
             return False
@@ -3807,7 +3823,7 @@ class TaskManager(
             if parent_id == task_id
         ]
         for sub_id in subtasks_to_remove:
-            self.remove_task(sub_id)
+            self._forget_task(sub_id)
 
         if task_id in self.task_state.task_to_subtask_list:
             del self.task_state.task_to_subtask_list[task_id]
@@ -3835,7 +3851,6 @@ class TaskManager(
         del self.task_state.tasks[task_id]
         self._logger.debug("Task %s removed from active tracking.", task_id)
         self._check_queue_backlog_warning()
-        self._persist_runtime_state()
         return True
 
     def complete_task(

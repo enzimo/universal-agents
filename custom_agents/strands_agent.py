@@ -56,6 +56,7 @@ from custom_agents.deferred_message_runtime import (
     is_priority_deferred_message,
 )
 from custom_agents.agent_team_runtime import LocalAgentTeamRuntime, unregister_local_worker
+from custom_agents.custody_loss import install_custody_listeners
 from custom_agents.liveness_observation import LivenessObservation, NATS_PRESENCE_HEARTBEAT_SECONDS
 from custom_agents.runtime_paths import (
     agent_layout,
@@ -189,6 +190,7 @@ from custom_agents.scheduled_runtime import (
 )
 from custom_agents.heartbeat_store import is_heartbeat_launcher
 from custom_agents.control_runtime import (
+    _interrupt_active_execution,
     cancel_task_tree_locally,
     request_subtask_stop,
     resolve_control_target_task_info,
@@ -295,6 +297,7 @@ from custom_messages.contracts.routing_v1 import (
     MessageHeader,
     MessageMeta,
 )
+from custom_messages.contracts.runtime_snapshot_v3 import TURN_ACTION_DONE_STATUSES
 from custom_messages.contracts.schedule_v1 import (
     AutomationMessage,
     ManagerScheduleCommand,
@@ -1181,6 +1184,9 @@ class UniversalAgent(BaseModel):
     # Next time the lead looks for dead agents holding unfinished work
     # (orphaned_work_takeover.take_over_orphaned_work).
     _orphaned_work_check_after: float = PrivateAttr(default=0.0)
+    # Tasks this agent released after another agent took them over
+    # (custom_agents.custody_loss); set when the agent connects.
+    _custody_release: Any = PrivateAttr(default=None)
     _active_execution_task_id: Optional[str] = PrivateAttr(default=None)
     _stop_reasons_by_task_id: Dict[str, str] = PrivateAttr(default_factory=dict)
     # Set once this worker loses its launch lease; see lease_loss_wind_down.
@@ -4472,7 +4478,7 @@ class UniversalAgent(BaseModel):
                 for record in records:
                     if record.action_index < due_record.action_index:
                         continue
-                    if record.status in {"completed", "dispatched"}:
+                    if record.status in TURN_ACTION_DONE_STATUSES:
                         continue
                     if record.status == "blocked":
                         await self.task_manager.operations_runtime.run(
@@ -4991,6 +4997,7 @@ class UniversalAgent(BaseModel):
 
             register_parent_end_stops(self)
             register_delegated_task_endings(self)
+            install_custody_listeners(self, interrupt_turn=_interrupt_active_execution)
             await self._recover_runtime_after_restart()
             # Delegated tasks this agent holds after a restart, or took over
             # from a worker that is gone: tell each requester who holds them.

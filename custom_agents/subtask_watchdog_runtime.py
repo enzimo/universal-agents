@@ -6,6 +6,7 @@ from custom_messages.records.task_results import TaskResultUpdate
 
 import asyncio
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any, List, Optional
 
 from custom_agents.control_runtime import handle_interrupted_turn
@@ -837,7 +838,7 @@ async def _queue_tracking(
         await _warn_untracked_subtask(agent, subtask_info.task.task_id)
         return False, None
     if record.status == DELEGATED_QUEUED and not record.target_agent_name:
-        if _never_published(agent, record):
+        if await _never_published(agent, record):
             _warn_never_published(agent, record)
             return False, None
         return True, None
@@ -845,21 +846,24 @@ async def _queue_tracking(
     return False, claimed.isoformat() if claimed is not None else None
 
 
-def _never_published(agent: Any, record: Any) -> bool:
-    """A queued record that never got a stream sequence after the outbox stopped retrying.
+async def _never_published(agent: Any, record: Any) -> bool:
+    """A queued record without a stream sequence that no outbox action still publishes.
 
     The requester records a delegated task before publishing it and adds the
     sequence afterwards. When the outbox gives up publishing it ends the
     subtask (``delegated_work_runtime.end_unpublished_delegation``); this is
     the safeguard for a record that outlived that, so it is checked and timed
-    out like untracked work instead of waiting for ever.
+    out like untracked work instead of waiting for ever. It acts only when
+    the outbox gave up or holds no action for the task; the record's age
+    alone misjudged a requester that was busy or had restarted.
     """
     if record.publish_sequence is not None:
         return False
-    from custom_agents.turn_action_outbox_runtime import turn_action_retry_window_seconds
+    from custom_agents.turn_action_outbox_runtime import delegation_publish_given_up
 
-    age_seconds = (datetime.now(timezone.utc) - record.updated_at_utc).total_seconds()
-    return age_seconds > turn_action_retry_window_seconds(agent)
+    return await agent.task_manager.operations_runtime.run(
+        partial(delegation_publish_given_up, agent.task_manager, record.task_id)
+    )
 
 
 def _warn_never_published(agent: Any, record: Any) -> None:

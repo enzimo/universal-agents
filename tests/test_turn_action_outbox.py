@@ -535,6 +535,43 @@ def test_a_delegation_never_sent_is_stopped_when_retries_end(tmp_path, caplog) -
     assert any("event=delegated_task_never_published" in r.getMessage() for r in caplog.records)
 
 
+def test_a_delegation_a_worker_took_is_treated_as_sent_when_retries_end(tmp_path, caplog) -> None:
+    """Regression (2026-10-17 review round 2): JetStream stored the task and a worker
+    claimed it, but every publish call reported a failure (lost acknowledgement).
+    When retries ended the subtask was failed while the worker ran it. A claimed
+    record shows the publish went through: the subtask keeps running and the action
+    is recorded dispatched."""
+    from custom_agents.delegated_work_runtime import delegated_tasks
+    from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent._probe_live_named_agent_type = AsyncMock()
+    object.__setattr__(agent, "_turn_action_outbox_config", lambda: {"max_auto_attempts": 0})
+
+    async def stored_and_claimed_but_ack_lost(*, message, routing_key):
+        delegated_tasks(agent).record_claim(
+            team_id=str(agent.team_id), task_id=message.msg_content.task_id, worker_agent_id="worker_9",
+            worker_agent_name="worker-9", claimed_at=datetime.now(timezone.utc),
+        )
+        raise TimeoutError("nats: timeout")
+
+    agent.team_comms.send_message = stored_and_claimed_but_ack_lost
+    with caplog.at_level(logging.WARNING), pytest.raises(TurnActionRecoveryScheduled):
+        _delegate(agent, manager, parent, named_type="WebResearchAgent")
+
+    (child,) = _subtasks(manager, parent)
+    assert manager.get_task_info(child).state != ProgressState.FAILED
+    assert not manager.is_execution_cancelled(child)
+    record = delegated_tasks(agent).get(str(agent.team_id), child)
+    assert (record.status, record.holder_agent_id) == ("running", "worker_9")
+    (action,) = [item for item in manager.execution_state.turn_action_outbox.values() if item.action_type == "delegate_task"]
+    assert action.status == "dispatched"
+    assert action.side_effects["publish_confirmed_by_claim"] == "worker_9"
+    assert any("event=delegated_task_publish_confirmed_by_claim" in r.getMessage() for r in caplog.records)
+
+
 def test_a_delegation_still_retrying_or_already_sent_is_left_alone(tmp_path) -> None:
     from custom_agents.delegated_work_runtime import delegated_tasks
     from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
@@ -862,10 +899,12 @@ def test_delegation_outbox_defers_same_turn_terminal_response_until_child_return
         "delegate_task",
         "task_response",
     ]
-    assert [record.status for record in records] == [
-        "completed",
-        "completed",
-        "completed",
+    # The deferred answer sent nothing, so it is recorded as held back, never
+    # as completed (a lease-loss wind-down once read it as sent).
+    assert [(record.status, record.phase) for record in records] == [
+        ("completed", "complete"),
+        ("completed", "complete"),
+        ("held_back", "complete"),
     ]
     history_events = [
         entry
@@ -2090,3 +2129,27 @@ def test_workflow_public_config_keeps_agent_type_overrides_sparse(tmp_path) -> N
             {"provider": "litellm", "model_id": "fallback/model"}
         ]
         assert "same_provider_retry" not in manager_llm["failover"]
+
+
+def test_a_held_back_action_counts_as_done_when_its_batch_stops_or_recovers(tmp_path) -> None:
+    """A held-back action ran and sent nothing on purpose (2026-10-17): a later
+    failure in its batch must not block it, a resumed batch must not run it
+    again, and the recovery brief lists it with its status."""
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    batch = manager.create_turn_action_batch(
+        parent.task_id,
+        [{"action_type": "task_response"}, {"action_type": "notify_user"}, {"action_type": "notify_user"}],
+    )
+    assert batch is not None
+    held, failing, later = manager.list_turn_action_records(batch.batch_id)
+    manager.mark_turn_action_record(held.action_id, status="held_back", phase="complete")
+    manager.mark_turn_action_record(failing.action_id, status="failed_recoverable")
+
+    manager.block_turn_actions_after(batch.batch_id, -1, reason="an earlier action failed")
+
+    statuses = {record.action_id: record.status for record in manager.list_turn_action_records(batch.batch_id)}
+    assert statuses == {held.action_id: "held_back", failing.action_id: "blocked", later.action_id: "blocked"}
+    brief = manager.build_turn_action_recovery_brief(batch.batch_id)
+    completed_section = brief.split("Completed actions:")[1].split("Failed or retrying actions:")[0]
+    assert f"action_id={held.action_id} status=held_back" in completed_section

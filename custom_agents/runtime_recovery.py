@@ -8,12 +8,14 @@ from typing import Any, List, Optional
 
 from custom_agents.agent_liveness import lookup_owner_status, owner_gone_by_launch
 from custom_agents.liveness_observation import heartbeat_checks_deferred
+from custom_agents.orphaned_subtasks import stop_left_out_delegations
 from custom_agents.task_human_interaction_blockers import (
     has_pending_human_interaction,
 )
 from custom_agents.task_manager import TaskInfo
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.enums import ProgressState, TaskHistoryImportance, TaskHistoryType
+from storage.runtime_state_repository import RuntimeRecoveryConflict
 
 
 def should_fail_stale_executing_recovery(
@@ -277,6 +279,86 @@ async def _preserve_or_requeue_recovered_pause(
     )
 
 
+class RuntimeRecoveryStartFailed(RuntimeError):
+    """Adopting saved work conflicted twice at start; the agent does not start.
+
+    ``commit_task_runtime_recovery`` refuses a recovery whose saved work
+    changed after it was read, or one that would adopt a task another agent
+    claimed meanwhile (``RuntimeRecoveryConflict``). One retry reads again and
+    leaves such a task out; a second conflict means the saved work keeps
+    changing, and starting without it could run work twice or lose it.
+    """
+
+    def __init__(self, agent_id: str, team_id: Optional[str], named_agent_type: Optional[str]) -> None:
+        super().__init__(
+            f"Agent {agent_id} ({named_agent_type}, team {team_id}) could not adopt its saved work: "
+            "the saved work changed twice while it was being adopted."
+        )
+        self.agent_id = agent_id
+        self.team_id = team_id
+        self.named_agent_type = named_agent_type
+
+
+async def _restore_saved_tasks(agent: Any, same_role_takeover_enabled: bool) -> Optional[dict[str, Any]]:
+    """Adopt the saved work of gone agents of this type, else this agent's own."""
+    restored_runtime = None
+    if same_role_takeover_enabled:
+        role_runtime_candidates = (
+            agent.task_manager.runtime_state_store.peek_task_runtime_by_role(
+                agent.team_id,
+                agent.named_agent_type,
+            )
+            if agent.team_id and agent.named_agent_type
+            else []
+        )
+        stale_owner_ids = await filter_stale_role_takeover_owner_ids(
+            agent,
+            [row.owner_agent_id for row in role_runtime_candidates],
+        )
+        restored_runtime = await agent.task_manager.operations_runtime.run(
+            agent.task_manager.restore_runtime_state_for_owner_ids, stale_owner_ids
+        )
+    if not restored_runtime:
+        restored_runtime = await agent.task_manager.operations_runtime.run(
+            agent.task_manager.restore_runtime_state,
+        )
+    return restored_runtime
+
+
+async def _restore_with_one_retry(agent: Any, same_role_takeover_enabled: bool) -> Optional[dict[str, Any]]:
+    """Restore saved work; after a custody conflict, read everything again once.
+
+    Startup did not handle ``RuntimeRecoveryConflict`` before 2026-10-17: a
+    spawned worker's launch failed, and a startup agent's or the lead's process
+    exited, every later start the same way. A failed restore leaves nothing
+    adopted, and the second read sees the new holders and leaves their tasks
+    out (``RuntimeSnapshotCoordinator._taken_by_other_agents``).
+    """
+    try:
+        return await _restore_saved_tasks(agent, same_role_takeover_enabled)
+    except RuntimeRecoveryConflict as first:
+        agent._logger.warning(
+            "Saved work changed while this agent adopted it; reading it again. "
+            "event=runtime_recovery_conflict_retrying agent_id=%s team_id=%s named_agent_type=%s error=%s",
+            agent.id,
+            agent.team_id,
+            agent.named_agent_type,
+            first,
+        )
+    try:
+        return await _restore_saved_tasks(agent, same_role_takeover_enabled)
+    except RuntimeRecoveryConflict as second:
+        agent._logger.error(
+            "Saved work changed again while this agent adopted it; the agent does not start. "
+            "event=runtime_recovery_conflict_start_failed agent_id=%s team_id=%s named_agent_type=%s error=%s",
+            agent.id,
+            agent.team_id,
+            agent.named_agent_type,
+            second,
+        )
+        raise RuntimeRecoveryStartFailed(agent.id, agent.team_id, agent.named_agent_type) from second
+
+
 async def recover_runtime_after_restart(agent: Any) -> None:
     stored_runtime_team_id = await agent.task_manager.operations_runtime.run(
         agent.task_manager.get_stored_runtime_team_id,
@@ -286,7 +368,6 @@ async def recover_runtime_after_restart(agent: Any) -> None:
         getattr(agent, "same_role_runtime_takeover_enabled", True)
     )
 
-    restored_runtime = None
     restored_deferred = False
 
     if stored_runtime_team_id and stored_runtime_team_id != agent.team_id:
@@ -296,26 +377,9 @@ async def recover_runtime_after_restart(agent: Any) -> None:
         if restored_runtime:
             await discard_runtime_state_for_team_change(agent, stored_runtime_team_id)
     else:
-        if same_role_takeover_enabled:
-            role_runtime_candidates = (
-                agent.task_manager.runtime_state_store.peek_task_runtime_by_role(
-                    agent.team_id,
-                    agent.named_agent_type,
-                )
-                if agent.team_id and agent.named_agent_type
-                else []
-            )
-            stale_owner_ids = await filter_stale_role_takeover_owner_ids(
-                agent,
-                [row.owner_agent_id for row in role_runtime_candidates],
-            )
-            restored_runtime = await agent.task_manager.operations_runtime.run(
-                agent.task_manager.restore_runtime_state_for_owner_ids, stale_owner_ids
-            )
-        if not restored_runtime:
-            restored_runtime = await agent.task_manager.operations_runtime.run(
-                agent.task_manager.restore_runtime_state,
-            )
+        restored_runtime = await _restore_with_one_retry(agent, same_role_takeover_enabled)
+        if restored_runtime:
+            await stop_left_out_delegations(agent, restored_runtime.get("left_out_delegations") or [])
 
     if stored_deferred_team_id and stored_deferred_team_id != agent.team_id:
         agent._logger.warning(

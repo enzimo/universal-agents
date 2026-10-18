@@ -7,7 +7,7 @@ children running on workers; their results were then dropped as "Parent task
 not found" and the workers kept working, or waiting on a person, for nothing
 (found 2026-10-04).
 
-Two parts, both trusted code:
+Three parts, all trusted code:
 
 - ``register_parent_end_stops``: a task-terminal callback. When a task ends
   with subtasks still pending, it records the cancellation barrier for them
@@ -21,6 +21,11 @@ Two parts, both trusted code:
   cancellation barrier), the lead tells that worker directly to stop. A report
   for a parent this agent never knew, such as one arriving before a restart's
   recovery finished, is only logged.
+- ``stop_left_out_delegations``: when restart recovery leaves out a gone
+  agent's task because another agent holds or finished it, the gone agent's
+  delegated tasks are left out with it (``runtime_snapshot_codec``). They get
+  the same barrier and stop: the parent's new holder delegates its own work,
+  and these would answer a requester that is gone (2026-10-17).
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from functools import partial
-from typing import Any
+from typing import Any, Sequence
 
 from custom_messages.contracts.control_v1 import ControlInstruction, Instruction
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
@@ -39,6 +44,10 @@ from custom_messages.enums import ControlType, RequesterType
 logger = logging.getLogger(__name__)
 
 PARENT_ENDED_REASON = "The request this work belonged to has ended, so this work was stopped."
+PARENT_LEFT_OUT_REASON = (
+    "The request this work belonged to is now handled by another agent, or has ended, "
+    "so this work was stopped."
+)
 
 
 def register_parent_end_stops(agent: Any) -> None:
@@ -113,6 +122,67 @@ async def _send_stops(agent: Any, parent_task_id: str, pending: list[Any]) -> No
                 "task_id=%s subtask_id=%s",
                 parent_task_id,
                 subtask_info.task.task_id,
+            )
+
+
+async def stop_left_out_delegations(agent: Any, left_out: Sequence[Any]) -> None:
+    """Stop the delegated tasks restart recovery left out with their parent (module docstring).
+
+    ``left_out`` holds ``runtime_snapshot_codec.LeftOutDelegation`` items. Each
+    child gets its own barrier (its own root, so the parent another agent runs
+    is untouched), then the stop goes to its worker or withdraws it from the
+    queue.
+    """
+    manager = agent.task_manager
+    if not left_out or not manager.identity.team_id:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    for item in left_out:
+        child_id = item.task_info.task.task_id
+        context = getattr(item.task_info.meta, "gateway_context", None)
+        try:
+            await manager.operations_runtime.run(
+                partial(
+                    manager.record_execution_graph_cancelled,
+                    root_task_id=child_id,
+                    task_ids=[child_id],
+                    canonical_user_id=getattr(context, "canonical_user_id", None),
+                    command_id=f"parent_left_out:{item.parent_task_id}",
+                    reason=PARENT_LEFT_OUT_REASON,
+                    cancelled_at=now,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Could not record that left-out delegated work must stop. "
+                "event=left_out_delegation_barrier_failed task_id=%s subtask_id=%s",
+                item.parent_task_id,
+                child_id,
+            )
+        logger.warning(
+            "Recovery left out a task another agent holds or finished; stopping the work it had "
+            "delegated. event=left_out_delegation_stopping agent_id=%s task_id=%s subtask_id=%s",
+            agent.id,
+            item.parent_task_id,
+            child_id,
+        )
+    await _send_left_out_stops(agent, left_out)
+
+
+async def _send_left_out_stops(agent: Any, left_out: Sequence[Any]) -> None:
+    for item in left_out:
+        try:
+            await agent._request_subtask_stop(
+                parent_task_id=item.parent_task_id,
+                subtask_info=item.task_info,
+                reason=PARENT_LEFT_OUT_REASON,
+            )
+        except Exception:
+            logger.exception(
+                "Could not send a stop for left-out delegated work. event=left_out_delegation_stop_failed "
+                "task_id=%s subtask_id=%s",
+                item.parent_task_id,
+                item.task_info.task.task_id,
             )
 
 

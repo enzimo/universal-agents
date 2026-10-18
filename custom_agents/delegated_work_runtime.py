@@ -28,6 +28,7 @@ execution slot.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Optional
@@ -184,20 +185,36 @@ def register_delegated_task_endings(agent: Any) -> None:
     agent.task_manager.add_task_terminal_callback(callback)
 
 
-def end_unpublished_delegation(agent: Any, *, subtask_id: str, parent_task_id: str, error: str) -> bool:
-    """Fail a delegated task whose publication was given up; True if it ended here.
+@dataclass(frozen=True)
+class UnpublishedDelegationOutcome:
+    """What ``end_unpublished_delegation`` did with a delegation the outbox gave up publishing."""
+
+    ended: bool = False
+    # A worker holds the task: the publish went through and only its acknowledgement was lost.
+    claimed_by: Optional[str] = None
+
+
+def end_unpublished_delegation(
+    agent: Any, *, subtask_id: str, parent_task_id: str, error: str
+) -> UnpublishedDelegationOutcome:
+    """Fail a delegated task whose publication was given up, unless a worker holds it.
 
     Runs on the task lane when the delegation's outbox action leaves automatic
     retry (model recovery, isolated recovery or a terminal failure) without
     having published. Its record was written before publishing, so without
     this it stayed "queued" for ever: the watchdog does not check queued
-    tasks, and the parent's answer waited on it (2026-10-17). The cancellation
-    record makes a worker refuse the task if the publish did reach NATS after
-    all, and the delegated record is closed as failed. The parent is not
-    resumed here: the outbox recovery that follows runs its next turn.
+    tasks, and the parent's answer waited on it (2026-10-17). A record with a
+    holder shows the publish reached NATS and a worker took the task, so it is
+    left running and reported as claimed. Otherwise the cancellation record
+    makes a worker refuse the task if the publish did reach NATS after all,
+    and the delegated record is closed as failed. The parent is not resumed
+    here: the outbox recovery that follows runs its next turn.
     """
 
     manager = agent.task_manager
+    record = delegated_tasks(agent).get(str(agent.team_id), subtask_id)
+    if record is not None and record.holder_agent_id:
+        return UnpublishedDelegationOutcome(claimed_by=record.holder_agent_id)
     now = datetime.now(timezone.utc).isoformat()
     if manager.identity.team_id:
         manager.record_execution_graph_cancelled(
@@ -216,7 +233,7 @@ def end_unpublished_delegation(agent: Any, *, subtask_id: str, parent_task_id: s
         reason=NEVER_PUBLISHED_REASON,
         source="delegation_not_published",
     ):
-        return False
+        return UnpublishedDelegationOutcome()
     from custom_messages.records.task_results import TaskResultUpdate
 
     info = manager.get_task_info(subtask_id)
@@ -235,7 +252,7 @@ def end_unpublished_delegation(agent: Any, *, subtask_id: str, parent_task_id: s
         related_task_id=subtask_id,
         details={"event": "delegated_task_never_published", "error": error},
     )
-    return True
+    return UnpublishedDelegationOutcome(ended=True)
 
 
 # -- claims (worker) ---------------------------------------------------------------
@@ -641,6 +658,7 @@ async def stop_delegated_task(
 __all__ = [
     "NEVER_PUBLISHED_REASON",
     "TASK_ALREADY_ENDED_REASON",
+    "UnpublishedDelegationOutcome",
     "delegated_tasks",
     "end_unpublished_delegation",
     "fail_after_worker_losses",

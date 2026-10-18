@@ -225,6 +225,10 @@ class GetPlanOperation(Protocol):
     def __call__(self, plan_id: str) -> Optional[PlanRecord]: ...
 
 
+class ForgetTaskOperation(Protocol):
+    def __call__(self, task_id: str) -> bool: ...
+
+
 class GetTaskFromDbOperation(Protocol):
     def __call__(
         self,
@@ -349,6 +353,7 @@ class RuntimeOperationsCoordinatorOperations:
 class RuntimeSnapshotCoordinatorOperations:
     emit_activity: EmitActivityOperation
     ensure_task_plan_link: EnsureTaskPlanLinkOperation
+    forget_task: ForgetTaskOperation
     objectives_enabled: ObjectivesEnabledOperation
     plans_enabled: PlansEnabledOperation
     sync_plan_from_task: SyncPlanFromTaskOperation

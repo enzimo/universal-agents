@@ -12,7 +12,9 @@ from custom_messages.contracts.runtime_snapshot_v3 import TaskSnapshotRecord, de
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 from storage.schedule_worker_repository import ScheduleWorkerRepository
 from storage import task_custody_repository as custody
-from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyRow, TaskCustodyTakeover
+from storage.task_custody_repository import (
+    TaskCustodyConflict, TaskCustodyRow, TaskCustodyTakenOver, TaskCustodyTakeover,
+)
 from storage.runtime_snapshot_layout import (
     assemble_snapshot, canonical_json, parse_storage_header,
     payload_digest, split_snapshot,
@@ -366,7 +368,9 @@ class _RelationalRuntimeStateRepository:
 
         ``custody_takeover`` lets the save replace that holder's row for that
         task (``custom_agents.task_custody``); any other held row refuses the
-        save with ``TaskCustodyConflict``.
+        save with ``TaskCustodyConflict``. A task this owner executed in its
+        previous save whose row another agent now holds refuses the save with
+        ``TaskCustodyTakenOver`` before anything is written.
         """
         parts = split_snapshot(decode_runtime_snapshot(runtime_state_json))
         if schedule_admission is not None and (
@@ -385,6 +389,10 @@ class _RelationalRuntimeStateRepository:
                     (owner_agent_id,),
                 ).fetchone()
                 previous_task_ids = set(parse_storage_header(previous[0])["task_order"]) if previous is not None else set()
+                if team_id and previous_task_ids:
+                    self._refuse_taken_over_tasks(
+                        conn, parts.records, previous_task_ids, owner_agent_id=owner_agent_id, team_id=team_id,
+                    )
                 conn.execute(
                     f"""INSERT INTO active_task_runtime
                         (owner_agent_id, owner_agent_name, team_id, owner_named_agent_type, runtime_state_json, updated_at)
@@ -405,11 +413,35 @@ class _RelationalRuntimeStateRepository:
                         takeover=custody_takeover,
                     )
                 conn.commit()
-        except TaskCustodyConflict:
-            raise  # an expected refusal; the admitting caller logs it
+        except (TaskCustodyConflict, TaskCustodyTakenOver):
+            raise  # expected refusals; the admitting caller or the snapshot coordinator logs them
         except Exception:
             self._logger.exception("Failed to persist active runtime state", extra={"owner_agent_id": owner_agent_id})
             raise
+
+    def _refuse_taken_over_tasks(
+        self, conn: Any, records: dict[tuple[str, str], str], previous_task_ids: set[str], *,
+        owner_agent_id: str, team_id: str,
+    ) -> None:
+        """Refuse the save if another agent took over a task this owner already held.
+
+        Only the custody row moves in an admission takeover; the old holder's
+        snapshot still lists the task, and a holder wrongly judged gone keeps
+        running and saving it (2026-10-17). A task the previous save had
+        delegated out is the worker's to hold, also once its record leaves the
+        delegation map, so it is not checked.
+        """
+        bind = self._dialect.bind
+        previously_delegated = {row[0] for row in conn.execute(
+            f"SELECT record_id FROM active_task_runtime_records WHERE owner_agent_id = {bind} AND section = {bind}",
+            (owner_agent_id, "subtask_to_parent_map"),
+        ).fetchall()}
+        still_held = custody.executed_task_ids(records) & (previous_task_ids - previously_delegated)
+        holders = custody.taken_over(
+            conn, self._dialect, team_id=team_id, owner_agent_id=owner_agent_id, task_ids=still_held,
+        )
+        if holders:
+            raise TaskCustodyTakenOver(owner_agent_id, holders)
 
     def save_task_runtime_task(
         self, *, owner_agent_id: str, task: TaskSnapshotRecord,

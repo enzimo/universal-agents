@@ -243,18 +243,19 @@ async def test_wind_down_hands_back_running_and_unstarted_work_then_exits(
 
 
 def test_only_a_sent_final_answer_counts_as_answered(manager):
-    """Regression (2026-10-17 review): the outbox marks a held-back task_response
-    dispatched and completed too; only a task in FINALIZING_PLAN, or an answer that
-    reached the post-publish phase, has really been answered."""
+    """Regression (2026-10-17 review): a held-back task_response was recorded
+    completed; now it is held_back, and only a task in FINALIZING_PLAN, or an
+    answer that reached the post-publish phase, has really been answered."""
     _add(manager, "t1", ProgressState.IN_PROGRESS)
     outbox = manager.execution_state.turn_action_outbox
     record = TurnActionOutboxRecord(
         action_id="a", batch_id="b", source_task_id="t1", action_index=0,
-        action_type="task_response", payload_json={}, status="completed", phase="complete",
+        action_type="task_response", payload_json={}, status="held_back", phase="complete",
     )
     outbox["a"] = record  # held back (final review, pending work, escalation): not sent
     assert not wind_down._final_answer_sent(manager, "t1")
     manager.update_main_task_state("t1", ProgressState.FINALIZING_PLAN, NOW())
+    assert not wind_down._final_answer_sent(manager, "t1")
     outbox["a"] = record.model_copy(update={"status": "dispatching", "phase": "publish"})
     assert not wind_down._final_answer_sent(manager, "t1")  # publish outcome unknown
     # Sent; its after-action report is going out, so the phase is still publish.
@@ -268,14 +269,52 @@ def test_only_a_sent_final_answer_counts_as_answered(manager):
     assert wind_down._final_answer_sent(manager, "t1")
 
 
+@pytest.mark.parametrize(("latest_status", "sent"), [("dispatching", False), ("dispatched", True)])
+def test_only_the_latest_answer_decides_whether_it_was_sent(manager, latest_status, sent):
+    """Regression (2026-10-17 review round 2): an earlier answer the outbox held
+    back counted as sent while the real answer was still being published, so a
+    lost lease cancelled the publish and completed the task without an answer."""
+    _add(manager, "job", ProgressState.IN_PROGRESS)
+    outbox = manager.execution_state.turn_action_outbox
+    outbox["old"] = TurnActionOutboxRecord(
+        action_id="old", batch_id="b1", source_task_id="job", action_index=0, action_type="task_response",
+        payload_json={"answer": "held back"}, status="dispatched", phase="publish",
+        created_at="2026-10-17T10:00:00+00:00",
+    )
+    outbox["new"] = TurnActionOutboxRecord(
+        action_id="new", batch_id="b2", source_task_id="job", action_index=0, action_type="task_response",
+        payload_json={"answer": "real"}, status=latest_status, phase="publish",
+        created_at="2026-10-17T10:05:00+00:00",
+    )
+    manager.update_main_task_state("job", ProgressState.FINALIZING_PLAN, NOW())
+    assert wind_down._final_answer_sent(manager, "job") is sent
+
+
+def test_the_next_worker_is_not_told_a_held_back_answer_was_sent(manager):
+    """Regression (2026-10-17 review round 2): the handback notes told the next
+    worker a held-back answer had been sent, so the person could get nothing."""
+    _add(manager, "job", ProgressState.IN_PROGRESS)
+    outbox = manager.execution_state.turn_action_outbox
+    outbox["held"] = TurnActionOutboxRecord(
+        action_id="held", batch_id="b1", source_task_id="job", action_index=0, action_type="task_response",
+        payload_json={"answer": "Summary for the person"}, status="held_back", phase="complete",
+    )
+    outbox["sent"] = TurnActionOutboxRecord(
+        action_id="sent", batch_id="b1", source_task_id="job", action_index=1, action_type="notify_user",
+        payload_json={"message": "Started"}, status="completed", phase="complete",
+    )
+    notes = wind_down._dispatched_action_notes(manager, "job")
+    assert [(note.action_id, note.status) for note in notes] == [("sent", "completed")]
+
+
 @pytest.mark.asyncio
 async def test_a_running_task_whose_answer_was_held_back_is_handed_back(manager, monkeypatch):
     """A final-review turn runs after the outbox held its first answer back
-    (completed record, nothing sent): the task goes back to the lead."""
+    (held_back record, nothing sent): the task goes back to the lead."""
     _add(manager, "reviewing", ProgressState.IN_PROGRESS)
     manager.execution_state.turn_action_outbox["act"] = TurnActionOutboxRecord(
         action_id="act", batch_id="b", source_task_id="reviewing", action_index=0,
-        action_type="task_response", payload_json={"answer": "draft"}, status="completed", phase="complete",
+        action_type="task_response", payload_json={"answer": "draft"}, status="held_back", phase="complete",
     )
     agent = _worker(manager, monkeypatch=monkeypatch)
     finished: list[str] = []

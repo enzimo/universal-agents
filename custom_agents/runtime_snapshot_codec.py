@@ -44,6 +44,19 @@ class SnapshotSource:
     snapshot: RuntimeSnapshotV3
 
 
+@dataclass(frozen=True)
+class LeftOutDelegation:
+    """A delegated task recovery left out with its parent; its worker should stop.
+
+    Another agent holds or finished the parent and runs it with delegations of
+    its own; this one would answer a requester that is gone
+    (``orphaned_subtasks.stop_left_out_delegations``).
+    """
+
+    parent_task_id: str
+    task_info: TaskInfo
+
+
 def capture_task(task: TaskInfo) -> TaskSnapshotRecord:
     return TaskSnapshotRecord(
         task_id=task.task.task_id, state=task.state,
@@ -87,6 +100,7 @@ def capture_runtime_snapshot(
 
 def _restore_tasks(
     sources: Sequence[SnapshotSource], excluded: dict[str, str], logger: logging.Logger,
+    left_out: list[LeftOutDelegation],
 ) -> tuple[dict[str, TaskInfo], dict[str, int]]:
     """Restore task records; return them and, per task, the source index kept.
 
@@ -112,13 +126,13 @@ def _restore_tasks(
                 restored_runtime_updated_at=source.updated_at,
             )
             kept_from[item.task_id] = index
-    _leave_out_orphaned_delegations(sources, tasks, kept_from, logger)
+    _leave_out_orphaned_delegations(sources, tasks, kept_from, logger, left_out)
     return tasks, kept_from
 
 
 def _leave_out_orphaned_delegations(
     sources: Sequence[SnapshotSource], tasks: dict[str, TaskInfo], kept_from: dict[str, int],
-    logger: logging.Logger,
+    logger: logging.Logger, left_out: list[LeftOutDelegation],
 ) -> None:
     """Leave out records of delegated tasks whose parent is not restored, transitively.
 
@@ -135,7 +149,7 @@ def _leave_out_orphaned_delegations(
             for child, parent in source.snapshot.subtask_to_parent_map.items():
                 if kept_from.get(child) != index or parent in tasks:
                     continue
-                del tasks[child]
+                left_out.append(LeftOutDelegation(parent_task_id=parent, task_info=tasks.pop(child)))
                 del kept_from[child]
                 changed = True
                 logger.warning(
@@ -321,16 +335,19 @@ def _recover_interrupted_operations(state: ExecutionRuntimeState, logger: loggin
 def restore_snapshot_state(
     sources: Sequence[SnapshotSource], *, cancelled: set[str], plans_enabled: bool,
     objectives_enabled: bool, logger: logging.Logger, taken_elsewhere: Mapping[str, str] | None = None,
+    left_out_delegations: list[LeftOutDelegation] | None = None,
 ) -> WorkflowRuntimeState:
     """Merge snapshots into one owner's state.
 
     ``taken_elsewhere`` maps tasks another agent of the team holds or already
     finished (``storage.task_custody_repository``) to the reason; like
-    cancelled tasks they are not adopted.
+    cancelled tasks they are not adopted. Delegated tasks left out with their
+    parent are appended to ``left_out_delegations`` when given.
     """
     excluded = dict(taken_elsewhere or {})
     excluded.update({task_id: CANCELLED for task_id in cancelled})
-    tasks, kept_from = _restore_tasks(sources, excluded, logger)
+    left_out = left_out_delegations if left_out_delegations is not None else []
+    tasks, kept_from = _restore_tasks(sources, excluded, logger, left_out)
     workflow = WorkflowRuntimeState(
         TaskRuntimeState(tasks=tasks), PlanRuntimeState(), ObjectiveRuntimeState(), ExecutionRuntimeState(),
     )

@@ -61,6 +61,7 @@ from custom_messages.contracts.envelope_v1 import (
     MessageEnvelope,
 )
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.contracts.runtime_snapshot_v3 import TURN_ACTION_HELD_BACK
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task, TaskQuery
 from custom_messages.enums import (
@@ -86,6 +87,8 @@ from reply_routing_trace import (
 
 # The outbox action type of a delegation.
 _DELEGATE_ACTION = DelegateTaskAction.model_fields["action_type"].default
+# Outbox statuses of an action the outbox stopped trying to carry out.
+_PUBLISH_GIVEN_UP_STATUSES = frozenset({"failed_recoverable", "failed_terminal"})
 
 
 class TurnActionRecoveryScheduled(RuntimeError):
@@ -706,37 +709,41 @@ def _turn_action_retry_delay_seconds(self, attempt_count: int) -> float:
     return delay
 
 
-def turn_action_retry_window_seconds(self: Any) -> float:
-    """Longest time the outbox keeps retrying one action automatically.
+def delegation_publish_given_up(task_manager: Any, subtask_id: str) -> bool:
+    """Whether no outbox action is still trying to publish this delegated task (task lane).
 
-    Every allowed retry at its longest delay (upper jitter), plus one maximum
-    delay for the attempts themselves. The subtask watchdog waits this long
-    before it stops trusting a delegated record that never got a publish
-    sequence.
+    True when every action that delegated it failed (the outbox gave up), or
+    the outbox holds none. An action still pending, publishing, waiting for
+    its retry or blocked behind an earlier action may still publish it, and
+    one dispatched did publish it, whatever its record says. The subtask
+    watchdog checks queued records without a stream sequence with this,
+    because a record's age alone misjudged a busy or restarted requester.
     """
-    attempts = self._turn_action_outbox_int(
-        "max_auto_attempts", AGENT_DEFAULTS.turn_action_outbox.value["max_auto_attempts"]
-    )
-    initial = self._turn_action_outbox_float("initial_retry_delay_seconds", 2.0)
-    maximum = self._turn_action_outbox_float("max_retry_delay_seconds", 60.0)
-    jitter_ratio = self._turn_action_outbox_float("retry_jitter_ratio", 0.15)
-    delays = (min(maximum, initial * (2 ** (attempt - 1))) for attempt in range(1, attempts + 1))
-    return sum(delays) * (1 + jitter_ratio) + maximum
+    statuses = [
+        record.status
+        for record in task_manager.execution_state.turn_action_outbox.values()
+        if record.action_type == _DELEGATE_ACTION
+        and (record.side_effects or {}).get("delegated_task_id") == subtask_id
+    ]
+    return all(status in _PUBLISH_GIVEN_UP_STATUSES for status in statuses)
 
 
-async def _end_unpublished_delegation(self: Any, record: Any, exc: Exception) -> None:
+async def _end_unpublished_delegation(self: Any, record: Any, exc: Exception) -> bool:
     """End the subtask of a delegation that leaves automatic retry unpublished.
 
     Called when the action goes to model recovery, isolated recovery or a
     terminal failure (``delegated_work_runtime.end_unpublished_delegation``).
     A delegation whose publish already succeeded (status ``dispatched``) is
-    left alone: a worker may hold it.
+    left alone: a worker may hold it. One a worker claimed although no publish
+    call returned (its acknowledgement was lost) was sent after all: its
+    action is recorded dispatched and True is returned, so the recovery that
+    follows does not mark it failed.
     """
     subtask_id = (record.side_effects or {}).get("delegated_task_id")
     if record.action_type != _DELEGATE_ACTION or not subtask_id or record.status == "dispatched":
-        return
+        return False
     try:
-        ended = await self.task_manager.operations_runtime.run(
+        outcome = await self.task_manager.operations_runtime.run(
             partial(
                 end_unpublished_delegation,
                 self,
@@ -755,8 +762,27 @@ async def _end_unpublished_delegation(self: Any, record: Any, exc: Exception) ->
             subtask_id,
             record.action_id,
         )
-        return
-    if ended:
+        return False
+    if outcome.claimed_by:
+        await self.task_manager.operations_runtime.run(
+            self.task_manager.mark_turn_action_record,
+            record.action_id,
+            status="dispatched",
+            side_effects={"publish_confirmed_by_claim": outcome.claimed_by},
+        )
+        self._logger.warning(
+            "A delegated task's publish reported a failure, but a worker took the task, so it "
+            "was sent. event=delegated_task_publish_confirmed_by_claim agent_id=%s task_id=%s "
+            "subtask_id=%s action_id=%s holder_agent_id=%s error_type=%s",
+            self.id,
+            record.source_task_id,
+            subtask_id,
+            record.action_id,
+            outcome.claimed_by,
+            type(exc).__name__,
+        )
+        return True
+    if outcome.ended:
         self._logger.warning(
             "A delegated task could not be sent to a worker and was stopped. "
             "event=delegated_task_never_published agent_id=%s task_id=%s subtask_id=%s "
@@ -768,6 +794,7 @@ async def _end_unpublished_delegation(self: Any, record: Any, exc: Exception) ->
             record.attempt_count,
             type(exc).__name__,
         )
+    return False
 
 
 async def _wake_turn_action_retry_after(self, delay_seconds: float) -> None:
@@ -865,8 +892,13 @@ async def _schedule_turn_action_recovery(
         ) from exc
 
     # Automatic retries are over: a delegation that never reached NATS ends
-    # its subtask instead of leaving it "waiting in the queue".
-    await _end_unpublished_delegation(self, record, exc)
+    # its subtask instead of leaving it "waiting in the queue". One a worker
+    # took was sent; its action stays dispatched in the recovery below.
+    publish_confirmed = await _end_unpublished_delegation(self, record, exc)
+
+    def failed(status: str) -> Optional[str]:
+        return None if publish_confirmed else status
+
     inline_limit = self._turn_action_outbox_int(
         "max_inline_recovery_attempts_per_batch", 2
     )
@@ -878,7 +910,7 @@ async def _schedule_turn_action_recovery(
         await self.task_manager.operations_runtime.run(
             self.task_manager.mark_turn_action_record,
             action_id,
-            status="failed_recoverable",
+            status=failed("failed_recoverable"),
             recoverability="model_recovery",
             last_error=str(exc),
             failure_report=failure_report,
@@ -983,7 +1015,7 @@ async def _schedule_turn_action_recovery(
             await self.task_manager.operations_runtime.run(
                 self.task_manager.mark_turn_action_record,
                 action_id,
-                status="failed_recoverable",
+                status=failed("failed_recoverable"),
                 recoverability="isolated_recovery",
                 last_error=str(exc),
                 failure_report=failure_report,
@@ -1025,7 +1057,7 @@ async def _schedule_turn_action_recovery(
     await self.task_manager.operations_runtime.run(
         self.task_manager.mark_turn_action_record,
         action_id,
-        status="failed_terminal",
+        status=failed("failed_terminal"),
         recoverability="terminal",
         last_error=str(exc),
         failure_report=failure_report,
@@ -1596,6 +1628,9 @@ async def _execute_turn_action_record(
             f"Execution graph for task {active_task_id} was cancelled before action publication."
         )
     publish_sequence: Optional[int] = None
+    # Held back: the runtime swallowed this action and the task goes on. A
+    # suppressed answer that finishes the task locally is not held back.
+    held_back = suppress_outbound_dispatch and local_finalization_task_id is None
     if suppress_outbound_dispatch:
         self._logger.info(
             "[%s] Suppressing outbound dispatch for internal runtime response task_id=%s action_id=%s.",
@@ -1629,7 +1664,7 @@ async def _execute_turn_action_record(
     await self.task_manager.operations_runtime.run(
         self.task_manager.mark_turn_action_record,
         record_id,
-        status="dispatched",
+        status=TURN_ACTION_HELD_BACK if held_back else "dispatched",
         phase="publish",
     )
 
@@ -1806,7 +1841,7 @@ async def _execute_turn_action_record(
     await self.task_manager.operations_runtime.run(
         self.task_manager.mark_turn_action_record,
         record_id,
-        status="completed",
+        status=TURN_ACTION_HELD_BACK if held_back else "completed",
         phase="complete",
     )
     return content

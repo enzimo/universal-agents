@@ -39,6 +39,7 @@ from custom_agents.task_records import TaskInfo
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
+from custom_messages.contracts.runtime_snapshot_v3 import TurnActionOutboxRecord
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.contracts.redispatch_v1 import DispatchedActionNoteV1
 from custom_messages.contracts.worker_handback_v1 import (
@@ -58,7 +59,9 @@ from custom_agents.structured_llm_messages import TaskResponseAction
 
 WIND_DOWN_POLL_SECONDS = 5.0
 HANDBACK_PUBLISH_RETRY_SECONDS = 5.0
-# Outbox actions that may already have reached another agent or a user.
+# Outbox actions that may already have reached another agent or a user. A
+# held-back action (``TURN_ACTION_HELD_BACK``) sent nothing, so the next worker
+# is not told it was sent.
 _SENT_ACTION_STATUSES = frozenset({"dispatching", "dispatched", "completed"})
 # Outbox states of a final answer that went out (or was recorded as delivered
 # without a message) once the task is in FINALIZING_PLAN; "dispatching" alone
@@ -285,27 +288,35 @@ def _peek_next_task_id(task_manager: Any) -> Optional[str]:
 def _final_answer_sent(task_manager: Any, task_id: str) -> bool:
     """Whether the outbox shows this task's final answer already went out.
 
-    The outbox marks every task_response action dispatched and then
-    completed, also when it held the answer back (a final review, pending
-    delegated work or a manager escalation). Only a real final answer moves
-    the task to FINALIZING_PLAN before it is sent
+    Only the task's latest task_response action counts: an earlier one may
+    have been held back while the latest is still being published. A
+    held-back answer (a final review, pending delegated work or a manager
+    escalation) has its own status, ``held_back``. Only a real final answer
+    moves the task to FINALIZING_PLAN before it is sent
     (``_prepare_local_task_finalization_before_dispatch``), and only that path
     reaches the post-publish phase, which may outlast FINALIZING_PLAN when
     finishing up fails and is retried. While its after-action report goes out,
     a sent answer is still at the publish phase, dispatched.
     """
 
+    latest = _latest_task_response(task_manager, task_id)
+    if latest is None:
+        return False
+    if latest.phase == _FINAL_ANSWER_SENT_PHASE:
+        return True
     info = task_manager.get_task_info(task_id)
     finalizing = info is not None and info.state == ProgressState.FINALIZING_PLAN
-    return any(
-        record.source_task_id == task_id
-        and record.action_type == _FINAL_ANSWER_ACTION
-        and (
-            record.phase == _FINAL_ANSWER_SENT_PHASE
-            or (finalizing and record.status in _FINAL_ANSWER_SENT_STATUSES)
-        )
-        for record in task_manager.execution_state.turn_action_outbox.values()
-    )
+    return finalizing and latest.status in _FINAL_ANSWER_SENT_STATUSES
+
+
+def _latest_task_response(task_manager: Any, task_id: str) -> Optional[TurnActionOutboxRecord]:
+    """The task's most recent task_response action: newest batch, then highest index."""
+    responses = [
+        (record.created_at, record.action_index, order, record)
+        for order, record in enumerate(task_manager.execution_state.turn_action_outbox.values())
+        if record.source_task_id == task_id and record.action_type == _FINAL_ANSWER_ACTION
+    ]
+    return max(responses, key=lambda item: item[:3])[3] if responses else None
 
 
 async def _finish_or_hand_back_running_task(

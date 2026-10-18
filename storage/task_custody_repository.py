@@ -13,7 +13,13 @@ row names the agent whose saved work last claimed the task:
 
 - a task entering an owner's snapshot claims its row; a row held by another
   agent refuses the save (``TaskCustodyConflict``) unless the caller names
-  that holder as the one it takes over from (compare-and-set);
+  that holder as the one it takes over from (compare-and-set on that holder;
+  a row the holder released meanwhile is never claimed afresh,
+  ``TaskCustodyReleased``);
+- a task that stays in the snapshot but whose row another agent took over
+  refuses the save (``TaskCustodyTakenOver``) before anything is written; the
+  snapshot coordinator drops it and saves again, so a holder wrongly judged
+  gone stops running it;
 - a task leaving the snapshot (it ended, was handed back, or was dropped)
   releases the row, but only while this owner still holds it;
 - recovery moves the rows of the adopted tasks to the replacement in the same
@@ -22,7 +28,8 @@ row names the agent whose saved work last claimed the task:
 - clearing an owner's snapshot releases all its rows.
 
 Two gaps are expected. After a takeover, the gone holder's snapshot still
-lists the task until a replacement recovers it and leaves the task out. A
+lists the task until a replacement recovers it and leaves the task out, or,
+if that holder is still running, until its next save drops it. A
 task in a snapshot saved before this table existed has no row until that
 snapshot is restored (every restore commits through recovery, which creates
 the missing rows).
@@ -47,10 +54,42 @@ CUSTODY_TABLE = "runtime_task_custody"
 class TaskCustodyConflict(RuntimeError):
     """Another agent holds this task; the save that would claim it was refused."""
 
-    def __init__(self, task_id: str, holder_agent_id: str) -> None:
-        super().__init__(f"Task {task_id} is held by agent {holder_agent_id}.")
+    def __init__(self, task_id: str, holder_agent_id: str, message: Optional[str] = None) -> None:
+        super().__init__(message or f"Task {task_id} is held by agent {holder_agent_id}.")
         self.task_id = task_id
         self.holder_agent_id = holder_agent_id
+
+
+class TaskCustodyReleased(TaskCustodyConflict):
+    """The holder a takeover named released the task before the takeover's save.
+
+    It finished the task, handed it back or dropped it, so it was alive after
+    all. The takeover never claims a fresh row for such a task: the admitting
+    caller re-checks the team's finished tasks (``task_message_runtime``).
+    """
+
+    def __init__(self, task_id: str, holder_agent_id: str) -> None:
+        super().__init__(
+            task_id, holder_agent_id, f"Task {task_id} was released by agent {holder_agent_id} before the takeover."
+        )
+
+
+class TaskCustodyTakenOver(RuntimeError):
+    """Tasks of this owner's saved work that another agent now holds.
+
+    Raised by a save before it writes anything. Another agent took each task
+    over after judging this owner gone (a redelivered copy,
+    ``custom_agents.task_custody``); only the custody row moved, so this
+    owner's snapshot still lists the task. The snapshot coordinator drops the
+    tasks and saves again (``task_manager_runtime_snapshots``). Not a
+    ``TaskCustodyConflict``: an admission in progress must not read it as a
+    refusal of the task it admits.
+    """
+
+    def __init__(self, owner_agent_id: str, holders: dict[str, str]) -> None:
+        super().__init__(f"Tasks {sorted(holders)} of {owner_agent_id} are now held by other agents.")
+        self.owner_agent_id = owner_agent_id
+        self.holders = dict(holders)
 
 
 @dataclass(frozen=True)
@@ -131,23 +170,68 @@ def claim_entering(
 
     bind = dialect.bind
     for task_id in sorted(set(task_ids)):
+        if takeover is not None and takeover.task_id == task_id:
+            _take_over(conn, dialect, team_id=team_id, owner_agent_id=owner_agent_id,
+                       owner_named_agent_type=owner_named_agent_type, takeover=takeover)
+            continue
         conn.execute(
             f"INSERT INTO {CUSTODY_TABLE} (team_id, task_id, holder_agent_id, holder_named_agent_type, claimed_at) "
             f"VALUES ({bind}, {bind}, {bind}, {bind}, {bind}) ON CONFLICT (team_id, task_id) DO NOTHING",
             (team_id, task_id, owner_agent_id, owner_named_agent_type, _now()),
         )
         row = read_rows(conn, dialect, team_id, [task_id]).get(task_id)
-        if row is None or row.holder_agent_id == owner_agent_id:
-            continue
-        if takeover is None or takeover.task_id != task_id or takeover.from_holder_agent_id != row.holder_agent_id:
+        if row is not None and row.holder_agent_id != owner_agent_id:
             raise TaskCustodyConflict(task_id, row.holder_agent_id)
-        moved = conn.execute(
-            f"UPDATE {CUSTODY_TABLE} SET holder_agent_id = {bind}, holder_named_agent_type = {bind}, claimed_at = {bind} "
-            f"WHERE team_id = {bind} AND task_id = {bind} AND holder_agent_id = {bind}",
-            (owner_agent_id, owner_named_agent_type, _now(), team_id, task_id, takeover.from_holder_agent_id),
-        )
-        if moved.rowcount != 1:
-            raise TaskCustodyConflict(task_id, row.holder_agent_id)
+
+
+def _take_over(
+    conn: Any,
+    dialect: SqlDialect,
+    *,
+    team_id: str,
+    owner_agent_id: str,
+    owner_named_agent_type: Optional[str],
+    takeover: TaskCustodyTakeover,
+) -> None:
+    """Move the named holder's row to this owner: a compare-and-set on that holder.
+
+    The update applies only while the judged-gone holder still holds the row.
+    A row that is gone means the holder released the task meanwhile (it was
+    alive after all): nothing is inserted, ``TaskCustodyReleased``. Before
+    2026-10-17 the claim inserted a new row first, so a copy was admitted
+    after its holder had finished the task.
+    """
+
+    bind = dialect.bind
+    task_id = takeover.task_id
+    moved = conn.execute(
+        f"UPDATE {CUSTODY_TABLE} SET holder_agent_id = {bind}, holder_named_agent_type = {bind}, claimed_at = {bind} "
+        f"WHERE team_id = {bind} AND task_id = {bind} AND holder_agent_id = {bind}",
+        (owner_agent_id, owner_named_agent_type, _now(), team_id, task_id, takeover.from_holder_agent_id),
+    )
+    if moved.rowcount == 1:
+        return
+    row = read_rows(conn, dialect, team_id, [task_id]).get(task_id)
+    if row is None:
+        raise TaskCustodyReleased(task_id, takeover.from_holder_agent_id)
+    if row.holder_agent_id != owner_agent_id:
+        raise TaskCustodyConflict(task_id, row.holder_agent_id)
+
+
+def taken_over(
+    conn: Any, dialect: SqlDialect, *, team_id: str, owner_agent_id: str, task_ids: Iterable[str]
+) -> dict[str, str]:
+    """Of tasks this owner saved before, those another agent now holds: task id -> holder.
+
+    A task with no row is not reported: its row may predate custody, and a
+    holder never releases a row it does not hold.
+    """
+
+    return {
+        task_id: row.holder_agent_id
+        for task_id, row in read_rows(conn, dialect, team_id, task_ids).items()
+        if row.holder_agent_id != owner_agent_id
+    }
 
 
 def release_leaving(
@@ -231,7 +315,9 @@ def transfer_on_recovery(
 __all__ = [
     "CUSTODY_TABLE",
     "TaskCustodyConflict",
+    "TaskCustodyReleased",
     "TaskCustodyRow",
+    "TaskCustodyTakenOver",
     "TaskCustodyTakeover",
     "claim_entering",
     "ensure_schema",
@@ -239,5 +325,6 @@ __all__ = [
     "read_rows",
     "release_leaving",
     "release_owners",
+    "taken_over",
     "transfer_on_recovery",
 ]

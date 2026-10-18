@@ -173,10 +173,14 @@ each. They run in parallel on as many workers as the team allows:
   reached the worker (fixed 2026-10-17). A record that has a holder never goes
   back to "waiting" except through a handback by that holder. A delegation the
   outbox gives up publishing (its automatic retries are over) is failed with a
-  cancellation record and its record closed (`event=delegated_task_never_published`);
-  as a safeguard, the watchdog checks and times out a "waiting" record that still
-  has no stream sequence after the outbox's full retry window
-  (`event=delegated_record_never_published`).
+  cancellation record and its record closed (`event=delegated_task_never_published`),
+  unless a worker already claimed it: then the publish went through and only its
+  acknowledgement was lost, so the task keeps running and the action is recorded
+  sent (`event=delegated_task_publish_confirmed_by_claim`). As a safeguard, the
+  watchdog checks and times out a "waiting" record without a stream sequence once
+  no outbox action is still trying to publish it
+  (`event=delegated_record_never_published`); the record's age alone misjudged a
+  busy or restarted requester.
 - **One holder per task.** NATS hands a task out again when its acknowledgement
   does not arrive in time: the worker that took it stopped after saving it, or
   NATS was unreachable for longer than the wait. Each task an agent executes has
@@ -186,14 +190,24 @@ each. They run in parallel on as many workers as the team allows:
   receives a copy another agent holds drops it while that agent is alive, and
   takes it over when the holder is gone or handed it back after losing its
   lease (`custom_agents/task_custody.py`, `event=task_copy_dropped_held_elsewhere`
-  or `event=task_custody_takeover`). Admission reads custody before the
+  or `event=task_custody_takeover`). The takeover moves the row only while the
+  judged-gone holder still holds it; a holder that released the task meanwhile
+  was alive after all, so the copy is dropped (or, if the lead re-sent it after
+  that holder's handback, admitted as a free task) and no fresh row is claimed
+  for it. A holder wrongly judged gone that keeps running finds its next save
+  refused for that task: it drops the task from memory, stops its running turn
+  without a reply and keeps working (`custom_agents/custody_loss.py`,
+  `event=task_custody_taken_over`). Admission reads custody before the
   finished-task archive, because a holder archives a task before its save
   releases custody. A copy of a task any agent of the team already finished is
   dropped too, and a replacement taking over a gone worker's saved work leaves
   out tasks another agent holds or finished, together with that work's records of
-  the tasks it delegated. A copy dropped while its holder looked alive relies on
-  that takeover if the holder stops later, so it is not run when
-  `agent.same_role_runtime_takeover_enabled` is off. Before 2026-10-17 each agent
+  the tasks it delegated, whose workers are told to stop
+  (`orphaned_subtasks.stop_left_out_delegations`). If custody changes while a
+  starting agent adopts saved work, it reads the saved work again once; a second
+  conflict stops the start with `RuntimeRecoveryStartFailed`. A copy dropped
+  while its holder looked alive relies on that takeover if the holder stops
+  later, so it is not run when `agent.same_role_runtime_takeover_enabled` is off. Before 2026-10-17 each agent
   checked only its own records, so such a task ran twice.
   Every delegation gets a generated task id, never one the model chose, so a
   new task can never look like a copy of an earlier one.
@@ -406,11 +420,13 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
    cancellation record, so the task can run elsewhere. New requests that still
    reach the worker go to the TeamLead the same way. A running task whose final
    answer was already sent is completed by this worker instead; handing it back
-   made another worker run it again and send a second answer. "Sent" means the
-   task is in FINALIZING_PLAN (entered only before a real final answer) and the
-   outbox shows its task response dispatched, or the outbox reached the
-   post-publish step. A held-back answer (final review, pending delegated work,
-   a manager escalation) is also marked dispatched, so it is handed back.
+   made another worker run it again and send a second answer. "Sent" looks at
+   the task's latest task response only: the task is in FINALIZING_PLAN (entered
+   only before a real final answer) and the outbox shows that response
+   dispatched or completed, or it reached the post-publish step. The outbox
+   records an answer it held back (final review, pending delegated work, a
+   manager escalation) with its own status, `held_back`, so such a task is
+   handed back, and the next worker is not told the held-back answer was sent.
 3. It keeps tasks that already started and now wait on a person or subtask,
    because replies are addressed to this worker's id. They may finish until
    `agent.schedule_workers.lease_loss_wait_timeout_seconds` (default 30 minutes)

@@ -27,6 +27,9 @@ handle the copy like this:
 - When the holder has stopped, or handed the task back after losing its launch
   lease, the agent that received the copy runs it (`event=task_custody_takeover`),
   and a later takeover of the stopped agent's saved work leaves that task out.
+- If the holder only looked stopped and is still running, it drops the task the
+  next time it saves its work and stops working on it without replying
+  (`event=task_custody_taken_over`). Work it did before that may happen twice.
 - A copy of a task any agent of the team already finished is dropped
   (`event=duplicate_archived_delivery_ignored`).
 

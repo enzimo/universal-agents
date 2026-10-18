@@ -21,15 +21,21 @@ An agent receiving a task that someone else holds:
   (``RuntimeSnapshotCoordinator._taken_by_other_agents``), so that replacement
   does not run it too.
 
-The takeover is a compare-and-set in the admission's save, so a racing
-recovery or a second copy cannot both win; the loser drops its copy.
+The takeover is a compare-and-set on the judged-gone holder in the
+admission's save, so a racing recovery or a second copy cannot both win; the
+loser drops its copy. A holder that released the task meanwhile was alive
+after all: a copy the lead re-sent after that holder's handback is admitted
+as a free task; any other copy is dropped, and no fresh row is claimed for it
+(``task_message_runtime``). A holder wrongly judged gone that is still
+running finds the task taken at its next save and drops it
+(``custom_agents.custody_loss``).
 
-What this does not cover: a holder judged gone that is in fact still running
-(the liveness rule decides), work the gone holder already did before it
-stopped (the taker starts the task again), agents that do not share the
-team's database, and, with ``agent.same_role_runtime_takeover_enabled`` off, a
-copy dropped while its holder looked alive when that holder stops later
-(nobody adopts the holder's saved work).
+What this does not cover: work a holder judged gone did before it stopped,
+or, if it is still running, until its next save (the taker starts the task
+again); agents that do not share the team's database; and, with
+``agent.same_role_runtime_takeover_enabled`` off, a copy dropped while its
+holder looked alive when that holder stops later (nobody adopts the holder's
+saved work).
 """
 
 from __future__ import annotations
@@ -52,6 +58,8 @@ CUSTODY_HANDED_BACK = "handed_back_by_holder"
 CUSTODY_HOLDER_GONE = "holder_gone"
 CUSTODY_HELD = "held_by_live_agent"
 CUSTODY_TAKEN_MEANWHILE = "taken_by_another_agent_meanwhile"
+# The holder a takeover named released the task before the takeover's save.
+CUSTODY_RELEASED_MEANWHILE = "released_by_holder_meanwhile"
 
 
 @dataclass(frozen=True)
@@ -155,6 +163,7 @@ __all__ = [
     "CUSTODY_HELD",
     "CUSTODY_HOLDER_GONE",
     "CUSTODY_MINE",
+    "CUSTODY_RELEASED_MEANWHILE",
     "CUSTODY_TAKEN_MEANWHILE",
     "CustodyDecision",
     "check_admission",

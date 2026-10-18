@@ -5,6 +5,7 @@ from __future__ import annotations
 from custom_agents.runtime_snapshot_codec import (
     FINISHED_BY_ANOTHER_AGENT,
     HELD_BY_ANOTHER_AGENT,
+    LeftOutDelegation,
     SnapshotSource,
     capture_runtime_snapshot,
     capture_task,
@@ -23,18 +24,25 @@ from storage.runtime_state_repository import RuntimeStateRepository
 from custom_agents.task_runtime_state import WorkflowRuntimeState
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 
 from custom_agents.runtime_state_store import TaskRuntimeSnapshotRow
-from storage.task_custody_repository import TaskCustodyTakeover
+from storage.task_custody_repository import TaskCustodyTakenOver, TaskCustodyTakeover
 from custom_messages.enums import TaskActivityStage, TaskActivityType
 
 
 
 
 class RuntimeSnapshotCoordinator:
-    """Persist and restore TaskManager active-runtime snapshots."""
+    """Persist and restore TaskManager active-runtime snapshots.
+
+    A save refused because another agent took over some of this agent's
+    tasks (``TaskCustodyTakenOver``) drops those tasks from memory, saves the
+    rest and tells the custody listener (``custom_agents.custody_loss``),
+    which stops a running turn of them without a reply: their new holder runs
+    them and answers.
+    """
 
     def __init__(
         self,
@@ -59,7 +67,11 @@ class RuntimeSnapshotCoordinator:
         self.state = WorkflowRuntimeState(
             task_state, plan_state, objective_state, execution_state
         )
+        self._custody_lost_listener: Optional[Callable[[tuple[str, ...]], None]] = None
 
+    def set_custody_lost_listener(self, listener: Optional[Callable[[tuple[str, ...]], None]]) -> None:
+        """Called with the released task ids when a save finds tasks taken over."""
+        self._custody_lost_listener = listener
 
     def _export_runtime_state(self) -> Dict[str, Any]:
         return capture_runtime_snapshot(
@@ -80,23 +92,64 @@ class RuntimeSnapshotCoordinator:
             return
 
         try:
-            if not self.task_state.tasks:
-                self.runtime_state_store.clear_task_runtime(self.identity.owner_agent_id)
-                return
-
-            runtime_state_json = json.dumps(self._export_runtime_state())
-            self.runtime_state_store.save_task_runtime(
-                owner_agent_id=self.identity.owner_agent_id,
-                owner_agent_name=self.identity.owner_agent_name,
-                team_id=self.identity.team_id,
-                owner_named_agent_type=self.identity.owner_named_agent_type,
-                runtime_state_json=runtime_state_json,
-                schedule_admission=schedule_admission,
-                custody_takeover=custody_takeover,
-            )
+            while True:
+                try:
+                    self._write_runtime_state(schedule_admission, custody_takeover)
+                    return
+                except TaskCustodyTakenOver as taken:
+                    self._release_taken_tasks(taken)
         except Exception as e:
             self._logger.error(f"Failed to persist active runtime state: {e}")
             raise
+
+    def _write_runtime_state(
+        self, schedule_admission: "ScheduleOccurrenceV1 | None", custody_takeover: TaskCustodyTakeover | None,
+    ) -> None:
+        if not self.task_state.tasks:
+            self.runtime_state_store.clear_task_runtime(self.identity.owner_agent_id)
+            return
+        self.runtime_state_store.save_task_runtime(
+            owner_agent_id=self.identity.owner_agent_id,
+            owner_agent_name=self.identity.owner_agent_name,
+            team_id=self.identity.team_id,
+            owner_named_agent_type=self.identity.owner_named_agent_type,
+            runtime_state_json=json.dumps(self._export_runtime_state()),
+            schedule_admission=schedule_admission,
+            custody_takeover=custody_takeover,
+        )
+
+    def _release_taken_tasks(self, taken: TaskCustodyTakenOver) -> None:
+        """Drop tasks another agent took over, without saving, ending or replying.
+
+        That agent judged this one gone and admitted a copy (2026-10-17); it
+        runs the task and answers. Each pass drops at least one task, so the
+        save that follows ends.
+        """
+        released = tuple(sorted(task_id for task_id in taken.holders if task_id in self.task_state.tasks))
+        if not released:
+            raise RuntimeError(f"A save was refused for tasks this agent does not hold: {sorted(taken.holders)}")
+        for task_id in released:
+            self.operations.forget_task(task_id)
+        self._logger.warning(
+            "Another agent took over tasks of this agent's saved work; dropped them from memory "
+            "without ending or answering them. event=task_custody_taken_over owner_agent_id=%s "
+            "task_ids=%s holders=%s",
+            taken.owner_agent_id,
+            list(released),
+            {task_id: taken.holders[task_id] for task_id in released},
+        )
+        if self._custody_lost_listener is None:
+            return
+        try:
+            self._custody_lost_listener(released)
+        except Exception:
+            # The tasks are already dropped; the save must still go ahead.
+            self._logger.exception(
+                "Could not tell the agent about released tasks. event=custody_listener_failed "
+                "owner_agent_id=%s task_ids=%s",
+                taken.owner_agent_id,
+                list(released),
+            )
 
     def persist_task_history(self, task_id: str) -> None:
         if not self.identity.owner_agent_id:
@@ -127,6 +180,7 @@ class RuntimeSnapshotCoordinator:
             rows.extend(self.runtime_state_store.load_task_runtime_by_owner(self.identity.owner_agent_id))
         previous_state = self.state.checkpoint()
         committed = False
+        left_out: list[LeftOutDelegation] = []
         try:
             sources = [SnapshotSource(row.owner_agent_id, row.updated_at, decode_runtime_snapshot(row.runtime_state_json)) for row in rows]
             cancelled = {
@@ -137,6 +191,7 @@ class RuntimeSnapshotCoordinator:
                 sources, cancelled=cancelled, plans_enabled=self.operations.plans_enabled(),
                 objectives_enabled=self.operations.objectives_enabled(), logger=self._logger,
                 taken_elsewhere=self._taken_by_other_agents(sources, {row.owner_agent_id for row in rows}),
+                left_out_delegations=left_out,
             )
             self.state.restore(restored)
             self.runtime_state_store.commit_task_runtime_recovery(
@@ -158,6 +213,8 @@ class RuntimeSnapshotCoordinator:
                 "task_count": len(restored.task_state.tasks),
                 "source_owner_agent_ids": [row.owner_agent_id for row in rows],
                 "top_level_task_ids": sorted(task_id for task_id, info in restored.task_state.tasks.items() if info.task.parent_task_id is None),
+                # Their workers are told to stop after recovery (orphaned_subtasks).
+                "left_out_delegations": left_out,
             }
         except Exception:
             if not committed:

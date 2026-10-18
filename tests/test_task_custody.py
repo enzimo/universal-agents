@@ -11,6 +11,7 @@ import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -25,7 +26,9 @@ from custom_messages.enums import MessageMetaType, ProgressState
 from storage.config import resolve_storage_settings
 from storage.runtime_snapshot_layout import canonical_json
 from storage.runtime_state_repository import RuntimeRecoveryConflict, create_runtime_state_repository
-from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyTakeover
+from storage.task_custody_repository import (
+    TaskCustodyConflict, TaskCustodyReleased, TaskCustodyTakenOver, TaskCustodyTakeover,
+)
 
 
 def _iso() -> str:
@@ -105,11 +108,54 @@ def test_a_second_holder_is_refused_unless_it_names_the_holder_it_replaces(store
         _save(store, b, _snapshot(work), takeover=TaskCustodyTakeover(work, "someone_else"))
     _save(store, b, _snapshot(work), takeover=TaskCustodyTakeover(work, a))
     assert _holder(store, work) == b
-    # The old holder still has the task saved; its later saves never touch b's row,
-    # and removing the task releases only rows it still holds.
-    _save(store, a, _snapshot(work, store.task("next")))
+    # Removing the task from the old holder's saved work releases only rows it still holds.
     _save(store, a, _snapshot(store.task("next")))
     assert _holder(store, work) == b
+
+
+def test_a_save_that_still_lists_a_task_another_agent_took_over_is_refused(store):
+    """Regression (2026-10-17 review round 2): an admission takeover moves only the
+    custody row. A holder wrongly judged gone kept saving and running the task, so it
+    ran twice. Its save is refused before anything is written, naming the new holder."""
+    a, b, _c = store.owners
+    work, other = store.task("work"), store.task("other")
+    _save(store, a, _snapshot(work, other))
+    _save(store, b, _snapshot(work), takeover=TaskCustodyTakeover(work, a))
+    before = store.repo.load_task_runtime_by_owner(a)[0].runtime_state_json
+    with pytest.raises(TaskCustodyTakenOver) as refused:
+        _save(store, a, _snapshot(work, other, store.task("new")))
+    assert refused.value.holders == {work: b}
+    assert store.repo.load_task_runtime_by_owner(a)[0].runtime_state_json == before
+    assert _holder(store, store.task("new")) is None  # the refused save claimed nothing
+    _save(store, a, _snapshot(other, store.task("new")))  # without the taken task it saves
+    assert (_holder(store, work), _holder(store, other)) == (b, a)
+
+
+def test_a_record_of_a_task_this_owner_delegated_is_not_its_custody(store):
+    """A requester keeps a record of each task it delegated; the worker holds it.
+    When the record leaves the delegation map before it leaves the snapshot, the
+    worker's row does not make the requester's save look taken over."""
+    a, b, _c = store.owners
+    parent, child = store.task("parent"), store.task("child")
+    _save(store, a, _snapshot(parent, child, delegated={child: parent}))
+    _save(store, b, _snapshot(child))
+    _save(store, a, _snapshot(parent, child))
+    assert (_holder(store, parent), _holder(store, child)) == (a, b)
+
+
+def test_a_takeover_never_claims_a_task_its_holder_released_meanwhile(store):
+    """Regression (2026-10-17 review round 2): a takeover against a holder judged gone
+    inserted a fresh row when that holder had finished and released the task between
+    the admission's reads and its save, so the task ran again."""
+    a, b, _c = store.owners
+    work = store.task("work")
+    _save(store, a, _snapshot(work))
+    _save(store, a, _snapshot(store.task("next")))  # a finished the task: its row is released
+    with pytest.raises(TaskCustodyReleased) as refused:
+        _save(store, b, _snapshot(work), takeover=TaskCustodyTakeover(work, a))
+    assert (refused.value.task_id, refused.value.holder_agent_id) == (work, a)
+    assert _holder(store, work) is None
+    assert store.repo.load_task_runtime_by_owner(b) == []
 
 
 def test_recovery_moves_custody_and_refuses_a_task_another_agent_took(store):
@@ -171,6 +217,32 @@ def test_a_refused_admission_leaves_no_task_behind(tmp_path):
     assert _admit(second, "t1", takeover_from="worker_a")
     holders = second.runtime_state_store.get_task_custody("team", ["t1"])
     assert holders["t1"].holder_agent_id == "worker_b"
+
+
+def test_a_holder_wrongly_judged_gone_drops_the_task_at_its_next_save(tmp_path, caplog):
+    """Regression (2026-10-17 review round 2): after another worker took a task over,
+    the old holder kept it in memory and in its saves and ran it too. Its next save
+    drops the task (no ending, no answer), saves the rest and tells its listener."""
+    old_holder, taker = _manager(tmp_path, "worker_a"), _manager(tmp_path, "worker_b")
+    _admit(old_holder, "taken")
+    _admit(old_holder, "kept")
+    _delegate_child(old_holder, "taken", "taken_child")
+    released: list[tuple[str, ...]] = []
+    old_holder.set_custody_lost_listener(released.append)
+    assert _admit(taker, "taken", takeover_from="worker_a")
+
+    with caplog.at_level(logging.WARNING):
+        old_holder.update_main_task_state("kept", ProgressState.IN_PROGRESS, _iso())
+
+    assert released == [("taken",)]
+    assert old_holder.get_task_info("taken") is None and old_holder.get_task_info("taken_child") is None
+    assert old_holder.get_task_info("kept").state == ProgressState.IN_PROGRESS
+    saved = old_holder.runtime_state_store.load_task_runtime_by_owner("worker_a")[0].runtime_state_json
+    assert "kept" in saved and '"taken"' not in saved
+    holders = old_holder.runtime_state_store.get_task_custody("team", ["taken", "kept"])
+    assert (holders["taken"].holder_agent_id, holders["kept"].holder_agent_id) == ("worker_b", "worker_a")
+    assert old_holder.get_task_from_db("taken") is None  # not ended, so not archived
+    assert any("event=task_custody_taken_over" in record.getMessage() for record in caplog.records)
 
 
 def test_handing_a_task_back_releases_its_custody(tmp_path):
@@ -248,6 +320,113 @@ def test_a_takeover_leaves_out_the_delegations_of_a_parent_it_leaves_out(tmp_pat
     assert replacement.runtime_state_store.load_task_runtime_by_owner("worker_gone") == []
 
 
+# -- startup recovery -----------------------------------------------------------
+
+
+def _starting_agent(manager: TaskManager) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=manager.identity.owner_agent_id, team_id="team", named_agent_type="Worker",
+        same_role_runtime_takeover_enabled=True, task_manager=manager, _logger=logging.getLogger("t"),
+        deferred_inbox=SimpleNamespace(
+            stored_team_id=AsyncMock(return_value=None), restore_role=AsyncMock(return_value=False),
+            restore=AsyncMock(return_value=False),
+        ),
+        _recovery_retry_deadline_seconds=lambda: None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_startup_reads_saved_work_again_after_a_custody_conflict(tmp_path, monkeypatch, caplog):
+    """Regression (2026-10-17 review round 2): a task claimed by a redelivered copy
+    while a starting agent adopted a gone agent's work made recovery fail with
+    RuntimeRecoveryConflict, which startup did not handle, so the agent never
+    started. It now reads again once and leaves the contested task out."""
+    from custom_agents import runtime_recovery
+
+    gone = _manager(tmp_path, "worker_gone")
+    _admit(gone, "contested")
+    _admit(gone, "free")
+    starting = _manager(tmp_path, "worker_new")
+    monkeypatch.setattr(
+        runtime_recovery, "filter_stale_role_takeover_owner_ids",
+        AsyncMock(side_effect=lambda _agent, ids: [owner for owner in ids if owner == "worker_gone"]),
+    )
+    store = starting.runtime_state_store
+    real_commit = store.commit_task_runtime_recovery
+    attempts: list[int] = []
+
+    def commit_after_a_copy_is_admitted(**kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            assert _admit(_manager(tmp_path, "worker_copy"), "contested", takeover_from="worker_gone")
+        return real_commit(**kwargs)
+
+    monkeypatch.setattr(store, "commit_task_runtime_recovery", commit_after_a_copy_is_admitted)
+    with caplog.at_level(logging.WARNING):
+        await runtime_recovery.recover_runtime_after_restart(_starting_agent(starting))
+
+    assert len(attempts) == 2
+    assert starting.get_task_info("free") is not None and starting.get_task_info("contested") is None
+    holders = store.get_task_custody("team", ["contested", "free"])
+    assert (holders["contested"].holder_agent_id, holders["free"].holder_agent_id) == ("worker_copy", "worker_new")
+    assert "event=runtime_recovery_conflict_retrying" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_startup_stops_the_delegated_work_of_a_task_it_leaves_out(tmp_path, monkeypatch, caplog):
+    """Follow-up to the 2026-10-17 review: recovery left out a gone agent's delegated
+    tasks together with a parent another worker took over, but their worker kept
+    running them and answered the gone requester. They now get a barrier and a stop;
+    the parent the other worker runs is untouched."""
+    from custom_agents import runtime_recovery
+
+    gone = _manager(tmp_path, "worker_gone")
+    _admit(gone, "P")
+    _delegate_child(gone, "P", "C")
+    taker = _manager(tmp_path, "worker_3")
+    assert _admit(taker, "P", takeover_from="worker_gone")
+    starting = _manager(tmp_path, "worker_new")
+    monkeypatch.setattr(
+        runtime_recovery, "filter_stale_role_takeover_owner_ids",
+        AsyncMock(side_effect=lambda _agent, ids: [owner for owner in ids if owner == "worker_gone"]),
+    )
+    agent = _starting_agent(starting)
+    agent._request_subtask_stop = AsyncMock(return_value=True)
+
+    with caplog.at_level(logging.WARNING):
+        await runtime_recovery.recover_runtime_after_restart(agent)
+
+    stop = agent._request_subtask_stop.await_args.kwargs
+    assert (stop["parent_task_id"], stop["subtask_info"].task.task_id) == ("P", "C")
+    assert starting.is_execution_cancelled("C")
+    assert not taker.is_execution_cancelled("P")
+    assert "event=left_out_delegation_stopping" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_startup_fails_with_a_clear_error_when_saved_work_conflicts_twice(tmp_path, monkeypatch, caplog):
+    from custom_agents import runtime_recovery
+
+    gone = _manager(tmp_path, "worker_gone")
+    _admit(gone, "t1")
+    starting = _manager(tmp_path, "worker_new")
+    monkeypatch.setattr(
+        runtime_recovery, "filter_stale_role_takeover_owner_ids",
+        AsyncMock(side_effect=lambda _agent, ids: [owner for owner in ids if owner == "worker_gone"]),
+    )
+
+    def always_changed(**_kwargs):
+        raise RuntimeRecoveryConflict("Runtime recovery source or destination changed.")
+
+    monkeypatch.setattr(starting.runtime_state_store, "commit_task_runtime_recovery", always_changed)
+    with caplog.at_level(logging.WARNING), pytest.raises(runtime_recovery.RuntimeRecoveryStartFailed) as failed:
+        await runtime_recovery.recover_runtime_after_restart(_starting_agent(starting))
+    assert (failed.value.agent_id, failed.value.team_id, failed.value.named_agent_type) == ("worker_new", "team", "Worker")
+    assert "event=runtime_recovery_conflict_start_failed" in caplog.text
+    assert starting.get_task_info("t1") is None  # nothing adopted
+    assert gone.runtime_state_store.load_task_runtime_by_owner("worker_gone") != []
+
+
 # -- admission decision --------------------------------------------------------
 
 
@@ -322,6 +501,54 @@ async def test_a_copy_of_a_task_its_live_holder_finishes_during_admission_is_dro
         agent, task, MessageHeader(message_id="m2"), MessageMeta(), "queue"
     )
     assert decision is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("holder_ends_task", "reason", "admitted"),
+    [
+        ("finishes", task_custody.CUSTODY_HOLDER_GONE, None),  # finished: the copy is a duplicate
+        ("hands_back", task_custody.CUSTODY_HOLDER_GONE, None),  # the lead re-sends its own copy
+        ("hands_back", task_custody.CUSTODY_HANDED_BACK, True),  # this is that re-sent copy
+    ],
+)
+async def test_a_copy_whose_holder_released_it_before_the_takeover_is_never_claimed_afresh(
+    tmp_path, caplog, holder_ends_task, reason, admitted
+):
+    """Regression (2026-10-17 review round 2): a holder judged gone finished the task
+    after both admission reads; the takeover then inserted a fresh row and ran the
+    task again. Now the compare-and-set fails, the archive is read again, and only
+    the lead's re-sent copy after a handback is admitted."""
+    from custom_agents import task_message_runtime
+
+    holder, taker = _manager(tmp_path, "worker_a"), _manager(tmp_path, "worker_b")
+    _admit(holder, "t1")
+    _admit(holder, "t2")  # keeps the holder's snapshot (and its row for t2) alive
+    if holder_ends_task == "finishes":
+        holder.complete_task("t1", _iso())
+    else:
+        holder.remove_task("t1")  # lease-loss handback
+    agent = SimpleNamespace(id="worker_b", team_id="team", task_manager=taker, _logger=logging.getLogger("t"))
+    custody = task_custody.CustodyDecision(True, reason, "worker_a")
+
+    async def admit(takeover_from):
+        return _admit(taker, "t1", takeover_from=takeover_from)
+
+    with pytest.raises(TaskCustodyReleased) as released:
+        await admit(custody.takeover_from)
+    with caplog.at_level(logging.WARNING):
+        outcome = await task_message_runtime._admit_after_holder_released(
+            agent, custody, released.value, admit, MessageHeader(message_id="m"), "queue"
+        )
+    assert outcome is admitted
+    holders = taker.runtime_state_store.get_task_custody("team", ["t1"])
+    assert (holders["t1"].holder_agent_id if holders else None) == ("worker_b" if admitted else None)
+    expected_event = (
+        "duplicate_archived_delivery_ignored" if holder_ends_task == "finishes"
+        else None if admitted else "released_by_holder_meanwhile"
+    )
+    if expected_event:
+        assert any(expected_event in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.live

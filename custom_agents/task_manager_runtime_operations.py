@@ -11,7 +11,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from custom_messages.contracts.runtime_snapshot_v3 import RuntimeMailboxEventRecord, TaskRuntimeLeaseRecord, TaskStateProjectionRecord, TurnActionBatchRecord, TurnActionOutboxRecord
+from custom_messages.contracts.runtime_snapshot_v3 import (
+    TURN_ACTION_DONE_STATUSES, RuntimeMailboxEventRecord, TaskRuntimeLeaseRecord, TaskStateProjectionRecord,
+    TurnActionBatchRecord, TurnActionOutboxRecord,
+)
 from custom_messages.enums import ProgressState, TaskHistoryImportance, TaskHistoryType
 from id_generation import new_id
 
@@ -180,7 +183,7 @@ class RuntimeOperationsCoordinator:
         for record in self.list_turn_action_records(batch_id):
             if record.action_index <= failed_action_index:
                 continue
-            if record.status in {"completed", "dispatched"}:
+            if record.status in TURN_ACTION_DONE_STATUSES:
                 continue
             record.status = "blocked"
             record.phase = "validate"
@@ -709,7 +712,8 @@ class RuntimeOperationsCoordinator:
             return "Runtime Action Recovery Brief: no durable action batch was found."
 
         records = self.list_turn_action_records(batch_id)
-        completed = [record for record in records if record.status in {"completed", "dispatched"}]
+        # A held-back action is listed with its status: it ran and sent nothing.
+        completed = [record for record in records if record.status in TURN_ACTION_DONE_STATUSES]
         failed = [
             record
             for record in records
