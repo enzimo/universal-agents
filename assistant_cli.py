@@ -35,7 +35,6 @@ from default_values import (
     INTERACTIVE_APP_DEFAULTS,
     LLM_DEFAULTS,
     NETWORK_DEFAULTS,
-    STORAGE_DEFAULTS,
 )
 from secure_tool_broker.defaults import (
     DEFAULT_BIND_PORT as DEFAULT_SECURE_TOOL_BROKER_BIND_PORT,
@@ -96,16 +95,6 @@ from runtime_settings.model_request_options import (
     normalize_litellm_api_mode,
     normalize_reasoning_summary,
 )
-from custom_agents.heartbeat_store import HeartbeatStore
-from custom_agents.schedule_store import ScheduleStore
-from custom_agents.schedule_management import (
-    ScheduleMutationAuthorityMode,
-    ScheduleMutationOperation,
-    build_schedule_mutation_permit,
-)
-from custom_agents.schedule_store import owner_canonical_user_id_for_schedule
-from custom_messages.enums import ObjectiveEventType, ObjectiveStatus
-from custom_messages.records.objectives import ObjectiveEventRecord
 from env_secrets import materialize_secret_file_envs
 from internal_credentials import (
     merge_env_file,
@@ -1199,63 +1188,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     objective_show.add_argument(
         "--objective-id", required=True, help="Objective id to show"
-    )
-
-    objective_pause = subparsers.add_parser(
-        "objective-pause",
-        help="Pause an Objective and disable managed schedules/heartbeats",
-    )
-    objective_pause.add_argument(
-        "--config", required=False, default=None, help="Path to instance_config.yaml"
-    )
-    objective_pause.add_argument(
-        "--env", default=None, help="Optional .env file to load before reading storage"
-    )
-    objective_pause.add_argument(
-        "--owner-agent-id",
-        default=None,
-        help="Manager agent id that owns the Objective record",
-    )
-    objective_pause.add_argument(
-        "--objective-id", required=True, help="Objective id to pause"
-    )
-
-    objective_resume = subparsers.add_parser(
-        "objective-resume",
-        help="Resume an Objective and re-enable schedules/heartbeats disabled by Objective pause",
-    )
-    objective_resume.add_argument(
-        "--config", required=False, default=None, help="Path to instance_config.yaml"
-    )
-    objective_resume.add_argument(
-        "--env", default=None, help="Optional .env file to load before reading storage"
-    )
-    objective_resume.add_argument(
-        "--owner-agent-id",
-        default=None,
-        help="Manager agent id that owns the Objective record",
-    )
-    objective_resume.add_argument(
-        "--objective-id", required=True, help="Objective id to resume"
-    )
-
-    objective_abandon = subparsers.add_parser(
-        "objective-abandon",
-        help="Mark an Objective abandoned and disable managed schedules/heartbeats",
-    )
-    objective_abandon.add_argument(
-        "--config", required=False, default=None, help="Path to instance_config.yaml"
-    )
-    objective_abandon.add_argument(
-        "--env", default=None, help="Optional .env file to load before reading storage"
-    )
-    objective_abandon.add_argument(
-        "--owner-agent-id",
-        default=None,
-        help="Manager agent id that owns the Objective record",
-    )
-    objective_abandon.add_argument(
-        "--objective-id", required=True, help="Objective id to abandon"
     )
 
     heartbeat_pause = subparsers.add_parser(
@@ -4347,149 +4279,6 @@ def _execution_retire_old_records(args: argparse.Namespace) -> None:
     )
 
 
-def _parse_objective_status_cli(value: str) -> ObjectiveStatus:
-    normalized = str(value or "").strip().lower().replace("-", "_")
-    for status in ObjectiveStatus:
-        if status.value == normalized:
-            return status
-    allowed = ", ".join(status.value for status in ObjectiveStatus)
-    raise SystemExit(f"Objective status must be one of: {allowed}")
-
-
-def _objective_link_requested_enabled(
-    link: Any,
-    *,
-    should_disable: bool,
-    should_resume: bool,
-) -> Optional[bool]:
-    if not link.managed_by_objective:
-        return None
-    if should_disable and not link.disabled_by_objective_pause:
-        return False
-    if should_resume and link.disabled_by_objective_pause:
-        return True
-    return None
-
-
-def _apply_cli_objective_schedule_cascade(
-    config: GatewayInstanceConfig,
-    objective: Any,
-    *,
-    schedule_store: ScheduleStore,
-    should_disable: bool,
-    should_resume: bool,
-) -> bool:
-    changed = False
-    for link in objective.schedule_links:
-        requested_enabled = _objective_link_requested_enabled(
-            link,
-            should_disable=should_disable,
-            should_resume=should_resume,
-        )
-        if requested_enabled is None:
-            continue
-        schedule = schedule_store.get_scheduled_message(link.schedule_id)
-        if schedule is None:
-            logger.warning(
-                "Objective lifecycle cascade skipped missing schedule %s for objective %s.",
-                link.schedule_id,
-                objective.objective_id,
-            )
-            continue
-        operation = (
-            ScheduleMutationOperation.ENABLE
-            if requested_enabled
-            else ScheduleMutationOperation.DISABLE
-        )
-        candidate = schedule.model_copy(deep=True)
-        candidate.enabled = requested_enabled
-        permit = build_schedule_mutation_permit(
-            schedule=schedule,
-            operation=operation,
-            authority_mode=ScheduleMutationAuthorityMode.TRUSTED_RUNTIME,
-            actor_principal_id="assistant_cli.objective_lifecycle",
-            owner_canonical_user_id=(
-                owner_canonical_user_id_for_schedule(schedule) or ""
-            ),
-            team_id=str(schedule.claim_team_id or config.manager.team_id or ""),
-            candidate=candidate,
-        )
-        if schedule_store.set_enabled(
-            link.schedule_id,
-            requested_enabled,
-            operation=operation,
-            system_mutation_permit=permit,
-        ):
-            link.disabled_by_objective_pause = not requested_enabled
-            changed = True
-    return changed
-
-
-def _apply_cli_objective_heartbeat_cascade(
-    objective: Any,
-    *,
-    heartbeat_store: HeartbeatStore,
-    should_disable: bool,
-    should_resume: bool,
-) -> bool:
-    changed = False
-    for link in objective.heartbeat_links:
-        requested_enabled = _objective_link_requested_enabled(
-            link,
-            should_disable=should_disable,
-            should_resume=should_resume,
-        )
-        if requested_enabled is None:
-            continue
-        updated = heartbeat_store.set_item_enabled(
-            link.heartbeat_item_id,
-            requested_enabled,
-        )
-        if updated is not None:
-            link.disabled_by_objective_pause = not requested_enabled
-            changed = True
-    return changed
-
-
-def _apply_cli_objective_lifecycle_cascade(
-    config: GatewayInstanceConfig, objective: Any
-) -> bool:
-    storage_settings = config.resolve_manager_storage_settings(env=os.environ)
-    db_path = (
-        storage_settings.sqlite_path or STORAGE_DEFAULTS.task_history_db_path.value
-    )
-    disable_statuses = {
-        ObjectiveStatus.PAUSED,
-        ObjectiveStatus.SATISFIED,
-        ObjectiveStatus.FAILED,
-        ObjectiveStatus.CANCELLED,
-        ObjectiveStatus.ABANDONED,
-    }
-    should_disable = objective.status in disable_statuses
-    should_resume = objective.status == ObjectiveStatus.ACTIVE
-    schedule_changed = _apply_cli_objective_schedule_cascade(
-        config,
-        objective,
-        schedule_store=ScheduleStore(
-            db_path=db_path,
-            storage_settings=storage_settings,
-            default_cron_timezone=config.user.timezone,
-        ),
-        should_disable=should_disable,
-        should_resume=should_resume,
-    )
-    heartbeat_changed = _apply_cli_objective_heartbeat_cascade(
-        objective,
-        heartbeat_store=HeartbeatStore(
-            db_path=db_path,
-            storage_settings=storage_settings,
-        ),
-        should_disable=should_disable,
-        should_resume=should_resume,
-    )
-    return schedule_changed or heartbeat_changed
-
-
 def _objective_list(args: argparse.Namespace) -> None:
     config, repository = _load_objective_repository(
         args.config, env_path=getattr(args, "env", None)
@@ -4526,36 +4315,6 @@ def _objective_show(args: argparse.Namespace) -> None:
     if objective is None:
         raise SystemExit(f"Objective not found: {args.objective_id}")
     print(objective.model_dump_json(indent=2))
-
-
-def _objective_set_status(args: argparse.Namespace, status: ObjectiveStatus) -> None:
-    config, repository = _load_objective_repository(
-        args.config, env_path=getattr(args, "env", None)
-    )
-    owner_agent_id = _resolve_objective_owner_agent_id(
-        config, getattr(args, "owner_agent_id", None)
-    )
-    objective = repository.get_objective(
-        args.objective_id, owner_agent_id=owner_agent_id
-    )
-    if objective is None:
-        raise SystemExit(f"Objective not found: {args.objective_id}")
-    previous_status = objective.status
-    objective.status = status
-    objective.event_log.append(
-        ObjectiveEventRecord(
-            event_type=ObjectiveEventType.STATUS_CHANGED,
-            summary=f"Objective status changed from {previous_status.value} to {status.value} by CLI.",
-            user_visible=True,
-            details={"source": "assistant_cli"},
-        )
-    )
-    if len(objective.event_log) > 200:
-        objective.event_log = objective.event_log[-200:]
-    cascaded = _apply_cli_objective_lifecycle_cascade(config, objective)
-    repository.save_objective(objective)
-    suffix = " with lifecycle cascade" if cascaded else ""
-    print(f"{objective.objective_id} status={objective.status.value}{suffix}")
 
 
 async def _heartbeat_pause(
@@ -5717,18 +5476,6 @@ def main() -> None:
     if args.command == "objective-show":
         args.config = _ensure_instance_config_ready(args.config)
         _objective_show(args)
-        return
-    if args.command == "objective-pause":
-        args.config = _ensure_instance_config_ready(args.config)
-        _objective_set_status(args, ObjectiveStatus.PAUSED)
-        return
-    if args.command == "objective-resume":
-        args.config = _ensure_instance_config_ready(args.config)
-        _objective_set_status(args, ObjectiveStatus.ACTIVE)
-        return
-    if args.command == "objective-abandon":
-        args.config = _ensure_instance_config_ready(args.config)
-        _objective_set_status(args, ObjectiveStatus.ABANDONED)
         return
     if args.command == "heartbeat-pause":
         asyncio.run(

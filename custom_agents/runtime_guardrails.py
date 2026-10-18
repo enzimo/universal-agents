@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional, get_args
 
 from strands.hooks import AfterModelCallEvent, AfterToolCallEvent, HookRegistry
 
+from custom_tools.runtime_context import caller_invocation_state
 from custom_agents.structured_llm_messages import (
     CompatibleTurnActionType,
     CompatibleWorkerTurnDecision,
@@ -291,13 +292,7 @@ class RuntimeGuardrailsPlugin:
 
     @classmethod
     def _turn_decision_context(cls, invocation_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        context = invocation_state.get(cls._TURN_DECISION_CONTEXT_KEY)
-        if isinstance(context, dict):
-            return context
-        nested_state = invocation_state.get("invocation_state")
-        if not isinstance(nested_state, dict):
-            return None
-        context = nested_state.get(cls._TURN_DECISION_CONTEXT_KEY)
+        context = caller_invocation_state(invocation_state).get(cls._TURN_DECISION_CONTEXT_KEY)
         return context if isinstance(context, dict) else None
 
     def _handle_structured_output_result(self, event: AfterToolCallEvent) -> None:

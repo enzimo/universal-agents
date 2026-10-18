@@ -173,6 +173,11 @@ def _open_objective_work_session_for_fired_task(
     task: Task,
     internal_meta: MessageMeta,
 ) -> bool:
+    """Open the bounded work session a fired Objective work schedule asked for.
+
+    Runs as one task operation (``_queue_fired_task``), so it calls the
+    manager's coordinators directly.
+    """
     if (
         scheduled_message.effective_system_schedule_kind
         != SystemScheduleKind.OBJECTIVE_WORK_SESSION
@@ -1451,12 +1456,19 @@ async def _queue_fired_task(
         )
         return False
 
-    if not _open_objective_work_session_for_fired_task(
-        agent,
-        schedule_id,
-        scheduled_message,
-        task,
-        meta,
+    # One manager operation: opening the session adds an event to the stored
+    # Objective and changes the task and its queue. Outside the lane it could
+    # write between another operation's load and save of the same Objective,
+    # and that save would erase the event.
+    if not await agent.task_manager.operations_runtime.run(
+        partial(
+            _open_objective_work_session_for_fired_task,
+            agent,
+            schedule_id,
+            scheduled_message,
+            task,
+            meta,
+        )
     ):
         await agent.task_manager.operations_runtime.run(
             agent.task_manager.remove_task, task.task_id
