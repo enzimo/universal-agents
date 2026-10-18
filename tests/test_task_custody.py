@@ -698,3 +698,20 @@ def test_postgres_recovery_never_overwrites_a_claim_made_meanwhile(monkeypatch):
     finally:
         for owner in (gone, taker, replacement):
             repo.clear_task_runtime(owner)
+
+
+def test_a_missing_archive_table_counts_as_no_finished_task_and_is_logged_once(caplog, monkeypatch):
+    """A store used on its own has no finished-task archive; a running team always does,
+    so the takeover's archive check logs the missing table once instead of passing silently."""
+    import sqlite3
+
+    import storage.task_custody_repository as custody_repository
+    from storage.sql_dialect import SQLITE
+
+    monkeypatch.setattr(custody_repository, "_MISSING_ARCHIVE_LOGGED", False)
+    conn = sqlite3.connect(":memory:")
+    with caplog.at_level("WARNING", logger=custody_repository.__name__):
+        for task_id in ("t1", "t2"):
+            assert not custody_repository.finished_by_team(conn, SQLITE, team_id="team", task_id=task_id)
+    warnings = [record for record in caplog.records if "task_custody_archive_missing" in record.getMessage()]
+    assert len(warnings) == 1

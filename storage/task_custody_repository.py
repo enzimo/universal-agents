@@ -45,11 +45,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 from typing import Any, Iterable, Optional
 
 from storage.sql_dialect import POSTGRES, SqlDialect
 
 CUSTODY_TABLE = "runtime_task_custody"
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class TaskCustodyConflict(RuntimeError):
@@ -232,6 +235,7 @@ def _take_over(
 # storage settings. A takeover reads it inside its own transaction; this is
 # the one place custody reads another repository's table (intentional coupling).
 ARCHIVE_TABLE = "completed_tasks"
+_MISSING_ARCHIVE_LOGGED = False
 
 
 def finished_by_team(conn: Any, dialect: SqlDialect, *, team_id: str, task_id: str) -> bool:
@@ -240,7 +244,8 @@ def finished_by_team(conn: Any, dialect: SqlDialect, *, team_id: str, task_id: s
     A holder archives a task before its save releases custody. Read after the
     takeover's compare-and-set, this closes the gap between the admission's
     own archive read and its save (2026-10-17). A database without the archive
-    table (a store used on its own) has no finished tasks.
+    table (a store used on its own, as in isolated tests) has no finished
+    tasks; a running team always has the table, so its absence is logged once.
     """
 
     bind = dialect.bind
@@ -251,6 +256,17 @@ def finished_by_team(conn: Any, dialect: SqlDialect, *, team_id: str, task_id: s
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (ARCHIVE_TABLE,)
         ).fetchone() is not None
     if not exists:
+        global _MISSING_ARCHIVE_LOGGED
+        if not _MISSING_ARCHIVE_LOGGED:
+            _MISSING_ARCHIVE_LOGGED = True
+            _LOGGER.warning(
+                "The finished-task archive table is missing from the runtime database, so a takeover "
+                "cannot see tasks finished after the admission's own archive read. "
+                "event=task_custody_archive_missing table=%s team_id=%s task_id=%s",
+                ARCHIVE_TABLE,
+                team_id,
+                task_id,
+            )
         return False
     return conn.execute(
         f"SELECT 1 FROM {ARCHIVE_TABLE} WHERE task_id = {bind} AND team_id = {bind} LIMIT 1",
