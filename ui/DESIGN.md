@@ -1277,7 +1277,9 @@ knowledge pages. It applies the existing rules; it adds none.
   into this page" are plain notice lines. Notes, revisions and links reuse the Memories row and tag styles.
   Article addresses keep the selected space, full page reference and optional
   revision in the URL. Reload and browser Back/Forward reopen that article
-  through the normal authenticated API. The URL names no person. Sign-out
+  through the normal authenticated API. Creating an article preserves the
+  previous article in browser history; editing keeps the same entry. After
+  reverting, the address opens the new current revision. The URL names no person. Sign-out
   clears the reader, directory and pagination and resets the address to Team Home.
 - Editing: the Memories inline editor (title, summary, tags, text) inside the
   viewer, with **Save**/**Create page** and **Cancel**. Results and refusals

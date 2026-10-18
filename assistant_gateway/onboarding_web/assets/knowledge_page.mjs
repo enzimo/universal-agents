@@ -633,6 +633,8 @@ export function createKnowledgePage({
       .then(payload => {
         if (!isCurrent()) return;
         showPage(payload.page, "Reverted to revision " + revision + ". This is a new revision; nothing in the history was removed.");
+        // Revert displays the current page, so reload must leave the historical revision too.
+        remember({ space: payload.page.space, page: payload.page.page }, "replace");
         loadList();
       })
       .catch(error => { if (isCurrent()) changeFailed(error, "The page was not reverted. Refresh and try again."); });
@@ -730,7 +732,8 @@ export function createKnowledgePage({
         .then(payload => {
           if (!isCurrent()) return;
           showPage(payload.page, creating ? "Page created." : "Saved.");
-          remember({ space: payload.page.space, page: payload.page.page }, "replace");
+          // A new article follows the one read before it; edits keep its entry.
+          remember({ space: payload.page.space, page: payload.page.page }, creating ? "push" : "replace");
           loadList(creating ? 0 : state.offset);
         })
         .catch(error => {

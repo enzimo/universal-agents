@@ -126,6 +126,7 @@ export async function verifyKnowledgePage() {
     }));
     let logoutRequests = 0;
     let finishLatePage;
+    let createdPage;
     win.fetch = async (url, options = {}) => {
       const path = new URL(String(url), win.location.href);
       const method = options.method || "GET";
@@ -135,6 +136,17 @@ export async function verifyKnowledgePage() {
       const response = payload => Promise.resolve(new win.Response(JSON.stringify(payload), {
         status: 200, headers: { "Content-Type": "application/json" },
       }));
+      if (path.pathname === "/api/web-chat/knowledge/pages/team" && method === "POST") {
+        createdPage = { ...sample.page, ...JSON.parse(options.body), page: "new-topic", revision: 1 };
+        return response({ status: "ok", page: createdPage });
+      }
+      if (path.pathname === "/api/web-chat/knowledge/pages/team/new-topic") {
+        return response({ status: "ok", page: createdPage });
+      }
+      if (path.pathname === "/api/web-chat/knowledge/pages/team/new-topic/save") {
+        createdPage = { ...createdPage, ...JSON.parse(options.body), revision: createdPage.revision + 1 };
+        return response({ status: "ok", page: createdPage });
+      }
       if (path.pathname === "/api/web-chat/knowledge/pages" && path.searchParams.get("status") === "archived") {
         const query = path.searchParams.get("query") || "";
         const offset = Number(path.searchParams.get("offset") || 0);
@@ -165,6 +177,29 @@ export async function verifyKnowledgePage() {
       }
       return originalFetch(url, options);
     };
+
+    // Creation visits a different article; editing it must keep the same
+    // history entry so one Back still reaches the article read before it.
+    doc.querySelector("#knowledge-home").click();
+    await until(() => doc.querySelector("#knowledge-viewer-title").textContent === "Home"
+      && doc.querySelector(".knowledge-page-link"), "Home before creating a topic");
+    [...doc.querySelectorAll(".knowledge-page-link")].find(link => link.textContent === "Release process").click();
+    await until(() => doc.querySelector("#knowledge-viewer-title").textContent === "Release process", "the previous article");
+    doc.querySelector("#knowledge-new").click();
+    doc.querySelector(".knowledge-editor input").value = "New topic";
+    doc.querySelector(".knowledge-editor-body").value = "A new topic.";
+    doc.querySelector(".knowledge-editor").requestSubmit();
+    await until(() => doc.querySelector("#knowledge-viewer-title").textContent === "New topic", "the created article");
+    [...doc.querySelectorAll("#knowledge-viewer-tools button")].find(button => button.textContent === "Edit").click();
+    doc.querySelector(".knowledge-editor-body").value = "The edited topic.";
+    doc.querySelector(".knowledge-editor").requestSubmit();
+    await until(() => doc.querySelector(".knowledge-body")?.textContent.includes("The edited topic."), "the edited article");
+    win.history.back();
+    await until(() => doc.querySelector("#knowledge-viewer-title").textContent === "Release process", "Back after creating and editing");
+    win.history.forward();
+    await until(() => doc.querySelector("#knowledge-viewer-title").textContent === "New topic"
+      && doc.querySelector(".knowledge-body")?.textContent.includes("The edited topic."), "Forward to the created article");
+    results.push("creating and editing an article preserve Back and Forward to the preceding article");
 
     doc.querySelector("#knowledge-personal-tab").click();
     doc.querySelector("#knowledge-browse").click();

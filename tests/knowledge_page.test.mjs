@@ -202,6 +202,34 @@ test("article addresses restore space and revision and browser navigation cannot
   assert.equal(f.requests.length, count);
 });
 
+test("reverting an addressed historical revision makes reload open the new current page", async () => {
+  const f = fixture({ url: "http://example.test/webchat?view=knowledge&space=team&page=team%2Fdeploys&revision=1" });
+  f.page.load();
+  await answer(f.requests, `${KNOWLEDGE_API}/pages/team/deploys?`, jsonResponse({
+    status: "ok", page: detail({ shown_revision: 1 }),
+  }));
+  const revert = buttonNamed(f.nodes["knowledge-viewer-tools"], "Revert to this revision");
+  click(revert);
+  click(revert);
+  const request = await answer(f.requests, `${KNOWLEDGE_API}/pages/team/deploys/revert`, jsonResponse({
+    status: "ok", page: detail({ revision: 3 }),
+  }));
+  assert.deepEqual([request.body.revision, request.body.base_revision], [1, 2]);
+  assert.match(f.nodes["knowledge-viewer-meta"].textContent, /Revision 3/);
+  assert.equal(f.browser.location.searchParams.has("revision"), false);
+  assert.deepEqual(f.addresses.map(entry => entry.method), ["replaceState"]);
+
+  const reloaded = fixture({ url: f.browser.location.href });
+  reloaded.page.load();
+  const read = await answer(reloaded.requests, `${KNOWLEDGE_API}/pages/team/deploys?`, jsonResponse({
+    status: "ok", page: detail({ revision: 3 }),
+  }));
+  assert.equal(new URL(read.path, "http://x").searchParams.has("revision"), false);
+  assert.deepEqual(buttonLabels(reloaded.nodes["knowledge-viewer-tools"]), ["Edit", "History", "Archive"]);
+  f.page.clear();
+  reloaded.page.clear();
+});
+
 test("removing the last row on the final directory page returns to a reachable page", async () => {
   const f = fixture();
   f.page.load();

@@ -2381,7 +2381,10 @@ page, the browser reads the last remaining page. The Home reader occupies the
 full width until the person opens All pages; proposals keep their list visible.
 `knowledge_navigation.mjs` reads and builds article addresses, including a full
 space/page reference and optional revision. Browser Back/Forward and reload
-read through the existing gateway routes; addresses convey no authority and
+read through the existing gateway routes. Creating an article adds a history
+entry; editing keeps that entry. A successful revert replaces the historical
+address with the current article, so reload opens the new current revision.
+Addresses convey no authority and
 personal always means the signed-in person's own space. A linked team article
 can be read while the Personal directory stays selected. Sign-out clears the
 article address and stops history navigation from fetching until sign-in.
