@@ -5,8 +5,8 @@
 For a first installation, use the bundled image installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/enzimo/universal-agents/v0.9.4/install.sh -o ua-install.sh
-bash ua-install.sh --image ghcr.io/enzimo/universal-agents:0.9.4
+curl -fsSL https://raw.githubusercontent.com/enzimo/universal-agents/v0.9.5/install.sh -o ua-install.sh
+bash ua-install.sh --image ghcr.io/enzimo/universal-agents:0.9.5
 ```
 
 It publishes host port `18090` to container port `18090`, keeps
