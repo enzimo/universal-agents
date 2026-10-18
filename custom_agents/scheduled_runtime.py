@@ -56,6 +56,7 @@ from custom_agents.agent_liveness import prune_departed_agent_rows_when_due
 from custom_agents.turn_failure_runtime import release_orphaned_slot_when_idle
 from custom_agents.schedule_store import (
     DEFAULT_SCHEDULE_CLAIM_TTL_SECONDS,
+    ScheduleClaimScope,
     compute_next_fire_at,
     owner_canonical_user_id_for_schedule,
     prepare_schedule_for_add,
@@ -549,7 +550,7 @@ async def _preserve_inbound_routing(
         schedule_msg.payload_meta = normalized_meta
 
 
-async def _store_ensure(agent: Any, schedule_msg: ScheduledMessage, claim_scope: dict[str, Any]) -> None:
+async def _store_ensure(agent: Any, schedule_msg: ScheduledMessage, claim_scope: ScheduleClaimScope) -> None:
     """Insert the schedule only when absent; a stored one keeps all of its state."""
 
     ensured = await agent.task_manager.operations_runtime.run(
@@ -578,7 +579,7 @@ async def _store_ensure(agent: Any, schedule_msg: ScheduledMessage, claim_scope:
     )
 
 
-async def _store_replace(agent: Any, schedule_msg: ScheduledMessage, claim_scope: dict[str, Any]) -> None:
+async def _store_replace(agent: Any, schedule_msg: ScheduledMessage, claim_scope: ScheduleClaimScope) -> None:
     """Replace the row; a stored system schedule needs the trusted-runtime permit for this exact change."""
 
     existing = await agent.task_manager.operations_runtime.run(
