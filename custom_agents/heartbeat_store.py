@@ -17,6 +17,7 @@ from storage.heartbeat_repository import (
     HeartbeatSourceRecord,
     create_heartbeat_repository,
 )
+from custom_messages.enums import ScheduleManagementClass, SystemScheduleKind
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +46,13 @@ def extract_active_heartbeat_tasks(content: str) -> list[str]:
 
 
 def is_heartbeat_launcher(scheduled_message: Any) -> bool:
-    """Whether a schedule starts the items of a heartbeat source (``heartbeat:`` name and a source id)."""
+    """Recognize only the protected heartbeat launcher, never a person's chosen name."""
 
     gateway_context = getattr(scheduled_message.payload_meta, "gateway_context", None)
     return bool(
-        gateway_context
+        scheduled_message.management_class == ScheduleManagementClass.SYSTEM
+        and scheduled_message.system_schedule_kind == SystemScheduleKind.HEARTBEAT_LAUNCHER
+        and gateway_context
         and gateway_context.heartbeat_source_id
         and scheduled_message.schedule_name
         and str(scheduled_message.schedule_name).startswith("heartbeat:")

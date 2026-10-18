@@ -30,7 +30,8 @@ from custom_messages.contracts.schedule_v1 import (
     ScheduledMessage,
     ScheduleTaskMemory,
 )
-from custom_messages.enums import RequesterType, TaskHistoryImportance, TaskHistoryType
+from custom_messages.contracts.task_v1 import Task
+from custom_messages.enums import MessageMetaType, RequesterType, TaskHistoryImportance, TaskHistoryType
 from custom_tools import file_access
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.runtime_context import (
@@ -76,7 +77,8 @@ async def send_message(message_json: str) -> str:
     """
     Send a structured message to another agent via the configured transport.
 
-    Use this tool to communicate with other agents in the system. The message
+    Use this tool for non-task messages to other agents. Delegate new tasks
+    through the delegate_task action so the runtime tracks their owner and result. The message
     should be a valid JSON string representing a CommsMessage object with
     msg_content, msg_meta, and optionally msg_header fields.
 
@@ -90,8 +92,8 @@ async def send_message(message_json: str) -> str:
 
     Example:
         message = {
-            "msg_content": {"message_class": "Task", "task_type": "request", ...},
-            "msg_meta": {"to_named_agent_type": CODE_WRITING_AGENT_TYPE, "from_agent_name": "Manager"}
+            "msg_content": {"message_class": "TaskQuery", "query_type": "request", "parent_task_id": "task_id", "message": "Which account should I use?"},
+            "msg_meta": {"to_agent_name": "TeamLead"}
         }
         send_message(json.dumps(message))
     """
@@ -102,6 +104,15 @@ async def send_message(message_json: str) -> str:
     try:
         # Parse the JSON message
         comms_obj = CommsMessage.model_validate_json(message_json)
+        if (
+            isinstance(comms_obj.msg_content, Task)
+            and comms_obj.msg_content.task_type == MessageMetaType.REQUEST
+        ):
+            logger.warning(
+                "Rejected an untracked task request. event=send_message_task_request_rejected agent_id=%s",
+                agent.id,
+            )
+            return "Error: Task requests must use delegate_task, not send_message."
         if isinstance(comms_obj.msg_content, GATEWAY_MANAGER_CONTROL_TYPES):
             logger.warning(
                 "Agent-authored gateway manager control message rejected. "
@@ -137,6 +148,22 @@ async def send_message(message_json: str) -> str:
                 "Error: System-managed schedule messages are reserved for trusted "
                 "runtime producers and cannot be sent by an agent."
             )
+
+        # Sender identity comes from this process, never from model-authored JSON.
+        if comms_obj.msg_meta is None:
+            comms_obj.msg_meta = MessageMeta()
+        if (
+            comms_obj.msg_meta.from_agent_name
+            and comms_obj.msg_meta.from_agent_name != agent.name
+        ):
+            logger.warning(
+                "Ignored a model-authored sender name. event=message_sender_name_overridden "
+                "supplied_sender=%s actual_sender=%s agent_id=%s",
+                comms_obj.msg_meta.from_agent_name,
+                agent.name,
+                agent.id,
+            )
+        comms_obj.msg_meta.from_agent_name = agent.name
 
         # Construct header using agent's method
         header = await agent._construct_header(comms_message=comms_obj)
@@ -504,8 +531,6 @@ def notify_user(
                     "notification_id": envelope.msg_content.notification_id,
                     "correlation_id": correlation_id,
                     "channel_name": gateway_context.channel_name,
-                    "chat_id": gateway_context.chat_id,
-                    "thread_id": gateway_context.thread_id,
                     "target": effective_target,
                     "requested_target": requested_target,
                     "notification_class": notification_class,
@@ -522,13 +547,11 @@ def notify_user(
             )
             logger.warning(
                 "Failed to record notify_user task-history breadcrumb: source_task_id=%s "
-                "notification_id=%s correlation_id=%s channel_name=%s chat_id=%s thread_id=%s.",
+                "notification_id=%s correlation_id=%s channel_name=%s.",
                 source_task_id,
                 envelope.msg_content.notification_id,
                 correlation_id,
                 gateway_context.channel_name,
-                gateway_context.chat_id,
-                gateway_context.thread_id,
                 exc_info=True,
             )
 
@@ -544,8 +567,6 @@ def notify_user(
         "notification_id": envelope.msg_content.notification_id,
         "routing_key": routing_key,
         "channel_name": gateway_context.channel_name,
-        "chat_id": gateway_context.chat_id,
-        "thread_id": gateway_context.thread_id,
         "requested_target": requested_target,
         "effective_target": effective_target,
         "notification_class": notification_class,

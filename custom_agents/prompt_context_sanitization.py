@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Optional
 
 from custom_messages.contracts.replied_message_v1 import RepliedMessage
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.contracts.task_v1 import Task
+from custom_messages.contracts.task_v1 import Task, TaskQuery
 
 
 _SECTION_HEADER_RE = re.compile(r"^\[([^\]\n]+)\]\s*$", re.MULTILINE)
@@ -133,6 +134,35 @@ def _quoted(text: str) -> list[str]:
     return [f"> {line}" if line else ">" for line in text.splitlines() or [""]]
 
 
+def _task_query_context(query: TaskQuery) -> list[str]:
+    """Keep the question and structured answer visible without dumping task history."""
+
+    lines = [
+        f"- Task query ID: {query.task_query_id}",
+        f"- Parent task ID: {query.parent_task_id}",
+        f"- Query type: {_enum_value(query.query_type)}",
+        "Current Task Question:",
+        query.message,
+    ]
+    for field in (
+        "query_reason",
+        "choice_mode",
+        "allow_free_text",
+        "allowed_decisions",
+        "selected_choice_ids",
+    ):
+        value = getattr(query, field, None)
+        if value is not None:
+            lines.append(f"- {field}: {json.dumps(value, ensure_ascii=False)}")
+    if query.choices:
+        lines.append("Question Choices:")
+        lines.extend(
+            json.dumps(choice.model_dump(exclude_none=True), ensure_ascii=False)
+            for choice in query.choices
+        )
+    return lines
+
+
 def render_incoming_message_summary(
     *,
     content: Any,
@@ -174,6 +204,9 @@ def render_incoming_message_summary(
             if len(attachments) > 10:
                 lines.append(f"- Attachments omitted from summary: {len(attachments) - 10}")
 
+    if isinstance(content, TaskQuery):
+        lines.extend(_task_query_context(content))
+
     if meta is not None:
         lines.append(f"- From: {getattr(meta, 'from_agent_name', None) or 'unknown'}")
         if getattr(meta, "to_agent_name", None):
@@ -193,15 +226,24 @@ def render_incoming_message_summary(
         if getattr(meta, "request_timezone", None):
             lines.append(f"- Request timezone: {meta.request_timezone}")
 
+        escalation = getattr(meta, "manager_escalation", None)
+        if escalation is not None:
+            # These typed details carry the worker's choices and proposal;
+            # presence alone does not give the lead enough information to act.
+            lines.append("Worker Escalation Context:")
+            lines.append(
+                json.dumps(
+                    escalation.model_dump(mode="json", exclude_none=True),
+                    ensure_ascii=False,
+                )
+            )
+
         gateway_context = getattr(meta, "gateway_context", None)
         if gateway_context is not None:
             gateway_bits = []
             for attr, label in [
-                ("gateway_instance_name", "gateway"),
-                ("session_key", "session"),
                 ("delivery_mode", "delivery_mode"),
                 ("channel_name", "channel"),
-                ("original_message_id", "original_message_id"),
             ]:
                 value = getattr(gateway_context, attr, None)
                 if value:

@@ -248,6 +248,13 @@ class _RelationalRuntimeStateRepository:
                         team_id=replacement.team_id,
                         task_ids=tuple(key for section, key in parts.records if section == "tasks"),
                     )
+                    from storage.schedule_repository import transfer_task_timer_claims
+
+                    transfer_task_timer_claims(
+                        conn, self._dialect, sources=tuple(expected),
+                        replacement_agent_id=replacement.owner_agent_id, team_id=replacement.team_id,
+                        task_ids=tuple(key for section, key in parts.records if section == "tasks"),
+                    )
                 conn.commit()
         except Exception:
             self._logger.exception(

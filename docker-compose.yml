@@ -24,7 +24,7 @@ services:
     container_name: ua
     ports:
       - "18090:18090"
-      - "18600:18600"
+      - "127.0.0.1:18600:18600"
     volumes:
       - ${HOST_ROOT}/${INSTANCE_NAME}:${INSTANCE_ROOT:-/data}
     environment:

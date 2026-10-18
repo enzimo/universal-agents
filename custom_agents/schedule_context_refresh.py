@@ -29,6 +29,11 @@ gateway start. A refresh creates nothing (the schedule's own installer does
 that) and never touches a schedule a person manages. Agents cannot send one:
 ``send_message`` refuses system-managed schedule messages and the structured
 schedule action creates person-managed ones only.
+
+The heartbeat launcher's fixed interval comes from gateway configuration.
+Its refresh applies a changed configured interval but retains the current due
+occurrence, so a restart never postpones work. The new interval applies after
+that occurrence; other maintenance schedules retain their saved cadence.
 """
 
 from __future__ import annotations
@@ -48,6 +53,7 @@ from custom_agents.schedule_execution_identity import follow_authorized_change
 from custom_agents.schedule_store import ScheduleWriteConflict, owner_canonical_user_id_for_schedule
 from custom_messages.contracts.routing_v1 import PERSON_GATEWAY_FIELDS
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
+from custom_messages.enums import SystemScheduleKind
 from id_generation import new_id
 
 logger = logging.getLogger(__name__)
@@ -87,6 +93,10 @@ def refreshed_schedule(existing: ScheduledMessage, incoming: ScheduledMessage) -
     """
 
     candidate = existing.model_copy(deep=True)
+    if effective_system_schedule_kind(existing) == SystemScheduleKind.HEARTBEAT_LAUNCHER:
+        candidate.interval_ms = incoming.interval_ms
+        candidate.cron_expression = incoming.cron_expression
+        candidate.cron_timezone = incoming.cron_timezone
     stored, fresh = _gateway_context(candidate), _gateway_context(incoming)
     person_changed = owner_canonical_user_id_for_schedule(existing) != owner_canonical_user_id_for_schedule(incoming)
     for name in PERSON_GATEWAY_FIELDS:

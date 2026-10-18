@@ -504,10 +504,11 @@ async def test_terminal_task_response_is_deferred_when_pending_guidance_exists()
     task_id = "task_steer_late"
     task_manager = MagicMock()
     task_manager.operations_runtime = TaskOperationRuntime()
-    task_manager.append_history_entry.return_value = None
+    task_manager.append_history_entry.return_value = True
     task_manager.append_runtime_resume_directive.return_value = None
     task_manager.update_main_task_state.return_value = None
     task_manager.enqueue_task.return_value = None
+    task_manager.get_task_info.return_value = SimpleNamespace(task=Task(task_id=task_id, task_type=MessageMetaType.REQUEST))
     agent = SimpleNamespace(
         _pending_proactive_task_steering={
             task_id: [

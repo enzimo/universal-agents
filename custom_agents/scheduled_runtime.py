@@ -709,6 +709,8 @@ async def _dispatch_heartbeat_item_to_worker(
         msg_content=task,
         msg_meta=internal_meta,
         msg_header=MessageHeader(
+            message_id=f"heartbeat_{task.task_id}",
+            idempotency_key=f"heartbeat_{task.task_id}",
             from_agent_id=internal_header.from_agent_id or agent.id,
             to_routing_path=routing_key,
             response_routing_key=internal_header.response_routing_key,
@@ -812,8 +814,16 @@ async def _prepared_heartbeat_run(
         )
         return None
 
+    from custom_messages.contracts.schedule_worker_v1 import occurrence_identity
+
+    # Persisted launchers always have a due time. A directly constructed
+    # launcher has only its creation time, which still identifies that fire.
+    occurrence_id = occurrence_identity(
+        f"{scheduled_message.schedule_id}:{item.heartbeat_item_id}",
+        scheduled_message.next_fire_at or scheduled_message.created_at,
+    )
     task = Task(
-        task_id=new_id("task_id"),
+        task_id=f"task_{occurrence_id}",
         task_type=MessageMetaType.REQUEST,
         problem_statement=item.instruction,
     )
@@ -909,8 +919,27 @@ async def _start_heartbeat_run(
     store: HeartbeatStore,
     source_id: str,
     run: _HeartbeatRun,
+    claim_token: Optional[str] = None,
 ) -> bool:
     item, task, internal_header, internal_meta = run.item, run.task, run.header, run.meta
+    admission = None
+    if claim_token and not item.target_agent_type:
+        from custom_agents.schedule_execution_identity import execution_digest
+        from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
+
+        occurrence_id = task.task_id.removeprefix("task_")
+        receipt = await agent.task_manager.operations_runtime.run(
+            agent._schedule_store.worker_records.get_occurrence, occurrence_id, agent.team_id,
+        )
+        if receipt is not None:
+            return True
+        admission = ScheduleOccurrenceV1(
+            occurrence_id=occurrence_id, schedule_id=scheduled_message.schedule_id,
+            due_at=scheduled_message.next_fire_at, task_id=task.task_id, team_id=agent.team_id,
+            owner_canonical_user_id=owner_canonical_user_id_for_schedule(scheduled_message) or "",
+            named_agent_type=agent.named_agent_type, execution_digest=execution_digest(scheduled_message),
+            agent_id=agent.id, claim_token=claim_token,
+        )
     await agent.task_manager.operations_runtime.run(
         store.mark_item_run_started, item.heartbeat_item_id
     )
@@ -939,6 +968,7 @@ async def _start_heartbeat_run(
     if not await agent.task_manager.operations_runtime.run(
         agent.task_manager.add_task, task, internal_header, internal_meta,
         owner_person_id=owner_person_id,
+        **({"schedule_admission": admission} if admission is not None else {}),
     ):
         agent._logger.warning(
             "[%s] Could not admit heartbeat item %s as task %s; leaving it "
@@ -1007,6 +1037,7 @@ async def enqueue_heartbeat_items(
             store=store,
             source_id=source_id,
             run=run,
+            claim_token=claim_token,
         )
         accepted_any = accepted or accepted_any
 

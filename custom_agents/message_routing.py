@@ -107,7 +107,7 @@ def requester_bound_primary_route(
 ) -> str | None:
     """Give typed user handoffs their trusted reply route before header creation.
 
-    Setup pages, and the team lead's credential forms and signups, go to the
+    Setup pages, and the team lead's questions, credential forms and signups, go to the
     person's chat: when TeamArchitect works on a specialist's escalation the
     immediate requester is that specialist, and only the gateway can show the
     person a form. Specialists have no credential-form or signup actions
@@ -119,7 +119,7 @@ def requester_bound_primary_route(
         return None
     if isinstance(content, ToolSetupRequestV1) or (
         sender_is_team_lead
-        and isinstance(content, (SecureCredentialCollectionRequest, SignupAutomationRequest))
+        and isinstance(content, (TaskQuery, SecureCredentialCollectionRequest, SignupAutomationRequest))
     ):
         return person_chat_route(
             incoming_header, instance_config_path=instance_config_path, team_id=team_id, requester_type=requester_type
@@ -231,8 +231,18 @@ async def build_outgoing_meta(
     """
     outgoing_meta = llm_meta.model_copy(deep=True) if llm_meta else MessageMeta()
 
-    if not outgoing_meta.from_agent_name:
-        outgoing_meta.from_agent_name = from_agent_name
+    # The model may choose a recipient, but the runtime owns the sender.
+    if (
+        outgoing_meta.from_agent_name
+        and outgoing_meta.from_agent_name != from_agent_name
+    ):
+        logger.warning(
+            "Ignored a model-authored sender name. event=message_sender_name_overridden "
+            "supplied_sender=%s actual_sender=%s",
+            outgoing_meta.from_agent_name,
+            from_agent_name,
+        )
+    outgoing_meta.from_agent_name = from_agent_name
 
     if (
         not outgoing_meta.msg_correlation_id

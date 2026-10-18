@@ -971,7 +971,15 @@ def test_start_isolated_recovery_tool_queues_fresh_manager_task(tmp_path):
     recovery_task_id = recovery_links[0].recovery_task_id
     assert recovery_links[0].original_plan_id == task_manager.get_task_plan_id(task.task_id)
     assert recovery_links[0].checkpoint_schedule_id is not None
-    assert schedule_store.get_scheduled_message(recovery_links[0].checkpoint_schedule_id) is not None
+    checkpoint = schedule_store.get_scheduled_message(recovery_links[0].checkpoint_schedule_id)
+    assert checkpoint is not None
+    assert checkpoint.claim_agent_id == "manager_agent"
+    claim_time = datetime.now(timezone.utc) + timedelta(minutes=10)
+    assert schedule_store._repository.claim_next_due(
+        now_iso=claim_time.isoformat(), claim_expires_at=(claim_time + timedelta(minutes=2)).isoformat(),
+        claim_token="sibling_claim",
+        claimer_agent_id="sibling_manager", claimer_named_agent_type="TeamArchitect", claimer_team_id="team_1",
+    ) is None
 
     recovery_info = task_manager.get_task_info(recovery_task_id)
     assert recovery_info is not None

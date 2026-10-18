@@ -185,6 +185,34 @@ def _comms_message_from_turn_action(self, action: TurnAction) -> Optional[CommsM
     return None
 
 
+def _supply_reply_linkage(action: TurnAction, incoming: ContentType) -> None:
+    """Set omitted runtime ids before durable serialization and before dispatch.
+
+    The outbox must retain known reply ids across restarts. Explicitly supplied
+    mismatches stay visible to the later correction and anomaly recorder.
+    """
+
+    if isinstance(action, TaskResponseAction) and isinstance(incoming, Task):
+        if action.task.task_id is None:
+            action.task.task_id = incoming.task_id
+        if incoming.parent_task_id and action.task.parent_task_id is None:
+            action.task.parent_task_id = incoming.parent_task_id
+        return
+    if not isinstance(action, TaskQueryAction):
+        return
+    query = action.task_query
+    if isinstance(incoming, Task) and query.parent_task_id is None:
+        query.parent_task_id = incoming.task_id
+    elif isinstance(incoming, TaskQuery):
+        if query.parent_task_id is None:
+            query.parent_task_id = incoming.parent_task_id
+        if (
+            query.query_type == MessageMetaType.RESPONSE
+            and "task_query_id" not in query.model_fields_set
+        ):
+            query.task_query_id = incoming.task_query_id
+
+
 def _enum_value(value: Any) -> Any:
     return value.value if hasattr(value, "value") else value
 
@@ -1188,11 +1216,7 @@ async def _execute_turn_action_record(
         )
         return await _complete_published_delegation(self, record=record, action=action)
 
-    if isinstance(action, TaskResponseAction) and isinstance(incoming_content, Task):
-        if action.task.task_id is None:
-            action.task.task_id = incoming_content.task_id
-        if incoming_content.parent_task_id and action.task.parent_task_id is None:
-            action.task.parent_task_id = incoming_content.parent_task_id
+    _supply_reply_linkage(action, incoming_content)
     _validate_manager_mediated_worker_delegation(self, action)
     comms_message = self._comms_message_from_turn_action(action)
     if comms_message is None:
@@ -1582,6 +1606,12 @@ async def _execute_turn_action_record(
                 },
             )
     elif isinstance(content, ScheduledMessage):
+        # The model's schedule schema leaves routing to trusted runtime code.
+        # Supplying it here is normal construction, not a malformed-message repair.
+        if content.payload_header is None:
+            content.payload_header = incoming_header.model_copy(deep=True)
+        if content.payload_meta is None:
+            content.payload_meta = incoming_meta.model_copy(deep=True)
         await self._handle_scheduled_message(
             content, msg_header=incoming_header, msg_meta=incoming_meta
         )
@@ -2107,6 +2137,7 @@ async def _execute_turn_decision_outbox(
 
     action_payloads = []
     for action in decision.actions:
+        _supply_reply_linkage(action, incoming_content)
         action_payload = action.model_dump(mode="json", exclude_none=True)
         task_id = None
         if isinstance(action, (DelegateTaskAction, TaskResponseAction)):

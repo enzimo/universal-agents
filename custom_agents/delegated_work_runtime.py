@@ -33,6 +33,8 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Optional
 
+from id_generation import new_id
+
 from custom_messages.contracts.control_v1 import ControlInstruction, Instruction
 from custom_messages.contracts.delegated_work_v1 import (
     DelegatedTaskClaimedV1,
@@ -142,6 +144,44 @@ def delegation_holder(agent: Any, subtask_id: str) -> Optional[str]:
 
     record = delegated_tasks(agent).get(str(agent.team_id), subtask_id)
     return record.holder_agent_id if record is not None else None
+
+
+def task_response_matches_holder(
+    agent: Any, task_info: Any, response: Any, sender_id: Optional[str]
+) -> bool:
+    """Check reply linkage and the recorded recipient before a result changes state.
+
+    A shared worker queue has no recipient until a worker's admission claim.
+    Direct agent addressing can identify the recipient without a queue claim.
+    The message's display name never establishes who holds a task.
+    """
+
+    record = delegated_tasks(agent).get(str(agent.team_id), response.task_id)
+    expected_sender = record.holder_agent_id if record is not None else None
+    if record is None:
+        recipient_name = getattr(task_info.meta, "to_agent_name", None)
+        expected_sender = (getattr(agent, "_agent_id_by_name", {}) or {}).get(
+            recipient_name
+        )
+    expected_parent = task_info.task.parent_task_id
+    if (
+        expected_parent == response.parent_task_id
+        and expected_sender
+        and expected_sender == sender_id
+    ):
+        return True
+    agent._logger.warning(
+        "Ignored a delegated result whose sender or parent does not match the held task. "
+        "event=delegated_task_response_rejected agent_id=%s task_id=%s sender=%s "
+        "expected_sender=%s parent_task_id=%s expected_parent_task_id=%s",
+        agent.id,
+        response.task_id,
+        sender_id,
+        expected_sender,
+        response.parent_task_id,
+        expected_parent,
+    )
+    return False
 
 
 def record_check_back(agent: Any, *, parent_task_id: str, minutes: float) -> None:
@@ -265,10 +305,6 @@ def end_unpublished_delegation(
 # -- claims (worker) ---------------------------------------------------------------
 
 
-def _claim_id(task_id: str, worker_agent_id: str, recovered: bool) -> str:
-    return f"claim:{task_id}:{worker_agent_id}:{'recovered' if recovered else 'admitted'}"
-
-
 async def send_task_claim(
     agent: Any,
     *,
@@ -294,7 +330,9 @@ async def send_task_claim(
     ):
         return False
     claim = DelegatedTaskClaimedV1(
-        claim_id=_claim_id(task_id, str(agent.id), recovered),
+        # Each admission is a new event, even if this worker held the task
+        # earlier. Reusing a task/worker key suppresses real moves in JetStream.
+        claim_id=new_id("claim"),
         team_id=str(agent.team_id),
         task_id=task_id,
         parent_task_id=parent_task_id,

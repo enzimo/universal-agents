@@ -31,6 +31,7 @@ from assistant_gateway.domain.sessions import (
     SessionSearchRecord,
 )
 from assistant_gateway.ports.repositories import (
+    CredentialCollectionRepository,
     DeliveryRepository,
     DeliveryUnitOfWork,
     IdentityRepository,
@@ -124,6 +125,9 @@ class GatewayStateStore:
             self._repository,
             ToolSetupRepository,
         )
+        self._credential_collection_repository = _DomainRepositoryView(
+            self._repository, CredentialCollectionRepository,
+        )
 
     @property
     def identity_repository(self) -> IdentityRepository:
@@ -148,6 +152,10 @@ class GatewayStateStore:
         """The setup pages tasks wait on (assistant_gateway.application.tool_setup)."""
 
         return cast(ToolSetupRepository, self._tool_setup_repository)
+
+    @property
+    def credential_collection_repository(self) -> CredentialCollectionRepository:
+        return cast(CredentialCollectionRepository, self._credential_collection_repository)
 
     @property
     def delivery_repository(self) -> DeliveryRepository:

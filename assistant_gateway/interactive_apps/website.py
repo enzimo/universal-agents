@@ -684,7 +684,8 @@ class InternalWebsiteInteractiveApp(BaseInteractiveApp):
             headers={"Cache-Control": "no-store"},
         )
 
-    async def _handle_agent_status(self, _request: web.Request) -> web.Response:
+    async def _handle_agent_status(self, request: web.Request) -> web.Response:
+        self.access._require_web_chat_session(request)
         base_url = self.environment.activity_collector_base_url
         token = self.environment.activity_collector_admin_token
         if not base_url or not token:

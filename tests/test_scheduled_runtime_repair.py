@@ -28,6 +28,51 @@ from custom_messages.enums import (
 from storage.config import resolve_storage_settings
 
 
+@pytest.mark.asyncio
+async def test_provider_retry_cannot_be_claimed_by_sibling_worker(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from custom_agents.strands_agent import UniversalAgent
+
+    agent = _FakeAgent()
+    agent.named_agent_type = "WebResearchAgent"
+    agent.instance_timezone = "UTC"
+    agent._schedule_store = ScheduleStore(db_path=str(tmp_path / "timers.db"))
+    agent._ensure_schedule_store = lambda: agent._schedule_store
+    info = SimpleNamespace(
+        task=Task(task_id="paused_task", task_type=MessageMetaType.REQUEST),
+        header=MessageHeader(from_agent_id="requester"),
+        meta=MessageMeta(),
+    )
+    schedule = await UniversalAgent._schedule_provider_cooldown_retry(
+        agent, task_info=info, retry_at=datetime.now(timezone.utc) - timedelta(seconds=1)
+    )
+    assert agent._schedule_store.claim_next_due(
+        claimer_agent_id="sibling_worker", claimer_named_agent_type=agent.named_agent_type,
+        claimer_team_id=agent.team_id,
+    ) is None
+    claimed = agent._schedule_store.claim_next_due(
+        claimer_agent_id=agent.id, claimer_named_agent_type=agent.named_agent_type,
+        claimer_team_id=agent.team_id,
+    )
+    assert claimed is not None and claimed["schedule_id"] == schedule.schedule_id
+
+
+@pytest.mark.parametrize("management,kind", [
+    (ScheduleManagementClass.USER, None),
+    (ScheduleManagementClass.SYSTEM, SystemScheduleKind.UNCLASSIFIED),
+])
+def test_heartbeat_name_does_not_grant_launcher_behavior(management, kind):
+    from custom_agents.heartbeat_store import is_heartbeat_launcher
+
+    schedule = ScheduledMessage(
+        schedule_name="heartbeat:personal", management_class=management, system_schedule_kind=kind,
+        payload=Task(task_type=MessageMetaType.REQUEST),
+        payload_meta=MessageMeta(gateway_context=GatewayContext(heartbeat_source_id="source")),
+        interval_ms=60_000,
+    )
+    assert not is_heartbeat_launcher(schedule)
+
+
 class _FakeScheduleStore:
     def __init__(self):
         self.added = None
@@ -214,6 +259,99 @@ async def test_heartbeat_does_not_dispatch_work_to_unavailable_worker_role(
     assert refreshed.last_run_at is not None
     assert refreshed.last_failure_at is not None
     assert refreshed.last_success_at is None
+
+
+@pytest.mark.asyncio
+async def test_replayed_heartbeat_occurrence_keeps_worker_task_identity(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    settings = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "heartbeat.db")}})
+    store = HeartbeatStore(storage_settings=settings)
+    store.ensure_source(source_id="source")
+    store.add_item(source_id="source", title="Alerts", instruction="Check alerts", conversation_id="conversation_heartbeat", target_agent_type="WebResearchAgent")
+    sends = AsyncMock()
+    agent = SimpleNamespace(
+        id="manager", name="Manager", team_id="team", named_agent_type="TeamArchitect", paused=True,
+        task_manager=SimpleNamespace(operations_runtime=TaskOperationRuntime(), _db_path=settings.sqlite_path, storage_settings=settings),
+        named_agent_type_queue_map={}, team_comms=SimpleNamespace(send_message=sends),
+        _verify_delegation_target=AsyncMock(return_value=True), _logger=logging.getLogger("heartbeat.replay"),
+    )
+    schedule = ScheduledMessage(
+        schedule_id="launcher", schedule_name="heartbeat:test", management_class=ScheduleManagementClass.SYSTEM,
+        system_schedule_kind=SystemScheduleKind.HEARTBEAT_LAUNCHER,
+        payload=Task(task_type=MessageMetaType.REQUEST),
+        payload_meta=MessageMeta(gateway_context=GatewayContext(heartbeat_source_id="source")),
+        interval_ms=60_000, next_fire_at=datetime.now(timezone.utc).isoformat(),
+    )
+    # The launcher was dispatched but its due time was not advanced before restart.
+    assert await enqueue_heartbeat_items(agent, schedule)
+    agent.id = "replacement_manager"
+    assert await enqueue_heartbeat_items(agent, schedule.model_copy(deep=True))
+    first, replay = [call.kwargs["message"] for call in sends.await_args_list]
+    assert first.msg_content.task_id == replay.msg_content.task_id
+    assert first.msg_header.idempotency_key == replay.msg_header.idempotency_key
+    assert first.msg_header.idempotency_key
+    # The broker's duplicate window may have elapsed. A different worker must
+    # still refuse this occurrence after the first worker completed it.
+    from custom_agents.task_manager import TaskManager
+    from custom_agents.task_message_runtime import _custody_for_new_task
+
+    original_worker = TaskManager(storage_settings=settings)
+    original_worker.set_owner_identity("worker_one", "First worker", "team", "WebResearchAgent")
+    assert original_worker.add_task(first.msg_content, first.msg_header, first.msg_meta, owner_person_id=None)
+    original_worker.complete_task(first.msg_content.task_id, datetime.now(timezone.utc).isoformat())
+    sibling = TaskManager(storage_settings=settings)
+    sibling.set_owner_identity("worker_two", "Second worker", "team", "WebResearchAgent")
+    sibling_agent = SimpleNamespace(
+        id="worker_two", team_id="team", task_manager=sibling, _logger=agent._logger,
+    )
+    fresh_header = replay.msg_header.model_copy(update={"message_id": "fresh_transport_delivery", "idempotency_key": None})
+    assert await _custody_for_new_task(sibling_agent, replay.msg_content, fresh_header, replay.msg_meta, None) is None
+    assert not sibling.task_state.tasks
+    schedule.next_fire_at = (datetime.fromisoformat(schedule.next_fire_at) + timedelta(minutes=1)).isoformat()
+    assert await enqueue_heartbeat_items(agent, schedule)
+    assert sends.await_args.kwargs["message"].msg_content.task_id != first.msg_content.task_id
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_item_admission_survives_restart_before_launcher_advances(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from custom_agents.task_manager import TaskManager
+    from custom_messages.contracts.schedule_worker_v1 import occurrence_identity
+
+    db_path = str(tmp_path / "heartbeat_admission.db")
+    manager = TaskManager(db_path=db_path)
+    manager.set_owner_identity("manager", "Manager", "team", "TeamArchitect")
+    heartbeat = HeartbeatStore(storage_settings=manager.storage_settings)
+    heartbeat.ensure_source(source_id="source")
+    item = heartbeat.add_item(source_id="source", title="Alerts", instruction="Check alerts", conversation_id="conversation_item")
+    schedules = ScheduleStore(storage_settings=manager.storage_settings)
+    schedules.add(ScheduledMessage(
+        schedule_id="launcher", schedule_name="heartbeat:test", management_class=ScheduleManagementClass.SYSTEM,
+        system_schedule_kind=SystemScheduleKind.HEARTBEAT_LAUNCHER,
+        payload=Task(task_type=MessageMetaType.REQUEST),
+        payload_meta=MessageMeta(gateway_context=GatewayContext(heartbeat_source_id="source")),
+        interval_ms=60_000, repeat_count=None,
+        next_fire_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+    ), claim_team_id="team", claim_named_agent_type="TeamArchitect")
+    claim = schedules.claim_next_due(claimer_agent_id="manager", claimer_named_agent_type="TeamArchitect", claimer_team_id="team")
+    schedule = schedules.get_scheduled_message("launcher")
+    agent = SimpleNamespace(
+        id="manager", name="Manager", team_id="team", named_agent_type="TeamArchitect", paused=True,
+        task_manager=manager, _schedule_store=schedules, _logger=logging.getLogger("heartbeat.admission"),
+    )
+    assert await enqueue_heartbeat_items(agent, schedule, claim_token=claim["claim_token"])
+    occurrence_id = occurrence_identity(f"launcher:{item.heartbeat_item_id}", schedule.next_fire_at)
+    receipt = schedules.worker_records.get_occurrence(occurrence_id, "team")
+    assert receipt is not None
+    # Restart with the launcher still due. Its task and receipt committed together.
+    restarted = TaskManager(db_path=db_path)
+    restarted.set_owner_identity("manager", "Manager", "team", "TeamArchitect")
+    restarted.restore_runtime_state()
+    agent.task_manager = restarted
+    assert await enqueue_heartbeat_items(agent, schedule, claim_token=claim["claim_token"])
+    assert list(restarted.task_state.tasks) == [receipt.task_id]
+    assert schedules.get_scheduled_message("launcher").next_fire_at == schedule.next_fire_at
 
 
 @pytest.mark.parametrize("explicit_followup", [True])

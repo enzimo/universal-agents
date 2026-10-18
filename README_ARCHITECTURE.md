@@ -2324,6 +2324,29 @@ this model remain (`assistant_cli.py execution-retire-old-records`).
 
 ## Gateway, tools, and models
 
+The runtime sets message sender names from the sending agent. New delegated
+tasks use `delegate_task`; `send_message` handles other structured messages.
+Delegated results must match the saved parent and the worker holding the task.
+Questions and escalation choices remain in the lead's prompt, and a lead's
+question to a person uses the preserved gateway reply route. Steering that
+names a task applies only to that task. Accepted guidance and duplicate keys
+are saved with its history, and guidance survives a restart until the model
+turn records its decision.
+
+Delivery receipts use the durable team-lead route, so they can wait for a
+replacement lead before discovery completes. Repeated publication of one
+receipt uses the same idempotency key. Presence replay follows the presence
+stream's retention period; its age still determines whether an agent is live.
+Queued model turns broadcast when work starts and finishes.
+
+Credential-form watches keep broker session and task identifiers in gateway
+storage and recover after restart. These local wait records contain no
+submitted credentials or form URLs and are not team-transfer records. Error
+replies omit the agent's plan and execution history. Notification results and
+prompt delivery settings omit raw chat and thread addresses. The agent-status
+HTTP endpoint requires a signed-in Web Chat session; collector API tokens go
+in headers.
+
 The gateway gives people the places to decide; it never decides access itself.
 The access Inbox (`assistant_gateway/access_inbox.py`) lists access and change
 requests with notices, announces each waiting request once in a chat where the

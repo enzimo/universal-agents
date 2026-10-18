@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import hmac
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from aiohttp import web
+from aiohttp import BasicAuth, web
 
 from activity_collector.settings import CollectorRuntimeSettings
 from runtime_hosting.aiohttp import start_aiohttp_site
@@ -187,20 +188,29 @@ class ActivityCollectorService:
         if audience is not None:
             if audience == "admin":
                 expected_token = self._admin_token
-                supplied = self._extract_token(request, include_query=True)
+                supplied = self._extract_token(request, include_basic=True)
             elif audience == "ingest":
                 expected_token = self._ingest_token
                 supplied = self._extract_token(
                     request,
-                    include_query=False,
+                    include_basic=False,
                     extra_header=INGEST_TOKEN_HEADER,
                     include_shared_header=False,
                 )
             else:
                 expected_token = self._user_token
-                supplied = self._extract_token(request, include_query=True)
-            if supplied != expected_token:
-                raise web.HTTPUnauthorized(text="Missing or invalid shared-secret token.")
+                supplied = self._extract_token(request, include_basic=True)
+            if not hmac.compare_digest(
+                (supplied or "").encode("utf-8"), expected_token.encode("utf-8")
+            ):
+                headers = (
+                    {"WWW-Authenticate": f'Basic realm="Activity collector {audience}", charset="UTF-8"'}
+                    if audience in {"admin", "user"}
+                    else {}
+                )
+                raise web.HTTPUnauthorized(
+                    text="Missing or invalid shared-secret token.", headers=headers
+                )
         return await handler(request)
 
     def _classify_audience(self, path: str) -> Optional[str]:
@@ -216,21 +226,25 @@ class ActivityCollectorService:
     def _extract_token(
         request: web.Request,
         *,
-        include_query: bool,
+        include_basic: bool,
         extra_header: str | None = None,
         include_shared_header: bool = True,
     ) -> Optional[str]:
         auth_header = request.headers.get("Authorization", "")
         if auth_header.lower().startswith("bearer "):
             return auth_header.split(" ", 1)[1].strip() or None
+        # Native browser authentication keeps dashboard and EventSource tokens
+        # in headers. URL query parameters are never credential channels.
+        if include_basic and auth_header.lower().startswith("basic "):
+            try:
+                return BasicAuth.decode(auth_header, encoding="utf-8").password
+            except ValueError:
+                return None
         if extra_header and request.headers.get(extra_header):
             return request.headers.get(extra_header)
         if include_shared_header and request.headers.get("X-Shared-Token"):
             return request.headers.get("X-Shared-Token")
-        if not include_query:
-            return None
-        token = request.query.get("token")
-        return token.strip() if token else None
+        return None
 
     async def _handle_single_event(self, request: web.Request) -> web.Response:
         payload = await request.json()
@@ -720,12 +734,8 @@ class ActivityCollectorService:
     const mode = {json.dumps(mode)};
     const summaryEndpoint = {json.dumps(summary_endpoint)};
     const streamEndpoint = {json.dumps(stream_endpoint)};
-    const token = new URLSearchParams(window.location.search).get("token") || "";
-
     function apiUrl(path) {{
-      const url = new URL(path, window.location.origin);
-      if (token) url.searchParams.set("token", token);
-      return url.toString();
+      return new URL(path, window.location.origin).toString();
     }}
 
     function escapeHtml(value) {{

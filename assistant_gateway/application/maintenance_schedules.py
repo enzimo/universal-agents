@@ -28,7 +28,7 @@ roles from the gateway's copy of the team's people instead
   InternalImprovementAgent starts or memory-review cleanup is pending
   (``custom_agents.internal_improvement_runtime``); the gateway only refreshes
   it, so its escalations reach the schedule's owner with current roles.
-- Heartbeat launcher: still installed with ``replace``.
+- Heartbeat launcher: installed once with ``ensure`` and then refreshed.
 
 Which agent type runs a schedule, its runs' delivery mode, the name prefix of
 a per-person schedule and whether a kind is per-person come from the system
@@ -249,22 +249,23 @@ class GatewayMaintenanceScheduleApplication:
                 "event=gateway_heartbeat_schedule_manager_unavailable"
             )
             return
-        await self._publish(
-            _MaintenanceScheduleDefinition(
-                schedule_id=heartbeat.schedule_id,
-                schedule_name=f"heartbeat:{self._settings.instance_name}",
-                interval_seconds=max(1, int(heartbeat.interval_seconds)),
-                instruction=(
-                    f"Heartbeat launcher tick for source_id={heartbeat.source_id}. "
-                    "The runtime will expand enabled heartbeat items into "
-                    "independent top-level tasks."
-                ),
-                delivery_mode=str(_spec(SystemScheduleKind.HEARTBEAT_LAUNCHER).delivery_mode),
-                system_schedule_kind=SystemScheduleKind.HEARTBEAT_LAUNCHER,
-                response_requested=True,
+        definition = _MaintenanceScheduleDefinition(
+            schedule_id=heartbeat.schedule_id,
+            schedule_name=f"heartbeat:{self._settings.instance_name}",
+            interval_seconds=max(1, int(heartbeat.interval_seconds)),
+            instruction=(
+                f"Heartbeat launcher tick for source_id={heartbeat.source_id}. "
+                "The runtime will expand enabled heartbeat items into "
+                "independent top-level tasks."
             ),
-            *self._team_target(),
+            delivery_mode=str(_spec(SystemScheduleKind.HEARTBEAT_LAUNCHER).delivery_mode),
+            system_schedule_kind=SystemScheduleKind.HEARTBEAT_LAUNCHER,
+            response_requested=True,
+            install_mode="ensure",
         )
+        target = self._team_target()
+        await self._publish(definition, *target)
+        await self._publish(replace(definition, install_mode="refresh"), *target)
 
     async def ensure_specialist_schedules(self) -> None:
         """Install every specialist schedule set: its team schedules and every active person's.

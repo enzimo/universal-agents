@@ -73,8 +73,6 @@ def render_delivery_settings_context(
             f"- Urgent delivery allowed during quiet hours: {str(quiet_hours.allow_urgent_delivery).lower()}",
             f"- Digest release hour: {delivery.digest_delivery_hour_local}:00 local time",
             f"- Default delivery channel: {default_target.channel_name}",
-            f"- Default delivery chat id: {default_target.chat_id or '(not set)'}",
-            f"- Default delivery thread/topic id: {default_target.thread_id or '(not set)'}",
             f"- Notification routing mode: {notification_routing_mode}",
             "- User communication profile: notify_user target='auto' follows notification routing mode. source_thread_or_default returns notifications to the active interactive chat/thread when available; default_target uses the default delivery target.",
             "- Preferred user communication tool: notify_user(message, urgency='normal'|'urgent', reason='short_audit_reason', target='auto'|'default'|'current_thread').",

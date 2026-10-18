@@ -20,7 +20,7 @@ from assistant_gateway.domain.identity import (
     GatewayUserWebInviteRecord,
     GatewayUserWebTokenRecord,
 )
-from assistant_gateway.domain.request_state import PendingQueryRecord, RequestRecord, ToolSetupRecord
+from assistant_gateway.domain.request_state import CredentialCollectionRecord, PendingQueryRecord, RequestRecord, ToolSetupRecord
 from assistant_gateway.domain.sessions import (
     SessionConversationListRecord,
     SessionConversationRecord,
@@ -242,6 +242,17 @@ class RequestRepository(Protocol):
         cutoff_iso: str,
         status: str = "expired",
     ) -> int: ...
+
+
+@runtime_checkable
+class CredentialCollectionRepository(Protocol):
+    """Keep open broker form watches until their result has been published."""
+
+    def record_credential_collection(self, record: CredentialCollectionRecord) -> None: ...
+
+    def list_credential_collections(self) -> list[CredentialCollectionRecord]: ...
+
+    def remove_credential_collection(self, credential_request_id: str) -> None: ...
 
 
 @runtime_checkable

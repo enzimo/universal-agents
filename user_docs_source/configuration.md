@@ -1348,6 +1348,15 @@ The activity collector needs user and admin tokens in env. Verify:
 - `activity_collector.base_url` is reachable by manager and spawned agents.
 - The collector process starts in logs.
 
+API clients send the matching token in an `Authorization: Bearer ...` header.
+Dashboard pages use the browser's sign-in prompt. Enter `user` or `admin` as
+the username and that dashboard's token as the password. Tokens in URL query
+parameters are refused, so they do not enter browser history or URL logs.
+
+The Compose example publishes the secure broker's port on loopback only.
+Access from another machine needs an explicitly configured authenticated HTTPS
+proxy. Keep the broker's internal address reachable by the runtime processes.
+
 ## Voice
 
 Voice settings live under `voice`. Grok voice uses the xAI key: save it with

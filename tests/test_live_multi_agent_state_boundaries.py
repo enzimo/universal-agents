@@ -34,6 +34,7 @@ from runtime_settings.instance_layout import InstanceLayout
 from runtime_settings.projection import _project_transport
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_agents.pending_work_runtime import schedule_pending_work
+from custom_agents.delegated_work_runtime import delegated_tasks, record_publication
 from custom_agents.runtime_guardrails import RuntimeGuardrailsPlugin
 from custom_agents.strands_agent import UniversalAgent
 from custom_agents.tool_call_limits import ToolCallLimitCallbackHandler
@@ -954,7 +955,7 @@ async def test_live_manager_task_query_choices_survive_nats_transport() -> None:
                 await connection.close()
 
 
-async def test_live_worker_manager_escalation_round_trips_through_team_architect() -> (
+async def test_live_worker_manager_escalation_round_trips_through_team_architect(monkeypatch) -> (
     None
 ):
     team_id = new_id("team_mgr_esc")
@@ -963,6 +964,10 @@ async def test_live_worker_manager_escalation_round_trips_through_team_architect
     worker_task_id = new_id("worker_schedule")
     manager_route = f"{team_id}_{TEAM_ARCHITECT_AGENT_TYPE}"
     worker_route = f"{team_id}_InternalImprovementAgent"
+    user_route = new_id("usr_mgr_esc")
+    # Stand in for this team's configured gateway route. The worker's reply
+    # route is deliberately different, so a question sent there cannot pass.
+    monkeypatch.setattr("custom_agents.message_routing.person_chat_route", lambda *args, **kwargs: user_route)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -994,6 +999,9 @@ async def test_live_worker_manager_escalation_round_trips_through_team_architect
             ],
         )
         manager_llm = FakeStrandsAgent(
+            _task_query_request(
+                "Approve the capability update?", choice_mode="single", choices=escalation.choices,
+            ),
             _task_response("MANAGER_GUIDANCE: user approved the capability update.")
         )
         worker_llm = FakeStrandsAgent(
@@ -1053,7 +1061,7 @@ async def test_live_worker_manager_escalation_round_trips_through_team_architect
             try:
                 channel = await connection.channel()
                 user_queue = await channel.declare_queue(
-                    new_id("usr_mgr_esc"),
+                    user_route,
                     durable=False,
                     auto_delete=True,
                 )
@@ -1121,6 +1129,25 @@ async def test_live_worker_manager_escalation_round_trips_through_team_architect
                     == "approve_image_true"
                 )
 
+                question = await _wait_for_response(user_queue, timeout=20)
+                assert isinstance(question.msg_content, TaskQuery)
+                assert question.msg_content.message == "Approve the capability update?"
+                assert question.msg_content.choices == escalation.choices
+                for detail in ("needs_user_input", "approve_image_true", "supports_image_input"):
+                    assert detail in manager_llm.invocations[0]
+                await _publish_envelope(
+                    channel, manager.id,
+                    MessageEnvelope(
+                        msg_content=TaskQuery(
+                            task_query_id=question.msg_content.task_query_id,
+                            parent_task_id=question.msg_content.parent_task_id,
+                            query_type=MessageMetaType.RESPONSE, message="Approved.",
+                            selected_choice_ids=["approve_image_true"],
+                        ),
+                        msg_header=MessageHeader(from_agent_id="live-test-user", to_routing_path=manager.id, response_routing_key=user_queue.name),
+                        msg_meta=MessageMeta(requester_type=RequesterType.USER_REQUESTER, msg_correlation_id=question.msg_meta.msg_correlation_id, conversation_id=question.msg_meta.conversation_id),
+                    ),
+                )
                 final_envelope = await _wait_for_response(user_queue, timeout=30)
 
                 assert isinstance(final_envelope.msg_content, Task)
@@ -1133,7 +1160,7 @@ async def test_live_worker_manager_escalation_round_trips_through_team_architect
 
                 await _wait_for(
                     lambda: (
-                        len(manager_llm.invocations) == 1
+                        len(manager_llm.invocations) == 2
                         and len(worker_llm.invocations) == 2
                         and _archive_row(worker.task_manager, worker_task_id, worker_id)
                         is not None
@@ -3229,6 +3256,8 @@ async def test_live_runtime_mailbox_defers_response_while_batch_lease_active() -
                     requester_type=RequesterType.AGENT_REQUESTER,
                 ),
             )
+            record_publication(manager, subtask_id=subtask_id, parent_task_id=parent_task_id, named_agent_type="WebResearchAgent", target_agent_name=None, publish_sequence=1)
+            delegated_tasks(manager).record_claim(team_id=team_id, task_id=subtask_id, worker_agent_id="live-worker", worker_agent_name="live-worker", claimed_at=datetime.now(timezone.utc))
             agent_tasks: list[tuple[UniversalAgent, asyncio.Task]] = []
             connection = await _connect_nats(team_id)
             try:
@@ -3396,6 +3425,9 @@ async def test_live_watchdog_failure_replays_after_worker_response_when_batch_ac
                 ),
             )
             assert child_info is not None
+
+            record_publication(manager, subtask_id=subtask_id, parent_task_id=parent_task_id, named_agent_type="WebResearchAgent", target_agent_name=None, publish_sequence=1)
+            delegated_tasks(manager).record_claim(team_id=team_id, task_id=subtask_id, worker_agent_id="live-worker", worker_agent_name="live-worker", claimed_at=datetime.now(timezone.utc))
 
             agent_tasks: list[tuple[UniversalAgent, asyncio.Task]] = []
             connection = await _connect_nats(team_id)

@@ -152,13 +152,13 @@ class ScheduleClaimScope(TypedDict):
     claim_agent_id: str | None
 
 
-def schedule_claim_scope_for_agent(agent: Any) -> ScheduleClaimScope:
-    """Return the default persisted claim scope for schedules owned by an agent."""
+def schedule_claim_scope_for_agent(agent: Any, *, task_local: bool = False) -> ScheduleClaimScope:
+    """Allow replaceable type ownership unless firing requires this agent's task memory."""
     named_agent_type = getattr(agent, "named_agent_type", None)
     return {
         "claim_team_id": getattr(agent, "team_id", None),
         "claim_named_agent_type": named_agent_type,
-        "claim_agent_id": None if named_agent_type else getattr(agent, "id", None),
+        "claim_agent_id": getattr(agent, "id", None) if task_local or not named_agent_type else None,
     }
 
 

@@ -410,15 +410,18 @@ def _access_maintenance_tasks(
     access_inbox: GatewayAccessInbox,
     broker: Any,
     tool_setups: Any,
+    credential_workflow: Any = None,
     status_page: Any,
     stop_event: asyncio.Event,
 ) -> list[asyncio.Task[Any]]:
-    """Access work at start: the onboarding key hand-over and setup recovery (both modes) and the Inbox loop.
+    """Access work at start: onboarding key hand-over, form recovery and the Inbox loop.
 
     The hand-over records the onboarding sharing choices and links the keys
     typed during onboarding (``assistant_gateway.onboarding_account_keys``); setup recovery
     tells tasks whose setup page was open when the gateway stopped that
     nobody watched it (``tool_setup.GatewayToolSetups.recover_unwatched``);
+    credential recovery resumes saved broker session watches without storing
+    submitted fields or page URLs;
     the Inbox loop (authorization on) sends announcements and decision
     messages; the Status page loop tells administrators about new problems
     (``assistant_gateway.status_page``). With authorization on, administrators
@@ -440,6 +443,8 @@ def _access_maintenance_tasks(
         asyncio.create_task(tool_setups.recover_unwatched(), name="gateway_tool_setup_recovery"),
         asyncio.create_task(status_page.run(stop_event), name="gateway_status_page_loop"),
     ]
+    if credential_workflow is not None:
+        tasks.append(asyncio.create_task(credential_workflow.recover_collections(), name="gateway_credential_collection_recovery"))
     if config.authorization.enabled:
         tasks.append(asyncio.create_task(access_inbox.run(stop_event), name="gateway_access_inbox_loop"))
         tasks.append(
@@ -901,6 +906,7 @@ class UserGateway:
             manager_client=self._manager_client,
             session_repository=self.session_repository,
             tool_setup_repository=resolved_state_store.tool_setup_repository,
+            collection_repository=resolved_state_store.credential_collection_repository,
             setup_states=self.access_inbox.setup_states(),
             request_service=self._request_service,
             clock=self._clock,
@@ -1252,6 +1258,7 @@ class UserGateway:
                     access_inbox=self.access_inbox,
                     broker=self._secure_broker,
                     tool_setups=self._credential_workflow.tool_setups,
+                    credential_workflow=self._credential_workflow,
                     status_page=self.application.status,
                     stop_event=self._stop_event,
                 )
