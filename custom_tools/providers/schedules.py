@@ -76,6 +76,7 @@ from custom_messages.enums import (
     TaskHistoryType,
 )
 from custom_tools.provider_contract import ToolProvider
+from custom_agents.pending_work_runtime import wake_scheduler
 from custom_tools.providers._runtime import (
     _get_current_task_info,
     _link_to_objective,
@@ -197,8 +198,8 @@ def _run_change(agent: "UniversalAgent", request: ScheduleChangeRequestV1, *, ac
         )
     report = result.pop(REPORT_KEY, None)
     if report is not None:
-        if result.get(flag) and getattr(agent, "_scheduler_wake", None):
-            agent._scheduler_wake.set()
+        if result.get(flag):
+            wake_scheduler(agent)
         result["manager_report"] = (
             _report_schedule_mutation_to_manager(agent, action=action, schedule_id=request.schedule_id, **report)
             if result.get(flag)
@@ -590,8 +591,7 @@ def create_scheduled_job(
             user_visible=True,
             reason="Scheduled job created from objective-linked task context.",
         )
-        if getattr(agent, "_scheduler_wake", None):
-            agent._scheduler_wake.set()
+        wake_scheduler(agent)
         return json.dumps(
             {
                 **objective_link_fields,

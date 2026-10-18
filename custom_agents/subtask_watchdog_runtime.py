@@ -10,6 +10,7 @@ from typing import Any, List, Optional
 
 from custom_agents.control_runtime import handle_interrupted_turn
 from custom_agents.conversation_runtime import finalize_conversation_turn
+from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.task_manager import TaskInfo
 from storage.delegated_task_repository import DELEGATED_QUEUED
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
@@ -1116,5 +1117,6 @@ async def _recover_stalled_subtasks(self) -> None:
 
     # Check-back times the requester's model set on its delegations.
     recovered_any = bool(await wake_due_check_backs(self)) or recovered_any
-    if recovered_any and not self.paused and not self.is_executing:
-        await self._continue_pending_work()
+    if recovered_any:
+        # The retained drain runs the recovered work, never this scheduler pass.
+        schedule_pending_work(self)

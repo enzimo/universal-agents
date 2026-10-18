@@ -12,6 +12,7 @@ from typing import Optional, Union
 
 from custom_agents.control_runtime import handle_interrupted_turn
 from custom_agents.lease_loss_wind_down import may_start_next_task
+from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.delegated_work_runtime import send_task_claim
 from custom_agents.worker_handback_runtime import apply_redispatch_notice
 from custom_agents.conversation_delivery_runtime import handle_delivery_receipt
@@ -1257,8 +1258,7 @@ async def _handle_task_request(
         )
 
     await check_queue_pressure(self)
-    if not self.is_executing and not self.paused:
-        await self._continue_pending_work()
+    schedule_pending_work(self)
 
 
 async def _handle_delivery_receipt(

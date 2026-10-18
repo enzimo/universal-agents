@@ -240,12 +240,15 @@ def exiting_agent(team, agent_id, *, is_lead):
         _agent_state_io=BlockingIOLane(),
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
+        _pending_work_timers=set(),
+        _owned_tasks=set(),
         _local_schedule_task=None,
         _presence_task=None,
         _scheduler_task=None,
     )
     agent.get_self_status = lambda is_exiting=False, **_: status(agent_id, exiting=is_exiting, agent_type="TeamArchitect")
     agent._refresh_self_agent_state = partial(UniversalAgent._refresh_self_agent_state, agent)
+    agent._cancel_scheduler_pass = partial(UniversalAgent._cancel_scheduler_pass, agent)
     agent.set_exit_flag = agent._should_exit.set
     return agent
 

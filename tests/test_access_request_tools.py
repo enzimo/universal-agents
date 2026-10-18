@@ -11,6 +11,7 @@ directive; and a request is withdrawn when its task ends first.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -105,6 +106,8 @@ def make_agent(storage, tmp_path: Path, *, agent_type="WebResearchAgent", lead=F
         _interrupted_turn_sessions={},
         paused=False,
         is_executing=False,
+        _should_exit=asyncio.Event(),
+        _pending_work_task=None,
         _continue_pending_work=AsyncMock(),
     )
     return agent
@@ -267,6 +270,9 @@ async def test_an_access_interrupt_waits_here_and_a_decision_resumes_the_task(st
     )
     assert get_human_interaction_blocker(manager, task_id) is None
     assert manager.get_task_info(task_id).state == ProgressState.ACCEPTED
+    # The decision's handler returned before the turn; the retained drain runs it.
+    worker._continue_pending_work.assert_not_awaited()
+    await asyncio.wait_for(worker._pending_work_task, 2)
     worker._continue_pending_work.assert_awaited()
 
 

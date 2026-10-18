@@ -19,6 +19,7 @@ from custom_agents.agent_instantiation_service import (
     AgentInstantiationService,
     effective_worker_rules,
 )
+from custom_agents.pending_work_runtime import wake_scheduler
 from custom_agents.schedule_access import OWNER, ScheduleAccessCheck
 from custom_agents.schedule_changes import (
     CONFIGURE_WORKER_ACTION,
@@ -315,8 +316,8 @@ class _ConfigurationCommit:
                 policy_revision=binding.revision,
             ),
         )
-        if agent._scheduler_wake:
-            agent._scheduler_wake.set()
+        # A sync tool (configure_scheduled_worker) reaches this from its worker thread.
+        wake_scheduler(agent)
         return self._result(binding, pending)
 
     def _suspend(self, permit: ScheduleMutationPermit | None) -> dict[str, Any]:

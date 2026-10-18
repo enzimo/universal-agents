@@ -1,9 +1,10 @@
 """Bounded Objective work sessions and their execution profiles (catalog tool ``fn:objectives``).
 
 ``objective_work_sessions`` and ``objective_work_profiles`` take an action
-(``custom_tools.providers.objectives`` explains the merge); each action runs
-the function it replaced, unchanged. ``propose_objective_work_profile`` stays
-its own function (15 inputs). This module holds the sessions' schedule
+to group related operations within providers' tool-count limits. Each call
+validates its action's inputs and required level; grants cover the whole
+tool. ``propose_objective_work_profile`` stays its own function because it
+has many inputs. This module holds the sessions' schedule
 installation and rollback too; ``custom_tools.providers.objectives`` lists
 these tools in the objectives provider.
 """
@@ -59,6 +60,7 @@ if TYPE_CHECKING:
 
 from custom_tools.providers._objective_profile_export import export_profile
 from custom_tools.providers._objective_work_skills import missing_objective_work_skills
+from custom_agents.pending_work_runtime import wake_scheduler
 from custom_tools.providers._runtime import (
     _get_current_task_info,
     _require_manager_tool,
@@ -278,8 +280,7 @@ def _install_objective_work_schedule(
                     rollback_exc,
                 )
         raise
-    if getattr(agent, "_scheduler_wake", None):
-        agent._scheduler_wake.set()
+    wake_scheduler(agent)
     return policy
 
 

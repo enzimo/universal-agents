@@ -21,6 +21,7 @@ from custom_agents.sdk.strands.turn_tool_stop import (
     invoke_with_tool_stop,
     stop_tool_calls,
 )
+from custom_agents.task_runtime_state import TurnStartNotes
 from custom_agents.sdk.strands.turn_ports import (
     TurnRuntimeSettings,
     TurnRuntimeEffects,
@@ -606,6 +607,11 @@ class _TurnState:
     reasoning_summary_repair_attempted: bool = field(init=False)
     # The turn's stop for its tool commands, from set_active_execution_context.
     tool_stop: ToolStop | None = None
+    # What the turn read for itself at its start (TurnStartNotes). The outbox
+    # releases it with the decision's batch, an approval pause hands it to the
+    # interrupted session, and any other returned result releases it at return.
+    start_notes: TurnStartNotes | None = None
+    start_notes_handed_over: bool = False
 
 
 class LLMTurnExecutor:
@@ -1917,12 +1923,37 @@ class LLMTurnExecutor:
             self.effects.clear_active_execution_context()
             return early_response
         try:
-            return await self._run_prepared_turn(turn)
+            content = await self._run_prepared_turn(turn)
+            if not turn.start_notes_handed_over:
+                await self._release_turn_start_state(turn)
+            return content
         except asyncio.CancelledError:
             await self._end_tool_work_of_cancelled_turn(turn)
             raise
         finally:
             self.effects.clear_active_execution_context()
+
+    async def _release_turn_start_state(self, turn: _TurnState) -> None:
+        """Release what this turn read, for a result saved outside the outbox.
+
+        A turn's decision normally reaches the outbox, which releases the notes
+        with its batch in one save (``TurnStartNotes``). This covers results
+        saved elsewhere (a budget pause, a work-session yield), once saved.
+        Before 2026-10-17 the notes were removed at turn start, so a turn
+        cancelled at shutdown lost them; a delegation repeated by a later turn
+        is not deduplicated, so they must not outlive the decision either.
+        """
+        if turn.start_notes is None:
+            return
+        try:
+            await self.tasks.runtime.run(self.tasks.release_turn_start_notes, turn.start_notes)
+        except Exception:
+            self.logger.exception(
+                "Could not remove the note a finished turn read; the next turn reads it again. "
+                "event=turn_start_state_release_failed agent_id=%s task_id=%s",
+                self.settings.id,
+                turn.active_task_id,
+            )
 
     async def _run_prepared_turn(self, turn: _TurnState) -> ContentType:
         """Run and recover inside the cancellation owner, including error-handler awaits."""
@@ -2304,10 +2335,13 @@ class LLMTurnExecutor:
         tool_call_limit = self.effects.resolved_max_tool_calls_per_task()
         turn.tool_call_limit_handler = None
         runtime_resume_directive = await self.tasks.runtime.run(
-            self.tasks.consume_runtime_resume_directive, turn.active_task_id
+            self.tasks.read_runtime_resume_directive, turn.active_task_id
         )
         partial_tool_call_limit = await self.tasks.runtime.run(
-            self.tasks.consume_partial_tool_call_limit, turn.active_task_id
+            self.tasks.read_partial_tool_call_limit, turn.active_task_id
+        )
+        turn.start_notes = TurnStartNotes.read(
+            turn.active_task_id, runtime_resume_directive, partial_tool_call_limit
         )
         turn.partial_finalization_requested = partial_tool_call_limit is not None
         if partial_tool_call_limit is not None:
@@ -2709,6 +2743,9 @@ class LLMTurnExecutor:
         if getattr(turn.result, "stop_reason", None) == "interrupt" and isinstance(
             turn.msg_content, Task
         ):
+            # The task is mid-work: the resumed turn's decision releases what
+            # this turn read (TurnStartNotes).
+            turn.start_notes_handed_over = True
             return await self.effects.send_interrupt_request_for_result(
                 result=turn.result,
                 task=turn.msg_content,
@@ -2717,6 +2754,7 @@ class LLMTurnExecutor:
                 strands_agent=self.model(),
                 invoke_kwargs=turn.invoke_kwargs,
                 full_prompt=turn.full_prompt,
+                start_notes=turn.start_notes,
             )
         if (
             turn.tool_call_limit_handler is not None
@@ -2730,12 +2768,16 @@ class LLMTurnExecutor:
         outcome = self.decode_result(
             result=turn.result, msg_content=turn.msg_content, msg_meta=turn.msg_meta
         )
+        # The outbox releases what this turn read when it records the batch;
+        # a failure before that keeps it for the task's next turn.
+        turn.start_notes_handed_over = True
         turn.content = await self.effects.execute_turn_decision_outbox(
             decision=outcome.decision,
             incoming_content=turn.msg_content,
             incoming_header=turn.msg_header,
             incoming_meta=turn.msg_meta,
             structured_output_details=outcome.structured_output_details,
+            start_notes=turn.start_notes,
         )
         await self._write_context_debug_post_turn(
             request=turn.context_request,

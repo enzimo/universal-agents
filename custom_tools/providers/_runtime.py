@@ -1,13 +1,15 @@
 """Runtime support for the trusted Strands tool surface."""
 
 import asyncio
+import concurrent.futures
 import logging
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, Optional
 
 from access_control.entities import PersonPrincipal
 from access_control.identity import IdentityRejected
 from access_control.ownership import PRIVATE_UPDATE, named_task_access, objective_access
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
+from custom_agents.pending_work_runtime import AgentStopping, run_as_owned_task
 from custom_agents.task_manager_objectives import ObjectiveSaveFailed
 from custom_agents.schedule_store import (
     ScheduleStore,
@@ -57,25 +59,71 @@ async def _send_control_instruction_payload(
     return routing_key
 
 
+def _on_event_loop_thread() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+_SEND_REFUSALS = {
+    "event_loop_thread": "the tool ran on the agent's event loop instead of a worker thread",
+    "agent_not_running": "the agent is not running",
+}
+_SHUTTING_DOWN = "the agent is shutting down, so the message was not sent"
+
+
+def _refuse_tool_send(agent: "UniversalAgent", coroutine: Any, reason: str) -> NoReturn:
+    coroutine.close()
+    logger.error(
+        "An agent tool could not send: it must run in a worker thread of a running agent. "
+        "event=agent_tool_send_refused agent_id=%s reason=%s",
+        getattr(agent, "id", None),
+        reason,
+    )
+    raise RuntimeError(f"The message was not sent: {_SEND_REFUSALS[reason]}.")
+
+
 def _run_agent_coroutine(
     agent: "UniversalAgent", coroutine: Any, *, timeout: float = 15.0
 ) -> None:
-    """Schedule an agent coroutine from either the agent loop or a sync tool worker thread."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        runtime_loop = getattr(agent, "_runtime_loop", None)
-        if runtime_loop is not None and runtime_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(coroutine, runtime_loop)
-            future.result(timeout=timeout)
-            return
-        asyncio.run(coroutine)
-        return
+    """Run an agent coroutine from a sync tool's worker thread and wait for it.
 
-    if loop.is_running():
-        asyncio.create_task(coroutine)
-    else:
-        loop.run_until_complete(coroutine)
+    Strands runs sync tools in a worker thread, so a send has finished, or
+    failed, before the tool reports it. The send runs on the agent's loop as
+    owned work (``pending_work_runtime.run_as_owned_task``): it is refused once
+    the agent is stopping, and shutdown cancels and joins it, so a tool whose
+    turn was cancelled cannot publish after shutdown started. A send that does
+    not finish within ``timeout`` is cancelled, never left running while the
+    tool reports a failure. A call from the event loop thread, or with no
+    running agent loop, is refused: the send could only run unowned, or on a
+    private loop without the agent's connection.
+    """
+    if _on_event_loop_thread():
+        _refuse_tool_send(agent, coroutine, "event_loop_thread")
+    runtime_loop = getattr(agent, "_runtime_loop", None)
+    if runtime_loop is None or not runtime_loop.is_running():
+        _refuse_tool_send(agent, coroutine, "agent_not_running")
+    future = asyncio.run_coroutine_threadsafe(
+        run_as_owned_task(agent, coroutine, name=f"tool-send:{getattr(agent, 'id', None)}"),
+        runtime_loop,
+    )
+    # The tool shows these errors' text to the model, so each says why plainly
+    # (a bare TimeoutError or CancelledError prints as an empty string).
+    try:
+        future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()
+        logger.warning(
+            "An agent tool's send did not finish in time and was cancelled. "
+            "event=agent_tool_send_timed_out agent_id=%s timeout_seconds=%s",
+            getattr(agent, "id", None),
+            timeout,
+        )
+        raise TimeoutError(f"the send did not finish within {timeout:g} s and was cancelled") from None
+    except (AgentStopping, concurrent.futures.CancelledError):
+        raise AgentStopping(_SHUTTING_DOWN) from None
 
 
 def _require_manager_tool(agent: "UniversalAgent", tool_name: str) -> Optional[str]:

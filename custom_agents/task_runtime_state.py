@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, Dict, List, Optional
@@ -27,6 +28,72 @@ class TaskRuntimeState:
     runtime_resume_directives: Dict[str, str] = field(default_factory=dict)
     human_interaction_blockers: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
+
+
+@dataclass(frozen=True)
+class TurnStartNotes:
+    """What a turn read for itself at its start: its next-turn note and partial tool-call limit.
+
+    They are released when the turn's decision is recorded: in the same task
+    lane step and the same snapshot save as the decision's outbox batch
+    (``create_turn_action_batch``), or, for a result saved outside the outbox
+    (a budget pause, a work-session yield), when the turn returns. A turn that
+    pauses for an approval hands them to its interrupted session, and the
+    resumed turn's batch releases them. A cancel, failover or failure before
+    the decision is recorded keeps them for the task's next turn.
+
+    Why at the decision and not later: a repeated delegation is not
+    deduplicated across turns. Each turn's batch gets a new id, a delegation's
+    idempotency key falls back to the batch id and action index, and receivers
+    deduplicate only by task id or message id. A note kept after its decision
+    was recorded would make a later turn act on it again.
+    """
+
+    task_id: str
+    resume_directive: Optional[str] = None
+    partial_tool_call_limit: Optional[int] = None
+
+    @classmethod
+    def read(
+        cls, task_id: Optional[str], resume_directive: Optional[str], partial_tool_call_limit: Optional[int]
+    ) -> Optional["TurnStartNotes"]:
+        """What a turn read for its task, or None when it read nothing to release."""
+        if not task_id or (not resume_directive and partial_tool_call_limit is None):
+            return None
+        return cls(task_id, resume_directive, partial_tool_call_limit)
+
+
+def release_turn_start_notes(
+    state: TaskRuntimeState, notes: TurnStartNotes, logger: logging.Logger
+) -> bool:
+    """Remove what a turn read, keeping what was added since; True when the state changed.
+
+    Notes are only ever added after the existing text
+    (``TaskManager.append_runtime_resume_directive``), so the note a turn read
+    is the start of the stored note. A partial limit is removed only if no
+    newer one replaced it.
+    """
+    changed = False
+    applied = notes.resume_directive
+    current = state.runtime_resume_directives.get(notes.task_id)
+    if applied and current is not None:
+        if current == applied:
+            del state.runtime_resume_directives[notes.task_id]
+            changed = True
+        elif current.startswith(f"{applied}\n\n"):
+            state.runtime_resume_directives[notes.task_id] = current[len(applied) + 2 :]
+            changed = True
+        else:
+            logger.warning(
+                "The note for a task's next turn changed during the turn in an unexpected way; "
+                "it is kept for the next turn. event=resume_note_kept_after_turn task_id=%s",
+                notes.task_id,
+            )
+    limit = notes.partial_tool_call_limit
+    if limit is not None and state.partial_tool_call_limit_overrides.get(notes.task_id) == limit:
+        del state.partial_tool_call_limit_overrides[notes.task_id]
+        changed = True
+    return changed
 
 @dataclass
 class PlanRuntimeState:

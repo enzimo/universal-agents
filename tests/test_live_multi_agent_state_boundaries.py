@@ -31,6 +31,7 @@ from assistant_gateway.runtime_config import load_runtime_config_file
 from config_loader import load_config
 from runtime_settings.instance_layout import InstanceLayout
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
+from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.runtime_guardrails import RuntimeGuardrailsPlugin
 from custom_agents.strands_agent import UniversalAgent
 from custom_agents.tool_call_limits import ToolCallLimitCallbackHandler
@@ -1622,7 +1623,8 @@ async def test_live_late_aar_schedules_hydrated_manager_review_task(
                 # database alive through result application and the final
                 # admission drain, then verify the scheduled task completed.
                 await _wait_for(
-                    lambda: not manager.is_executing and not manager._continuing_work
+                    lambda: not manager.is_executing
+                    and (manager._pending_work_task is None or manager._pending_work_task.done())
                 )
                 archived = _archive_row(
                     manager.task_manager, batch.scheduled_review_task_id, manager_id
@@ -1927,7 +1929,7 @@ async def test_live_manager_isolated_recovery_uses_fresh_context_and_plan_link()
                     "2026-04-28T12:00:05+00:00",
                 )
 
-                await manager._continue_pending_work()
+                schedule_pending_work(manager)
 
                 response = await _wait_for_response(user_queue)
                 assert isinstance(response.msg_content, Task)
@@ -3304,7 +3306,7 @@ async def test_live_runtime_mailbox_defers_response_while_batch_lease_active() -
                 manager.task_manager.complete_runtime_batch_lease(
                     lease.lease_id, status="completed"
                 )
-                await manager._continue_pending_work()
+                schedule_pending_work(manager)
 
                 await _wait_for(
                     lambda: (
@@ -3497,7 +3499,7 @@ async def test_live_watchdog_failure_replays_after_worker_response_when_batch_ac
                 manager.task_manager.complete_runtime_batch_lease(
                     lease.lease_id, status="completed"
                 )
-                await manager._continue_pending_work()
+                schedule_pending_work(manager)
 
                 await _wait_for(
                     lambda: (

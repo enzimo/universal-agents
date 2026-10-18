@@ -19,11 +19,12 @@ from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage, ScheduleTaskMemory
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
-from custom_tools.runtime_context import _agent_ctx, set_agent_ref
+from custom_tools.runtime_context import _agent_ctx, get_agent_ref, set_agent_ref
 from custom_tools.providers.communication import notify_user
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
+from tests.pending_work_support import call_tool_on_agent_loop
 
 
 @pytest.fixture(autouse=True)
@@ -112,6 +113,12 @@ def _fake_agent_without_instance_config(
     return agent
 
 
+
+def _notify(*args, **kwargs):
+    """Call notify_user as Strands does: in a worker thread while the agent loop runs."""
+    return call_tool_on_agent_loop(get_agent_ref(), notify_user._tool_func, *args, **kwargs)
+
+
 _OUTSIDE_TASK_FOLDERS = "outside this person's folder, the shared team/ and agents/ folders, the data folders, and what others shared"
 
 
@@ -130,7 +137,7 @@ def test_notify_user_publishes_user_notification_to_gateway_preferred_target(
     agent = _fake_agent(config_path, team_comms=team_comms)
     set_agent_ref(agent)
     try:
-        result = notify_user._tool_func(
+        result = _notify(
             "Done with the GitHub task.",
             urgency="urgent",
             reason="github_task_done",
@@ -230,7 +237,7 @@ def test_notify_user_records_scheduled_notification_in_memory(
     agent._schedule_store = schedule_store
     set_agent_ref(agent)
     try:
-        result = notify_user._tool_func(
+        result = _notify(
             "Goal update.",
             reason="scheduled_match_goal",
         )
@@ -268,7 +275,7 @@ def test_notify_user_can_target_current_thread(tmp_path: Path) -> None:
     )
     set_agent_ref(agent)
     try:
-        result = notify_user._tool_func(
+        result = _notify(
             "Current thread progress update.",
             reason="progress_update",
             target="current_thread",
@@ -319,7 +326,7 @@ def test_notify_user_auto_targets_active_web_chat_thread(tmp_path: Path, monkeyp
     )
     set_agent_ref(agent)
     try:
-        result = notify_user._tool_func(
+        result = _notify(
             "Screenshot attached.",
             attachments=[
                 {
@@ -366,7 +373,7 @@ def test_notify_user_explicit_default_uses_preferred_target_during_interactive_t
     )
     set_agent_ref(agent)
     try:
-        result = notify_user._tool_func(
+        result = _notify(
             "Send to the preferred target.", target="default"
         )
     finally:
@@ -406,7 +413,7 @@ def test_notify_user_memory_class_forces_memory_notification_target(
     )
     set_agent_ref(agent)
     try:
-        result = notify_user._tool_func(
+        result = _notify(
             "Saved a memory.",
             reason="",
             target="current_thread",
@@ -453,7 +460,7 @@ def test_notify_user_auto_can_be_forced_to_preferred_target_during_interactive_t
     )
     set_agent_ref(agent)
     try:
-        result = notify_user._tool_func(
+        result = _notify(
             "Send auto notification to the preferred target."
         )
     finally:
@@ -480,7 +487,7 @@ def test_notify_user_current_thread_requires_gateway_context(tmp_path: Path) -> 
     )
     set_agent_ref(agent)
     try:
-        result = notify_user._tool_func("Created memory.", target="current_thread")
+        result = _notify("Created memory.", target="current_thread")
     finally:
         _agent_ctx.set(None)
 
@@ -497,7 +504,7 @@ def test_notify_user_resolves_instance_config_from_runtime_config(
     team_comms = SimpleNamespace(send_message=AsyncMock())
     set_agent_ref(_fake_agent_without_instance_config(team_comms=team_comms))
     try:
-        result = notify_user._tool_func("Done through runtime config.")
+        result = _notify("Done through runtime config.")
     finally:
         _agent_ctx.set(None)
 
@@ -518,7 +525,7 @@ def test_notify_user_resolves_instance_config_from_agent_instance_root(
         )
     )
     try:
-        result = notify_user._tool_func("Done through instance root discovery.")
+        result = _notify("Done through instance root discovery.")
     finally:
         _agent_ctx.set(None)
 
@@ -548,7 +555,7 @@ def test_notify_user_logs_runtime_config_failure_before_instance_root_fallback(
             logging.WARNING,
             logger="custom_tools.providers.communication",
         ):
-            result = notify_user._tool_func("Done through logged fallback.")
+            result = _notify("Done through logged fallback.")
     finally:
         _agent_ctx.set(None)
 
@@ -561,7 +568,7 @@ def test_notify_user_rejects_app_target_without_chat_id(tmp_path: Path) -> None:
     config_path = _write_config(tmp_path, channel_name="telegram", chat_id="")
     set_agent_ref(_fake_agent(config_path))
     try:
-        result = notify_user._tool_func("Cannot route this.")
+        result = _notify("Cannot route this.")
     finally:
         _agent_ctx.set(None)
 
@@ -580,7 +587,7 @@ def test_notify_user_rejects_attachments_from_instance_root_and_database(tmp_pat
     database_copy.write_text("rows", encoding="utf-8")
     set_agent_ref(_fake_agent(config_path))
     try:
-        result = notify_user._tool_func(
+        result = _notify(
             "Files attached.",
             attachments=[{"path": str(team_env)}, {"path": str(database_copy)}],
         )
@@ -601,7 +608,7 @@ def test_notify_user_rejects_attachment_outside_instance_roots(tmp_path: Path) -
     outside.write_bytes(b"png-data")
     set_agent_ref(_fake_agent(config_path))
     try:
-        result = notify_user._tool_func(
+        result = _notify(
             "Screenshot attached.",
             attachments=[{"path": str(outside), "content_type": "image/png"}],
         )
@@ -637,7 +644,7 @@ def test_notify_user_rejects_attachments_from_other_people_and_control_files(
         _fake_agent(config_path, team_comms=team_comms, active_gateway_context=active_context)
     )
     try:
-        result = notify_user._tool_func(
+        result = _notify(
             "Files attached.",
             attachments=[{"path": str(other_person_file)}, {"path": str(control_file)}],
         )
@@ -701,3 +708,30 @@ def test_a_default_notice_for_another_person_goes_to_their_route_never_the_first
         _notify_user_gateway_context(
             config, target="default", source_meta=_meta_for("usr_first", session_key="session_first"), person_id="usr_ben"
         )
+
+
+def test_notify_user_says_plainly_why_a_send_did_not_finish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare TimeoutError printed as an empty string: "Failed to publish user notification: "."""
+    import asyncio
+
+    from custom_tools.providers import _runtime, communication
+
+    async def stuck_send(**_kwargs):
+        await asyncio.Event().wait()
+
+    team_comms = SimpleNamespace(send_message=AsyncMock(side_effect=stuck_send))
+    agent = _fake_agent(_write_config(tmp_path), team_comms=team_comms)
+    monkeypatch.setattr(
+        communication,
+        "_run_agent_coroutine",
+        lambda target, coroutine: _runtime._run_agent_coroutine(target, coroutine, timeout=0.05),
+    )
+    set_agent_ref(agent)
+    try:
+        result = _notify("Done with the GitHub task.")
+    finally:
+        _agent_ctx.set(None)
+    assert result["status"] == "error"
+    assert result["error"] == (
+        "Failed to publish user notification: the send did not finish within 0.05 s and was cancelled"
+    )

@@ -6,6 +6,7 @@ from custom_agents.task_manager_ports import RuntimeOperationsCoordinatorOperati
 from custom_agents.task_runtime_state import ExecutionRuntimeState
 from custom_agents.task_runtime_state import PlanRuntimeState
 from custom_agents.task_runtime_state import TaskRuntimeState
+from custom_agents.task_runtime_state import TurnStartNotes, release_turn_start_notes
 import logging
 
 from datetime import datetime, timedelta, timezone
@@ -42,8 +43,15 @@ class RuntimeOperationsCoordinator:
         *,
         plan_id: Optional[str] = None,
         plan_step_id: Optional[str] = None,
+        release_notes: Optional[TurnStartNotes] = None,
     ) -> Optional[TurnActionBatchRecord]:
-        """Create durable outbox records for one ordered runtime-action batch."""
+        """Create durable outbox records for one ordered runtime-action batch.
+
+        Recording the batch records the turn's decision, so what the turn read
+        at its start (``release_notes``) is released here, in the same snapshot
+        save: a crash can neither keep a note for a recorded decision nor drop
+        one for an unrecorded decision (``TurnStartNotes``).
+        """
         if source_task_id not in self.task_state.tasks:
             self._logger.error("Cannot create turn-action batch for unknown task %s.", source_task_id)
             return None
@@ -99,6 +107,8 @@ class RuntimeOperationsCoordinator:
                 "action_ids": [f"{batch_id}_action_{index}" for index in range(len(actions))],
             },
         )
+        if release_notes is not None:
+            release_turn_start_notes(self.task_state, release_notes, self._logger)
         self.operations.persist_runtime_state()
         return batch
 
