@@ -613,23 +613,27 @@ def _require_record_digest(current: "ScheduledMessage", expected: Optional[str])
         )
 
 
-# A person set a new run time during what would have been the schedule's last run.
+# A person set a new run time for a one-time schedule while its run was under way.
 RETIMED_FINAL_RUN_KEPT = "retimed_final_run_kept"
 
 
 def _after_retimed_run(row: Mapping[str, Any], *, release_claim: bool) -> RowWrite:
     """The advance after a run during which someone set a new next run time.
 
-    The new run time stands and the claim is released. The run that happened
-    counts against a counted series that has runs left. When it would have
-    been the last run (a one-time reminder moved to tomorrow), the person's
-    latest instruction wins: the schedule stays at the new time with one run
-    left (owner's decision 2026-10-17).
+    The new run time stands and the claim is released. A one-time schedule
+    (no interval or cron) stays at the new time with its one run: the
+    person's latest instruction wins, as for a reminder moved to tomorrow
+    (owner's decision 2026-10-17). A counted repeating series counts the run
+    and finishes after its last one even when it was re-timed, so a series
+    whose runs move their own next run time cannot run forever.
     """
 
     remaining = row.get("remaining_count")
+    one_time = row.get("interval_ms") is None and not row.get("cron_expression")
     columns: dict[str, Any] = dict(_CLEARED_CLAIM) if release_claim else {}
     if remaining is not None and remaining - 1 <= 0:
+        if not one_time:
+            return RowWrite(delete=True, result=(AdvanceOutcome.FINISHED, _AfterRun(None, None, "last_run")))
         columns["remaining_count"] = 1
         kept = _AfterRun(row.get("next_fire_at"), 1, RETIMED_FINAL_RUN_KEPT)
         return RowWrite(columns=columns, result=(AdvanceOutcome.DUE_CHANGED, kept))
@@ -986,8 +990,8 @@ class ScheduleStore:
         claim (when given) and the next run time is still ``due_at``, the run
         that was claimed. An edit that set a new run time during the run wins
         and the claim is released: the run counts against a counted series
-        with runs left, and a schedule on its last run stays at the new time
-        with one run left (``_after_retimed_run``). Writes only the run time, the
+        (which finishes after its last run), and a one-time schedule stays at
+        the new time (``_after_retimed_run``). Writes only the run time, the
         remaining count and the claim, so a pause or turn-off made during the
         run stays. The next run is computed from the later of now and
         ``due_at``. The caller logs an outcome that is not ``applied``.
@@ -1036,7 +1040,7 @@ class ScheduleStore:
         due_at: Optional[str],
         agent_id: Optional[str],
     ) -> None:
-        """Log an advance that applied, and a re-timed final run that was kept.
+        """Log an advance that applied, and a re-timed one-time schedule that was kept.
 
         The caller logs every outcome that is not ``applied``
         (``scheduled_runtime``).
@@ -1044,9 +1048,9 @@ class ScheduleStore:
 
         if after is not None and after.reason == RETIMED_FINAL_RUN_KEPT:
             self._logger.info(
-                "A schedule's next run time was changed during what would have been its last run; it stays at "
-                "the new time with one run left. event=schedule_retimed_during_final_run_kept schedule_id=%s "
-                "due_at=%s next_fire_at=%s agent_id=%s",
+                "A one-time schedule's run time was changed while its run was under way; it stays at the new "
+                "time. event=schedule_retimed_during_final_run_kept schedule_id=%s due_at=%s next_fire_at=%s "
+                "agent_id=%s",
                 schedule_id,
                 due_at,
                 after.next_fire_at,

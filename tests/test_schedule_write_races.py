@@ -516,14 +516,9 @@ def test_a_run_re_timed_during_its_run_still_counts_while_its_series_has_runs_le
     assert (row["remaining_count"], row["next_fire_at"], row["claimed_by_agent_id"]) == (2, new_time, None)
 
 
-@pytest.mark.parametrize("kind", ["one_time_reminder", "series_on_its_last_run"])
-def test_a_schedule_re_timed_during_its_last_run_stays_at_the_new_time(store, caplog, kind):
+def test_a_one_time_schedule_re_timed_during_its_run_stays_at_the_new_time(store, caplog):
     """The person's latest instruction wins (owner's decision 2026-10-17): a reminder moved to tomorrow stays."""
-    if kind == "one_time_reminder":
-        schedule_id = _due(store, interval_ms=None, repeat_count=1)
-    else:
-        schedule_id = _due(store, repeat_count=3)
-        store._repository.write_locked(schedule_id, lambda _row: RowWrite(columns={"remaining_count": 1}))
+    schedule_id = _due(store, interval_ms=None, repeat_count=1)
     claimed, new_time = _retime_during_run(store, schedule_id)
 
     with caplog.at_level(logging.INFO, logger=schedule_store_module.__name__):
@@ -536,6 +531,33 @@ def test_a_schedule_re_timed_during_its_last_run_stays_at_the_new_time(store, ca
     assert (row["remaining_count"], row["next_fire_at"], row["claimed_by_agent_id"]) == (1, new_time, None)
     assert "event=schedule_retimed_during_final_run_kept" in caplog.text
     assert f"schedule_id={schedule_id}" in caplog.text
+
+
+def test_a_counted_series_that_re_times_itself_in_every_run_still_finishes_after_its_count(store, caplog):
+    """A run that moves its own next run time (update_scheduled_job(next_fire_at=...)) must not keep it forever."""
+    schedule_id = _due(store, repeat_count=2)
+    outcomes = []
+    for _ in range(4):
+        if store.get_row(schedule_id) is None:
+            break
+        # Time passes until the moved run is due.
+        store._repository.write_locked(
+            schedule_id, lambda _row: RowWrite(columns={"next_fire_at": (_now() - timedelta(seconds=5)).isoformat()})
+        )
+        claimed, _new_time = _retime_during_run(store, schedule_id)
+        with caplog.at_level(logging.INFO, logger=schedule_store_module.__name__):
+            outcomes.append(
+                store.update_after_fire(
+                    schedule_id,
+                    claim_token=claimed["claim_token"],
+                    claimer_agent_id="worker_b",
+                    due_at=claimed["next_fire_at"],
+                )
+            )
+
+    assert outcomes == [AdvanceOutcome.DUE_CHANGED, AdvanceOutcome.FINISHED]
+    assert store.get_row(schedule_id) is None
+    assert "event=schedule_retimed_during_final_run_kept" not in caplog.text
 
 
 def test_an_advance_by_an_agent_that_lost_its_claim_is_refused(store):

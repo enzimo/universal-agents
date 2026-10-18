@@ -211,9 +211,11 @@ wrote its notes does not count, so a schedule that runs often can still be
 paused. A run that writes its notes never undoes your change. Pausing or
 turning off a schedule just before a run starts stops that run, and pausing it
 while it runs does not make that run happen again when you resume it. If you
-move a schedule's next run while its last run is under way (a reminder moved to
-tomorrow), it keeps the new time. A one-time schedule always runs once: asking
-for more runs needs an interval or a cron time.
+move a one-time schedule while its run is under way (a reminder moved to
+tomorrow), it keeps the new time and runs then. A schedule with a set number of
+runs still stops after its last run, even if that run moved its next time. A
+one-time schedule always runs once: asking for more runs needs an interval or a
+cron time.
 
 The runtime notices and reports; it does not guarantee a repair. Disallowed
 types, missing tools or credentials, or a stopped team lead can still need an
