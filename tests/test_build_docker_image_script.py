@@ -567,6 +567,7 @@ def test_dockerfiles_build_and_validate_rust_runtime_tools() -> None:
     for content in (dockerfile, bundle_dockerfile):
         assert "FROM rust:1.95.0-slim-trixie AS rust-tools-builder" in content
         assert "COPY rust/ua-anydoc-cli/Cargo.toml" in content
+        assert "COPY rust/vendor /src/rust/vendor" in content
         assert "COPY rust/ua-anydoc-cli/src" in content
         assert "cargo build --locked --release --bin anydoc --bin ua-cedar-authorizer" in content
         assert "target/release/anydoc /usr/local/bin/anydoc" in content

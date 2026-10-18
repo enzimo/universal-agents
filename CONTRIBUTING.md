@@ -96,9 +96,10 @@ installed graph, and exercises entry-point imports, configuration, and SQLite.
 
 Both Dockerfiles build documentation in the disposable `user-docs-builder` stage
 using the development lock, then copy the generated site into the runtime image.
-The final image installs only the runtime lock. CI builds this documentation stage
-for both Dockerfiles and checks the generated pages and search index. Keep build
-tools in the stage that runs them when changing dependency ownership.
+The final image installs only the runtime lock. CI builds the documentation and
+Rust tools stages of both Dockerfiles, including the copied Rust source patches.
+It checks the generated pages, search index and container document converter.
+Keep build tools in the stage that runs them when changing dependency ownership.
 
 After editing an input, regenerate the universal, hash-checked locks with the
 development environment's uv 0.12.24:
@@ -125,6 +126,10 @@ AnyDoc's `pdf-inspector` requires `ttf-parser 0.25.1`, which has
 still requires that parser. Retain AnyDoc's current API and document formats while
 tracking the upstream font-parser replacement; do not suppress the advisory.
 The yanked `chacha20 0.10.1` pin has been replaced by `0.10.2`.
+ZIP 8 is also yanked and vulnerable. Until the document-converter dependencies
+publish compatible releases, checksum-verified source patches retain their current
+versions with ZIP 9.0.5. See [the source patch record](rust/vendor/README.md) for
+the exact changes, verification command and removal criteria.
 
 Photon's contract test declares `@photon-ai/otel` as a development dependency.
 Use `npm ci` before `npm test`; production images continue to use `--omit=dev`.

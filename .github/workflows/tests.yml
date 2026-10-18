@@ -52,6 +52,10 @@ jobs:
         run: docker buildx build --builder "$UA_CI_BUILDER" --load --label "com.universalagents.ci.job=$UA_CI_ID" --target user-docs-builder --file "${{ matrix.dockerfile }}" --tag "ua-ci-docs:$UA_CI_ID" .
       - name: Verify generated documentation
         run: docker run --rm --label "com.universalagents.ci.job=$UA_CI_ID" "ua-ci-docs:$UA_CI_ID" python -c "from pathlib import Path; assert Path('/app/user_docs/site/index.html').is_file(); assert Path('/app/user_docs/site/search/search_index.json').is_file()"
+      - name: Build the Rust tools image stage
+        run: docker buildx build --builder "$UA_CI_BUILDER" --load --label "com.universalagents.ci.job=$UA_CI_ID" --target rust-tools-builder --file "${{ matrix.dockerfile }}" --tag "ua-ci-rust:$UA_CI_ID" .
+      - name: Verify the container document converter
+        run: docker run --rm --label "com.universalagents.ci.job=$UA_CI_ID" "ua-ci-rust:$UA_CI_ID" /src/target/release/anydoc --version
 
   runtime-install:
     if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)

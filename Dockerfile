@@ -21,6 +21,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock /src/
+COPY rust/vendor /src/rust/vendor
 COPY rust/ua-anydoc-cli/Cargo.toml /src/rust/ua-anydoc-cli/Cargo.toml
 COPY rust/ua-anydoc-cli/src /src/rust/ua-anydoc-cli/src
 COPY rust/ua-cedar-authorizer/Cargo.toml /src/rust/ua-cedar-authorizer/Cargo.toml

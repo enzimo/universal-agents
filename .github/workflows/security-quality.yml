@@ -219,8 +219,9 @@ jobs:
         env:
           COMPLEXITY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: python scripts/report_cognitive_complexity.py "${COMPLEXITY_BASE_SHA}"
-      - name: Rust Cedar evaluator quality
+      - name: Rust source integrity and quality
         run: |
+          python scripts/check_vendored_rust.py
           cargo fmt --all --check
           cargo clippy --locked --workspace --all-targets -- -D warnings
           cargo test --locked --workspace

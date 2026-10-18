@@ -10,6 +10,9 @@ rust-version.workspace = true
 [dependencies]
 anydoc.workspace = true
 
+[dev-dependencies]
+zip.workspace = true
+
 [[bin]]
 name = "anydoc"
 path = "src/main.rs"

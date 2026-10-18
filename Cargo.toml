@@ -1,5 +1,6 @@
 [workspace]
 members = ["rust/ua-anydoc-cli", "rust/ua-cedar-authorizer"]
+exclude = ["rust/vendor/anydoc-0.1.9", "rust/vendor/calamine-0.36.1"]
 resolver = "2"
 
 [workspace.package]
@@ -14,3 +15,10 @@ cedar-policy = "=4.13.0"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 sha2 = "=0.10.9"
+zip = { version = "=9.0.5", default-features = false, features = ["deflate"] }
+
+# Keep the existing converter API while upstream packages still require zip 8.
+# Provenance and the narrow ZIP 9 backport are recorded in rust/vendor/README.md.
+[patch.crates-io]
+anydoc = { path = "rust/vendor/anydoc-0.1.9" }
+calamine = { path = "rust/vendor/calamine-0.36.1" }
