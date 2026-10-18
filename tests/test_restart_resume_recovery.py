@@ -25,6 +25,7 @@ from custom_agents.runtime_recovery import recover_runtime_after_restart
 from custom_agents.access_request_runtime import _resume_without_live_turn
 from custom_agents.task_human_interaction_blockers import ACCESS_REQUEST_BLOCKER, record_human_interaction_blocker
 from custom_agents.task_manager import TaskManager
+from custom_agents.task_runtime_state import TurnStartNotes
 from custom_agents.task_steering_runtime import handle_task_steering_message
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task, TaskSteering
@@ -219,7 +220,7 @@ def test_notes_for_the_next_turn_are_added_never_replaced(tmp_path: Path) -> Non
 
     note = f"{restart_note}\n\n{brief}"
     assert manager.read_runtime_resume_directive(TASK_ID) == note
-    manager.release_runtime_resume_directive(TASK_ID, note)  # the turn that read it ended
+    manager.release_turn_start_notes(TurnStartNotes(TASK_ID, resume_directive=note))  # its decision was recorded
     assert manager.read_runtime_resume_directive(TASK_ID) is None
     assert not hasattr(manager, "record_runtime_resume_directive"), "Notes have one way in, which adds"
 
@@ -292,7 +293,7 @@ async def test_distinct_requester_corrections_survive_until_the_restarted_tasks_
     assert directive.count("Runtime mid-turn interrupt response") == 2
     assert first_response in directive
     assert directive.endswith(second_response)
-    restored.release_runtime_resume_directive(TASK_ID, directive)
+    restored.release_turn_start_notes(TurnStartNotes(TASK_ID, resume_directive=directive))
     assert restored.read_runtime_resume_directive(TASK_ID) is None
 
 
@@ -313,21 +314,33 @@ def test_resume_note_deduplication_matches_whole_blocks(tmp_path: Path) -> None:
 
 
 def _turn_with_saved_notes(manager: TaskManager, invoke):
-    """The real turn owner, reading and releasing notes in ``manager``; and a model result."""
+    """The real turn owner reading notes in ``manager``, and a model result.
+
+    Its outbox records the decision as the real one does, as a batch in
+    ``manager`` that releases what the turn read (``TurnStartNotes``).
+    """
+    import dataclasses
+
     from tests.test_runtime_owner_boundaries import build_turn_owner
 
-    return build_turn_owner(
+    executor, result = build_turn_owner(
         invoke=invoke,
         guidance=deque(["", ""]),
         committed=[],
         cleared=[],
         task_operations={
             "read_runtime_resume_directive": manager.read_runtime_resume_directive,
-            "release_runtime_resume_directive": manager.release_runtime_resume_directive,
             "read_partial_tool_call_limit": manager.read_partial_tool_call_limit,
-            "release_partial_tool_call_limit": manager.release_partial_tool_call_limit,
+            "release_turn_start_notes": manager.release_turn_start_notes,
         },
     )
+
+    async def record_decision(*, incoming_content, start_notes=None, **_kwargs):
+        assert manager.create_turn_action_batch(incoming_content.task_id, [], release_notes=start_notes)
+        return Task(task_id=incoming_content.task_id, task_type=MessageMetaType.RESPONSE, answer="done")
+
+    executor.effects = dataclasses.replace(executor.effects, execute_turn_decision_outbox=record_decision)
+    return executor, result
 
 
 DECISION_NOTE = "The access request this task paused for was granted. Continue the task."
@@ -379,7 +392,7 @@ async def test_a_turn_cancelled_at_shutdown_keeps_its_note_through_a_restart(tmp
 
 
 @pytest.mark.asyncio
-async def test_a_finished_turn_removes_only_the_note_it_read(tmp_path: Path) -> None:
+async def test_a_recorded_decision_removes_only_the_note_its_turn_read(tmp_path: Path) -> None:
     """A note added while the turn runs is for the task's next turn."""
 
     _interrupted_task(tmp_path, "WebResearchAgent")

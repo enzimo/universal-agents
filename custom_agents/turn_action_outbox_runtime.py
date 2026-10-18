@@ -12,6 +12,7 @@ from default_values import AGENT_DEFAULTS
 
 from custom_agents.delegated_work_runtime import record_check_back, record_publication
 from custom_agents.pending_work_runtime import wake_pending_work_after
+from custom_agents.task_runtime_state import TurnStartNotes
 from custom_agents.conversation_delivery_states import (
     DELIVERY_STATE_NOTIFICATION_QUEUED,
     DELIVERY_STATE_SUPPRESSED,
@@ -1764,7 +1765,14 @@ async def _execute_turn_decision_outbox(
     incoming_header: MessageHeader,
     incoming_meta: MessageMeta,
     structured_output_details: Optional[Dict[str, Any]] = None,
+    start_notes: Optional[TurnStartNotes] = None,
 ) -> ContentType:
+    """Record the turn's decision as a durable batch, then carry out its actions.
+
+    ``start_notes`` (what the deciding turn read) are released in the batch's
+    own save (``TurnStartNotes``): an action that fails later, or a shutdown
+    during the actions, leaves them released, because the decision is recorded.
+    """
     source_task_id = self._history_task_id_for_content(incoming_content)
     if not source_task_id:
         if len(decision.actions) != 1:
@@ -1807,6 +1815,7 @@ async def _execute_turn_decision_outbox(
         plan_id=await self.task_manager.operations_runtime.run(
             self.task_manager.get_task_plan_id, source_task_id
         ),
+        release_notes=start_notes,
     )
     if batch is None:
         raise RuntimeError("Failed to create durable runtime action batch.")

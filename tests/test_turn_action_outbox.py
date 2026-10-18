@@ -32,6 +32,7 @@ from custom_agents.provider_error_runtime import (
     ProviderTimeoutError,
 )
 from custom_agents.conversation_store import ConversationStore
+from custom_agents.pending_work_runtime import close_pending_work
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.credentials_v1 import (
@@ -2046,3 +2047,223 @@ def test_workflow_public_config_keeps_agent_type_overrides_sparse(tmp_path) -> N
             {"provider": "litellm", "model_id": "fallback/model"}
         ]
         assert "same_provider_retry" not in manager_llm["failover"]
+
+
+# -- what a turn read is released when its decision is recorded (review 2026-10-18) --
+
+ACCESS_NOTE = (
+    "Your access request was decided while this task was paused. Continue the task using this decision; "
+    "call the tool you needed again only if it was granted: {\"status\": \"granted\"}"
+)
+
+
+def _delegation(problem: str) -> DelegateTaskAction:
+    return DelegateTaskAction(
+        task=StructuredTaskPayload(task_type=MessageMetaType.REQUEST, problem_statement=problem),
+        target_named_agent_type="WebResearchAgent",
+        requester_type=RequesterType.AGENT_REQUESTER,
+    )
+
+
+def _turn_on_the_real_outbox(agent, manager, model_call):
+    """The real turn owner: it reads notes from ``manager`` and records its decision in the agent's outbox."""
+    import dataclasses
+    from collections import deque
+
+    from tests.test_runtime_owner_boundaries import build_turn_owner
+
+    executor, _ = build_turn_owner(
+        invoke=model_call,
+        guidance=deque(["", ""]),
+        committed=[],
+        cleared=[],
+        task_operations={
+            "read_runtime_resume_directive": manager.read_runtime_resume_directive,
+            "read_partial_tool_call_limit": manager.read_partial_tool_call_limit,
+            "release_turn_start_notes": manager.release_turn_start_notes,
+            "get_task_info": manager.get_task_info,
+            "count_recoverable_pauses": manager.count_recoverable_pauses,
+        },
+    )
+    executor.effects = dataclasses.replace(
+        executor.effects, execute_turn_decision_outbox=agent._execute_turn_decision_outbox
+    )
+    return executor
+
+
+def _saved_note(tmp_path, task_id: str) -> str:
+    reloaded = _make_task_manager(tmp_path)
+    reloaded.restore_runtime_state()
+    return reloaded.read_runtime_resume_directive(task_id) or ""
+
+
+def test_an_outbox_retry_leaves_the_decided_turns_note_released(tmp_path) -> None:
+    """Before, a later outbox action failing with an automatic retry kept the
+    note, so a later turn read "call the tool again only if granted" again."""
+    from custom_agents.strands_agent import TurnActionRecoveryScheduled
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    manager.append_runtime_resume_directive(parent.task_id, ACCESS_NOTE)
+    manager.record_partial_tool_call_limit(parent.task_id, 3)
+    agent = _make_agent(
+        tmp_path,
+        task_manager=manager,
+        turn_action_outbox={
+            "max_auto_attempts": 3,
+            "initial_retry_delay_seconds": 60.0,
+            "max_retry_delay_seconds": 60.0,
+            "retry_jitter_ratio": 0.0,
+        },
+    )
+    agent.team_comms.send_message = AsyncMock(side_effect=TimeoutError("broker publish timed out"))
+    prompts: list[str] = []
+
+    async def model_call(prompt, **_kwargs):
+        prompts.append(prompt)
+        return SimpleNamespace(structured_output=StructuredAgentTurnDecision(actions=[_delegation("Research flights.")]))
+
+    executor = _turn_on_the_real_outbox(agent, manager, model_call)
+    info = manager.get_task_info(parent.task_id)
+
+    async def scenario() -> None:
+        with pytest.raises(TurnActionRecoveryScheduled):
+            await executor.process_llm_interaction(parent, info.header, info.meta)
+        await close_pending_work(agent)  # the retry timer is not part of this test
+
+    asyncio.run(scenario())
+    assert ACCESS_NOTE in prompts[0]  # the turn read the note and decided
+    assert ACCESS_NOTE not in (manager.read_runtime_resume_directive(parent.task_id) or "")
+    assert manager.read_partial_tool_call_limit(parent.task_id) is None
+    assert ACCESS_NOTE not in _saved_note(tmp_path, parent.task_id)  # in the batch's own save
+
+
+def test_a_cancel_after_the_outbox_dispatched_leaves_the_note_released(tmp_path) -> None:
+    """Before, SIGTERM after the outbox had sent a re-delegation kept the
+    delegation-decision note, so the turn after the restart delegated again."""
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    decision_note = (
+        "Runtime instruction: a delegated task failed. Inspect it, then decide: keep waiting, "
+        "delegate a task again differently, or answer with what you have."
+    )
+    manager.append_runtime_resume_directive(parent.task_id, decision_note)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    sent: list[str] = []
+
+    async def scenario() -> None:
+        second_sending = asyncio.Event()
+
+        async def publish(*, message, routing_key):
+            sent.append(routing_key)
+            if len(sent) == 1:
+                return 1  # the re-delegation went out
+            second_sending.set()
+            await asyncio.Event().wait()  # the next action is still sending when SIGTERM arrives
+
+        agent.team_comms.send_message = AsyncMock(side_effect=publish)
+
+        async def model_call(_prompt, **_kwargs):
+            return SimpleNamespace(
+                structured_output=StructuredAgentTurnDecision(
+                    actions=[_delegation("Research it again, differently."), _delegation("Check the supplier list.")]
+                )
+            )
+
+        executor = _turn_on_the_real_outbox(agent, manager, model_call)
+        info = manager.get_task_info(parent.task_id)
+        turn = asyncio.create_task(executor.process_llm_interaction(parent, info.header, info.meta))
+        await asyncio.wait_for(second_sending.wait(), 5)
+        turn.cancel()  # shutdown cancels the turn mid-outbox
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+
+    asyncio.run(scenario())
+    assert len(sent) == 2
+    assert decision_note not in _saved_note(tmp_path, parent.task_id)
+
+
+def test_an_approval_pause_keeps_the_note_until_the_resumed_turns_decision(tmp_path) -> None:
+    """A paused turn is mid-work: its note stays saved (a restart that loses
+    the live session gives the fresh turn the note again), and the resumed
+    turn's recorded decision releases it."""
+    import dataclasses
+
+    from custom_agents import task_steering_runtime
+    from custom_messages.contracts.task_v1 import TaskSteering
+    from custom_messages.enums import TaskSteeringType
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    setup_note = "The tool setup this task paused for ended while the task was paused. Continue the task."
+    manager.append_runtime_resume_directive(parent.task_id, setup_note)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    handed: dict[str, object] = {}
+
+    async def model_call(_prompt, **_kwargs):
+        return SimpleNamespace(stop_reason="interrupt", structured_output=None)
+
+    async def pause_for_approval(**kwargs):
+        handed.update(kwargs)
+        return TaskSteering(steering_type=TaskSteeringType.INTERRUPT_REQUEST, target_task_id=parent.task_id)
+
+    executor = _turn_on_the_real_outbox(agent, manager, model_call)
+    executor.effects = dataclasses.replace(executor.effects, send_interrupt_request_for_result=pause_for_approval)
+    info = manager.get_task_info(parent.task_id)
+    asyncio.run(executor.process_llm_interaction(parent, info.header, info.meta))
+    assert setup_note in _saved_note(tmp_path, parent.task_id)  # still saved while the task waits
+    start_notes = handed["start_notes"]
+    assert start_notes is not None and start_notes.resume_directive == setup_note
+
+    # The decision arrives: the live session resumes and its decision is recorded.
+    resumed_strands_agent = SimpleNamespace(
+        invoke_async=AsyncMock(
+            return_value=SimpleNamespace(
+                stop_reason="end_turn",
+                structured_output=StructuredAgentTurnDecision(
+                    actions=[
+                        TaskResponseAction(
+                            task=StructuredTaskPayload(task_type=MessageMetaType.RESPONSE, answer="Set up and done.")
+                        )
+                    ]
+                ),
+            )
+        )
+    )
+    session = task_steering_runtime.StrandsInterruptedTurnSession(
+        task_id=parent.task_id,
+        strands_agent=resumed_strands_agent,
+        invoke_kwargs={},
+        full_prompt="",
+        msg_content=parent,
+        msg_header=info.header,
+        msg_meta=info.meta,
+        created_at=_now(),
+        interrupts=[],
+        start_notes=start_notes,
+    )
+    object.__setattr__(agent, "_apply_task_processing_result", AsyncMock())
+    steering = TaskSteering(steering_type=TaskSteeringType.INTERRUPT_RESPONSE, target_task_id=parent.task_id)
+    asyncio.run(
+        task_steering_runtime._run_resumed_turn(agent, session, steering, info, [{"interruptResponse": {}}])
+    )
+    assert setup_note not in _saved_note(tmp_path, parent.task_id)
+
+
+def test_a_recorded_batch_and_its_released_note_are_saved_together(tmp_path) -> None:
+    """A crash never keeps a note for a recorded decision, nor drops one for an unrecorded decision."""
+    from custom_agents.task_runtime_state import TurnStartNotes
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    manager.append_runtime_resume_directive(parent.task_id, ACCESS_NOTE)
+    read = TurnStartNotes(parent.task_id, resume_directive=ACCESS_NOTE)
+
+    assert manager.create_turn_action_batch("task_unknown", [], release_notes=read) is None
+    assert ACCESS_NOTE in _saved_note(tmp_path, parent.task_id)  # no decision recorded, note kept
+
+    batch = manager.create_turn_action_batch(parent.task_id, [], release_notes=read)
+    reloaded = _make_task_manager(tmp_path)
+    reloaded.restore_runtime_state()
+    assert reloaded.get_turn_action_batch(batch.batch_id) is not None
+    assert reloaded.read_runtime_resume_directive(parent.task_id) is None

@@ -15,6 +15,7 @@ from custom_agents.message_routing import resolve_requester_routing_key
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.prompt_context_sanitization import render_replied_message_lines
 from custom_agents.provider_error_runtime import ProviderTimeoutError, is_provider_timeout_error
+from custom_agents.task_runtime_state import TurnStartNotes
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError, settle_failed_turn
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND
 from custom_agents.task_human_interaction_blockers import (
@@ -63,6 +64,10 @@ class StrandsInterruptedTurnSession:
     created_at: str
     interrupts: List[TaskSteeringInterruptRecord]
     steering_id: Optional[str] = None
+    # What the paused turn read at its start; the resumed turn's decision
+    # releases it (TurnStartNotes). Lost with the session at a restart, when
+    # the notes are still saved and the task's fresh turn reads them again.
+    start_notes: Optional[TurnStartNotes] = None
 
 
 def ensure_fresh_strands_agent_for_new_turn(
@@ -886,6 +891,7 @@ async def _run_resumed_turn(
             strands_agent=session.strands_agent,
             invoke_kwargs=session.invoke_kwargs,
             full_prompt=session.full_prompt,
+            start_notes=session.start_notes,
         )
 
     outcome = agent.turn_executor.decode_result(
@@ -900,6 +906,7 @@ async def _run_resumed_turn(
         incoming_header=session.msg_header,
         incoming_meta=session.msg_meta,
         structured_output_details=outcome.structured_output_details,
+        start_notes=session.start_notes,
     )
     await agent._apply_task_processing_result(task_id, task_info, content)
     agent._interrupted_turn_sessions.pop(task_id, None)
@@ -942,6 +949,7 @@ async def send_interrupt_request_for_result(
     strands_agent: Any,
     invoke_kwargs: Dict[str, Any],
     full_prompt: str,
+    start_notes: Optional[TurnStartNotes] = None,
 ) -> TaskSteering:
     config = mid_turn_steering_config(agent)
     expires_at = _ttl_timestamp(
@@ -1006,6 +1014,7 @@ async def send_interrupt_request_for_result(
         created_at=datetime.now(timezone.utc).isoformat(),
         interrupts=interrupt_records,
         steering_id=steering.steering_id,
+        start_notes=start_notes,
     )
     if access_interrupts:
         access_interrupt = access_interrupts[0]
