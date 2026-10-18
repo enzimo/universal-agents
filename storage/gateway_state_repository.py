@@ -4129,14 +4129,21 @@ class _RelationalGatewayStateRepository:
             ).fetchone()
             if not row:
                 return None
-            conn.execute(
+            # Guarded like consume_web_user_invite: only the use that marks the
+            # code used gets it, even if another use read it unused first.
+            cursor = conn.execute(
                 f"""
                 UPDATE gateway_user_link_codes
                 SET consumed_at_utc = {self._dialect.bind}
                 WHERE link_code_hash = {self._dialect.bind}
+                  AND consumed_at_utc IS NULL
+                  AND expires_at_utc > {self._dialect.bind}
                 """,
-                (now, link_code_hash),
+                (now, link_code_hash, now),
             )
+            if cursor.rowcount <= 0:
+                conn.rollback()
+                return None
             conn.commit()
         return GatewayUserLinkCodeRecord(**dict(row))
 

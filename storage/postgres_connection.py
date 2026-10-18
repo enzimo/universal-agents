@@ -10,6 +10,16 @@ from uuid import uuid4
 from types import TracebackType
 from .sql_dialect import POSTGRES
 
+# Transaction-level advisory lock keys (``pg_advisory_xact_lock``), one per
+# store that serializes its own writes in PostgreSQL the way ``BEGIN
+# IMMEDIATE`` does in SQLite. A store's read-then-write steps (a uniqueness
+# check before an insert, a read-modify-write of a JSON record) are only
+# exact when its writers take turns; PostgreSQL's default READ COMMITTED
+# isolation does not make them take turns. Each store has its own key, so
+# unrelated stores never wait for each other. Keys must stay distinct.
+KNOWLEDGE_WRITE_LOCK_KEY = 7_302_211_551
+ACCESS_STORE_WRITE_LOCK_KEY = 7_302_211_552
+
 
 def ensure_storage_parent_dir(path: Optional[str]) -> None:
     raw = str(path or "").strip()
@@ -178,12 +188,21 @@ class PostgresConnection:
     dialect = POSTGRES
 
     def begin_write(self) -> None:
-        # psycopg begins on the first statement. SELECT FOR UPDATE belongs to
-        # the repository operation because its lock set is domain-specific.
-        pass
+        """Start a write: take the store's write lock when it has one.
 
-    def __init__(self, dsn: str):
+        psycopg begins the transaction on the first statement. A store opened
+        with ``write_lock_key`` takes its transaction-level advisory lock here,
+        released at commit or rollback, so its writers take turns as they do in
+        SQLite. Other stores lock the rows they change (SELECT FOR UPDATE),
+        because their lock sets are domain-specific.
+        """
+
+        if self._write_lock_key is not None:
+            self.execute("SELECT pg_advisory_xact_lock(%s)", (self._write_lock_key,))
+
+    def __init__(self, dsn: str, *, write_lock_key: int | None = None):
         self._dsn = dsn
+        self._write_lock_key = write_lock_key
         self._conn = _connect_psycopg(dsn)
         from storage.read_only import repositories_are_read_only
 
@@ -236,8 +255,10 @@ class PostgresConnection:
         self._conn.close()
 
 
-def connect_postgres(dsn: str) -> PostgresConnection:
-    return PostgresConnection(dsn)
+def connect_postgres(dsn: str, *, write_lock_key: int | None = None) -> PostgresConnection:
+    """Open a connection; ``write_lock_key`` makes ``begin_write`` take that store's write lock."""
+
+    return PostgresConnection(dsn, write_lock_key=write_lock_key)
 
 
 def validate_postgres_connection(dsn: str) -> None:

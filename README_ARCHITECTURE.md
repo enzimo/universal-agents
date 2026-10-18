@@ -476,6 +476,25 @@ conversations, memory, authorization records, gateway sessions, and execution
 attempts. Agents still coordinate through NATS rather than polling one
 another's tables.
 
+A store whose writes read before they write takes turns between writers on
+both backends. In SQLite every write starts with `BEGIN IMMEDIATE`. In
+PostgreSQL the default READ COMMITTED isolation lets two transactions read the
+same rows before either writes, so the access store and the knowledge store
+take their own transaction-level advisory lock in `begin_write`
+(`storage/postgres_connection.py`, one key per store, so unrelated stores never
+wait for each other); other stores lock the rows they change (`SELECT ... FOR
+UPDATE`). An advisory lock key covers the whole PostgreSQL database, so
+instances or teams that share one database in different schemas also wait for
+each other's writes to that store. Reads and writes a thread makes while it
+holds an open write transaction of the access store (a grant plan, a whole
+decision) join that transaction, so no second connection is opened while the
+lock is held. Moving rows between tables uses `DELETE ... RETURNING` so exactly the
+rows deleted are the rows kept elsewhere (a removed person's held records,
+`storage/person_departure_repository.py`). Rationale: the 2026-10-17
+concurrency audit found that on PostgreSQL an approved change could be claimed
+twice, two edits to one person's model settings lost one, and holding a
+person's records could delete a row written meanwhile without holding it.
+
 An Objective change that a tool call or a person's command asked for is
 reported as not saved when the write fails (`ObjectiveSaveFailed` in
 `custom_agents/task_manager_objectives.py`), so the caller never gets back a
@@ -1222,7 +1241,14 @@ grant moves to the new one (`AccessRepository._replace_in`, a `grant_moved`
 event), so replacing never cuts off a worker; this relaxes "grants are
 immutable" for `parent_grant_id` only. A grant an existing one covers is not
 stored. Grants neither covers stay side by side (lasting access plus a step-up
-for one task). Removing access removes the whole entry
+for one task). The plan runs after the store's write lock is taken
+(`AccessRepository.store_planned`, `approve_pending`, `apply_together`), so of
+two grants stored at once the second sees the first: before 2026-10-17 two
+first calls of one tool in one request could both store a task grant, and a
+tool grant stored with its tool set could stay as a separate entry that
+removing the set left working. A person's decision stores its grants and its
+outcome in one transaction, so a grant it replaces ends only if the outcome is
+stored (see "Each request is decided once" below). Removing access removes the whole entry
 (`AccessService.revoke_by_person`, `AccessRequests.revoke`, proposals'
 removals). Why: people saw several independent grants for one tool, assumed the
 broadest replaced the others, and removing one could leave another working.
@@ -1302,6 +1328,113 @@ and TeamLead's own requests a box that lets it hand the access on to workers
 without asking. Chat buttons, which have no checkboxes, offer the same choices
 as separate buttons (`assistant_gateway/application/access_reviews.py`).
 
+Each request is decided once (`AccessRequests.decide`). A person's decision
+stores its grants and its outcome in one transaction
+(`AccessRepository.decision_transaction`): it takes the access store's write
+lock, checks that the request still waits, and everything the decision then
+does on the store in that thread joins the transaction, so its authority
+checks see the grants it stored a moment ago. Only the thread that opened the
+transaction joins it: work handed to another thread, even with a copied
+context (`asyncio.to_thread`), opens its own connection and sees only what was
+committed. Other writers see none of the decision's grants until the outcome
+is stored with them, and log lines about what the decision replaced are
+written only after it commits (`AccessRepository.after_commit`). A second decision made at the same
+moment (a double click, a chat button and the web card, two reviewers,
+`assistant_cli access decide`), a withdrawal (the task ended, or its person
+left), or another writer (a person giving access on the Access page, a
+worker's request that trusted code may hand down) waits for the lock and then
+works on what was committed: the second decision finds the request decided.
+A decision that fails, or cannot get the lock, stores nothing, so there is
+nothing to take back and no access in force for a request that still waits;
+replacing narrower access (one entry per tool) happens in the same
+transaction. When the database was busy or could not be reached, the person
+is told so in plain words ("Nothing was changed; try again") and the failure
+is logged as `event=access_decision_failed` with the request and the
+reviewer; it first reads the request back, because a lost PostgreSQL commit
+answer may hide an outcome that was stored. A denied or withdrawn request denies its hand-downs still
+waiting for approval in the same transaction; only a granted outcome keeps
+the hand-downs it approved in place.
+
+Changes applied at the decision (proposals, file deliveries) also do work
+outside the database: downloads, tool files, MCP records, a copied file. They
+first claim the request (`AccessRepository.claim_decision`, a short-lived row
+in `access_request_claims` with an owner and a time limit,
+`DECISION_CLAIM_SECONDS`), do that work, and store their grants and outcome
+together (`apply_together`, `finish_request`) only while the claim holds; any
+other decision is refused while the claim is current ("Someone is deciding
+this request right now"). The claim is renewed before and after each program
+download, and a download stops after `DOWNLOAD_DEADLINE_SECONDS` measured from
+connecting to its last byte (redirects, TLS and headers included; a timer
+shuts a duplicate of the transport down, because the HTTP client detaches
+its socket after headers and a socket timeout bounds one read only, and
+the deadline is checked again after each host name lookup, which nothing can
+interrupt, so a slow lookup overruns by its own length at most). So
+a claim runs out only when a step stalls past its limit or the process ends.
+The gateway first reconciles any recorded effects; then another decision may
+take over. The stalled decision finds its claim lost at its next renewal or
+when storing its outcome, and stores nothing. Cleanup
+reads the outcome and claim under the access store's write lock, so a new
+decision cannot take over between that check and removing local files. A
+losing decision keeps programs another decision may use regardless of the
+exception type, including a failed renewal that reports a database error.
+
+Before doing external work, each applier stores a transient recovery record
+in `access_decision_recoveries`: the expected decision and its effects list.
+Before writing each file's bytes, it records the relative path, file identity,
+expected size and content digest. Tool definitions stay in a hidden staging
+file until complete, then are published without replacing an existing file.
+MCP activation rechecks the claim under the cleanup lock after journaling,
+so a paused approval cannot activate a server after recovery releases it.
+A confirmed rollback removes only files still matching that ownership record;
+a replacement or edited file is kept and logged. Failed cleanup retains the
+record for another pass. A lost
+PostgreSQL commit answer may hide a committed outcome, so a failed readback
+is an unknown result and never authorizes cleanup. The person is told to
+check the Inbox when the store returns, rather than told nothing changed.
+The files, claim and recovery record stay. After the claim period, Inbox
+maintenance rereads the latest effects, outcome and claim under the store
+lock, even after a gateway restart. Claim renewal also postpones recovery,
+so an old maintenance scan cannot clean up a live download. Committed work stays, an
+uncommitted delivery is removed, an uncommitted proposal is undone, and a
+committed move finishes removing its unchanged original. Delivery notices
+use a request-derived id so recovery cannot store duplicate notices.
+Unresolved recovery records prevent another decision from taking over and
+prevent an access transfer export until the gateway has reconciled them.
+They never travel in a transfer. The journal makes cleanup retryable across
+database failures; filesystem changes are still separate from the database
+transaction.
+
+A grant that carries the approval id of a request that was not granted is
+never kept in force: none can be written now, but an older version stored a
+decision's grants before its outcome and could leave them behind when it
+stopped in between. The gateway's Inbox pass ends such grants
+(`end_grants_without_granted_outcome`, found by the indexed
+`access_grants.approval_id` column), a decision ends those carrying its own
+request's id before it writes anything (so a decision made before the first
+Inbox pass cannot make one permanent), and the team transfer leaves them
+behind.
+Existing stores get the `approval_id` column added and filled from each
+grant's record at their first open, in one transaction.
+
+Rationale (2026-10-17 concurrency audit and its two reviews): grants and the
+outcome were separate transactions, so a lost race revoked the winner's
+grants and access in force before the request, a failed approval left access
+in force that a later Deny did not remove, and between the grants and the
+outcome other writers already relied on an undecided grant (a person's own
+grant was answered "already covered", a worker's request was handed down
+from it) and lost that when the decision failed. A first fix with claims,
+undo and postponed replacements still left that window; one transaction
+removes it at the root. It became possible once every read a decision makes
+goes through the store's joined transaction, and the evaluator (Cedar) only
+computes over the data it is given and never waits for the store while
+holding its own lock, so holding the store's lock across a decision cannot
+deadlock; a decision holds it for the time of a few evaluations. The claim is
+a separate transient table rather than a new request status, so readers of
+waiting requests are unchanged and the team transfer, which never carries
+access requests, is unaffected; the approval id column is filled from each
+grant's record (`GrantV1.approval_id`), which is how grants travel, so the
+transfer format does not change either.
+
 When nobody can hand the access on, or a service is missing from the tool
 catalog, TeamLead proposes the whole change with `propose_access_change`
 (`custom_tools/providers/access_proposals.py`, catalog `fn:access_proposals`):
@@ -1327,9 +1460,15 @@ plan, compares its digest with the one reviewed, writes any new tool file to
 `control/access/tools/` from the typed item (`access_catalog/instance_tools.py`,
 only `http:*` tools), reloads the catalog, and stores grants, blocks, data
 folders, revocations and the request outcome in one transaction
-(`AccessRepository.apply_together`); if that fails the tool files are removed,
-so nothing is half applied. A tool with no grants gives nobody anything, which
-is why writing its file first is safe. Afterwards the gateway opens the broker's
+(`AccessRepository.apply_together`) under the decision's claim; if anything
+fails, including a busy database, the tool files, downloaded programs and MCP
+servers it wrote are taken back, so nothing is half applied. Because the claim
+is held from before the first file is written and renewed around each
+download, a second approval of the same proposal is refused while the first
+works; if the first stalls past its limit and the second takes over, the
+first keeps the programs the second may rely on (see "Each request is decided
+once"). A tool with no
+grants gives nobody anything, which is why writing its file first is safe. Afterwards the gateway opens the broker's
 account link form for the approver, watches it with the tool setup watcher
 (`GatewayToolSetups.after_proposal_links`), and holds the decision message to
 the waiting task until every form ended; the resumed `propose_access_change`
@@ -1539,7 +1678,13 @@ person types, through the broker's own store path (`collect_credential`, in the
 team's collection for a team link and the person's for their own), and links it
 in the same submission, so one form finishes the job. A new credential gets a
 key made from the tool and owner and a number when that key is taken, so it
-never replaces a stored credential. The form's **Used by** line is read by the
+never replaces a stored credential. One link per tool and owner is active:
+creating one reads and revokes the earlier link in the same transaction, and a
+partial unique index refuses a second active link. A store that held two from
+before the index (two forms finished at once) keeps the newest, the one in use,
+and revokes the older at the first start, logging
+`event=account_link_duplicate_revoked`; otherwise unlinking the newest would
+have put the older credential back in use. The form's **Used by** line is read by the
 broker from the grant store it already holds (agent-side grants in force that
 reach the tool for the owner's work). It is shown for information only, and the
 access service still decides every call. The broker reads it itself rather than
@@ -2563,8 +2708,10 @@ inspect | review | import | import-credentials | finish-import`; guide:
   new gateway key. Later batches require its receipt and the exact same signed
   export. Imported identities are skipped and existing destination records
   kept. Account links match by team, owner and tool, since a newer link has a
-  new ID; all active destination chat bindings, including removed people's,
-  participate in collision checks through a separate read-only identity query.
+  new ID; a file holding two for one tool and owner (from a store before the
+  one-active-link index) has the older refused with the newer named. All
+  active destination chat bindings, including removed people's, participate in
+  collision checks through a separate read-only identity query.
   Noncredential batches hold an import lock and the supervisor's run lock;
   broker batches hold the import lock while the runtime runs. The process config
   loader checks the unfinished marker for every entry point. Failed later

@@ -20,6 +20,7 @@ what is particular to CLIs (``ProposedCliToolV1``):
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -30,7 +31,6 @@ from access_control.cli_binaries import (
     ProgramRefused,
     extract_member,
     install_program,
-    remove_program,
     workspace_digest,
     workspaces_root,
 )
@@ -119,8 +119,11 @@ def cli_rows(index: int, cli: ProposedCliToolV1, setup_rows) -> list[ReviewItemV
     return [_program_row(index, cli), _commands_row(index, cli), *setup_rows(f"cli-{index}", cli)]
 
 
-def install_programs(instance_root: Path, clis: tuple[ProposedCliToolV1, ...], download: Downloader, written: list) -> None:
-    """Make sure each approved program is in the workspace; ``written`` collects what was downloaded here."""
+def install_programs(
+    instance_root: Path, clis: tuple[ProposedCliToolV1, ...], download: Downloader,
+    *, before_write: Callable[[Path, tuple[str, ...], int, bytes], None] | None = None,
+) -> None:
+    """Check existing programs or record each newly allocated file before writing its bytes."""
 
     root = workspaces_root(instance_root)
     for cli in clis:
@@ -136,8 +139,8 @@ def install_programs(instance_root: Path, clis: tuple[ProposedCliToolV1, ...], d
             data = download(program.source_url)
             if program.archive_member:
                 data = extract_member(data, program.archive_member)
-            install_program(root, parts, data, program.sha256)
-            written.append((root, parts))
+            prepare = None if before_write is None else lambda fd, body: before_write(root, parts, fd, body)
+            install_program(root, parts, data, program.sha256, before_write=prepare)
         elif present != program.sha256:
             raise ProgramRefused(
                 f"The program at {program.binary_path} is not the reviewed one (SHA-256 {present[:12]}..., "
@@ -147,9 +150,4 @@ def install_programs(instance_root: Path, clis: tuple[ProposedCliToolV1, ...], d
             )
 
 
-def remove_programs(written: list) -> None:
-    for root, parts in written:
-        remove_program(root, parts)
-
-
-__all__ = ["cli_rows", "install_programs", "remove_programs"]
+__all__ = ["cli_rows", "install_programs"]

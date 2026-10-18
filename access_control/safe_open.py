@@ -283,7 +283,9 @@ def copy_file(root: Path, parts: tuple[str, ...], destination: Path, *, max_byte
         return copied
 
 
-def remove_file(root: Path, parts: tuple[str, ...]) -> None:
+def remove_file(
+    root: Path, parts: tuple[str, ...], *, expected_identity: tuple[int, int, int, int] | None = None
+) -> None:
     """Remove the regular file ``root/parts`` (never a link, a folder, or a path through a link)."""
 
     folder_parts, name = _split(_checked_parts(parts), root)
@@ -298,6 +300,10 @@ def remove_file(root: Path, parts: tuple[str, ...]) -> None:
             raise UnsafePath(f"A link is not removed through this path: {shown}", reason=REASON_LINK)
         if not stat.S_ISREG(info.st_mode):
             raise UnsafePath(f"Not a regular file: {shown}", reason=REASON_NOT_REGULAR_FILE)
+        if expected_identity is not None and (
+            info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns
+        ) != expected_identity:
+            return  # changed after the caller checked its ownership/content
         os.unlink(name, dir_fd=directory)
     finally:
         os.close(directory)

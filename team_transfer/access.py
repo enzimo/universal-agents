@@ -18,10 +18,20 @@ blocks the whole tool here (``access_control.stale_blocks``) until an
 administrator replaces it.
 
 What stays behind: task and one-time grants (they end with their task),
-revoked, denied and pending grants, access requests, change plans, notices and
-the audit log (history), and the gateway's copy of the people (rebuilt at
-gateway start). Standard role access is not stored as grants; it comes from
-the release (``access_control.standard_grants``).
+revoked, denied and pending grants, grants that carry the approval id of a
+request that was not granted (an older version could leave one when it
+stopped between a decision's grants and its outcome; logged, see
+``AccessRepository.grants_without_granted_outcome``), access requests and the
+claims of decisions running on them (``AccessRepository.claim_decision``,
+transient), decision recovery records (export waits for the gateway to
+reconcile them), change plans, notices and the audit log (history), and the
+gateway's copy of the people (rebuilt at gateway start). Standard role access is not stored as
+grants; it comes from the release (``access_control.standard_grants``).
+
+One account link per tool and owner is active (a unique index in the access
+store). A file from a store that held two (two link forms finished at once
+before the index existed) has its older link refused with the newer one
+named; the newer one is the one that was in use.
 
 Each record travels as its own versioned contract (``GrantV1``,
 ``DataFolderRecordV1``, ``AccountLinkV1``, ``PersonSettingsV1``) with its id,
@@ -52,6 +62,7 @@ from pydantic import BaseModel, Field, JsonValue
 from custom_messages.contracts.access_v2 import MODEL_KEYS_SHARING_SUBJECT
 from secure_tools.chat_commands import ACCOUNTS_SHARE, accounts_command
 from team_transfer.format import TransferModel
+from team_transfer.errors import TransferError
 from team_transfer.sections import (
     ExportSource,
     ImportContext,
@@ -173,11 +184,20 @@ class AccessSection:
     def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:
         store = _store(source.config.manager_storage_settings)
         team = source.team_id
+        if store.decision_recoveries(team):
+            raise TransferError(
+                "An access decision is awaiting confirmation. Start the gateway, let its Inbox reconcile the "
+                "decision after the ten-minute claim period, then stop the runtime and export again."
+            )
         now = datetime.now(timezone.utc)
         records: list[AccessRecordV1] = []
         for folder in store.data_folders(team):
             records.append(_record(AccessKind.DATA_FOLDER, folder.name, folder))
+        undecided = {grant.grant_id: request for grant, request in store.grants_without_granted_outcome(team)}
         for grant in store.list_team(team):
+            if grant.grant_id in undecided:
+                _skip_without_granted_outcome(grant.grant_id, undecided[grant.grant_id])
+                continue
             if _lasting(grant, now):
                 records.append(_record(AccessKind.GRANT, grant.grant_id, grant))
         for link in store.list_links(team):
@@ -212,12 +232,13 @@ class AccessSection:
     ) -> list[PlannedRecord]:
         known = _Known.build(context)
         chosen = _sharing_in_file(records)
+        newest = _newest_links(records)
         planned = []
         for raw in _dependency_order(_rename_operations(records)):
             record = AccessRecordV1.model_validate(raw)
             key = f"{record.kind.value}/{record.record_id}"
             try:
-                problem = _CHECKS[record.kind](record.document, known)
+                problem = _older_link(record, newest) or _CHECKS[record.kind](record.document, known)
             except ValueError as exc:  # the model refuses the document
                 problem = f"this version refuses it: {exc}"
             if problem:
@@ -259,6 +280,16 @@ class AccessSection:
             len(accepted),
             len(plan) - len(accepted),
         )
+
+
+def _skip_without_granted_outcome(grant_id: str, request: Any) -> None:
+    logger.warning(
+        "A grant whose access request was not granted stays behind. event=team_transfer_grant_without_outcome "
+        "grant_id=%s request_id=%s request_status=%s",
+        grant_id,
+        request.request_id,
+        request.status.value,
+    )
 
 
 def _record(kind: AccessKind, record_id: str, model: Any) -> AccessRecordV1:
@@ -555,6 +586,46 @@ def _check_link(document: dict[str, Any], known: _Known) -> str:
         whose = "only each person's own account" if link.owner_kind is LinkOwnerKind.TEAM else "only the team's account"
         return f"this version uses {whose} for {tool.display_name}, so the link would never be used"
     return ""
+
+
+def _link_owner_key(document: dict[str, Any]) -> tuple[str, str, str, str]:
+    def text(name: str) -> str:
+        return str(document.get(name) or "")
+
+    return text("team_id"), text("tool_id"), text("owner_kind"), text("owner_id")
+
+
+def _newest_links(records: SectionRecords) -> dict[tuple[str, str, str, str], str]:
+    """The newest account link in the file for each tool and owner: the one in use (``AccessRepository.active_link``)."""
+
+    newest: dict[tuple[str, str, str, str], tuple[datetime, str]] = {}
+    for raw in records:
+        document = raw.get("document")
+        if raw.get("kind") != AccessKind.ACCOUNT_LINK.value or not isinstance(document, dict):
+            continue
+        try:
+            created = datetime.fromisoformat(str(document.get("created_at_utc")))
+        except ValueError:
+            continue  # the model refuses it in the record's own check
+        order = (created, str(raw.get("record_id") or ""))
+        key = _link_owner_key(document)
+        if key not in newest or order > newest[key]:
+            newest[key] = order
+    return {key: record_id for key, (_created, record_id) in newest.items()}
+
+
+def _older_link(record: AccessRecordV1, newest: dict[tuple[str, str, str, str], str]) -> str:
+    """Refuse an account link a newer one for the same tool and owner replaces (one active link each)."""
+
+    if record.kind is not AccessKind.ACCOUNT_LINK:
+        return ""
+    kept = newest.get(_link_owner_key(record.document))
+    if kept is None or kept == record.record_id:
+        return ""
+    return (
+        f"the newer account link {kept} for the same tool and owner replaces it (one link per tool and owner "
+        "is in use, and the newer one was)"
+    )
 
 
 def _sharing_in_file(records: SectionRecords) -> dict[str, str]:
