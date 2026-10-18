@@ -15,10 +15,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from custom_messages.contracts.activity_v1 import TaskActivityEvent
 from custom_messages.enums import TaskActivityStage, TaskActivityType
-from live_storage_utils import redact_dsn, reset_postgres_storage, resolve_live_storage_settings
+from live_storage_utils import reset_postgres_storage, resolve_live_storage_settings
 from storage.activity_collector_repository import create_activity_collector_repository
 from storage.config import StorageSettings
-from storage.postgres_connection import connect_postgres
+from storage.postgres_connection import connect_postgres, redact_postgres_dsn
 
 try:
     from dotenv import load_dotenv
@@ -145,7 +145,7 @@ def run_validation(*, config_path: str | None = None) -> dict[str, Any]:
     return {
         "status": "passed",
         "storage_backend": settings.backend,
-        "storage": redact_dsn(settings.postgres_dsn or "") if settings.backend == "postgres" else settings.sqlite_path,
+        "storage": redact_postgres_dsn(settings.postgres_dsn or "") if settings.backend == "postgres" else settings.sqlite_path,
         "objective_id": "objective_live_activity",
         "upgraded_columns": sorted(column for column in columns if column in {"objective_id", "objective_title"}),
     }

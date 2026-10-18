@@ -274,5 +274,8 @@ jobs:
         env:
           STORAGE_BACKEND: postgres
         run: python tests/live_postgres_storage_validation.py
-      - name: Test knowledge storage and curation with PostgreSQL
-        run: python -m pytest tests/test_knowledge_*.py -m postgres -q --tb=short --show-capture=no
+      - name: Run every PostgreSQL test
+        # Every test marked postgres: the Postgres variants of the storage,
+        # runtime recovery, snapshot and schedule-worker transaction tests,
+        # and the knowledge store and curation tests.
+        run: python -m pytest tests -m postgres -q --tb=short --show-capture=no

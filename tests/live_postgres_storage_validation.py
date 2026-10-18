@@ -14,7 +14,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 try:
     import psycopg
@@ -68,7 +67,7 @@ from storage.adapter_host_repository import create_adapter_host_repository
 from storage.after_action_report_repository import create_after_action_report_repository
 from storage.memory_graph_repository import create_memory_graph_repository
 from storage.multi_user_owner_migration import migrate_legacy_null_owner_rows
-from storage.postgres_connection import connect_postgres
+from storage.postgres_connection import connect_postgres, redact_postgres_dsn
 from storage.solution_variation_repository import create_solution_variation_repository
 from live_storage_utils import resolve_live_storage_settings
 from tests.after_action_report_repository_support import assert_report_person_scoping
@@ -88,26 +87,6 @@ def write_json_file(path: Path, payload: dict[str, Any] | list[Any]) -> None:
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8"
     )
-
-
-def redact_dsn(raw_dsn: str) -> str:
-    if not raw_dsn:
-        return raw_dsn
-    parts = urlsplit(raw_dsn)
-    netloc = parts.netloc
-    if "@" in netloc:
-        userinfo, hostinfo = netloc.rsplit("@", 1)
-        if ":" in userinfo:
-            username, _password = userinfo.split(":", 1)
-            userinfo = f"{username}:***"
-        netloc = f"{userinfo}@{hostinfo}"
-    query = urlencode(
-        [
-            (key, "***" if "password" in key.lower() else value)
-            for key, value in parse_qsl(parts.query)
-        ]
-    )
-    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
 
 
 def require_postgres_settings() -> StorageSettings:
@@ -1228,15 +1207,15 @@ def main() -> None:
         settings = require_postgres_settings()
         report["storage"] = {
             "backend": settings.backend,
-            "dsn": redact_dsn(settings.postgres_dsn or ""),
+            "dsn": redact_postgres_dsn(settings.postgres_dsn or ""),
         }
         logger.info(
             "Resetting Postgres validation database: %s",
-            redact_dsn(settings.postgres_dsn or ""),
+            redact_postgres_dsn(settings.postgres_dsn or ""),
         )
         reset_postgres_database(settings.postgres_dsn or "")
         record_check(
-            report, "baseline_reset", {"dsn": redact_dsn(settings.postgres_dsn or "")}
+            report, "baseline_reset", {"dsn": redact_postgres_dsn(settings.postgres_dsn or "")}
         )
 
         exercise_agent_state_store(settings, report)
