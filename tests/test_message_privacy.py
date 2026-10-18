@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import pytest
 import test_activity_collector
 import yaml
-from aiohttp import BasicAuth, web
+from aiohttp import encode_basic_auth, web
 from aiohttp.test_utils import TestClient, TestServer
 
 from assistant_gateway.http_activity_source import HttpGatewayActivitySource
@@ -58,7 +58,7 @@ async def test_collector_rejects_tokens_in_urls_and_supports_header_auth(
         response = await client.get("/user")
         assert response.status == 401
         assert response.headers["WWW-Authenticate"].startswith("Basic ")
-        response = await client.get("/user", auth=BasicAuth("token", "user-token"))
+        response = await client.get("/user", headers={"Authorization": encode_basic_auth("token", "user-token")})
         assert response.status == 200
         assert 'searchParams.set("token"' not in await response.text()
         response = await client.get(
@@ -66,7 +66,7 @@ async def test_collector_rejects_tokens_in_urls_and_supports_header_auth(
         )
         assert response.status == 200
         response = await client.get(
-            "/api/admin/agents", auth=BasicAuth("token", "user-token")
+            "/api/admin/agents", headers={"Authorization": encode_basic_auth("token", "user-token")}
         )
         assert response.status == 401
 
