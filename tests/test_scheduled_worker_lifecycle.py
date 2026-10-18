@@ -2,11 +2,11 @@
 
 import asyncio
 import json
-import os
 from datetime import timedelta
 from uuid import uuid4
 
 import pytest
+from live_nats_client import nats_transport_config_from_env, resolve_live_transport_settings
 from strands.models import Model
 
 from config_loader import Config
@@ -27,6 +27,7 @@ from custom_messages.enums import (
     ProgressState,
     ScheduleManagementClass,
 )
+from runtime_settings.projection import _project_transport
 
 
 class ScheduledResultModel(Model):
@@ -77,9 +78,9 @@ class ScheduledResultModel(Model):
 
 
 @pytest.fixture
-def local_broker():
+def live_transport():
     # The live profile supplies a broker; unique team IDs isolate test subjects.
-    return os.environ["NATS_URL"]
+    return resolve_live_transport_settings()
 
 
 @pytest.mark.parametrize("memory_timer", [False, True])
@@ -88,26 +89,26 @@ def local_broker():
 @pytest.mark.nats
 @pytest.mark.asyncio
 async def test_three_occurrences_spawn_retire_and_complete_without_lead_turn(
-    tmp_path, monkeypatch, local_broker, memory_timer, caplog
+    tmp_path, monkeypatch, live_transport, memory_timer, caplog
 ):
     from custom_agents import strands_team
     from custom_agents.agent_instantiation_service import AgentInstantiationService
     from custom_agents.schedule_store import ScheduleStore
 
     team = "team_" + uuid4().hex[:12]
-    from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
+    from custom_transport.nats_adapter import NatsTransportAdapter
     from custom_transport.subjects import NatsSubjectMapper
 
     topology = NatsTransportAdapter(
-        config=NatsTransportConfig(servers=[local_broker]),
-        mapper=NatsSubjectMapper(team_id=team),
+        config=nats_transport_config_from_env(transport=live_transport),
+        mapper=NatsSubjectMapper(team_id=team, subject_prefix=live_transport.subject_prefix),
     )
     await topology.connect(reconcile_topology=True)
     await topology.close()
     database = str(tmp_path / "runtime.db")
     config = Config(
         {
-            "transport": {"nats_servers": [local_broker]},
+            "transport": live_transport.model_dump(),
             "storage": {"backend": "sqlite", "sqlite": {"path": database}},
             "agent": {
                 "workspace_dir": str(tmp_path),
@@ -168,7 +169,7 @@ async def test_three_occurrences_spawn_retire_and_complete_without_lead_turn(
             "skills_enabled": False,
             "model_provider": "openai",
             "model_id": "scheduled-result-test",
-            "nats_servers": [local_broker],
+            **_project_transport(transport_cfg=live_transport.model_dump()),
         }
     )
     lead.task_manager.add_task(

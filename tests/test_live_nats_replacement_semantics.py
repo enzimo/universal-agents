@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import uuid
@@ -38,7 +38,8 @@ from custom_transport.base import (
 )
 from custom_transport.nats_adapter import NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
-from live_nats_client import nats_transport_config_from_env
+from live_nats_client import nats_transport_config_from_env, resolve_live_transport_settings
+from config_loader import CONFIG_SCHEMA_VERSION
 from id_generation import new_id, new_id_suffix
 from scripts.reconcile_nats_consumers import reconcile_nats_consumers
 
@@ -978,15 +979,23 @@ async def test_live_process_consumer_expires_after_connection_loss() -> None:
             await crashed._nc.close()
 
 
-async def test_live_reconciler_uses_normalized_default_team_id(monkeypatch) -> None:
+async def test_live_reconciler_uses_normalized_default_team_id(monkeypatch, tmp_path) -> None:
     from nats.js.api import AckPolicy, ConsumerConfig
 
     team_id = _team("nats_rscope")
-    mapper = NatsSubjectMapper(team_id=team_id)
+    transport = resolve_live_transport_settings()
+    mapper = NatsSubjectMapper(team_id=team_id, subject_prefix=transport.subject_prefix)
     adapter = _adapter(team_id, mapper=mapper)
     agent_id = new_id("agent_id")
     consumer_name = mapper.durable_name(f"agent_{agent_id}")
     monkeypatch.setenv("DEFAULT_TEAM_ID", team_id)
+    # The reconciler loads a file like the operator command. Keep this test's
+    # broker/auth settings, rather than connecting through the example defaults.
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "schema_version": CONFIG_SCHEMA_VERSION, "transport": transport.model_dump(),
+    }))
+    config_path.chmod(0o600)
 
     try:
         await adapter.connect(reconcile_topology=True)
@@ -1001,7 +1010,7 @@ async def test_live_reconciler_uses_normalized_default_team_id(monkeypatch) -> N
         )
 
         result = await reconcile_nats_consumers(
-            config_path=Path(__file__).resolve().parents[1] / "config.example.yaml",
+            config_path=config_path,
             apply=False,
             minimum_age_seconds=0,
         )
