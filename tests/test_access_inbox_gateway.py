@@ -11,6 +11,7 @@ one-click revoke; and refusals shown as plain text.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -180,6 +181,26 @@ def test_a_waiting_request_is_announced_once_where_its_person_can_decide(harness
     assert view["choice_effects_default"] == "kept" and "TeamArchitect keeps it for you" in view["keep_help"]
     assert set(view["choice_effects"]["approve"]) == {"task", "kept"}
     assert view["choice_effects"]["deny"] == {"any": "Nothing is given, and WebResearchAgent is told you said no."}
+
+
+@pytest.mark.parametrize("operation", ["end_grants_without_granted_outcome", "decision_recoveries"])
+def test_a_failed_recovery_check_does_not_skip_announcements(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, operation: str
+) -> None:
+    request = ask(harness)
+
+    def broken(*_args: object, **_kwargs: object) -> list[str]:
+        raise RuntimeError("database unavailable")
+
+    store = harness.inbox.requests().service.store
+    monkeypatch.setattr(type(store), operation, broken)
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(harness.inbox.run_once())
+
+    [event] = harness.emitted
+    assert event.access_request_id == request.request_id
+    event = "grants_without_outcome_check_failed" if operation == "end_grants_without_granted_outcome" else "access_decision_recovery_scan_failed"
+    assert f"event={event}" in caplog.text
 
 
 def test_a_members_request_goes_to_the_member_when_they_hold_the_access(harness: Harness) -> None:

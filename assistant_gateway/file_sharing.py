@@ -30,9 +30,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from access_control import safe_open
 from access_control.decisions import HandDownRefused
+from access_control.decision_effects import EffectJournal, OwnedFile
 from access_control.entities import PersonPrincipal
 from access_control.folders import FOLDER_ROOT_TEAM, FOLDER_ROOT_USERS, normalize_folder_id
 from access_control.requests import FILE_DELIVERY_CHANGE, AccessRequests
@@ -59,7 +61,7 @@ from custom_messages.contracts.access_v2 import (
 )
 from id_generation import new_id
 from runtime_settings.instance_layout import person_folder_name
-from storage.access_repository import AccessStoreConflict
+from storage.access_repository import AccessStoreConflict, DecisionClaim, DecisionRecovery
 
 logger = logging.getLogger(__name__)
 
@@ -351,8 +353,10 @@ class GatewayFileSharing:
 
     # -- applying an approved delivery (AccessRequests.appliers) -------------------------
 
-    def apply(self, request: AccessRequestV1, reviewer: PersonPrincipal, finished: AccessRequestV1) -> AccessRequestV1:
-        """Copy the approved file into the recipient's received/ folder, then record the outcome."""
+    def apply(
+        self, request: AccessRequestV1, reviewer: PersonPrincipal, finished: AccessRequestV1, claim: DecisionClaim
+    ) -> AccessRequestV1:
+        """Copy the approved file into the recipient's received/ folder, then record the outcome under ``claim``."""
 
         assert request.change is not None
         requests = self._requests()
@@ -368,21 +372,70 @@ class GatewayFileSharing:
             raise HandDownRefused("The file changed after it was sent for approval; send it again.")
         sender, recipient = str(plan["sender_person_id"]), str(plan["recipient_person_id"])
         folder = (FOLDER_ROOT_USERS, person_folder_name(recipient), RECEIVED_DIRNAME, person_folder_name(sender))
-        name = self._write_new(folder, item.parts[-1], data)
         applied = finished.model_copy(update={"applied_at_utc": requests.service.clock()})
+        recovery = requests.recovery_record(claim, applied, {"files": []})
+        requests.service.store.save_decision_recovery(recovery)
+        journal = EffectJournal(requests.service.store, recovery)
+
+        def prepare(parts: tuple[str, ...], descriptor: int, body: bytes) -> None:
+            journal.prepare("files", self._workspaces, parts, descriptor, body)
+
         try:
-            requests.service.store.finish_request(applied)
-        except AccessStoreConflict as exc:
-            self._discard(folder + (name,))
-            raise HandDownRefused(str(exc)) from exc
+            name = self._write_new(folder, item.parts[-1], data, before_write=prepare)
+            requests.service.store.finish_request(applied, claim_id=claim.claim_id)
+        except BaseException as exc:
+            # Any failure (also a busy or lost database) removes the copy,
+            # unless the outcome was stored after all, so a later Deny or a
+            # second approval never finds a file already delivered.
+            kept = requests.outcome_stored_despite(exc, request.request_id, reviewer, finished.decided_at_utc)
+            if kept is None:
+                kept = requests.reconcile_decision(
+                    recovery, lambda latest, current, elsewhere: self.recover(requests, latest, current, elsewhere)
+                )
+                if kept is None:
+                    if isinstance(exc, AccessStoreConflict):
+                        raise HandDownRefused(str(exc)) from exc
+                    raise
+                return kept  # reconciliation already finished the delivery
+            applied = kept
+        self._complete_delivery(requests, applied, plan, item, folder, name)
+        requests.clear_recovery(claim)
+        return applied
+
+    def recover(
+        self, requests: AccessRequests, recovery: DecisionRecovery,
+        current: AccessRequestV1 | None, claimed_elsewhere: bool,
+    ) -> AccessRequestV1 | None:
+        """Finish a committed delivery or remove only this decision's uncommitted copy."""
+
+        files = [OwnedFile.model_validate(record) for record in recovery.effects["files"]]
+        if not recovery.matches(current):
+            for owned in files:
+                owned.remove(self._workspaces)
+            return None
+        parts = files[0].parts
+        assert current is not None and current.change is not None
+        stored = requests.service.store.get_plan(current.change.change_id)
+        if stored is None or contract_digest(stored[3]) != current.change.plan_digest:
+            raise HandDownRefused("The delivery's stored plan no longer matches its recovery record.")
+        plan = stored[3]
+        item = OwnItem(tuple(plan["source_parts"]), True, int(plan["size"]))
+        self._complete_delivery(requests, current, plan, item, parts[:-1], parts[-1])
+        return current
+
+    def _complete_delivery(
+        self, requests: AccessRequests, applied: AccessRequestV1, plan: dict[str, Any],
+        item: OwnItem, folder: tuple[str, ...], name: str,
+    ) -> None:
         if plan.get("move"):
             self._remove_original(item, plan["sha256"])
+        sender, recipient = str(plan["sender_person_id"]), str(plan["recipient_person_id"])
         logger.info(
             "A sent file was delivered. event=file_delivered request_id=%s from=%s to=%s approved_by=%s moved=%s",
-            request.request_id,
+            applied.request_id,
             sender,
             recipient,
-            reviewer.person_id,
+            applied.decided_by.id if applied.decided_by else None,
             bool(plan.get("move")),
         )
         self._notify(
@@ -391,8 +444,8 @@ class GatewayFileSharing:
             AccessNoticeKind.FILE_RECEIVED,
             f"{self._display_name(sender)} sent you {item.parts[-1]}",
             f"It is in {'/'.join(folder[2:])}/{name} in your folder.",
+            notice_id=f"file_received_{applied.request_id}",
         )
-        return applied
 
     # -- files ----------------------------------------------------------------------------
 
@@ -402,7 +455,10 @@ class GatewayFileSharing:
         except UnsafePath as exc:
             raise FileSharingRefused(f"{'/'.join(item.parts[2:])} cannot be read safely: {exc}") from exc
 
-    def _write_new(self, folder: tuple[str, ...], name: str, data: bytes) -> str:
+    def _write_new(
+        self, folder: tuple[str, ...], name: str, data: bytes,
+        *, before_write: Callable[[tuple[str, ...], int, bytes], None] | None = None,
+    ) -> str:
         """Write ``data`` as a new file in ``folder``; a taken name gets " (2)", " (3)", ..."""
 
         stem, suffix = PurePosixPath(name).stem, PurePosixPath(name).suffix
@@ -412,18 +468,14 @@ class GatewayFileSharing:
                 with safe_open.writable_file(
                     self._workspaces, folder + (candidate,), create_directories=True, exclusive=True
                 ) as writer:
+                    if before_write is not None:
+                        before_write(folder + (candidate,), writer.fileno(), data)
                     writer.write(data)
                 return candidate
             except UnsafePath as exc:
                 if "Already exists" not in str(exc):
                     raise FileSharingRefused(f"The file could not be written safely: {exc}") from exc
         raise FileSharingRefused(f"Too many files called {name} already; rename it first.")
-
-    def _discard(self, parts: tuple[str, ...]) -> None:
-        try:
-            safe_open.remove_file(self._workspaces, parts)
-        except UnsafePath:
-            logger.warning("Could not remove an undelivered copy. event=file_delivery_cleanup_failed path=%s", "/".join(parts))
 
     def _remove_original(self, item: OwnItem, sha256: str) -> None:
         """Remove the sender's file after a move, only while it still has the content that was sent."""
@@ -447,11 +499,14 @@ class GatewayFileSharing:
     # -- notices --------------------------------------------------------------------------
 
     @staticmethod
-    def _notify(requests: AccessRequests, person_id: str, kind: AccessNoticeKind, title: str, summary: str) -> None:
+    def _notify(
+        requests: AccessRequests, person_id: str, kind: AccessNoticeKind, title: str, summary: str,
+        *, notice_id: str | None = None,
+    ) -> None:
         try:
             requests.inbox.send_notice(
                 AccessNoticeV1(
-                    notice_id=new_id("access_notice"),
+                    notice_id=notice_id or new_id("access_notice"),
                     team_id=requests.service.team_id,
                     kind=kind,
                     recipient_person_id=person_id,

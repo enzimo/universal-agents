@@ -9,7 +9,7 @@ from strands import tool
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.schedule_worker_v1 import AgentCreationResultV1
 from custom_agents.team_templates import load_team_templates, summarize_team_templates
-from custom_messages.contracts.control_v1 import AgentCreationRequest, AgentStatus
+from custom_messages.contracts.control_v1 import AGENT_STATUS_RUNTIME_ONLY_FIELDS, AgentCreationRequest, AgentStatus
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.enums import ControlType, MessageMetaType, RoutingType
@@ -80,7 +80,9 @@ def get_known_agents() -> str:
     if agent is None:
         return json.dumps({"error": "Agent reference not set"})
 
-    return agent.known_agents.model_dump_json()
+    return agent.known_agents.model_dump_json(
+        exclude={"agent_map": {"__all__": set(AGENT_STATUS_RUNTIME_ONLY_FIELDS)}}
+    )
 
 
 @tool
@@ -236,7 +238,7 @@ def query_agent_state(
                 "returned": len(results),
                 "live_refresh_requested": live_requested,
                 "live_refresh_targets": live_targets,
-                "agents": [r.model_dump() for r in results],
+                "agents": [r.model_dump(exclude=set(AGENT_STATUS_RUNTIME_ONLY_FIELDS)) for r in results],
             },
             default=str,
         )

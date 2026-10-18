@@ -22,6 +22,7 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
+from .runtime_custody import DeferredMessageClaim, check_deferred_message
 from .sqlite_connection import connect_sqlite
 
 
@@ -101,7 +102,10 @@ RowDecision = Callable[[Optional[dict[str, Any]]], RowWrite]
 
 
 class ScheduleRepository(Protocol):
-    def write_locked(self, schedule_id: str, decide: RowDecision) -> RowWrite: ...
+    def write_locked(
+        self, schedule_id: str, decide: RowDecision,
+        *, deferred_message: DeferredMessageClaim | None = None,
+    ) -> RowWrite: ...
 
     def add_schedule_row_if_absent(
         self,
@@ -319,7 +323,10 @@ class _RelationalScheduleRepository:
             raise
 
 
-    def write_locked(self, schedule_id: str, decide: RowDecision) -> RowWrite:
+    def write_locked(
+        self, schedule_id: str, decide: RowDecision,
+        *, deferred_message: DeferredMessageClaim | None = None,
+    ) -> RowWrite:
         """Read one schedule row, decide what to write and write it, in one write transaction.
 
         Every change that depends on the row's current values goes through
@@ -327,10 +334,19 @@ class _RelationalScheduleRepository:
         overwritten (``custom_agents.schedule_store``). The row stays locked
         while ``decide`` runs (``_locked_row``). ``decide`` gets the row as a
         dict, or None when there is none, and must do no I/O; an exception
-        from it rolls the transaction back and propagates.
+        from it rolls the transaction back and propagates. A delayed retry
+        checks and consumes its exact deferred reply in this same transaction,
+        so a lost dispatch cannot install a retry and a failed write leaves
+        the reply available. Lock the deferred row before the schedule, as task
+        admission does, to keep concurrent PostgreSQL saves in the same order.
         """
 
         with self._connect() as conn:
+            conn.begin_write()
+            if deferred_message is not None:
+                check_deferred_message(
+                    conn, self._dialect, deferred_message, consume=True, logger=self._logger,
+                )
             row = self._locked_row(conn, schedule_id)
             write = decide(dict(row) if row is not None else None)
             self._apply_write(conn, schedule_id, write, existed=row is not None)
@@ -619,7 +635,6 @@ class SqliteScheduleRepository(_RelationalScheduleRepository):
     def _locked_row(self, conn: Any, schedule_id: str) -> Any:
         # The database write lock first, so no other writer changes the row
         # between this read and the write.
-        conn.begin_write()
         return conn.execute(
             f"SELECT * FROM scheduled_messages WHERE schedule_id = {self._dialect.bind}",
             (schedule_id,),

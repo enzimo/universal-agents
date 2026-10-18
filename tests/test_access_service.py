@@ -365,7 +365,7 @@ def test_lowering_access_in_one_change_removes_the_old_grant_and_keeps_the_new(w
 
     assert [grant.grant_id for grant in plan.new] == ["grant_lower"] and plan.replaced == {}
     service.store.apply_together(
-        TEAM, grants=plan.new, replaced=plan.replaced, revoke_ids=[full.grant_id],
+        TEAM, plan=lambda: service.plan_grants([lower], ending=[full.grant_id]), revoke_ids=[full.grant_id],
         actor=SubjectRefV1(kind=SubjectKind.USER, id="alice"), at=clock(),
     )
     assert service.store.get(full.grant_id).status is GrantStatus.REVOKED

@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Mapping, Optional, TypedD
 
 from storage.backends import STORAGE_BACKEND_SQLITE
 from custom_agents.schedule_fields import schedule_memory_now, trim_schedule_memory_ledger
+from storage.runtime_custody import DeferredMessageClaim
 from custom_agents.schedule_management import (
     ScheduleMutationOperation,
     ScheduleMutationPermit,
@@ -143,7 +144,15 @@ def _preview_text(value: Optional[str], *, limit: int = 180) -> Optional[str]:
     return f"{normalized[: limit - 3]}..."
 
 
-def schedule_claim_scope_for_agent(agent: Any) -> dict[str, Optional[str]]:
+class ScheduleClaimScope(TypedDict):
+    """Only the three claim fields inferred from an agent's identity."""
+
+    claim_team_id: str | None
+    claim_named_agent_type: str | None
+    claim_agent_id: str | None
+
+
+def schedule_claim_scope_for_agent(agent: Any) -> ScheduleClaimScope:
     """Return the default persisted claim scope for schedules owned by an agent."""
     named_agent_type = getattr(agent, "named_agent_type", None)
     return {
@@ -686,6 +695,7 @@ class ScheduleStore:
             ScheduleMutationOperation.UPDATE
         ),
         system_mutation_request_binding: Optional[dict[str, Any]] = None,
+        deferred_message: DeferredMessageClaim | None = None,
     ) -> None:
         """Install a schedule: create it, or replace the stored definition of one with its id.
 
@@ -727,7 +737,9 @@ class ScheduleStore:
             return RowWrite(columns=_definition_columns(msg, remaining_count=remaining), result="replaced")
 
         try:
-            write = self._repository.write_locked(msg.schedule_id, decide)
+            write = self._repository.write_locked(
+                msg.schedule_id, decide, deferred_message=deferred_message,
+            )
         except SystemScheduleMutationDenied:
             raise
         except Exception as e:

@@ -260,6 +260,61 @@ def test_gateway_state_repository_roundtrips_gateway_users_bindings_tokens_and_c
     assert repo.resolve_web_user_token(token_hash="hash_alpha") is None
 
 
+def test_a_link_code_two_uses_read_as_unused_is_given_to_only_one(tmp_path: Path) -> None:
+    settings = resolve_storage_settings(
+        {"backend": "sqlite", "sqlite": {"path": "runtime/gateway_state.db"}},
+        base_dir=str(tmp_path),
+    )
+    first = create_gateway_state_repository(settings, logger=logging.getLogger("test"))
+    second = create_gateway_state_repository(settings, logger=logging.getLogger("test"))
+    first.create_gateway_user(canonical_user_id="user_alpha", display_name="Alpha", timezone="UTC")
+    first.create_link_code(
+        link_code_hash="code_hash_alpha",
+        canonical_user_id="user_alpha",
+        expires_at_utc="2999-01-01T00:00:00+00:00",
+        created_by_channel="telegram",
+    )
+    open_connection = first._open_connection
+    used_by_second: list[object] = []
+
+    class SecondUseAfterRead:
+        """The first use's connection: right after it reads the code as unused, the second use takes it."""
+
+        def __init__(self) -> None:
+            self._conn = open_connection()
+
+        def __enter__(self) -> "SecondUseAfterRead":
+            self._conn.__enter__()
+            return self
+
+        def __exit__(self, *exc: object) -> object:
+            return self._conn.__exit__(*exc)
+
+        def execute(self, sql: str, params: object = ()) -> object:
+            cursor = self._conn.execute(sql, params)
+            if "FROM gateway_user_link_codes" in sql and not used_by_second:
+                rows = cursor.fetchall()
+                used_by_second.append(second.consume_link_code(link_code_hash="code_hash_alpha"))
+                return _Rows(rows)
+            return cursor
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._conn, name)
+
+    first._open_connection = SecondUseAfterRead  # type: ignore[method-assign]
+
+    assert first.consume_link_code(link_code_hash="code_hash_alpha") is None
+    assert used_by_second and used_by_second[0] is not None, "the second use got the code"
+
+
+class _Rows:
+    def __init__(self, rows: list[object]) -> None:
+        self._rows = rows
+
+    def fetchone(self) -> object:
+        return self._rows[0] if self._rows else None
+
+
 def test_gateway_state_repository_roundtrips_per_user_appearance(
     tmp_path: Path,
 ) -> None:

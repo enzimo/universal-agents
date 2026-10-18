@@ -159,14 +159,14 @@ async def test_full_inbox_rejects_new_request_once_without_redelivery(inbox):
 @pytest.mark.nats
 async def test_transport_close_joins_inflight_durable_admission(inbox, monkeypatch):
     started, release = threading.Event(), threading.Event()
-    original = inbox.repository.save_deferred_messages
+    original = inbox.repository.add_deferred_message
 
     def blocked_commit(**kwargs):
         started.set()
         assert release.wait(5)
         return original(**kwargs)
 
-    monkeypatch.setattr(inbox.repository, "save_deferred_messages", blocked_commit)
+    monkeypatch.setattr(inbox.repository, "add_deferred_message", blocked_commit)
     mapper = NatsSubjectMapper(team_id=new_id("close_custody"))
     adapter = NatsTransportAdapter(
         config=nats_transport_config_from_env(), mapper=mapper

@@ -81,7 +81,7 @@ async def test_cancelled_slow_admission_finishes_custody_on_loop_before_next_wri
         logger=logging.getLogger(__name__),
     )
     started, release = threading.Event(), threading.Event()
-    original = repository.save_deferred_messages
+    original = repository.add_deferred_message
     threads = []
 
     def slow_commit(**kwargs):
@@ -90,7 +90,7 @@ async def test_cancelled_slow_admission_finishes_custody_on_loop_before_next_wri
         assert release.wait(3), "test did not release the storage operation"
         original(**kwargs)
 
-    monkeypatch.setattr(repository, "save_deferred_messages", slow_commit)
+    monkeypatch.setattr(repository, "add_deferred_message", slow_commit)
     first = asyncio.create_task(inbox.admit(_envelope("first")))
     second = None
     try:

@@ -1,6 +1,7 @@
 """Real storage contention, admission rollback and policy revision fencing."""
 
 from concurrent.futures import ThreadPoolExecutor
+import json
 import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -9,8 +10,9 @@ from uuid import uuid4
 
 import pytest
 
-from custom_agents.schedule_management import schedule_control_state_digest
+from custom_agents.schedule_management import SystemScheduleMutationDenied, schedule_control_state_digest
 from custom_agents.schedule_store import ScheduleStore
+from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.schedule_worker_v1 import (
@@ -23,10 +25,11 @@ from custom_messages.contracts.schedule_worker_v1 import (
     utc_now,
 )
 from custom_messages.contracts.task_v1 import Task
-from custom_messages.enums import MessageMetaType, ScheduleManagementClass
+from custom_messages.enums import MessageMetaType, ScheduleManagementClass, SystemScheduleKind
 
 from storage.agent_launch_repository import AgentLaunchRepository, LaunchCapacity, LaunchConflict
 from storage.config import resolve_storage_settings
+from storage.runtime_custody import DeferredMessageClaim, RuntimeCustodyLost, deferred_message_id
 from storage.runtime_state_repository import create_runtime_state_repository
 from storage.schedule_worker_repository import ScheduleWorkerConflict
 from tests.runtime_snapshot_fixtures import snapshot_json
@@ -131,6 +134,7 @@ def claim_occurrence(store, schedule, agent_id="worker"):
 
 def admit(runtime, occurrence):
     runtime.save_task_runtime(
+        expect_existing=False,
         owner_agent_id=occurrence.agent_id,
         owner_agent_name="worker",
         team_id="team",
@@ -462,6 +466,7 @@ def test_coalesced_occurrence_commits_against_existing_task_custody(stores):
         update={"coalesced_into_task_id": "active-task"}
     )
     runtime.save_task_runtime(
+        expect_existing=False,
         owner_agent_id="worker",
         owner_agent_name="worker",
         team_id="team",
@@ -516,3 +521,81 @@ def test_excluding_blocked_first_schedule_allows_later_due_work(stores):
         exclude_schedule_ids=(first.schedule_id,),
     )
     assert claim["schedule_id"] == "second"
+
+
+def test_a_refused_save_records_no_outcome_and_keeps_the_receipt_with_the_new_owner(stores):
+    """A previous owner still running after a takeover finishes the run: nothing is written."""
+    store, runtime, _ = stores
+    occurrence = claim_occurrence(store, seed_schedule(store))
+    admit(runtime, occurrence)
+    sources = runtime.load_task_runtime_by_owner("worker")
+    runtime.commit_task_runtime_recovery(
+        sources=sources, replacement=replace(sources[0], owner_agent_id="replacement")
+    )
+    finished = json.loads(snapshot_json(occurrence.task_id))
+    finished["tasks"][0]["state"] = "completed"
+    with pytest.raises(RuntimeCustodyLost):
+        runtime.save_task_runtime(
+            expect_existing=True,
+            owner_agent_id="worker",
+            owner_agent_name="worker",
+            team_id="team",
+            owner_named_agent_type="Worker",
+            runtime_state_json=json.dumps(finished),
+        )
+    receipt = store.worker_records.get_occurrence(occurrence.occurrence_id, "team")
+    assert (receipt.agent_id, receipt.state, receipt.finished_at_utc) == ("replacement", "admitted", None)
+    assert runtime.load_task_runtime_by_owner("worker") == []
+
+
+def deferred_retry_reply(runtime):
+    envelope = MessageEnvelope(msg_content=Task(task_type=MessageMetaType.REQUEST, problem_statement="Retry later"))
+    runtime.add_deferred_message(
+        owner_agent_id="worker", owner_agent_name="worker", team_id="team",
+        owner_named_agent_type="Worker", message_id=envelope.msg_header.message_id,
+        envelope_json=envelope.model_dump_json(), first=False,
+        expect_existing=bool(runtime.load_deferred_messages_by_owner("worker")),
+    )
+    return DeferredMessageClaim("worker", envelope.msg_header.message_id)
+
+
+def deferred_reply_ids(runtime):
+    return [
+        deferred_message_id(message)
+        for row in runtime.load_deferred_messages_by_owner("worker")
+        for message in json.loads(row.messages_json)
+    ]
+
+
+def test_a_retry_install_consumes_only_its_reply_and_cannot_replay(stores):
+    store, runtime, _ = stores
+    reply, later_reply = deferred_retry_reply(runtime), deferred_retry_reply(runtime)
+    schedule = seed_schedule(store).model_copy(deep=True)
+    schedule.schedule_id = "retry"
+
+    store.add(schedule, deferred_message=reply)
+
+    assert store.get_scheduled_message("retry") is not None
+    assert deferred_reply_ids(runtime) == [later_reply.message_id]
+    schedule.schedule_id = "duplicate-retry"
+    with pytest.raises(RuntimeCustodyLost):
+        store.add(schedule, deferred_message=reply)
+    assert store.get_scheduled_message("duplicate-retry") is None
+    assert deferred_reply_ids(runtime) == [later_reply.message_id]
+
+
+def test_a_refused_schedule_install_keeps_its_reply(stores):
+    store, runtime, _ = stores
+    schedule = seed_schedule(store).model_copy(deep=True)
+    schedule.schedule_id = "system-retry"
+    schedule.management_class = ScheduleManagementClass.SYSTEM
+    schedule.system_schedule_kind = SystemScheduleKind.PROVIDER_OVERLOAD_RETRY
+    store.add(schedule)
+    reply = deferred_retry_reply(runtime)
+    schedule.enabled = False
+
+    with pytest.raises(SystemScheduleMutationDenied):
+        store.add(schedule, deferred_message=reply)
+
+    assert store.get_scheduled_message("system-retry").enabled is True
+    assert deferred_reply_ids(runtime) == [reply.message_id]

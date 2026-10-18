@@ -52,10 +52,12 @@ from custom_agents.liveness_observation import MAX_SCHEDULER_SLEEP_SECONDS, obse
 from custom_agents.dead_letter_watch import report_dead_letters
 from custom_agents.access_request_runtime import resume_decided_access_waits
 from custom_agents.orphaned_work_takeover import take_over_orphaned_work
+from custom_agents.agent_liveness import prune_departed_agent_rows_when_due
 from custom_agents.turn_failure_runtime import release_orphaned_slot_when_idle
 from custom_agents.schedule_store import (
     DEFAULT_SCHEDULE_CLAIM_TTL_SECONDS,
     AdvanceOutcome,
+    ScheduleClaimScope,
     compute_next_fire_at,
     owner_canonical_user_id_for_schedule,
     prepare_schedule_for_add,
@@ -374,7 +376,7 @@ async def _coalesce_into_run_elsewhere(
     new fire must not run beside it. Only runs whose owner is still live count,
     so a crashed worker's leftover receipt cannot block the schedule forever.
     """
-    from custom_agents.runtime_recovery import filter_stale_role_takeover_owner_ids
+    from custom_agents.agent_liveness import LivenessPurpose, gone_owner_ids
 
     records = agent._schedule_store.worker_records
     unfinished = [
@@ -385,13 +387,18 @@ async def _coalesce_into_run_elsewhere(
         if record.occurrence_id != schedule_admission.occurrence_id
         and record.agent_id != agent.id
     ]
-    if not unfinished:
-        return False
+    # Asked even with no unfinished run, so this schedule's decision records
+    # about owners it no longer waits on are forgotten (agent_liveness).
     stale = set(
-        await filter_stale_role_takeover_owner_ids(
-            agent, sorted({record.agent_id for record in unfinished})
+        await gone_owner_ids(
+            agent,
+            sorted({record.agent_id for record in unfinished}),
+            purpose=LivenessPurpose.SCHEDULE_COALESCING,
+            scope=schedule_id,
         )
     )
+    if not unfinished:
+        return False
     live = sorted(
         (record for record in unfinished if record.agent_id not in stale),
         key=lambda record: record.due_at,
@@ -545,7 +552,7 @@ async def _preserve_inbound_routing(
         schedule_msg.payload_meta = normalized_meta
 
 
-async def _store_ensure(agent: Any, schedule_msg: ScheduledMessage, claim_scope: dict[str, Any]) -> None:
+async def _store_ensure(agent: Any, schedule_msg: ScheduledMessage, claim_scope: ScheduleClaimScope) -> None:
     """Insert the schedule only when absent; a stored one keeps all of its state."""
 
     ensured = await agent.task_manager.operations_runtime.run(
@@ -574,7 +581,7 @@ async def _store_ensure(agent: Any, schedule_msg: ScheduledMessage, claim_scope:
     )
 
 
-async def _store_replace(agent: Any, schedule_msg: ScheduledMessage, claim_scope: dict[str, Any]) -> None:
+async def _store_replace(agent: Any, schedule_msg: ScheduledMessage, claim_scope: ScheduleClaimScope) -> None:
     """Replace the row; a stored system schedule needs the trusted-runtime permit for this exact change."""
 
     existing = await agent.task_manager.operations_runtime.run(
@@ -1994,6 +2001,14 @@ async def _scheduler_pass(
     except Exception:
         agent._logger.exception(
             "Could not check for work held by dead agents. event=orphaned_work_check_failed agent_id=%s",
+            agent.id,
+        )
+    # ...and removes the status rows of agents that are gone, on its own timer.
+    try:
+        await prune_departed_agent_rows_when_due(agent)
+    except Exception:
+        agent._logger.exception(
+            "Could not remove status rows of departed agents. event=agent_status_prune_failed agent_id=%s",
             agent.id,
         )
 

@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import threading
+import time
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -45,8 +46,11 @@ from strands.interrupt import InterruptException
 
 from access_catalog.catalog import CatalogSource
 from access_control.caller_tokens import CALLER_MANAGER, BrokerCaller
+from access_control import cli_binaries
 from access_control.cli_binaries import ProgramRefused, fetch_https, workspaces_root
+from access_control.decisions import HandDownRefused
 from access_control.proposals import ACCESS_PROPOSAL_KIND, ProposalCompiler, ProposalRefused, proposal_summary
+from access_control.requests import AccessRequests
 from custom_agents.tool_setup_runs import plan_run
 from custom_messages.contracts.access_v2 import (
     AccessProposalV1,
@@ -295,6 +299,323 @@ def test_a_built_program_that_changed_or_is_a_link_is_refused(world, served, tmp
 def test_downloads_are_https_only() -> None:
     with pytest.raises(ProgramRefused, match="only over https"):
         fetch_https("http://dl.gitea.com/tea")
+
+
+# A host name whose lookup the tests make slow (it resolves to 127.0.0.1).
+SLOW_HOST = "slowdns.test"
+
+
+def _self_signed_certificate(directory: Path) -> tuple[Path, Path]:
+    """A throwaway certificate for 127.0.0.1 and ``SLOW_HOST``, its own trust anchor."""
+
+    from datetime import timedelta
+    from ipaddress import ip_address
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(hours=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.IPAddress(ip_address("127.0.0.1")), x509.DNSName(SLOW_HOST)]), critical=False
+        )
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    cert_path, key_path = directory / "cert.pem", directory / "key.pem"
+    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()
+        )
+    )
+    return cert_path, key_path
+
+
+@pytest.fixture
+def https_server(tmp_path: Path, monkeypatch):
+    """Start local https servers this test trusts: ``https_server(answers)`` serves one answer per connection.
+
+    Each answer is called with the connection's TLS socket and the server's
+    port, after the request was read.
+    """
+
+    import socket
+    import ssl
+
+    cert, key = _self_signed_certificate(tmp_path)
+    trusted = ssl.create_default_context(cafile=str(cert))
+    monkeypatch.setattr(ssl, "_create_default_https_context", lambda *args, **kwargs: trusted)
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(cert, key)
+
+    def start(answers) -> str:
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        port = listener.getsockname()[1]
+
+        def serve() -> None:
+            for answer in answers:
+                conn, _address = listener.accept()
+                try:
+                    tls = server_context.wrap_socket(conn, server_side=True)
+                    tls.recv(4096)
+                    answer(tls, port)
+                    tls.close()
+                except OSError:
+                    pass  # the downloader stopped
+            listener.close()
+
+        threading.Thread(target=serve, daemon=True).start()
+        return f"https://127.0.0.1:{port}/hop0"
+
+    return start
+
+
+def _slowly(tls, data: bytes, seconds_per_byte: float) -> None:
+    for byte in data:
+        time.sleep(seconds_per_byte)
+        tls.sendall(bytes([byte]))
+
+
+def _redirect_after(seconds: float):
+    def answer(tls, port: int) -> None:
+        time.sleep(seconds)
+        tls.sendall(
+            f"HTTP/1.1 302 Found\r\nLocation: https://127.0.0.1:{port}/next\r\nContent-Length: 0\r\n"
+            "Connection: close\r\n\r\n".encode()
+        )
+
+    return answer
+
+
+def _file(body: bytes):
+    def answer(tls, _port: int) -> None:
+        tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+
+    return answer
+
+
+def _download(url: str) -> tuple[str, float]:
+    started = time.monotonic()
+    try:
+        result = repr(fetch_https(url))
+    except ProgramRefused as exc:
+        result = str(exc)
+    return result, time.monotonic() - started
+
+
+def test_one_deadline_covers_connecting_redirects_headers_and_the_file(https_server, monkeypatch) -> None:
+    # The socket timeout bounds one step only (2026-10-17 review): every step
+    # here answers within it, so only one deadline for the whole download stops it.
+    monkeypatch.setattr(cli_binaries, "DOWNLOAD_DEADLINE_SECONDS", 1)
+    monkeypatch.setattr(cli_binaries, "DOWNLOAD_TIMEOUT_SECONDS", 2)
+    head = b"HTTP/1.1 200 OK\r\nX-Pad: " + b"a" * 20 + b"\r\nContent-Length: 3\r\n\r\ntea"
+
+    cases = {
+        "slow headers": https_server([lambda tls, _port: _slowly(tls, head, 0.1)]),
+        "slow redirects": https_server([_redirect_after(0.6)] * 4 + [_file(b"tea")]),
+        "slow file": https_server([lambda tls, _port: (tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 40\r\n\r\n"), _slowly(tls, b"x" * 40, 0.1))]),
+    }
+    for name, url in cases.items():
+        result, seconds = _download(url)
+        assert "stopped after 1 seconds in total" in result, (name, result)
+        assert seconds < 1.8, (name, seconds)
+
+
+def test_a_slow_name_lookup_on_a_redirect_cannot_carry_the_download_past_its_deadline(https_server, monkeypatch) -> None:
+    # 2026-10-17 (third review): the timer could not reach a connection still
+    # looking up its host (it has no socket yet), so the rest of the download
+    # ran on. The deadline is now checked when the lookup returns.
+    import socket
+    from urllib.parse import urlsplit
+
+    monkeypatch.setattr(cli_binaries, "DOWNLOAD_DEADLINE_SECONDS", 1)
+    monkeypatch.setattr(cli_binaries, "DOWNLOAD_TIMEOUT_SECONDS", 2)
+    head = b"HTTP/1.1 200 OK\r\nX-Pad: " + b"a" * 30 + b"\r\nContent-Length: 3\r\n\r\ntea"
+    trickling = urlsplit(https_server([lambda tls, _port: _slowly(tls, head, 0.1)])).port
+
+    def redirect_to_slow_host(tls, _port: int) -> None:
+        time.sleep(0.7)
+        tls.sendall(
+            f"HTTP/1.1 302 Found\r\nLocation: https://{SLOW_HOST}:{trickling}/tea\r\nContent-Length: 0\r\n"
+            "Connection: close\r\n\r\n".encode()
+        )
+
+    first = https_server([redirect_to_slow_host])
+    lookup = socket.getaddrinfo
+
+    def slow_lookup(host, *args, **kwargs):
+        if host == SLOW_HOST:
+            time.sleep(0.5)  # the deadline passes during the lookup
+            host = "127.0.0.1"
+        return lookup(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", slow_lookup)
+    result, seconds = _download(first)
+
+    assert "stopped after 1 seconds in total" in result, result
+    assert seconds < 1.8, "overran by the lookup at most, not by the trickled headers"
+
+
+def test_the_download_deadline_interrupts_a_body_read_after_delayed_headers(https_server, monkeypatch) -> None:
+    monkeypatch.setattr(cli_binaries, "DOWNLOAD_DEADLINE_SECONDS", 1)
+    monkeypatch.setattr(cli_binaries, "DOWNLOAD_TIMEOUT_SECONDS", 2)
+
+    def stalled_body(tls, _port):
+        time.sleep(0.8)
+        tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n")
+        time.sleep(1.5)
+        tls.sendall(b"tea")
+
+    result, seconds = _download(https_server([stalled_body]))
+    assert "stopped after 1 seconds in total" in result
+    assert seconds < 1.5, seconds
+
+
+def test_a_download_follows_a_few_https_redirects_and_refuses_more(https_server, monkeypatch) -> None:
+    monkeypatch.setattr(cli_binaries, "DOWNLOAD_DEADLINE_SECONDS", 20)
+
+    assert fetch_https(https_server([_redirect_after(0)] * 2 + [_file(b"tea program")])) == b"tea program"
+    too_many = https_server([_redirect_after(0)] * (cli_binaries.MAX_DOWNLOAD_REDIRECTS + 1) + [_file(b"x")])
+    with pytest.raises(ProgramRefused, match="could not be downloaded"):
+        fetch_https(too_many)
+
+
+def test_each_download_runs_between_two_claim_renewals(world, served, monkeypatch) -> None:  # noqa: F811
+    _lead, requests, _gate, instance, _service = world
+    request, decide = approve(world, tea(), served)
+    applier = requests().appliers[ACCESS_PROPOSAL_KIND]
+    fetch = applier.download
+    steps: list[str] = []
+    renew = AccessRequests.renew_claim
+
+    def renew_claim(self, claim):  # noqa: ANN001 - patched method
+        steps.append("renew")
+        return renew(self, claim)
+
+    def download(url: str) -> bytes:
+        steps.append("download")
+        return fetch(url)
+
+    monkeypatch.setattr(AccessRequests, "renew_claim", renew_claim)
+    applier.download = download
+
+    decide()
+
+    assert steps == ["renew", "download", "renew"]
+    assert program_path(instance).read_bytes() == PROGRAM
+
+
+@pytest.mark.parametrize("renewal_unavailable", [False, True])
+def test_a_decision_that_lost_its_claim_keeps_a_program_the_winning_approval_uses(  # noqa: F811
+    world, served, monkeypatch, renewal_unavailable  # noqa: F811
+) -> None:
+    # 2026-10-17 review: the first approval's claim ran out during its second
+    # download and a second approval was stored meanwhile, relying on the
+    # program the first had already installed; the first approval's clean-up
+    # then removed that program.
+    lead, requests, _gate, instance, service = world
+    second_source = SOURCE.replace("/tea/", "/tea2/")
+    served.files["/tea2/0.9.2/tea-0.9.2-linux-amd64"] = PROGRAM
+    tea2 = tea(tool_id="cli:tea2", display_name="Second Gitea CLI")
+    tea2["installed_cli"] = {**tea2["installed_cli"], "binary_path": "team/tools/tea2/tea2", "source_url": second_source}
+    set_agent_ref(lead)
+    context = Context("tooluse-tea-two")
+    with pytest.raises(InterruptException):
+        json.loads(asyncio.run(propose_access_change(
+            title="Add two Gitea CLIs", reason="Triage issues.", tool_context=context, clis=[tea(), tea2],
+            grants=[{"agent_type": "TeamArchitect", "target": {"kind": "tool", "id": "cli:tea"}, "level": "read"}],
+        )))
+    request_id = context.raised[0]["access_request_id"]
+    applier = requests().appliers[ACCESS_PROPOSAL_KIND]
+    first_program = program_path(instance)
+    seen: dict = {}
+    renew = AccessRequests.renew_claim
+    first_claim: list[str] = []
+
+    def renew_claim(self, claim):
+        import sqlite3
+
+        if not first_claim:
+            first_claim.append(claim.claim_id)
+        if renewal_unavailable and "second" in seen and claim.claim_id == first_claim[0]:
+            raise sqlite3.OperationalError("connection lost during claim renewal")
+        return renew(self, claim)
+
+    monkeypatch.setattr(AccessRequests, "renew_claim", renew_claim)
+
+    def download(url: str) -> bytes:
+        data = served.download(url)
+        if "/tea2/" in url and not seen:
+            seen["first_program_installed"] = first_program.exists()
+            # The second download is slow: the first decision's claim runs out,
+            # and the reviewer approves the card again.
+            with service.store._connect() as conn:
+                conn.execute(
+                    "UPDATE access_request_claims SET claimed_until = '2000-01-01T00:00:00+00:00' WHERE request_id = ?",
+                    (request_id,),
+                )
+                conn.execute(
+                    "UPDATE access_decision_recoveries SET recover_after = '2000-01-01T00:00:00+00:00' WHERE request_id = ?",
+                    (request_id,),
+                )
+                conn.commit()
+            # An expired claim with external work must be reconciled before
+            # another approval starts. The old process can still resume later.
+            with pytest.raises(HandDownRefused, match="deciding this request"):
+                requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE)
+            requests().recover_decisions()
+            seen["second"] = requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE, kept_item_ids=("grant-0",))
+        return data
+
+    applier.download = download
+    message = "couldn't be saved" if renewal_unavailable else "already granted by another decision"
+    with pytest.raises(HandDownRefused, match=message):
+        requests().decide(request_id, OWNER, AccessReviewChoice.APPROVE, kept_item_ids=("grant-0",))
+
+    assert seen["first_program_installed"] and seen["second"].status is AccessRequestStatus.GRANTED
+    assert service.store.get_request(request_id).status is AccessRequestStatus.GRANTED
+    assert first_program.read_bytes() == PROGRAM, "the program the approved proposal uses stays"
+    assert (workspaces_root(instance) / "team" / "tools" / "tea2" / "tea2").read_bytes() == PROGRAM
+
+
+def test_a_decision_that_loses_its_claim_during_a_download_installs_nothing(world, served) -> None:  # noqa: F811
+    _lead, requests, _gate, instance, service = world
+    request, decide = approve(world, tea(), served)
+    applier = requests().appliers[ACCESS_PROPOSAL_KIND]
+    fetch = applier.download
+
+    def taken_over_meanwhile(url: str) -> bytes:
+        data = fetch(url)
+        # Meanwhile the claim ran out and another decision took the request.
+        with service.store._connect() as conn:
+            conn.execute(
+                "UPDATE access_request_claims SET claim_id = 'decision_other' WHERE request_id = ?",
+                (request.request_id,),
+            )
+            conn.commit()
+        return data
+
+    applier.download = taken_over_meanwhile
+    with pytest.raises(HandDownRefused, match="another decision took it"):
+        decide()
+
+    assert not program_path(instance).exists(), "a decision that lost the request writes nothing"
+    assert not (instance / "control" / "access" / "tools" / "proposed-cli-tea.yaml").exists()
+    assert service.store.get_request(request.request_id).status is AccessRequestStatus.WAITING
 
 
 # -- deciding and checking commands -------------------------------------------------------

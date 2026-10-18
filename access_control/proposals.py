@@ -61,18 +61,21 @@ from access_catalog.instance_tools import (
     with_proposed_tools,
     write_instance_tool,
 )
-from access_control.cli_binaries import Downloader, fetch_https
+from access_control.cli_binaries import Downloader, fetch_https, workspaces_root
 from access_control.data_folders import DataFolderRegistry, registration_problem
-from access_control.proposal_clis import cli_rows, install_programs, remove_programs
+from access_control.decision_effects import EffectJournal, OwnedFile
+from access_control.proposal_clis import cli_rows, install_programs
 from access_control.decisions import HandDownRefused
 from access_control.entities import PersonPrincipal, agent_type_id
 from access_control.folders import FOLDER_ROOT_USERS, FolderIdError, grantable_folder_id
+from access_control.grant_entries import GrantPlan
 from access_control.mcp_servers import default_proposal_grants
 from access_control.people import is_administrator
 from access_control.requests import ACCESS_PROPOSAL_CHANGE, LEVEL_WORDS, AccessRequests
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     AccessProposalV1,
+    AccessRequestStatus,
     AccessRequestV1,
     AccountMode,
     ChangeApprovalMode,
@@ -101,7 +104,7 @@ from mcp_control.registry import (
     MCPConnectionStore,
     MCPConnectionTransport,
 )
-from storage.access_repository import AccessStoreConflict
+from storage.access_repository import AccessStoreConflict, DecisionClaim, DecisionRecovery
 
 logger = logging.getLogger(__name__)
 
@@ -521,6 +524,11 @@ class ProposalCompiler:
         return rows
 
 
+# Failures that mean the approval no longer applies; they are reported as a
+# refusal. Anything else (a busy or lost database) is raised again as it was.
+_APPLY_REFUSALS = (HandDownRefused, CatalogError, AccessStoreConflict, PermissionError, ValueError)
+
+
 @dataclass
 class ProposalApplier:
     """Applies an approved proposal at the decision (``access_control.requests.ChangeApplier``)."""
@@ -563,7 +571,17 @@ class ProposalApplier:
             raise HandDownRefused("The proposal does not match what was reviewed; TeamLead must propose it again.")
         return proposal
 
-    def apply(self, request: AccessRequestV1, reviewer: PersonPrincipal, finished: AccessRequestV1) -> AccessRequestV1:
+    def apply(
+        self, request: AccessRequestV1, reviewer: PersonPrincipal, finished: AccessRequestV1, claim: DecisionClaim
+    ) -> AccessRequestV1:
+        """Apply an approved proposal under the decision's claim (``AccessRequests.decide``).
+
+        The claim is held from before the first file is written until the
+        outcome is stored, so a second approval of the same proposal is
+        refused before it touches anything: it can never take back tool
+        files, programs or an MCP server the first approval installed.
+        """
+
         requests = self.requests()
         proposal = self.stored_proposal(requests, request)
         if proposal.installs and not is_administrator(reviewer.roles):
@@ -575,7 +593,7 @@ class ProposalApplier:
             compiled = self.compiler(requests).compile(proposal, person=person, task_id=request.work_id)
         except ProposalRefused as exc:
             raise HandDownRefused(f"The proposal no longer applies: {exc}") from exc
-        applied = self._apply_items(requests, request, reviewer, finished, compiled)
+        applied = self._apply_items(requests, request, reviewer, finished, compiled, claim)
         if proposal.account_links:
             self.account_links[request.request_id] = list(proposal.account_links)
         logger.warning(
@@ -598,40 +616,144 @@ class ProposalApplier:
         reviewer: PersonPrincipal,
         finished: AccessRequestV1,
         compiled: CompiledProposal,
+        claim: DecisionClaim,
     ) -> AccessRequestV1:
-        """Write tool files and install MCP servers, then store the rest together; undo all on failure."""
+        """Write tool files and install MCP servers, then store the rest together; undo all on any failure.
 
-        written: list[Path] = []
-        programs: list = []
-        installed: list[MCPConnectionRecordV1] = []
+        Each download runs between two renewals of the decision's claim
+        (``AccessRequests.renew_claim``): the download gets the claim's whole
+        time limit, and a decision that lost the request meanwhile stops
+        before it writes anything. Any failure (also a busy or lost database)
+        undoes the files, programs and servers this approval wrote, unless the
+        outcome was stored after all; refusals are reported as such and other
+        errors are raised again as they were.
+        """
+
+        recovery = requests.recovery_record(claim, finished, {"tool_files": [], "programs": [], "servers": []})
+        requests.service.store.save_decision_recovery(recovery)
+        journal = EffectJournal(requests.service.store, recovery)
+
+        def prepare_program(root: Path, parts: tuple[str, ...], descriptor: int, body: bytes) -> None:
+            journal.prepare("programs", root, parts, descriptor, body)
+
+        def prepare_tool(path: Path, descriptor: int, body: bytes, temporary: Path) -> None:
+            journal.prepare(
+                "tool_files", path.parent, (path.name,), descriptor, body, staging_parts=(temporary.name,)
+            )
+
+        def prepare_server(record: MCPConnectionRecordV1) -> None:
+            recovery.effects["servers"].append(record.model_dump(mode="json"))
+            requests.service.store.save_decision_recovery(recovery)
+
+        def download(url: str) -> bytes:
+            requests.renew_claim(claim)
+            data = self.download(url)
+            requests.renew_claim(claim)
+            return data
+
         try:
-            install_programs(self.instance_root, compiled.proposal.clis, self.download, programs)
+            install_programs(self.instance_root, compiled.proposal.clis, download, before_write=prepare_program)
             for tool in (*compiled.proposal.tools, *compiled.proposal.clis):
-                written.append(write_instance_tool(self.instance_root, tool))
-            self._install_servers(compiled.proposal, request, reviewer, installed, now=requests.service.clock())
+                write_instance_tool(self.instance_root, tool, before_write=prepare_tool)
+            self._install_servers(
+                compiled.proposal, request, reviewer, prepare_server, claim, now=requests.service.clock()
+            )
             requests.service.catalog = self.catalogs.current()
-            return self._store(requests, request, reviewer, finished, compiled)
-        except (HandDownRefused, CatalogError, AccessStoreConflict, PermissionError, ValueError) as exc:
-            for path in written:
-                remove_instance_tool(path)
-            remove_programs(programs)
-            self._restore_servers(installed)
-            requests.service.catalog = self.catalogs.current()
+            applied = self._store(requests, request, reviewer, finished, compiled, claim)
+            requests.clear_recovery(claim)
+            return applied
+        except BaseException as exc:
+            stored = requests.outcome_stored_despite(exc, request.request_id, reviewer, finished.decided_at_utc)
+            if stored is not None:
+                requests.clear_recovery(claim)
+                return stored
+            stored = requests.reconcile_decision(
+                recovery, lambda latest, current, elsewhere: self.recover(requests, latest, current, elsewhere)
+            )
+            if stored is not None:
+                return stored
             logger.warning(
                 "An approved proposal could not be applied; nothing changed. event=proposal_apply_failed "
-                "request_id=%s by=%s error=%s",
+                "request_id=%s by=%s error_type=%s error=%s",
                 request.request_id,
                 reviewer.person_id,
+                type(exc).__name__,
                 exc,
             )
-            raise HandDownRefused(f"The proposal could not be applied, so nothing changed: {exc}") from exc
+            if isinstance(exc, _APPLY_REFUSALS):
+                raise HandDownRefused(f"The proposal could not be applied, so nothing changed: {exc}") from exc
+            raise
+
+    def recover(
+        self, requests: AccessRequests, recovery: DecisionRecovery,
+        current: AccessRequestV1 | None, claimed_elsewhere: bool,
+    ) -> AccessRequestV1 | None:
+        """Reconcile under the store lock; an exception's type never establishes ownership."""
+
+        if recovery.matches(current):
+            return current
+        effects = recovery.effects
+        from runtime_settings.instance_layout import InstanceLayout
+
+        directory = InstanceLayout.at(self.instance_root).instance_tools_dir
+        written = [OwnedFile.model_validate(record) for record in effects["tool_files"]]
+        programs = [OwnedFile.model_validate(record) for record in effects["programs"]]
+        installed = [MCPConnectionRecordV1.model_validate(record) for record in effects["servers"]]
+        if current is not None and (
+            current.status is AccessRequestStatus.GRANTED
+            or (current.status is AccessRequestStatus.WAITING and claimed_elsewhere)
+        ):
+            # A newer decision may have reused these programs. Keep them even
+            # when renewal failed with a database error rather than ClaimLost.
+            programs = []
+            if current.status is AccessRequestStatus.GRANTED:
+                written, installed = [], []
+            logger.warning(
+                "Another decision may use this proposal's programs; they are kept. "
+                "event=proposal_programs_kept request_id=%s", recovery.claim.request_id,
+            )
+        self._undo_items(requests, directory, recovery.claim.request_id, written, programs, installed)
+        return None
+
+    def _undo_items(
+        self,
+        requests: AccessRequests,
+        directory: Path,
+        request_id: str,
+        written: list[OwnedFile],
+        programs: list[OwnedFile],
+        installed: list[MCPConnectionRecordV1],
+    ) -> None:
+        """Take back the files, programs and servers a failed approval wrote (each step logged on failure)."""
+
+        steps: list[tuple[str, Callable[[], None]]] = [
+            *((
+                f"tool file {'/'.join(owned.parts)}",
+                lambda owned=owned: owned.remove(directory, lambda: remove_instance_tool(directory.joinpath(*owned.parts))),
+            ) for owned in written),
+            *((f"program {'/'.join(owned.parts)}", lambda owned=owned: owned.remove(workspaces_root(self.instance_root))) for owned in programs),
+            ("MCP servers", lambda: self._restore_servers(installed, request_id=request_id)),
+            ("catalog", lambda: setattr(requests.service, "catalog", self.catalogs.current())),
+        ]
+        failures: list[Exception] = []
+        for what, step in steps:
+            try:
+                step()
+            except Exception as exc:  # noqa: BLE001 - finish other steps, retain the journal for retry
+                failures.append(exc)
+                logger.exception(
+                    "Could not take back part of a failed proposal. event=proposal_undo_failed part=%s", what
+                )
+        if failures:
+            raise failures[0]
 
     def _install_servers(
         self,
         proposal: AccessProposalV1,
         request: AccessRequestV1,
         reviewer: PersonPrincipal,
-        installed: list[MCPConnectionRecordV1],
+        before_install: Callable[[MCPConnectionRecordV1], None],
+        claim: DecisionClaim,
         *,
         now: datetime,
     ) -> None:
@@ -653,8 +775,9 @@ class ProposalApplier:
                     f"The MCP server {record.descriptor.connection_name} changed after the review; "
                     "TeamLead must propose it again."
                 )
-            store.update_lifecycle(record.connection_id, lifecycle=MCPConnectionLifecycle.ACTIVE, approval=approval)
-            installed.append(record)
+            before_install(record)
+            with self.requests().service.store.decision_effect_transaction(claim):
+                store.update_lifecycle(record.connection_id, lifecycle=MCPConnectionLifecycle.ACTIVE, approval=approval)
             logger.warning(
                 "An MCP server was installed by an approved proposal. event=mcp_connection_approved "
                 "connection_id=%s request_id=%s by=%s",
@@ -663,13 +786,27 @@ class ProposalApplier:
                 reviewer.person_id,
             )
 
-    def _restore_servers(self, installed: list[MCPConnectionRecordV1]) -> None:
+    def _restore_servers(self, installed: list[MCPConnectionRecordV1], *, request_id: str) -> None:
         """Put back the pending records of servers installed by a proposal that then failed."""
 
         if not installed or self.mcp_store is None:
             return
         store = self.mcp_store()
         for record in installed:
+            current = store.require(record.connection_id)
+            if current.lifecycle is MCPConnectionLifecycle.PENDING and current.record_digest == record.record_digest:
+                continue
+            ignored = {"record_digest", "updated_at_utc", "lifecycle", "approval"}
+            if (
+                current.lifecycle is not MCPConnectionLifecycle.ACTIVE
+                or current.approval is None or current.approval.access_request_id != request_id
+                or current.model_dump(exclude=ignored) != record.model_dump(exclude=ignored)
+            ):
+                logger.warning(
+                    "An MCP record changed since this decision; its replacement is kept. "
+                    "event=access_decision_artifact_changed connection_id=%s", record.connection_id,
+                )
+                continue
             store.save(record)
             logger.warning(
                 "An MCP server installed by a failed proposal is pending again. event=mcp_connection_install_undone "
@@ -686,6 +823,7 @@ class ProposalApplier:
         reviewer: PersonPrincipal,
         finished: AccessRequestV1,
         compiled: CompiledProposal,
+        claim: DecisionClaim,
     ) -> AccessRequestV1:
         service = requests.service
         now = service.clock()
@@ -707,19 +845,26 @@ class ProposalApplier:
                 if not service.may_revoke(reviewer, held):
                     raise HandDownRefused(f"You cannot remove {held.grant_id}.")
                 revoke_ids.append(held.grant_id)
-        plan = service.plan_grants(grants, ending=revoke_ids)
-        given = [grant.grant_id for grant in plan.new] + [cover.grant_id for cover in plan.covered.values()]
-        applied = finished.model_copy(update={"grant_ids": tuple(dict.fromkeys(given)), "applied_at_utc": now})
-        service.store.apply_together(
+        ending = tuple(dict.fromkeys(revoke_ids))
+
+        def outcome(plan: GrantPlan | None) -> AccessRequestV1:
+            assert plan is not None
+            given = [grant.grant_id for grant in plan.new] + [cover.grant_id for cover in plan.covered.values()]
+            return finished.model_copy(update={"grant_ids": tuple(dict.fromkeys(given)), "applied_at_utc": now})
+
+        # Planned inside the store's write transaction (one entry per tool),
+        # and stored with the outcome under the decision's claim.
+        _plan, applied = service.store.apply_together(
             service.team_id,
-            grants=plan.new,
-            replaced=plan.replaced,
+            plan=lambda: service.plan_grants(grants, ending=ending),
             data_folders=folders,
-            revoke_ids=tuple(dict.fromkeys(revoke_ids)),
-            finished_request=applied,
+            revoke_ids=ending,
+            finish=outcome,
+            claim_id=claim.claim_id,
             actor=SubjectRefV1(kind=SubjectKind.USER, id=reviewer.person_id),
             at=now,
         )
+        assert applied is not None
         return applied
 
     def _all_grants(

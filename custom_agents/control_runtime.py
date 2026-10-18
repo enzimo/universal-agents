@@ -441,16 +441,17 @@ async def cancel_task_tree_locally(
 
 
 def consume_handback_interrupt(agent: Any, task_id: str) -> bool:
-    """Return True once if this task's turn was interrupted for a handback.
+    """Return True once if this task's turn was interrupted to move the task elsewhere.
 
-    The lease-loss wind-down records the task ids it interrupts on its own
-    state (custom_agents.lease_loss_wind_down); no other path sets them.
+    The lease-loss wind-down (custom_agents.lease_loss_wind_down) and the
+    release of work another agent took over (custom_agents.custody_loss) record
+    the task ids they interrupt on their own state; no other path sets them.
     """
-    wind_down = getattr(agent, "_lease_loss_wind_down", None)
-    interrupting = getattr(wind_down, "interrupting_task_ids", None)
-    if interrupting is not None and task_id in interrupting:
-        interrupting.discard(task_id)
-        return True
+    for owner in ("_lease_loss_wind_down", "_custody_release"):
+        interrupting = getattr(getattr(agent, owner, None), "interrupting_task_ids", None)
+        if interrupting is not None and task_id in interrupting:
+            interrupting.discard(task_id)
+            return True
     return False
 
 
@@ -462,15 +463,16 @@ async def handle_interrupted_turn(
 ) -> None:
     """Finish a turn whose child execution was cancelled.
 
-    A user or system stop cancels the whole task tree. A lease-loss handback
-    also cancels the turn, but the task is being returned for another worker
-    to run, so it must not be cancelled or given a cancellation record.
+    A user or system stop cancels the whole task tree. A lease-loss handback,
+    or the release of work another agent took over, also cancels the turn, but
+    the task is moving to another worker, so it must not be cancelled or given
+    a cancellation record.
     Callers re-raise first when the owning task itself is being cancelled
     (runtime shutdown).
     """
     if consume_handback_interrupt(agent, task_id):
         agent._logger.info(
-            "Turn interrupted for task handback; the wind-down owns the task. "
+            "Turn interrupted because its task is moving to another worker. "
             "event=turn_interrupted_for_handback agent_id=%s task_id=%s",
             agent.id,
             task_id,
