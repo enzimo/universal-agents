@@ -410,7 +410,7 @@ def _access_maintenance_tasks(
     access_inbox: GatewayAccessInbox,
     broker: Any,
     tool_setups: Any,
-    credential_workflow: Any = None,
+    credential_workflow: Any,
     status_page: Any,
     stop_event: asyncio.Event,
 ) -> list[asyncio.Task[Any]]:
@@ -441,10 +441,9 @@ def _access_maintenance_tasks(
     tasks = [
         asyncio.create_task(handover.run(stop_event), name="gateway_onboarding_key_handover"),
         asyncio.create_task(tool_setups.recover_unwatched(), name="gateway_tool_setup_recovery"),
+        asyncio.create_task(credential_workflow.recover_collections(), name="gateway_credential_collection_recovery"),
         asyncio.create_task(status_page.run(stop_event), name="gateway_status_page_loop"),
     ]
-    if credential_workflow is not None:
-        tasks.append(asyncio.create_task(credential_workflow.recover_collections(), name="gateway_credential_collection_recovery"))
     if config.authorization.enabled:
         tasks.append(asyncio.create_task(access_inbox.run(stop_event), name="gateway_access_inbox_loop"))
         tasks.append(

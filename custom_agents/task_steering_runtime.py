@@ -55,6 +55,8 @@ from id_generation import new_id
 from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 
 logger = logging.getLogger(__name__)
+GUIDANCE_ACCEPTED_EVENT = "task_steering_proactive_guidance_accepted"
+GUIDANCE_APPLIED_EVENT = "task_steering_proactive_guidance_applied"
 
 
 @dataclass
@@ -371,9 +373,9 @@ async def _record_guidance_history(
         entry_type=TaskHistoryType.TASK_EVENT,
         importance=TaskHistoryImportance.HIGH,
         details={
-            "event": "task_steering_proactive_guidance_applied"
+            "event": GUIDANCE_APPLIED_EVENT
             if applied
-            else "task_steering_proactive_guidance_accepted",
+            else GUIDANCE_ACCEPTED_EVENT,
             "steering_id": steering.steering_id,
             "conversation_id": steering.conversation_id,
             "dedupe_key": steering.idempotency_key or steering.steering_id,
@@ -1141,13 +1143,13 @@ def _saved_proactive_guidance(
                 pending.pop(key, None)
             read_by_turn.clear()
             continue
-        if event not in {"task_steering_proactive_guidance_accepted", "task_steering_proactive_guidance_applied"}:
+        if event not in {GUIDANCE_ACCEPTED_EVENT, GUIDANCE_APPLIED_EVENT}:
             continue
         key = details.get("dedupe_key") or details.get("steering_id")
         if not key:
             continue
         seen.add(key)
-        if event == "task_steering_proactive_guidance_applied":
+        if event == GUIDANCE_APPLIED_EVENT:
             read_by_turn.add(key)
         elif "steering" in details:
             pending[key] = TaskSteering.model_validate(details["steering"])

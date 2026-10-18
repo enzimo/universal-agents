@@ -463,6 +463,7 @@ async def test_a_wait_nobody_watches_after_a_restart_is_reported_once(setup_gate
         access_inbox=gateway.access_inbox,
         broker=gateway._secure_broker,
         tool_setups=gateway._credential_workflow.tool_setups,
+        credential_workflow=gateway._credential_workflow,
         status_page=gateway.application.status,
         stop_event=asyncio.Event(),
     )
