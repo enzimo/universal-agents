@@ -183,6 +183,17 @@ class TurnActionBatchRecord(SnapshotRecord):
     updated_at: str = ""
 
 
+# An action that ran but sent nothing: the runtime held it back and the task
+# goes on (a final review, pending delegated work or reviews, a running plan,
+# a saved workflow, or a delegation suppressed while a plan runs). Before
+# 2026-10-17 such actions were recorded dispatched and then completed, so a
+# held-back answer read as sent (``lease_loss_wind_down``).
+TURN_ACTION_HELD_BACK = "held_back"
+# Statuses of an action whose effect already happened (or was held back on
+# purpose); a retried or resumed batch skips it.
+TURN_ACTION_DONE_STATUSES = frozenset({"dispatched", "completed", TURN_ACTION_HELD_BACK})
+
+
 class TurnActionOutboxRecord(SnapshotRecord):
     """Runtime-owned durable state for one action inside a turn-action batch."""
 
@@ -209,6 +220,7 @@ class TurnActionOutboxRecord(SnapshotRecord):
         "dispatching",
         "dispatched",
         "completed",
+        "held_back",
         "blocked",
         "retry_scheduled",
         "failed_recoverable",

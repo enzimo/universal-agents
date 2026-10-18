@@ -10,7 +10,10 @@ refused to start a replacement for the live worker. The wind-down instead:
 2. hands every task it has not started, plus the task it is executing, back to
    the TeamLead in one structured message per task (the running turn is
    interrupted without a cancellation record so the task can run elsewhere,
-   and its running commands are stopped before the handback is sent);
+   and its running commands are stopped before the handback is sent).
+   A running task whose final answer the outbox already sent is finished here
+   instead: handing it back made another worker run it again and send a second
+   answer (2026-10-17);
 3. keeps tasks that already started and now wait on a person or a subtask,
    because their replies are addressed to this worker; they may finish here
    until ``lease_loss_wait_timeout_seconds`` after the lease was lost, after
@@ -34,11 +37,12 @@ from custom_agents.control_runtime import (
     request_subtask_stop,
 )
 from custom_agents.pending_work_runtime import start_owned_task
-from custom_agents.sdk.strands.turn_tool_stop import HANDBACK_REASON
+from custom_agents.sdk.strands.turn_tool_stop import ANSWERED_TASK_FINISHED_REASON, HANDBACK_REASON
 from custom_agents.task_records import TaskInfo
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
+from custom_messages.contracts.runtime_snapshot_v3 import TurnActionOutboxRecord
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.contracts.redispatch_v1 import DispatchedActionNoteV1
 from custom_messages.contracts.worker_handback_v1 import (
@@ -54,11 +58,20 @@ from custom_messages.contracts.worker_handback_v1 import (
 )
 from custom_messages.enums import MessageMetaType, ProgressState
 from custom_transport.nats_adapter import NAMED_WORKER_CONSUMER_ROLE
+from custom_agents.structured_llm_messages import TaskResponseAction
 
 WIND_DOWN_POLL_SECONDS = 5.0
 HANDBACK_PUBLISH_RETRY_SECONDS = 5.0
-# Outbox actions that may already have reached another agent or a user.
+# Outbox actions that may already have reached another agent or a user. A
+# held-back action (``TURN_ACTION_HELD_BACK``) sent nothing, so the next worker
+# is not told it was sent.
 _SENT_ACTION_STATUSES = frozenset({"dispatching", "dispatched", "completed"})
+# Outbox states of a final answer that went out (or was recorded as delivered
+# without a message) once the task is in FINALIZING_PLAN; "dispatching" alone
+# does not prove it.
+_FINAL_ANSWER_SENT_STATUSES = frozenset({"dispatched", "completed"})
+_FINAL_ANSWER_SENT_PHASE = "post_publish_finalize"
+_FINAL_ANSWER_ACTION = TaskResponseAction.model_fields["action_type"].default
 # Fields a worker adds while running a task; a returned request omits them.
 _REQUEST_FIELDS = {"message_class", "task_id", "parent_task_id", "task_type", "problem_statement", "attachments"}
 
@@ -210,7 +223,7 @@ async def _run_wind_down(agent: Any, state: LeaseLossWindDown) -> None:
         )
         state.resumable_task_ids.update(info.task.task_id for info in custody.resumable)
         for task_info in custody.running:
-            await _hand_back_running_task(agent, state, task_info)
+            await _finish_or_hand_back_running_task(agent, state, task_info)
         for task_info in custody.not_started:
             await _hand_back_unstarted_task(agent, state, task_info)
         await _hand_back_deferred_requests(agent, state)
@@ -275,6 +288,78 @@ def _has_started(task_manager: Any, info: TaskInfo) -> bool:
 def _peek_next_task_id(task_manager: Any) -> Optional[str]:
     queue = task_manager.task_state.task_queue
     return queue[0] if queue else None
+
+
+def _final_answer_sent(task_manager: Any, task_id: str) -> bool:
+    """Whether the outbox shows this task's final answer already went out.
+
+    Only the task's latest task_response action counts: an earlier one may
+    have been held back while the latest is still being published. A
+    held-back answer (a final review, pending delegated work or a manager
+    escalation) has its own status, ``held_back``. Only a real final answer
+    moves the task to FINALIZING_PLAN before it is sent
+    (``_prepare_local_task_finalization_before_dispatch``), and only that path
+    reaches the post-publish phase, which may outlast FINALIZING_PLAN when
+    finishing up fails and is retried. While its after-action report goes out,
+    a sent answer is still at the publish phase, dispatched.
+    """
+
+    latest = _latest_task_response(task_manager, task_id)
+    if latest is None:
+        return False
+    if latest.phase == _FINAL_ANSWER_SENT_PHASE:
+        return True
+    info = task_manager.get_task_info(task_id)
+    finalizing = info is not None and info.state == ProgressState.FINALIZING_PLAN
+    return finalizing and latest.status in _FINAL_ANSWER_SENT_STATUSES
+
+
+def _latest_task_response(task_manager: Any, task_id: str) -> Optional[TurnActionOutboxRecord]:
+    """The task's most recent task_response action: newest batch, then highest index."""
+    responses = [
+        (record.created_at, record.action_index, order, record)
+        for order, record in enumerate(task_manager.execution_state.turn_action_outbox.values())
+        if record.source_task_id == task_id and record.action_type == _FINAL_ANSWER_ACTION
+    ]
+    return max(responses, key=lambda item: item[:3])[3] if responses else None
+
+
+async def _finish_or_hand_back_running_task(
+    agent: Any, state: LeaseLossWindDown, task_info: TaskInfo
+) -> None:
+    """Finish a running task whose final answer was sent; hand back any other."""
+
+    task_id = task_info.task.task_id
+    if await agent.task_manager.operations_runtime.run(
+        partial(_final_answer_sent, agent.task_manager), task_id
+    ):
+        await _finish_answered_task(agent, state, task_id)
+    else:
+        await _hand_back_running_task(agent, state, task_info)
+
+
+async def _finish_answered_task(agent: Any, state: LeaseLossWindDown, task_id: str) -> None:
+    """Complete a task locally after its final answer went out.
+
+    Its turn was finishing up (summaries, after-action report, completion).
+    The turn is stopped as for a handback, without a cancellation record, and
+    the task is completed here so nobody runs it again.
+    """
+
+    state.interrupting_task_ids.add(task_id)
+    await _interrupt_active_execution(
+        agent, root_task_id=task_id, graph_task_ids={task_id}, reason=ANSWERED_TASK_FINISHED_REASON
+    )
+    state.interrupting_task_ids.discard(task_id)
+    finished = await agent._complete_local_task_finalization_after_dispatch(task_id=task_id)
+    agent._logger.warning(
+        "A running task's final answer was already sent; it was completed here "
+        "instead of being handed back. event=worker_wind_down_answered_task_finished "
+        "agent_id=%s task_id=%s completed_here=%s",
+        agent.id,
+        task_id,
+        finished,
+    )
 
 
 async def _hand_back_running_task(
@@ -390,7 +475,7 @@ async def _end_at_deadline(
         if agent.task_manager.is_executing_state(task_info.state):
             # A task that resumed and is running at the deadline goes back to
             # the lead like any interrupted run.
-            await _hand_back_running_task(agent, state, task_info)
+            await _finish_or_hand_back_running_task(agent, state, task_info)
         else:
             await _fail_waiting_task(agent, state, task_info)
 

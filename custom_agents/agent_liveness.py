@@ -109,6 +109,7 @@ class LivenessPurpose(StrEnum):
     REPLACEMENT_PASS = "replacement_pass"
     STUCK_TASK_NOTICE = "stuck_task_notice"
     STATUS_ROW_PRUNE = "status_row_prune"
+    CUSTODY_ADMISSION = "custody_admission"
 
 
 class OwnerEvidence(StrEnum):

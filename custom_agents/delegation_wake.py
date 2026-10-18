@@ -64,14 +64,53 @@ def counts_text(counts: dict[str, int]) -> str:
 async def wake_parent_for_decision(agent: Any, *, parent_task_id: str, directive: str, reason: str) -> bool:
     """Run the parent's model now although delegated tasks may still be pending.
 
-    Returns False when the parent is gone or already running.
+    Returns False when the parent is gone or no longer waiting.
+
+    The decision is taken while holding the agent's execution slot. The
+    callers (the scheduler pass and the claim handler) do not hold it, so a
+    delegated task's result handled meanwhile may already have resumed, or
+    finished, the parent. Before 2026-10-17 the parent was read before waiting
+    for the slot, and a second model turn then ran for a parent another path
+    had already completed. Moving WAITING to IN_PROGRESS with a compare-and-set
+    makes exactly one path resume it.
     """
 
     manager = agent.task_manager
     run = manager.operations_runtime.run
-    parent = await run(manager.get_task_info, parent_task_id)
-    if parent is None or manager.is_terminal_state(parent.state) or parent.state != ProgressState.WAITING:
-        return False
+    async with agent._execution_scope():
+        resumed = await run(
+            partial(
+                manager.try_transition_task_state,
+                parent_task_id,
+                allowed_from={ProgressState.WAITING},
+                to_state=ProgressState.IN_PROGRESS,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                reason=f"Woken for a decision: {reason}.",
+                source="delegation_wake",
+            )
+        )
+        if not resumed:
+            logger.info(
+                "A delegated-work wake-up found the task no longer waiting; nothing to do. "
+                "event=delegation_decision_wake_skipped agent_id=%s task_id=%s reason=%s",
+                agent.id,
+                parent_task_id,
+                reason,
+            )
+            return False
+        parent = await run(manager.get_task_info, parent_task_id)
+        if parent is None:
+            return False
+        await _resume_for_decision(agent, parent, directive=directive, reason=reason)
+    return True
+
+
+async def _resume_for_decision(agent: Any, parent: Any, *, directive: str, reason: str) -> None:
+    """Run the parent's turn; it waits again if work is still pending (caller holds the slot)."""
+
+    manager = agent.task_manager
+    run = manager.operations_runtime.run
+    parent_task_id = parent.task.task_id
     await run(
         manager.append_history_entry,
         parent_task_id,
@@ -107,7 +146,6 @@ async def wake_parent_for_decision(agent: Any, *, parent_task_id: str, directive
             ProgressState.WAITING,
             datetime.now(timezone.utc).isoformat(),
         )
-    return True
 
 
 def _decision_directive(agent: Any, parent_task_id: str, *, headline: str) -> str:

@@ -236,6 +236,14 @@ class GetPlanOperation(Protocol):
     def __call__(self, plan_id: str) -> Optional[PlanRecord]: ...
 
 
+class ForgetTaskOperation(Protocol):
+    def __call__(self, task_id: str) -> bool: ...
+
+
+class NotifyTaskReleasedOperation(Protocol):
+    def __call__(self, task_id: str) -> None: ...
+
+
 class GetTaskFromDbOperation(Protocol):
     def __call__(
         self,
@@ -360,10 +368,13 @@ class RuntimeOperationsCoordinatorOperations:
 class RuntimeSnapshotCoordinatorOperations:
     emit_activity: EmitActivityOperation
     ensure_task_plan_link: EnsureTaskPlanLinkOperation
+    forget_task: ForgetTaskOperation
+    notify_task_released: NotifyTaskReleasedOperation
     objectives_enabled: ObjectivesEnabledOperation
     plans_enabled: PlansEnabledOperation
     sync_plan_from_task: SyncPlanFromTaskOperation
     is_execution_cancelled: IsExecutionCancelledOperation
+    get_task_from_db: GetTaskFromDbOperation
 
 
 @dataclass(frozen=True, slots=True)

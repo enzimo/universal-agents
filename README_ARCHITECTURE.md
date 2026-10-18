@@ -166,7 +166,92 @@ each. They run in parallel on as many workers as the team allows:
   to the requester, which records the holder (`storage/delegated_task_repository.py`)
   and checks only that worker. Tasks still in a queue are neither probed nor timed
   out. Stops go to the holding worker; a task no worker took yet is withdrawn
-  from the stream.
+  from the stream. The requester writes the task's record before publishing it
+  and adds the stream sequence afterwards, because a free worker's claim can
+  arrive before the publish call returns; writing it afterwards turned such a
+  claim back into "waiting" with no holder, so stops withdrew nothing and never
+  reached the worker (fixed 2026-10-17). A record that has a holder never goes
+  back to "waiting" except through a handback by that holder. A delegation the
+  outbox gives up publishing (its automatic retries are over) is failed with a
+  cancellation record and its record closed (`event=delegated_task_never_published`).
+  A failed publish call whose task a worker already claimed did go through and
+  only its acknowledgement was lost: the action is finished as sent, its
+  post-publish steps run (the parent waits, a requested check-back is kept) and
+  the rest of the turn's actions run (`event=delegated_task_publish_confirmed_by_claim`).
+  A publish that went through is recorded on the outbox action as soon as it is
+  known (`publish_confirmed`, kept across later status changes and restarts):
+  when a later step fails (for example storing the stream sequence), the retry
+  runs only the steps after publishing and never publishes or cancels the task
+  again; before 2026-10-18 a failed second publish could end with the cleanup
+  cancelling a task already waiting in NATS. Retrying the steps after publishing
+  still counts toward the automatic retry limit, so a persistent database error
+  goes to the normal recovery path without cancelling the published task.
+  As a safeguard, the
+  watchdog checks and times out a "waiting" record without a stream sequence once
+  no outbox action is still trying to publish it
+  (`event=delegated_record_never_published`); the record's age alone misjudged a
+  busy or restarted requester.
+- **One holder per task.** NATS hands a task out again when its acknowledgement
+  does not arrive in time: the worker that took it stopped after saving it, or
+  NATS was unreachable for longer than the wait. Each task an agent executes has
+  one team-wide custody row (`runtime_task_custody`,
+  `storage/task_custody_repository.py`), claimed in the transaction that saves
+  the task and released when it leaves the agent's saved work. A worker that
+  receives a copy another agent holds drops it while that agent is alive, and
+  takes it over when the holder is gone or handed it back after losing its
+  lease (`custom_agents/task_custody.py`, `event=task_copy_dropped_held_elsewhere`
+  or `event=task_custody_takeover`); whether the holder is gone is the team's
+  owner-liveness rule (`agent_liveness.owner_liveness`, purpose
+  `custody_admission`). Every custody acquisition (a fresh claim, a takeover
+  and a recovery) reads the finished-task archive in its own transaction and
+  refuses a finished task, so a task another agent finished after the
+  admission's own archive read is never claimed and run again. The takeover
+  moves the row only while the judged-gone holder still holds it; a holder that
+  released or finished the task meanwhile was alive after all, so the copy is
+  dropped (or, if the lead re-sent it after that holder's handback, admitted as
+  a free task) and no fresh row is claimed for it. A holder wrongly judged gone
+  that keeps running finds its next save refused for that task: it drops the
+  task from memory, stops its running turn without a reply, stops the work the
+  task had delegated and withdraws the access requests it waited on, and keeps
+  working (`custom_agents/custody_loss.py`, `event=task_custody_taken_over`);
+  the task itself gets no cancellation record, because its new holder runs it.
+  The same happens when the row is gone although this agent never released it:
+  the taker already finished the task (`event=task_custody_finished_elsewhere`)
+  or gave it up unfinished, for example handed it back after a lost lease
+  (`event=task_custody_released_elsewhere`). The old holder never claims such a
+  task afresh, because that would run it beside the copy the lead sends again;
+  a task an operator retired from the taker is abandoned on purpose.
+  Task-sized history and result writes check the same custody rule as full
+  snapshots, while requester-side delegation records remain the requester's
+  to update. A mutation whose save releases its task reports that it did not
+  commit; state changes then skip terminal callbacks and projection records,
+  so an old holder never recreates records or reports an ending for released work.
+  The save checks this after its own-row check and before the deferred
+  message's exact-message check, so a refused save consumes no deferred
+  message; the save that follows, without the taken task, does. A released
+  turn's commands are stopped with the same reason as a whole-row takeover
+  (`CUSTODY_LOST_REASON`).
+  Admission reads custody before the
+  finished-task archive, because a holder archives a task before its save
+  releases custody. A copy of a task any agent of the team already finished is
+  dropped too, and a replacement taking over a gone worker's saved work leaves
+  out tasks another agent holds or any agent finished (the gone worker itself
+  too, if it stopped between archiving a task and saving), together with that work's records of
+  the tasks it delegated, whose workers are told to stop
+  (`orphaned_subtasks.stop_left_out_delegations`). If custody changes while a
+  starting agent adopts saved work, it reads the saved work again once. A
+  second conflict while taking over gone agents' work starts without that work
+  (`event=role_takeover_lost_race`, logged as an error): it stays saved with
+  its holder, the lead's replacement pass adopts it if that holder is gone, and
+  a startup agent that stopped here would stop the whole runtime. A second
+  conflict on the agent's own saved work stops the start
+  (`RuntimeRecoveryStartFailed`): starting without it could leave it unrun or
+  let the agent's first save replace it. A copy dropped while its holder looked
+  alive relies on that takeover if the holder stops later, so it is not run
+  when `agent.same_role_runtime_takeover_enabled` is off. Before 2026-10-17
+  each agent checked only its own records, so such a task ran twice.
+  Every delegation gets a generated task id, never one the model chose, so a
+  new task can never look like a copy of an earlier one.
 - **Worker pool controller** (`custom_agents/worker_pool_controller.py`, trusted
   code in the team host loop). For each worker type it reads waiting tasks, idle
   workers asking and the oldest wait from NATS, plus running, starting and
@@ -202,7 +287,10 @@ each. They run in parallel on as many workers as the team allows:
 - **When the requester wakes.** Its model runs again when every delegated task
   ended, at once when one failed with a typed reason, or when a
   `check_back_after_minutes` set on the delegation passed
-  (`custom_agents/delegation_wake.py`). Meanwhile trusted code sends the person
+  (`custom_agents/delegation_wake.py`). An early wake-up holds the agent's
+  execution slot and moves the waiting task to running with a compare-and-set,
+  so it never runs a second turn for a task that a delegated result handled
+  meanwhile already resumed or finished. Meanwhile trusted code sends the person
   counts ("9 of 24 done, 4 running, 11 waiting for a free worker") at most every
   `progress_notices.interval_minutes`.
 - **One named worker.** A delegation that also names a worker
@@ -419,7 +507,15 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
    cancellation record, so the task can run elsewhere, and its running shell
    and Python commands end before the handback is sent, so the rerun never
    overlaps them. New requests that still reach the worker go to the TeamLead
-   the same way.
+   the same way. A running task whose final answer was already sent is
+   completed by this worker instead; handing it back made another worker run
+   it again and send a second answer. "Sent" looks at
+   the task's latest task response only: the task is in FINALIZING_PLAN (entered
+   only before a real final answer) and the outbox shows that response
+   dispatched or completed, or it reached the post-publish step. The outbox
+   records an answer it held back (final review, pending delegated work, a
+   manager escalation) with its own status, `held_back`, so such a task is
+   handed back, and the next worker is not told the held-back answer was sent.
 3. It keeps tasks that already started and now wait on a person or subtask,
    because replies are addressed to this worker's id. They may finish until
    `agent.schedule_workers.lease_loss_wait_timeout_seconds` (default 30 minutes)
@@ -450,7 +546,9 @@ original reply route so the result reaches the original requester:
   task's first turn: which actions the interrupted run already sent, and to
   check them before repeating anything.
 - For a subtask the lead delegated itself, its record returns to "waiting in the
-  queue", so it is not probed until a worker takes it.
+  queue" before the task is sent again, so it is not probed until a worker takes
+  it. A claim recorded since (the new worker's, or one seen by a retried
+  handback) is never undone.
 - The worker that accepts a rerun takes over its occurrence receipt, fenced on
   the previous owner, so the schedule execution scope and completion follow the
   run. If the schedule ran again while the rerun was in flight, the worker
@@ -750,6 +848,20 @@ a previous owner does before its first save after the takeover (a model turn in
 progress until it is stopped) and handling that saves nothing (such as a reply
 about a task it no longer holds) may still happen on both agents. Repairs and
 fallback paths are logged rather than hidden.
+
+Task-scoped records (resume notes, pause records, tool-call overrides, blockers,
+Plan and Objective links, outbox and mailbox records) have one owner:
+`TASK_SCOPED_FIELDS` in `custom_agents/task_runtime_state.py` names the tasks
+each entry belongs to. Removing a task forgets its entries through that table,
+also when a task leaves without ending (a lease-loss handback), and restore
+keeps a saved entry by the same rule, taking a task's entries only from the
+snapshot whose task record it kept. Before 2026-10-17 removal cleared only some
+of them: finished tasks' records stayed in every later snapshot, and a takeover
+could attach one snapshot's leftover note to the same task restored from
+another. Restore drops leftovers in older snapshots with one
+`event=runtime_snapshot_orphans_dropped` warning per snapshot. The Objective
+review after a task ends gets the Objective id read before the task is archived,
+never by searching Objective records for the task id.
 
 Transport contracts, workflow records, and snapshot codecs have separate owners.
 Shared subsystem configuration lives in `runtime_settings/`; the gateway composes

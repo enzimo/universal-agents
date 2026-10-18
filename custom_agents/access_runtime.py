@@ -25,7 +25,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, replace
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any, Mapping, cast
 
 from strands.hooks import BeforeToolCallEvent, HookRegistry
@@ -577,17 +577,43 @@ def _clean_up_ended_task(agent: Any, task_id: str, state: ProgressState) -> None
     startup check (``end_grants_of_finished_tasks``).
     """
 
+    requests = _withdraw_waiting_requests(agent, task_id, why=f"The task ended ({state.value}) first.")
+    if requests is None:
+        return
+    try:
+        request_id = _ended_request_id(agent, task_id)
+        if request_id:
+            requests.service.end_task_grants([request_id])
+    except Exception:  # noqa: BLE001 - see above
+        logger.exception("Could not end the access of an ended task. event=task_grants_end_failed task_id=%s", task_id)
+
+
+def _clean_up_released_task(agent: Any, task_id: str) -> None:
+    """When another agent took the task over: withdraw the access requests this agent's run of it waited on.
+
+    The task-release callback (``TaskManager.add_task_release_callback``,
+    2026-10-17). The task goes on with its new holder, which asks again for
+    itself, so the person is not asked twice. The access bound to the request
+    stays: the task, and the request it belongs to, have not ended.
+    """
+
+    _withdraw_waiting_requests(agent, task_id, why="The task moved to another agent, which asks again if it needs to.")
+
+
+def _withdraw_waiting_requests(agent: Any, task_id: str, *, why: str) -> Any:
+    """Withdraw this agent's access requests waiting for the task; the request service, or None without one."""
+
     try:
         requests = runtime_requests(agent)
         waiting = requests.service.store.waiting_for_task(agent.team_id, agent.id, task_id)
     except AuthorizationOff:
-        return
-    except Exception:  # noqa: BLE001 - the task still ends; its reviews stay until decided
+        return None
+    except Exception:  # noqa: BLE001 - the task still ends or moves; its reviews stay until decided
         logger.exception("Could not look up access requests of an ended task. event=access_request_lookup_failed task_id=%s", task_id)
-        return
+        return None
     for request in waiting:
         try:
-            requests.withdraw(request.request_id, why=f"The task ended ({state.value}) first.")
+            requests.withdraw(request.request_id, why=why)
         except HandDownRefused:
             continue  # decided meanwhile
         except Exception:  # noqa: BLE001 - see above
@@ -596,12 +622,7 @@ def _clean_up_ended_task(agent: Any, task_id: str, state: ProgressState) -> None
                 "request_id=%s",
                 request.request_id,
             )
-    try:
-        request_id = _ended_request_id(agent, task_id)
-        if request_id:
-            requests.service.end_task_grants([request_id])
-    except Exception:  # noqa: BLE001 - see above
-        logger.exception("Could not end the access of an ended task. event=task_grants_end_failed task_id=%s", task_id)
+    return requests
 
 
 def end_grants_of_finished_tasks(service: AccessService, archive: Any) -> list[str]:
@@ -642,7 +663,7 @@ def end_grants_of_finished_tasks(service: AccessService, archive: Any) -> list[s
 
 
 def register_task_access_cleanup(agent: Any) -> None:
-    """Clean up after each ending task (once per agent); the team lead also checks finished tasks once."""
+    """Clean up after each ending or released task (once per agent); the team lead also checks finished tasks once."""
 
     callback = getattr(agent, "_task_access_terminal_callback", None)
     if callback is None:
@@ -652,6 +673,11 @@ def register_task_access_cleanup(agent: Any) -> None:
 
         agent._task_access_terminal_callback = callback
     agent.task_manager.add_task_terminal_callback(callback)
+    released = getattr(agent, "_task_access_release_callback", None)
+    if released is None:
+        released = partial(_clean_up_released_task, agent)
+        agent._task_access_release_callback = released
+    agent.task_manager.add_task_release_callback(released)
     if bool(getattr(agent, "is_team_lead", False)) and not getattr(agent, "_finished_task_grants_checked", False):
         agent._finished_task_grants_checked = True
         try:

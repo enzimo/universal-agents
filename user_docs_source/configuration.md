@@ -17,6 +17,37 @@ remain in NATS for redelivery. A duplicate already owned by the inbox can still 
 acknowledged. Lowering the limit preserves an existing backlog during recovery,
 logs a warning, and prevents new admission until the backlog falls below the limit.
 
+NATS can deliver a task a second time, for example when the agent that took it
+stopped before acknowledging it. Agents of a team that share one database then
+handle the copy like this:
+
+- While the agent holding the task looks alive, the copy is dropped
+  (`event=task_copy_dropped_held_elsewhere`). If that agent stops later, the
+  replacement that takes over its saved work runs the task.
+- When the holder has stopped, or handed the task back after losing its launch
+  lease, the agent that received the copy runs it (`event=task_custody_takeover`),
+  and a later takeover of the stopped agent's saved work leaves that task out.
+- If the holder only looked stopped and is still running, it drops the task the
+  next time it saves its work and stops working on it without replying
+  (`event=task_custody_taken_over`). Work it did before that may happen twice.
+- A copy of a task any agent of the team already finished is dropped
+  (`event=duplicate_archived_delivery_ignored`).
+
+These rules need `agent.same_role_runtime_takeover_enabled` left on (the
+default). With it off, nobody takes over a stopped agent's saved work, so a copy
+dropped while its holder looked alive is not run if that holder stops later.
+
+After upgrading to a release with this check, each agent's first start may log one
+`event=runtime_snapshot_orphans_dropped` warning per saved snapshot. Earlier
+releases left records of finished tasks in saved snapshots; they are dropped when
+the snapshot is read. No action is needed.
+
+Going back to an earlier release is not supported while agents hold unfinished
+work. This release records an action the runtime held back (for example an answer
+kept for a final review) with the outbox status `held_back`, which earlier releases
+do not know: they refuse a saved snapshot that contains it, so that agent cannot
+restore its work. Finish or abandon in-flight work before downgrading.
+
 The active task snapshot layout now uses strict version-3 records and does not read
 the previous monolithic layout. Before deploying this change, finish or explicitly
 abandon in-flight work and stop affected runtimes. Back up the database before

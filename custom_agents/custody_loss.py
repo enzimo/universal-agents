@@ -6,7 +6,16 @@ gone (``custom_agents.agent_liveness``). If that decision is ever wrong, the old
 owner is still running the same tasks. Until 2026-10-17 its next save simply
 wrote its row again, so two agents held and ran the same task. Saves now expect
 the owner's own row (``storage.runtime_custody.RuntimeCustodyLost``),
-and this module handles the refusal.
+and this module handles the refusal. An admission takeover of a redelivered
+copy (``custom_agents.task_custody``) moves only that one task's custody row;
+a later save that still lists the task is refused for it
+(``storage.task_custody_repository.TaskCustodyTakenOver``), and the
+coordinator drops only those tasks and calls the same listener. Before each
+such task is dropped, the task-release callbacks stop the work it delegated
+(cancellation records under each child's own root, ``orphaned_subtasks``)
+and withdraw the access requests it waited on (``access_runtime``): the new
+holder starts the task again, delegates and asks for itself, and the task
+itself gets no cancellation record.
 
 How a refusal is handled:
 
@@ -25,8 +34,9 @@ How a refusal is handled:
 4. The agent keeps running and takes new work; its next save makes a new row.
 
 Not done on purpose: no handback to the team lead (the work already has its new
-owner), no stop requests to subtasks (they belong to the new owner's task now),
-and no exit (a startup agent's exit stops the whole runtime).
+owner), no stop requests to subtasks when the whole saved row was taken over
+(the replacement adopted them with it; a per-task release stops them, see
+above), and no exit (a startup agent's exit stops the whole runtime).
 """
 
 from __future__ import annotations
@@ -36,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from custom_agents.provider_error_runtime import iter_exception_chain
+from custom_agents.sdk.strands.turn_tool_stop import CUSTODY_LOST_REASON
 from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 
 
@@ -93,7 +104,7 @@ def _release_tasks(agent: Any, task_ids: tuple[str, ...]) -> None:
 
 async def _stop_released_turn(agent: Any, state: CustodyRelease, task_id: str, released: set[str]) -> None:
     stopped = await state.interrupt_turn(
-        agent, root_task_id=task_id, graph_task_ids=released, reason="custody_lost",
+        agent, root_task_id=task_id, graph_task_ids=released, reason=CUSTODY_LOST_REASON,
     )
     if stopped is None:
         # The turn ended before the stop arrived; nothing will consume the marker.

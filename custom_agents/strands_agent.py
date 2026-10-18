@@ -59,9 +59,9 @@ from custom_agents.deferred_message_runtime import (
     pending_deferred_handoff,
 )
 from custom_agents.agent_team_runtime import LocalAgentTeamRuntime, unregister_local_worker
+from custom_agents.custody_loss import install_custody_listeners
 from custom_agents.liveness_observation import LivenessObservation, NATS_PRESENCE_HEARTBEAT_SECONDS
 from custom_agents.agent_liveness import own_process_identity, received_status_time
-from custom_agents.custody_loss import install_custody_listeners
 from storage.runtime_custody import DeferredMessageClaim, RuntimeCustodyLost
 from custom_agents.runtime_paths import (
     agent_layout,
@@ -305,6 +305,7 @@ from custom_messages.contracts.routing_v1 import (
     MessageHeader,
     MessageMeta,
 )
+from custom_messages.contracts.runtime_snapshot_v3 import TURN_ACTION_DONE_STATUSES
 from custom_messages.contracts.schedule_v1 import (
     AutomationMessage,
     ManagerScheduleCommand,
@@ -4525,7 +4526,7 @@ class UniversalAgent(BaseModel):
                 for record in records:
                     if record.action_index < due_record.action_index:
                         continue
-                    if record.status in {"completed", "dispatched"}:
+                    if record.status in TURN_ACTION_DONE_STATUSES:
                         continue
                     if record.status == "blocked":
                         await self.task_manager.operations_runtime.run(

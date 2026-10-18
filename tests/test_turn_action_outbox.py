@@ -476,6 +476,265 @@ def test_delegation_outbox_publishes_to_the_type_queue_and_records_it_as_waiting
     assert records[0].phase == "complete"
 
 
+def test_a_claim_that_beats_the_publish_call_keeps_its_worker(tmp_path) -> None:
+    """Regression (2026-10-17): the outbox wrote the delegated record after the
+    publish call returned. A free worker's claim handled in between was reset to
+    "queued" with no holder, so stops withdrew nothing and never reached the
+    worker. The record is now written before publishing."""
+    from custom_agents.delegated_work_runtime import delegated_tasks
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent._probe_live_named_agent_type = AsyncMock()
+    seen_before_publish = []
+
+    async def publish_then_claim(*, message, routing_key):
+        task_id = message.msg_content.task_id
+        seen_before_publish.append(delegated_tasks(agent).get(str(agent.team_id), task_id))
+        delegated_tasks(agent).record_claim(
+            team_id=str(agent.team_id), task_id=task_id, worker_agent_id="worker_9",
+            worker_agent_name="worker-9", claimed_at=datetime.now(timezone.utc),
+        )
+        return 42
+
+    agent.team_comms.send_message = publish_then_claim
+    result = _delegate(agent, manager, parent, named_type="WebResearchAgent")
+
+    assert seen_before_publish[0] is not None and seen_before_publish[0].status == "queued"
+    record = delegated_tasks(agent).get(str(agent.team_id), result.task_id)
+    assert (record.status, record.holder_agent_id, record.publish_sequence) == ("running", "worker_9", 42)
+
+
+def _subtasks(manager, parent):
+    return [info.task.task_id for info in manager.task_state.task_to_subtask_list.get(parent.task_id, [])]
+
+
+def test_a_delegation_never_sent_is_stopped_when_retries_end(tmp_path, caplog) -> None:
+    """Regression (2026-10-17 review): the record written before publishing stayed
+    "queued" when the publish kept failing and the action went to model recovery; the
+    watchdog never checks queued tasks, so the subtask and the parent's answer waited
+    for ever. Now the subtask fails, its record closes and a worker refuses it."""
+    from custom_agents.delegated_work_runtime import delegated_tasks
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent._probe_live_named_agent_type = AsyncMock()
+    object.__setattr__(agent, "_turn_action_outbox_config", lambda: {"max_auto_attempts": 0})
+    agent.team_comms.send_message = AsyncMock(side_effect=RuntimeError("nats unavailable"))
+
+    from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
+
+    with caplog.at_level(logging.WARNING), pytest.raises(TurnActionRecoveryScheduled):
+        _delegate(agent, manager, parent, named_type="WebResearchAgent")
+
+    (child,) = _subtasks(manager, parent)
+    assert manager.get_task_info(child).state == ProgressState.FAILED
+    assert delegated_tasks(agent).get(str(agent.team_id), child).status == "failed"
+    assert manager.is_execution_cancelled(child)
+    assert not manager.has_pending_subtasks(parent.task_id)
+    assert any("event=delegated_task_never_published" in r.getMessage() for r in caplog.records)
+
+
+def test_a_delegation_a_worker_took_is_finished_as_sent_and_its_batch_goes_on(tmp_path, caplog) -> None:
+    """Regression (2026-10-17 review rounds 2 and 3): JetStream stored the task and a
+    worker claimed it, but the publish call reported a failure (lost acknowledgement).
+    Round 2 failed the subtask; then it went through model recovery, which blocked the
+    rest of the batch and lost the check-back. A claim proves the publish: the action
+    finishes as sent, its post-publish steps run, and the next action runs."""
+    from custom_agents.delegated_work_runtime import delegated_tasks
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    task_info = manager.get_task_info(parent.task_id)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent._probe_live_named_agent_type = AsyncMock()
+
+    async def stored_and_claimed_but_ack_lost(*, message, routing_key):
+        delegated_tasks(agent).record_claim(
+            team_id=str(agent.team_id), task_id=message.msg_content.task_id, worker_agent_id="worker_9",
+            worker_agent_name="worker-9", claimed_at=datetime.now(timezone.utc),
+        )
+        raise TimeoutError("nats: timeout")
+
+    agent.team_comms.send_message = stored_and_claimed_but_ack_lost
+    decision = StructuredAgentTurnDecision(
+        actions=[
+            DelegateTaskAction(
+                task=StructuredTaskPayload(task_type=MessageMetaType.REQUEST, problem_statement="Research flights."),
+                target_named_agent_type="WebResearchAgent",
+                requester_type=RequesterType.AGENT_REQUESTER,
+                check_back_after_minutes=30,
+            ),
+            TaskResponseAction(task=StructuredTaskPayload(task_type=MessageMetaType.RESPONSE, answer="Working on it.")),
+        ]
+    )
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(
+            agent._execute_turn_decision_outbox(
+                decision=decision,
+                incoming_content=parent,
+                incoming_header=task_info.header,
+                incoming_meta=task_info.meta,
+            )
+        )
+
+    (child,) = _subtasks(manager, parent)
+    assert manager.get_task_info(child).state != ProgressState.FAILED
+    assert not manager.is_execution_cancelled(child)
+    record = delegated_tasks(agent).get(str(agent.team_id), child)
+    assert (record.status, record.holder_agent_id) == ("running", "worker_9")
+    assert delegated_tasks(agent).get_wait(str(agent.team_id), parent.task_id).check_back_at_utc is not None
+    delegation, answer = sorted(manager.execution_state.turn_action_outbox.values(), key=lambda item: item.action_index)
+    assert (delegation.status, delegation.phase) == ("completed", "complete")
+    assert delegation.side_effects["publish_confirmed_by_claim"] == "worker_9"
+    # The batch went on: the answer ran (held back while the delegated task runs), not blocked.
+    assert answer.status == "held_back"
+    assert manager.get_task_info(parent.task_id).state == ProgressState.WAITING
+    assert any("event=delegated_task_publish_confirmed_by_claim" in r.getMessage() for r in caplog.records)
+
+
+def test_a_claim_that_arrives_while_recovery_is_scheduled_still_keeps_the_task(tmp_path, monkeypatch) -> None:
+    """The narrow fallback: the claim lands after the first check, while the outbox
+    schedules its recovery. The subtask is not failed and the action stays dispatched."""
+    from custom_agents import turn_action_outbox_runtime
+    from custom_agents.delegated_work_runtime import delegated_tasks
+    from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent._probe_live_named_agent_type = AsyncMock()
+    object.__setattr__(agent, "_turn_action_outbox_config", lambda: {"max_auto_attempts": 0})
+    monkeypatch.setattr(turn_action_outbox_runtime, "delegation_holder", lambda _agent, _task_id: None)
+
+    async def stored_and_claimed_but_ack_lost(*, message, routing_key):
+        delegated_tasks(agent).record_claim(
+            team_id=str(agent.team_id), task_id=message.msg_content.task_id, worker_agent_id="worker_9",
+            worker_agent_name="worker-9", claimed_at=datetime.now(timezone.utc),
+        )
+        raise TimeoutError("nats: timeout")
+
+    agent.team_comms.send_message = stored_and_claimed_but_ack_lost
+    with pytest.raises(TurnActionRecoveryScheduled):
+        _delegate(agent, manager, parent, named_type="WebResearchAgent")
+
+    (child,) = _subtasks(manager, parent)
+    assert manager.get_task_info(child).state != ProgressState.FAILED
+    (action,) = list(manager.execution_state.turn_action_outbox.values())
+    assert action.status == "dispatched" and action.side_effects["publish_confirmed_by_claim"] == "worker_9"
+
+
+@pytest.mark.parametrize("keep_failing", [False, True])
+def test_a_published_delegation_is_never_cancelled_when_a_later_step_keeps_failing(tmp_path, keep_failing) -> None:
+    """Regression (2026-10-18 owner review O1, from the review probe): the publish went
+    through, then storing its stream sequence failed, so the action waited for a retry
+    with status retry_scheduled. The retry published again, that publish failed, the
+    retries ran out and the cleanup cancelled the task a worker could already be
+    running. Publishing is now recorded apart from the status (it survives a
+    restart), so the retry only runs the steps after publishing and nothing cancels
+    the published task."""
+    import sqlite3
+    from contextlib import nullcontext
+
+    from custom_agents.delegated_work_runtime import delegated_tasks
+    from custom_agents.turn_action_outbox_runtime import PUBLISH_CONFIRMED, TurnActionRecoveryScheduled
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent._probe_live_named_agent_type = AsyncMock()
+    object.__setattr__(agent, "_turn_action_outbox_config", lambda: {"max_auto_attempts": 2})
+    with patch(
+        "custom_agents.turn_action_outbox_runtime.record_publish_sequence",
+        side_effect=sqlite3.OperationalError("database is locked"),
+    ), pytest.raises(TurnActionRecoveryScheduled):
+        _delegate(agent, manager, parent, named_type="WebResearchAgent")
+    (record,) = manager.execution_state.turn_action_outbox.values()
+    child = record.side_effects["delegated_task_id"]
+    assert record.status == "retry_scheduled" and record.side_effects[PUBLISH_CONFIRMED]
+    assert agent.team_comms.send_message.await_count == 1
+
+    # A restart keeps the confirmation: it is saved with the record.
+    restarted = _make_task_manager(tmp_path)
+    restarted.restore_runtime_state()
+    assert restarted.get_turn_action_record(record.action_id).side_effects[PUBLISH_CONFIRMED]
+
+    manager.mark_turn_action_record(record.action_id, next_retry_at="2000-01-01T00:00:00+00:00")
+    agent.team_comms.send_message = AsyncMock(side_effect=TimeoutError("broker unavailable on retry"))
+    retry_failure = patch(
+        "custom_agents.turn_action_outbox_runtime.record_publish_sequence",
+        side_effect=sqlite3.OperationalError("database is still locked"),
+    ) if keep_failing else nullcontext()
+    with retry_failure:
+        assert asyncio.run(agent._drain_due_turn_action_outbox())
+
+    agent.team_comms.send_message.assert_not_awaited()  # not published a second time
+    finished = manager.get_turn_action_record(record.action_id)
+    assert finished.attempt_count == 2
+    if keep_failing:
+        assert finished.status == "failed_recoverable"
+        assert finished.recoverability == "model_recovery"
+    else:
+        assert (finished.status, finished.phase) == ("completed", "complete")
+    assert manager.get_task_info(child).state != ProgressState.FAILED
+    assert not manager.is_execution_cancelled(child)
+    assert delegated_tasks(agent).get(str(agent.team_id), child).status == "queued"
+    assert manager.get_task_info(parent.task_id).state == (
+        ProgressState.PARTIAL if keep_failing else ProgressState.WAITING
+    )
+
+
+def test_a_published_delegation_is_still_waiting_for_the_watchdog_after_its_action_failed(tmp_path) -> None:
+    """The watchdog's never-published safeguard reads the confirmation too: a
+    delegation published before its action failed for good is not untracked work."""
+    from custom_agents.turn_action_outbox_runtime import PUBLISH_CONFIRMED, delegation_publish_given_up
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    batch = manager.create_turn_action_batch(parent.task_id, [{"action_type": "delegate_task"}])
+    (record,) = manager.list_turn_action_records(batch.batch_id)
+    manager.mark_turn_action_record(
+        record.action_id, status="failed_terminal",
+        side_effects={"delegated_task_id": "child_1", PUBLISH_CONFIRMED: "publish_call"},
+    )
+    assert not delegation_publish_given_up(manager, "child_1")
+    manager.mark_turn_action_record(record.action_id, side_effects={PUBLISH_CONFIRMED: None})
+    assert delegation_publish_given_up(manager, "child_1")
+
+
+def test_a_delegation_still_retrying_or_already_sent_is_left_alone(tmp_path) -> None:
+    from custom_agents.delegated_work_runtime import delegated_tasks
+    from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent._probe_live_named_agent_type = AsyncMock()
+    agent.team_comms.send_message = AsyncMock(side_effect=RuntimeError("nats unavailable"))
+    with pytest.raises(TurnActionRecoveryScheduled):
+        _delegate(agent, manager, parent, named_type="WebResearchAgent")  # automatic retry follows
+    (child,) = _subtasks(manager, parent)
+    assert manager.get_task_info(child).state != ProgressState.FAILED
+    assert delegated_tasks(agent).get(str(agent.team_id), child).status == "queued"
+
+    # Published, then a later step failed: a worker may hold it, so it is not stopped.
+    manager2 = _make_task_manager(tmp_path / "second")
+    parent2 = _add_active_parent_task(manager2)
+    agent2 = _make_agent(tmp_path / "second", task_manager=manager2)
+    agent2._probe_live_named_agent_type = AsyncMock()
+    object.__setattr__(agent2, "_turn_action_outbox_config", lambda: {"max_auto_attempts": 0})
+    with patch(
+        "custom_agents.turn_action_outbox_runtime._notify_user_delegated_work_started",
+        AsyncMock(side_effect=RuntimeError("chat down")),
+    ), pytest.raises(TurnActionRecoveryScheduled):
+        _delegate(agent2, manager2, parent2, named_type="WebResearchAgent")
+    (sent,) = _subtasks(manager2, parent2)
+    assert manager2.get_task_info(sent).state != ProgressState.FAILED
+    assert not manager2.is_execution_cancelled(sent)
+
+
 def _delegate(agent, manager, parent, *, named_type, agent_name=None):
     decision = StructuredAgentTurnDecision(
         actions=[
@@ -772,10 +1031,12 @@ def test_delegation_outbox_defers_same_turn_terminal_response_until_child_return
         "delegate_task",
         "task_response",
     ]
-    assert [record.status for record in records] == [
-        "completed",
-        "completed",
-        "completed",
+    # The deferred answer sent nothing, so it is recorded as held back, never
+    # as completed (a lease-loss wind-down once read it as sent).
+    assert [(record.status, record.phase) for record in records] == [
+        ("completed", "complete"),
+        ("completed", "complete"),
+        ("held_back", "complete"),
     ]
     history_events = [
         entry
@@ -2048,6 +2309,30 @@ def test_workflow_public_config_keeps_agent_type_overrides_sparse(tmp_path) -> N
             {"provider": "litellm", "model_id": "fallback/model"}
         ]
         assert "same_provider_retry" not in manager_llm["failover"]
+
+
+def test_a_held_back_action_counts_as_done_when_its_batch_stops_or_recovers(tmp_path) -> None:
+    """A held-back action ran and sent nothing on purpose (2026-10-17): a later
+    failure in its batch must not block it, a resumed batch must not run it
+    again, and the recovery brief lists it with its status."""
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    batch = manager.create_turn_action_batch(
+        parent.task_id,
+        [{"action_type": "task_response"}, {"action_type": "notify_user"}, {"action_type": "notify_user"}],
+    )
+    assert batch is not None
+    held, failing, later = manager.list_turn_action_records(batch.batch_id)
+    manager.mark_turn_action_record(held.action_id, status="held_back", phase="complete")
+    manager.mark_turn_action_record(failing.action_id, status="failed_recoverable")
+
+    manager.block_turn_actions_after(batch.batch_id, -1, reason="an earlier action failed")
+
+    statuses = {record.action_id: record.status for record in manager.list_turn_action_records(batch.batch_id)}
+    assert statuses == {held.action_id: "held_back", failing.action_id: "blocked", later.action_id: "blocked"}
+    brief = manager.build_turn_action_recovery_brief(batch.batch_id)
+    completed_section = brief.split("Completed actions:")[1].split("Failed or retrying actions:")[0]
+    assert f"action_id={held.action_id} status=held_back" in completed_section
 
 
 # -- what a turn read is released when its decision is recorded (review 2026-10-18) --

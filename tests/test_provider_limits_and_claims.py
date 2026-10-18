@@ -18,6 +18,7 @@ from custom_agents.provider_limits import (
 )
 from custom_messages.contracts.delegated_work_v1 import DelegatedTaskClaimedV1, TaskFailureCategory
 from custom_messages.contracts.routing_v1 import MessageHeader
+from custom_messages.contracts.runtime_snapshot_v3 import TurnActionOutboxRecord
 from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry
 from custom_messages.enums import MessageMetaType, ProgressState
 from runtime_settings.worker_pools import WorkerPoolsConfig
@@ -248,6 +249,49 @@ async def test_only_tasks_waiting_in_a_shared_queue_skip_the_watchdog(tmp_path, 
     )
     holders = await _delegated_holders(agent)
     assert await _queue_tracking(agent, holders, shared) == (False, claimed_at.isoformat())
+
+
+def _delegation_action(task_id: str, status: str) -> TurnActionOutboxRecord:
+    return TurnActionOutboxRecord(
+        action_id=f"act_{task_id}", batch_id="batch", source_task_id="parent_1", action_index=0,
+        action_type="delegate_task", payload_json={}, status=status, phase="publish",
+        side_effects={"delegated_task_id": task_id},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_record_never_published_is_checked_like_untracked_work_once_the_outbox_gives_up(
+    tmp_path, monkeypatch, caplog
+):
+    """Safeguard (2026-10-17 review): a queued record without a stream sequence that no
+    outbox action still publishes is probed and timed out, not left waiting. Round 2:
+    it is judged by the outbox, not by the record's age, which misjudged a busy or
+    restarted requester whose action was still retrying."""
+    from custom_agents.subtask_watchdog_runtime import _delegated_holders, _queue_tracking
+
+    agent = _requester(tmp_path, monkeypatch)
+    agent._untracked_subtask_warnings = set()
+    outbox = {
+        f"act_{task_id}": _delegation_action(task_id, status)
+        for task_id, status in (
+            ("gave_up", "failed_recoverable"), ("retrying", "retry_scheduled"), ("publishing", "dispatching"),
+            ("dispatched", "dispatched"),
+        )
+    }
+    agent.task_manager.execution_state = SimpleNamespace(turn_action_outbox=outbox)
+    for task_id in ("gave_up", "retrying", "publishing", "dispatched", "no_action"):
+        _publish(agent, task_id, sequence=None)
+    _publish(agent, "published", sequence=9)
+    holders = await _delegated_holders(agent)
+    route = "team_t_WebResearchAgent"
+    with caplog.at_level(logging.WARNING):
+        for task_id in ("gave_up", "gave_up", "no_action"):
+            assert await _queue_tracking(agent, holders, _subtask_info(task_id, route=route)) == (False, None)
+    for task_id in ("retrying", "publishing", "dispatched", "published"):
+        assert await _queue_tracking(agent, holders, _subtask_info(task_id, route=route)) == (True, None)
+    warnings = [r.getMessage() for r in caplog.records if "event=delegated_record_never_published" in r.getMessage()]
+    assert len(warnings) == 2  # once per record
+    assert "subtask_id=gave_up" in warnings[0] and "task_id=parent_1" in warnings[0]
 
 
 @pytest.mark.asyncio

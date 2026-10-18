@@ -11,6 +11,10 @@ from typing import Any
 from custom_messages.contracts.runtime_snapshot_v3 import TaskSnapshotRecord, decode_runtime_snapshot
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 from storage.schedule_worker_repository import ScheduleWorkerRepository
+from storage import task_custody_repository as custody
+from storage.task_custody_repository import (
+    TaskCustodyConflict, TaskCustodyRow, TaskCustodyTakenOver, TaskCustodyTakeover,
+)
 from storage.runtime_snapshot_layout import (
     assemble_snapshot, canonical_json, parse_storage_header,
     payload_digest, split_snapshot,
@@ -98,9 +102,12 @@ class RuntimeStateRepository(Protocol):
         schedule_admission: ScheduleOccurrenceV1 | None = None,
         deferred_message_id: Optional[str] = None,
         consume_deferred_message: bool = False,
+        custody_takeover: TaskCustodyTakeover | None = None,
     ) -> None: ...
 
     def clear_task_runtime(self, owner_agent_id: str) -> None: ...
+
+    def get_task_custody(self, team_id: str, task_ids: Sequence[str]) -> dict[str, TaskCustodyRow]: ...
 
     def get_task_runtime_team_id(self, owner_agent_id: str) -> Optional[str]: ...
 
@@ -234,6 +241,7 @@ class _RelationalRuntimeStateRepository:
                 conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})", values)
                 if parts is not None:
                     self._write_task_records(conn, replacement.owner_agent_id, parts.records, replace_all=True)
+                    self._transfer_task_custody(conn, sources=list(expected), replacement=replacement, records=parts.records)
                     ScheduleWorkerRepository.transfer_custody(
                         conn, self._dialect, sources=tuple(expected),
                         replacement_agent_id=replacement.owner_agent_id,
@@ -248,6 +256,25 @@ class _RelationalRuntimeStateRepository:
                        "source_owner_ids": sorted(expected), "destination_owner_id": replacement.owner_agent_id},
             )
             raise
+
+    def _transfer_task_custody(
+        self, conn: Any, *, sources: list[str], replacement: TaskRuntimeSnapshotRow | DeferredMessageSnapshotRow,
+        records: dict[tuple[str, str], str],
+    ) -> None:
+        if not isinstance(replacement, TaskRuntimeSnapshotRow) or not replacement.team_id:
+            return
+        try:
+            custody.transfer_on_recovery(
+                conn, self._dialect, team_id=replacement.team_id, source_owner_ids=sources,
+                replacement_agent_id=replacement.owner_agent_id,
+                replacement_named_agent_type=replacement.owner_named_agent_type,
+                adopted_task_ids=custody.executed_task_ids(records),
+            )
+        except TaskCustodyConflict as exc:
+            # The caller left out tasks another agent held or finished when it
+            # read them; custody or the archive changed since. Same outcome as
+            # a concurrent recovery.
+            raise RuntimeRecoveryConflict(f"{exc} (during recovery)") from exc
 
     @staticmethod
     def _snapshot_values(
@@ -264,6 +291,7 @@ class _RelationalRuntimeStateRepository:
             ensure_storage_parent_dir(self._db_path)
             with self._connect() as conn:
                 ScheduleWorkerRepository.ensure_occurrence_schema(conn)
+                custody.ensure_schema(conn)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS active_task_runtime (
@@ -352,6 +380,7 @@ class _RelationalRuntimeStateRepository:
         self, *, owner_agent_id: str, owner_agent_name: Optional[str], team_id: Optional[str],
         owner_named_agent_type: Optional[str], runtime_state_json: str, expect_existing: bool,
         schedule_admission: ScheduleOccurrenceV1 | None = None,
+        custody_takeover: TaskCustodyTakeover | None = None,
         deferred_message_id: Optional[str] = None,
         consume_deferred_message: bool = False,
     ) -> None:
@@ -368,6 +397,13 @@ class _RelationalRuntimeStateRepository:
         Intermediate handler writes check custody without consuming the message,
         so restart can replay unfinished handling. A recreated row without the
         message cannot authorize a stale dispatch.
+
+        Tasks entering or leaving the snapshot claim or release custody.
+        ``custody_takeover`` lets the save replace that holder's row for that
+        task (``custom_agents.task_custody``); any other held row refuses the
+        save with ``TaskCustodyConflict``. A task this owner executed in its
+        previous save whose row another agent now holds refuses the save with
+        ``TaskCustodyTakenOver`` before anything is written.
         """
         if consume_deferred_message and deferred_message_id is None:
             raise ValueError("Consuming a deferred message requires its message id")
@@ -389,8 +425,11 @@ class _RelationalRuntimeStateRepository:
                 ).fetchone()
                 if previous is None and expect_existing:
                     raise RuntimeCustodyLost(owner_agent_id, CustodyStore.TASK_RUNTIME)
-                if previous is not None:
-                    parse_storage_header(previous[0])
+                previous_task_ids = set(parse_storage_header(previous[0])["task_order"]) if previous is not None else set()
+                if team_id and previous_task_ids:
+                    self._refuse_taken_over_tasks(
+                        conn, parts.records, previous_task_ids, owner_agent_id=owner_agent_id, team_id=team_id,
+                    )
                 if deferred_message_id is not None:
                     check_deferred_message(
                         conn, self._dialect, DeferredMessageClaim(owner_agent_id, deferred_message_id),
@@ -409,10 +448,18 @@ class _RelationalRuntimeStateRepository:
                 self._write_task_records(conn, owner_agent_id, parts.records, replace_all=True)
                 if schedule_admission is not None:
                     ScheduleWorkerRepository.commit_admission(conn, self._dialect, schedule_admission)
+                if team_id:
+                    self._sync_task_custody(
+                        conn, parts.records, previous_task_ids, owner_agent_id=owner_agent_id,
+                        team_id=team_id, owner_named_agent_type=owner_named_agent_type,
+                        takeover=custody_takeover,
+                    )
                 conn.commit()
         except RuntimeCustodyLost as lost:
             self._log_custody_refused(lost)
             raise
+        except (TaskCustodyConflict, TaskCustodyTakenOver):
+            raise  # expected refusals; the admitting caller or the snapshot coordinator logs them
         except Exception:
             self._logger.exception("Failed to persist active runtime state", extra={"owner_agent_id": owner_agent_id})
             raise
@@ -424,6 +471,34 @@ class _RelationalRuntimeStateRepository:
             lost.owner_agent_id,
             lost.store.value,
         )
+
+    def _refuse_taken_over_tasks(
+        self, conn: Any, records: dict[tuple[str, str], str], previous_task_ids: set[str], *,
+        owner_agent_id: str, team_id: str,
+    ) -> None:
+        """Refuse the save if a task this owner already held is no longer its own.
+
+        Only the custody row moves in an admission takeover; the old holder's
+        snapshot still lists the task, and a holder wrongly judged gone keeps
+        running and saving it (2026-10-17). Another agent may hold the row
+        now, or may already have given the task up again, finished or not, so
+        the row is gone (2026-10-18); both refuse. Only tasks this owner keeps
+        from its previous save are checked: a task it releases in this save,
+        or admits in it, is not. A task the previous save had delegated out is
+        the worker's to hold, also once its record leaves the delegation map,
+        so it is not checked either.
+        """
+        bind = self._dialect.bind
+        previously_delegated = {row[0] for row in conn.execute(
+            f"SELECT record_id FROM active_task_runtime_records WHERE owner_agent_id = {bind} AND section = {bind}",
+            (owner_agent_id, "subtask_to_parent_map"),
+        ).fetchall()}
+        still_held = custody.executed_task_ids(records) & (previous_task_ids - previously_delegated)
+        holders, released = custody.taken_over(
+            conn, self._dialect, team_id=team_id, owner_agent_id=owner_agent_id, task_ids=still_held,
+        )
+        if holders or released:
+            raise TaskCustodyTakenOver(owner_agent_id, holders, released)
 
     def save_task_runtime_task(
         self, *, owner_agent_id: str, task: TaskSnapshotRecord,
@@ -447,13 +522,17 @@ class _RelationalRuntimeStateRepository:
             with self._connect() as conn:
                 self._begin_recovery(conn)
                 row = conn.execute(
-                    f"SELECT runtime_state_json FROM active_task_runtime WHERE owner_agent_id = {bind}{self._recovery_lock_clause}",
+                    f"SELECT runtime_state_json, team_id FROM active_task_runtime WHERE owner_agent_id = {bind}{self._recovery_lock_clause}",
                     (owner_agent_id,),
                 ).fetchone()
                 if row is None:
                     raise RuntimeCustodyLost(owner_agent_id, CustodyStore.TASK_RUNTIME)
                 if task.task_id not in parse_storage_header(row[0])["task_order"]:
                     raise RuntimeRecoveryConflict("Task history requires existing durable task custody")
+                if row[1]:
+                    self._refuse_taken_over_tasks(
+                        conn, records, {task.task_id}, owner_agent_id=owner_agent_id, team_id=row[1],
+                    )
                 if deferred_message_id is not None:
                     check_deferred_message(
                         conn, self._dialect, DeferredMessageClaim(owner_agent_id, deferred_message_id),
@@ -463,6 +542,8 @@ class _RelationalRuntimeStateRepository:
                 conn.execute(f"UPDATE active_task_runtime SET updated_at = {bind} WHERE owner_agent_id = {bind}",
                              (datetime.now(timezone.utc).isoformat(), owner_agent_id))
                 conn.commit()
+        except TaskCustodyTakenOver:
+            raise  # the coordinator releases this task and logs the refusal
         except RuntimeCustodyLost as lost:
             # The coordinator knows whether this owner ever saved and logs which case it is.
             self._logger.warning(
@@ -510,8 +591,30 @@ class _RelationalRuntimeStateRepository:
                     ScheduleWorkerRepository.record_terminal_task(conn, self._dialect,
                         agent_id=owner_agent_id, task_id=record_id, outcome=state)
 
+    def _sync_task_custody(
+        self, conn: Any, records: dict[tuple[str, str], str], previous_task_ids: set[str], *,
+        owner_agent_id: str, team_id: str, owner_named_agent_type: Optional[str],
+        takeover: TaskCustodyTakeover | None,
+    ) -> None:
+        """Claim custody of executed tasks entering the snapshot; release tasks that left."""
+        current_task_ids = {key for section, key in records if section == "tasks"}
+        custody.claim_entering(
+            conn, self._dialect, team_id=team_id, owner_agent_id=owner_agent_id,
+            owner_named_agent_type=owner_named_agent_type,
+            task_ids=custody.executed_task_ids(records) - previous_task_ids, takeover=takeover,
+        )
+        custody.release_leaving(
+            conn, self._dialect, team_id=team_id, owner_agent_id=owner_agent_id,
+            task_ids=previous_task_ids - current_task_ids,
+        )
+
     def clear_task_runtime(self, owner_agent_id: str) -> None:
         self._delete_rows("active_task_runtime", [owner_agent_id], "active task runtime")
+
+    def get_task_custody(self, team_id: str, task_ids: Sequence[str]) -> dict[str, TaskCustodyRow]:
+        """Who holds each of these tasks (``storage.task_custody_repository``)."""
+        with self._connect() as conn:
+            return custody.read_rows(conn, self._dialect, team_id, task_ids)
 
     def get_task_runtime_team_id(self, owner_agent_id: str) -> Optional[str]:
         try:
@@ -879,13 +982,14 @@ class _RelationalRuntimeStateRepository:
             raise
 
     @staticmethod
-    def _delete_rows_with_connection(conn: sqlite3.Connection, table: str, owner_agent_ids: List[str]) -> None:
+    def _delete_rows_with_connection(conn: Any, table: str, owner_agent_ids: List[str]) -> None:
         unique_owner_ids = [owner_id for owner_id in dict.fromkeys(owner_agent_ids) if owner_id]
         if not unique_owner_ids:
             return
         placeholders = ",".join([f"{conn.dialect.bind}"] * len(unique_owner_ids))
         if table == "active_task_runtime":
             conn.execute(f"DELETE FROM active_task_runtime_records WHERE owner_agent_id IN ({placeholders})", unique_owner_ids)
+            custody.release_owners(conn, conn.dialect, unique_owner_ids)
         conn.execute(
             f"DELETE FROM {table} WHERE owner_agent_id IN ({placeholders})",
             unique_owner_ids,

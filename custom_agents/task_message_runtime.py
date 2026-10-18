@@ -7,13 +7,23 @@ from custom_messages.records.task_results import TaskResultUpdate
 import asyncio
 import json
 from datetime import datetime, timezone
-from typing import Optional, Union
+from typing import Any, Awaitable, Callable, Optional, Union
 
 
 from custom_agents.control_runtime import handle_interrupted_turn
 from custom_agents.lease_loss_wind_down import may_start_next_task
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.delegated_work_runtime import send_task_claim
+from custom_agents.task_custody import (
+    CUSTODY_FINISHED_MEANWHILE,
+    CUSTODY_HANDED_BACK,
+    CUSTODY_RELEASED_MEANWHILE,
+    CUSTODY_TAKEN_MEANWHILE,
+    CustodyDecision,
+    log_dropped_copy,
+)
+from custom_agents.task_custody import check_admission as check_task_custody
+from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyFinished, TaskCustodyReleased
 from custom_agents.worker_handback_runtime import apply_redispatch_notice
 from custom_agents.conversation_delivery_runtime import handle_delivery_receipt
 from custom_agents.conversation_runtime import (
@@ -1125,6 +1135,126 @@ async def _handle_task_query_message(
         )
 
 
+async def _custody_for_new_task(
+    self: Any, task_request: Task, msg_header: MessageHeader, msg_meta: MessageMeta,
+    source_queue_name: Optional[str],
+) -> Optional[CustodyDecision]:
+    """Whether this agent may take a task another agent may hold or finished; None drops it.
+
+    Held by a live agent: a copy delivered again while it runs
+    (``custom_agents.task_custody``). Finished by any agent of the team: a copy
+    delivered again after the first one completed (team-wide since
+    2026-10-17). Custody is read first: a holder archives the task before its
+    save releases custody, so a task released between the two reads is found
+    in the archive. Read the other way round, a task finished in between
+    looked free.
+    """
+    custody = await check_task_custody(self, task_request.task_id, msg_meta)
+    if not custody.admit:
+        return None
+    if await _finished_by_team(self, task_request.task_id, msg_header, source_queue_name):
+        return None
+    return custody
+
+
+async def _finished_by_team(
+    self: Any, task_id: str, msg_header: MessageHeader, source_queue_name: Optional[str]
+) -> bool:
+    """Whether this agent or any agent of its team already finished the task (logged)."""
+    archived = await self.task_manager.operations_runtime.run(
+        self.task_manager.get_task_from_db,
+        task_id,
+        include_all_agents=True,
+    )
+    if archived is None or not (
+        archived.get("owner_agent_id") == self.id
+        or (self.team_id and archived.get("team_id") == self.team_id)
+    ):
+        return False
+    self._logger.warning(
+        "[%s] event=duplicate_archived_delivery_ignored task_id=%s message_id=%s "
+        "idempotency_key=%s queue=%s finished_by=%s",
+        self.id,
+        task_id,
+        getattr(msg_header, "message_id", None),
+        getattr(msg_header, "idempotency_key", None),
+        source_queue_name,
+        archived.get("owner_agent_id"),
+    )
+    return True
+
+
+async def _admit_with_custody(
+    self: Any,
+    custody: CustodyDecision,
+    admit: Callable[[Optional[str]], Awaitable[bool]],
+    task_id: str,
+    msg_header: MessageHeader,
+    source_queue_name: Optional[str],
+) -> Optional[bool]:
+    """Run the admission save with the custody decision; None when the copy was dropped (logged)."""
+    try:
+        return await admit(custody.takeover_from)
+    except TaskCustodyFinished as finished:
+        await _drop_finished_copy(self, finished, msg_header, source_queue_name)
+        return None
+    except TaskCustodyReleased as released:
+        return await _admit_after_holder_released(
+            self, custody, released, admit, msg_header, source_queue_name
+        )
+    except TaskCustodyConflict as conflict:
+        # Another agent claimed it between the check and the save.
+        log_dropped_copy(self, task_id, CUSTODY_TAKEN_MEANWHILE, conflict.holder_agent_id)
+        return None
+
+
+async def _admit_after_holder_released(
+    self: Any,
+    custody: CustodyDecision,
+    released: TaskCustodyReleased,
+    admit: Callable[[Optional[str]], Awaitable[bool]],
+    msg_header: MessageHeader,
+    source_queue_name: Optional[str],
+) -> Optional[bool]:
+    """Admit or drop a copy whose holder released the task before the takeover's save.
+
+    The holder named by the takeover was alive after all (2026-10-17). A
+    task it finished is in the team's archive: the copy is dropped. A task it
+    handed back after losing its lease is free, and this copy is the one the
+    lead re-sent for it: it is admitted without a takeover. A holder judged
+    gone that released the task otherwise (it handed it back, or dropped it
+    because another agent holds it) left it to someone else: the copy is
+    dropped, never claimed afresh. Returns the admission result, or None when
+    the copy was dropped.
+    """
+    task_id = released.task_id
+    if await _finished_by_team(self, task_id, msg_header, source_queue_name):
+        return None
+    if custody.reason != CUSTODY_HANDED_BACK:
+        log_dropped_copy(self, task_id, CUSTODY_RELEASED_MEANWHILE, released.holder_agent_id)
+        return None
+    try:
+        return await admit(None)
+    except TaskCustodyFinished as finished:
+        await _drop_finished_copy(self, finished, msg_header, source_queue_name)
+        return None
+    except TaskCustodyConflict as conflict:
+        log_dropped_copy(self, task_id, CUSTODY_TAKEN_MEANWHILE, conflict.holder_agent_id)
+        return None
+
+
+async def _drop_finished_copy(
+    self: Any, finished: TaskCustodyFinished, msg_header: MessageHeader, source_queue_name: Optional[str]
+) -> None:
+    """Drop a copy whose claim found the task finished, in the claim's own transaction (logged).
+
+    The team's archive read before the claim did not show it: the agent that
+    finished it archived and released it in between (2026-10-18).
+    """
+    if not await _finished_by_team(self, finished.task_id, msg_header, source_queue_name):
+        log_dropped_copy(self, finished.task_id, CUSTODY_FINISHED_MEANWHILE, finished.finished_by)
+
+
 async def _handle_task_request(
     self,
     task_request: Task,
@@ -1166,23 +1296,8 @@ async def _handle_task_request(
             source_queue_name,
         )
         return
-    if (
-        await self.task_manager.operations_runtime.run(
-            self.task_manager.get_task_from_db,
-            task_request.task_id,
-            owner_agent_id=self.id,
-        )
-        is not None
-    ):
-        self._logger.warning(
-            "[%s] event=duplicate_archived_delivery_ignored task_id=%s message_id=%s "
-            "idempotency_key=%s queue=%s",
-            self.id,
-            task_request.task_id,
-            getattr(msg_header, "message_id", None),
-            getattr(msg_header, "idempotency_key", None),
-            source_queue_name,
-        )
+    custody = await _custody_for_new_task(self, task_request, msg_header, msg_meta, source_queue_name)
+    if custody is None:
         return
 
     if await self.task_manager.operations_runtime.run(self.task_manager.is_buffer_full):
@@ -1222,15 +1337,24 @@ async def _handle_task_request(
             )
             return
 
-    if not await self.task_manager.operations_runtime.run(
-        self.task_manager.add_task,
-        task_request,
-        msg_header,
-        normalized_meta,
-        owner_person_id=owner_person_id,
-        handled_at=message_handled_at,
-        handled_queue_name=source_queue_name,
-    ):
+    async def admit(takeover_from: Optional[str]) -> bool:
+        return await self.task_manager.operations_runtime.run(
+            self.task_manager.add_task,
+            task_request,
+            msg_header,
+            normalized_meta,
+            owner_person_id=owner_person_id,
+            handled_at=message_handled_at,
+            handled_queue_name=source_queue_name,
+            custody_takeover_from=takeover_from,
+        )
+
+    admitted = await _admit_with_custody(
+        self, custody, admit, task_request.task_id, msg_header, source_queue_name
+    )
+    if admitted is None:
+        return
+    if not admitted:
         await report_failed_admission(
             self, task_request, msg_header, normalized_meta, conversation_admitted=True,
         )

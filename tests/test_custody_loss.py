@@ -22,6 +22,8 @@ import pytest
 
 from custom_agents.control_runtime import _interrupt_active_execution, consume_handback_interrupt
 from custom_agents.custody_loss import custody_moved, install_custody_listeners
+from custom_agents.sdk.strands.turn_tool_stop import CUSTODY_LOST_REASON
+from custom_tools.tool_stop import ToolStop
 from custom_agents.deferred_message_runtime import (
     _CURRENT_HANDOFF,
     DeferredHandoff,
@@ -159,6 +161,7 @@ async def test_custody_loss_stops_the_running_turn_without_a_handback_or_a_failu
     task_info = old.get_task_info("work")
     turn = asyncio.create_task(asyncio.sleep(60))
     agent._active_execution_task, agent._active_execution_task_id = turn, "work"
+    agent._active_tool_stop = ToolStop(agent_id=OLD, task_id="work")
     manager(tmp_path, NEW).restore_runtime_state_for_owner_ids([OLD])
 
     with pytest.raises(RuntimeCustodyLost):
@@ -166,6 +169,9 @@ async def test_custody_loss_stops_the_running_turn_without_a_handback_or_a_failu
     await asyncio.sleep(0)
     await agent._custody_release.interrupt
     assert turn.cancelled()
+    # The turn's running commands were asked to stop, with the custody reason.
+    assert agent._active_tool_stop.is_requested()
+    assert agent._active_tool_stop.reason == CUSTODY_LOST_REASON
     # The interrupted turn is a transfer: no cancellation record, consumed once.
     assert consume_handback_interrupt(agent, "work") is True
     assert consume_handback_interrupt(agent, "work") is False

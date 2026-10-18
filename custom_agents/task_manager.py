@@ -4,6 +4,7 @@ from custom_agents.task_runtime_state import (
     ObjectiveRuntimeState,
     ExecutionRuntimeState,
     RuntimeOwnerIdentity,
+    forget_task_records,
     TurnStartNotes,
     release_turn_start_notes,
 )
@@ -26,6 +27,7 @@ from functools import partial
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
+from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyTakeover
 
 from storage.backends import STORAGE_BACKEND_SQLITE
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
@@ -172,6 +174,9 @@ class TaskManager(
         self._task_terminal_callbacks: list[
             Callable[[str, ProgressState, str], None]
         ] = []
+        # Called for a task another agent took over, before it is dropped
+        # (``add_task_release_callback``).
+        self._task_release_callbacks: list[Callable[[str], None]] = []
         self._db_path = (
             storage_settings.sqlite_path
             if storage_settings and storage_settings.sqlite_path
@@ -359,10 +364,13 @@ class TaskManager(
             operations=RuntimeSnapshotCoordinatorOperations(
                 emit_activity=self._emit_activity,
                 ensure_task_plan_link=self._ensure_task_plan_link,
+                forget_task=self._forget_task,
+                notify_task_released=self._run_task_release_callbacks,
                 objectives_enabled=self._objectives_enabled,
                 plans_enabled=self._plans_enabled,
                 sync_plan_from_task=self._sync_plan_from_task,
                 is_execution_cancelled=self.is_execution_cancelled,
+                get_task_from_db=self.get_task_from_db,
             ),
             execution_state=self.execution_state,
             identity=self.identity,
@@ -391,7 +399,9 @@ class TaskManager(
             deep=True,
         )
         try:
-            self.runtime_snapshot_coordinator.persist_task_history(task_id)
+            if not self.runtime_snapshot_coordinator.persist_task_history(task_id):
+                info.task = previous
+                return None
         except Exception:
             info.task = previous
             raise
@@ -891,15 +901,20 @@ class TaskManager(
         task_id: str,
         terminal_state: ProgressState | str,
         *,
+        objective_id: Optional[str],
         timestamp: Optional[str] = None,
         summary: Optional[str] = None,
     ) -> Optional[ObjectiveRecord]:
         return self.objective_coordinator.review_objective_after_task_terminal(
             task_id,
             terminal_state,
+            objective_id=objective_id,
             timestamp=timestamp,
             summary=summary,
         )
+
+    def objective_id_for_task_end(self, task_id: str) -> Optional[str]:
+        return self.objective_coordinator.objective_id_for_task_end(task_id)
 
     def render_objective_markdown(
         self, objective_id: str, *, max_events: int = 8
@@ -959,11 +974,6 @@ class TaskManager(
 
     def get_recovery_link(self, recovery_task_id: str) -> Optional[RecoveryTaskLink]:
         return self.plan_coordinator.get_recovery_link(recovery_task_id)
-
-    def get_recovery_links_for_original(
-        self, original_task_id: str
-    ) -> List[RecoveryTaskLink]:
-        return self.plan_coordinator.get_recovery_links_for_original(original_task_id)
 
     def is_plan_step_task(self, task_id: str) -> bool:
         return self.plan_coordinator.is_plan_step_task(task_id)
@@ -1661,10 +1671,12 @@ class TaskManager(
     def _persist_runtime_state(
         self, *, schedule_admission: "ScheduleOccurrenceV1 | None" = None,
         deferred_admission_task_id: Optional[str] = None,
+        custody_takeover: "TaskCustodyTakeover | None" = None,
     ) -> None:
         self.runtime_snapshot_coordinator._persist_runtime_state(
             schedule_admission=schedule_admission,
             deferred_admission_task_id=deferred_admission_task_id,
+            custody_takeover=custody_takeover,
         )
 
     def set_custody_lost_listener(self, listener: Optional[Callable[[tuple[str, ...]], None]]) -> None:
@@ -1796,7 +1808,9 @@ class TaskManager(
         entry.plan_id = plan_id
         task_info.task.execution_history.append(entry)
         try:
-            self.runtime_snapshot_coordinator.persist_task_history(task_id)
+            if not self.runtime_snapshot_coordinator.persist_task_history(task_id):
+                task_info.task.execution_history.remove(entry)
+                return None
         except Exception:
             task_info.task.execution_history.remove(entry)
             raise
@@ -2874,6 +2888,7 @@ class TaskManager(
         handled_at: Optional[str] = None,
         handled_queue_name: Optional[str] = None,
         schedule_admission: "ScheduleOccurrenceV1 | None" = None,
+        custody_takeover_from: Optional[str] = None,
     ) -> bool:
         """
         Adds a new task to be managed.
@@ -2882,6 +2897,12 @@ class TaskManager(
         for work for nobody), decided by the caller from verified identity
         only (``TaskInfo``); it has no default so no caller can leave it to
         the person the message names.
+
+        The first save claims the task's team-wide custody
+        (``storage.task_custody_repository``). It raises
+        ``TaskCustodyConflict`` when another agent holds the task, unless
+        ``custody_takeover_from`` names that holder (``custom_agents.task_custody``
+        decided it may be replaced).
         """
         if self.is_execution_cancelled(task.task_id):
             self._logger.warning(
@@ -2915,6 +2936,11 @@ class TaskManager(
             # A failed initial admission must not become an in-memory duplicate.
             self._persist_runtime_state(
                 schedule_admission=schedule_admission, deferred_admission_task_id=task.task_id,
+                custody_takeover=(
+                    TaskCustodyTakeover(task.task_id, custody_takeover_from)
+                    if custody_takeover_from
+                    else None
+                ),
             )
         except Exception as error:
             if _task_row_taken_over(error):
@@ -2930,6 +2956,8 @@ class TaskManager(
             del self.task_state.tasks[task.task_id]
             self.task_state.task_queue.remove(task.task_id)
             del self.task_state.task_to_taskquery_list[task.task_id]
+            if isinstance(error, TaskCustodyConflict):
+                raise  # an expected refusal; the admitting caller logs it
             self._logger.exception(
                 "Initial task admission did not commit",
                 extra={
@@ -3524,6 +3552,8 @@ class TaskManager(
             timestamp=timestamp,
             details={"from_state": previous_state.value, "to_state": new_state.value},
         )
+        if self.get_task_info(task_id) is not task_info:
+            return False
 
         is_top_level = task_info.task.parent_task_id is None
         is_locally_executable = self.is_locally_executable_task(task_id)
@@ -3582,6 +3612,10 @@ class TaskManager(
 
         self._sync_plan_from_task(task_id, create=False)
         self._persist_runtime_state()
+        # Saving may release just this task while successfully saving the rest.
+        # Its old holder must then skip terminal effects and report no transition.
+        if self.get_task_info(task_id) is not task_info:
+            return False
         if self.is_terminal_state(new_state) and not self.is_terminal_state(
             previous_state
         ):
@@ -3644,6 +3678,29 @@ class TaskManager(
 
         if callback not in self._task_terminal_callbacks:
             self._task_terminal_callbacks.append(callback)
+
+    def add_task_release_callback(self, callback: Callable[[str], None]) -> None:
+        """Register one in-process cleanup callback for a task another agent took over.
+
+        It runs on the task lane before the task is dropped, so the task's
+        pending subtasks and waits can still be read. The task does not end:
+        its new holder runs it, so nothing may record an outcome or a
+        cancellation for the task itself (``RuntimeSnapshotCoordinator._release_taken_tasks``).
+        """
+
+        if callback not in self._task_release_callbacks:
+            self._task_release_callbacks.append(callback)
+
+    def _run_task_release_callbacks(self, task_id: str) -> None:
+        for callback in tuple(self._task_release_callbacks):
+            try:
+                callback(task_id)
+            except Exception:
+                # The task is still dropped: its new holder runs it.
+                self._logger.exception(
+                    "Task release callback failed. event=task_release_callback_failed task_id=%s",
+                    task_id,
+                )
 
     def get_task_from_db(
         self,
@@ -3773,6 +3830,17 @@ class TaskManager(
         """
         Completely removes a task and its associated subtasks (if it's a parent).
         """
+        if not self._forget_task(task_id):
+            return False
+        self._persist_runtime_state()
+        return True
+
+    def _forget_task(self, task_id: str) -> bool:
+        """Remove a task, its delegated subtasks and its records from memory, without saving.
+
+        ``remove_task`` saves afterwards; the snapshot coordinator calls this
+        directly while it saves, for tasks another agent took over.
+        """
         if task_id not in self.task_state.tasks:
             self._logger.warning(f"Attempted to remove non-existent task {task_id}.")
             return False
@@ -3798,7 +3866,7 @@ class TaskManager(
             if parent_id == task_id
         ]
         for sub_id in subtasks_to_remove:
-            self.remove_task(sub_id)
+            self._forget_task(sub_id)
 
         if task_id in self.task_state.task_to_subtask_list:
             del self.task_state.task_to_subtask_list[task_id]
@@ -3818,42 +3886,14 @@ class TaskManager(
                 f"Subtask {task_id} removed from parent map (parent: {parent_id}) and parent's subtask list."
             )
 
-        if task_id in self.task_state.task_to_taskquery_list:
-            del self.task_state.task_to_taskquery_list[task_id]
-
-        for batch_id, batch in list(self.execution_state.turn_action_batches.items()):
-            if batch.source_task_id == task_id:
-                self.execution_state.turn_action_batches.pop(batch_id, None)
-        for action_id, record in list(self.execution_state.turn_action_outbox.items()):
-            if record.source_task_id == task_id:
-                self.execution_state.turn_action_outbox.pop(action_id, None)
-        for lease_id, lease in list(self.execution_state.runtime_leases.items()):
-            if lease.root_task_id == task_id or lease.source_task_id == task_id:
-                self.execution_state.runtime_leases.pop(lease_id, None)
-        for event_id, event in list(
-            self.execution_state.runtime_mailbox_events.items()
-        ):
-            if (
-                event.root_task_id == task_id
-                or event.local_task_id == task_id
-                or event.related_task_id == task_id
-            ):
-                self.execution_state.runtime_mailbox_events.pop(event_id, None)
-        for projection_id, projection in list(
-            self.execution_state.task_state_projection_records.items()
-        ):
-            if projection.task_id == task_id:
-                self.execution_state.task_state_projection_records.pop(
-                    projection_id, None
-                )
-
-        self.plan_state.final_review_attempt_counts.pop(task_id, None)
-        self.plan_state.final_review_pending_task_ids.discard(task_id)
+        # Every task-scoped record goes through the one table in
+        # task_runtime_state, also on paths that remove a task without ending
+        # it (a lease-loss handback, an overtaken scheduled rerun).
+        forget_task_records(self.runtime_snapshot_coordinator.state, task_id)
 
         del self.task_state.tasks[task_id]
         self._logger.debug("Task %s removed from active tracking.", task_id)
         self._check_queue_backlog_warning()
-        self._persist_runtime_state()
         return True
 
     def complete_task(
@@ -3917,10 +3957,12 @@ class TaskManager(
                 ProgressState.COMPLETED,
                 timestamp=timestamp,
             )
+            objective_id = self.objective_id_for_task_end(task_id)
             self._save_completed_task(task_id, ProgressState.COMPLETED)
             self.review_objective_after_task_terminal(
                 task_id,
                 ProgressState.COMPLETED,
+                objective_id=objective_id,
                 timestamp=timestamp,
                 summary="Linked task completed successfully.",
             )

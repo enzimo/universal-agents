@@ -543,13 +543,6 @@ class PlanCoordinator:
     def get_recovery_link(self, recovery_task_id: str) -> Optional[RecoveryTaskLink]:
         return self.plan_state.recovery_links.get(recovery_task_id)
 
-    def get_recovery_links_for_original(self, original_task_id: str) -> List[RecoveryTaskLink]:
-        return [
-            link
-            for link in self.plan_state.recovery_links.values()
-            if link.original_task_id == original_task_id
-        ]
-
     def is_plan_step_task(self, task_id: str) -> bool:
         """Return whether a task is an internal manager PlanStep execution task."""
         return task_id in self.plan_state.plan_step_task_links

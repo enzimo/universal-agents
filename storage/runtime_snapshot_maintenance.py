@@ -21,6 +21,7 @@ from storage.postgres_connection import connect_postgres
 from custom_messages.contracts.runtime_snapshot_v3 import decode_runtime_snapshot
 from storage.runtime_snapshot_layout import assemble_snapshot
 from storage.sqlite_connection import connect_sqlite
+from storage.task_custody_repository import CUSTODY_TABLE, release_owners
 
 LOGGER = logging.getLogger(__name__)
 ARCHIVE_TABLE = "retired_task_runtime"
@@ -224,6 +225,9 @@ def retire_runtime_snapshots(
             )
             for owner in selected
         ]
+        if _has_table(conn, CUSTODY_TABLE, postgres=postgres):
+            # Retired work is abandoned: its tasks no longer have a holder.
+            release_owners(conn, conn.dialect, selected)
     LOGGER.warning(
         "event=runtime_snapshots_retired team_id=%s owner_count=%d archive_ids=%s",
         team_id,

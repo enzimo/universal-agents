@@ -96,13 +96,16 @@ def launch_record(lead, state: AgentLaunchState, agent_id: str = DEAD):
     return repository.update(starting, state=state)
 
 
-def held_work(lead, owner: str = DEAD, state: ProgressState = ProgressState.WAITING, *, signed=False):
-    task = Task(task_id="work-1", task_type=MessageMetaType.REQUEST, problem_statement="Fetch candles")
+def held_work(
+    lead, owner: str = DEAD, state: ProgressState = ProgressState.WAITING, *, signed=False, task_id: str = "work-1"
+):
+    # One agent holds a task at a time (runtime_task_custody), so two holders need two task ids.
+    task = Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="Fetch candles")
     snapshot = RuntimeSnapshotV3(
         schema_version=3,
         tasks=[
             TaskSnapshotRecord(
-                task_id="work-1", state=state, task=task,
+                task_id=task_id, state=state, task=task,
                 header=MessageHeader(response_routing_key="gateway"),
                 meta=MessageMeta(gateway_context=GatewayContext(
                     canonical_user_id="owner",

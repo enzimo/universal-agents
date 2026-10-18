@@ -44,6 +44,11 @@ _POLL_SECONDS = 0.05
 TASK_STOPPED_REASON = "task_stopped"
 # A worker that lost its launch lease hands the task back (lease_loss_wind_down).
 HANDBACK_REASON = "lease_loss_handback"
+# Such a worker finishes a task whose final answer was already sent (lease_loss_wind_down).
+ANSWERED_TASK_FINISHED_REASON = "lease_loss_answered_task_finished"
+# Another agent took the work over: its whole saved row, or one task by an
+# admission takeover; this agent releases it (custody_loss).
+CUSTODY_LOST_REASON = "custody_lost"
 # The turn was cancelled without a stop naming a reason, such as at shutdown.
 TURN_CANCELLED_REASON = "turn_cancelled"
 
@@ -214,6 +219,8 @@ def _describe(calls: tuple[RunningToolCall, ...]) -> str:
 
 
 __all__ = [
+    "ANSWERED_TASK_FINISHED_REASON",
+    "CUSTODY_LOST_REASON",
     "HANDBACK_REASON",
     "TASK_STOPPED_REASON",
     "TURN_CANCELLED_REASON",

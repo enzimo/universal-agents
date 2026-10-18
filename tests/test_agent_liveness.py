@@ -314,7 +314,7 @@ async def test_new_lead_sees_startup_worker_alive_after_manager_restart(team, li
 async def test_exited_agents_taken_over_immediately_after_full_restart(team):
     """A graceful restart leaves each old agent's own row marked exiting."""
     held_work(team, owner="old_startup", signed=True)
-    held_work(team, owner="old_worker", signed=True)
+    held_work(team, owner="old_worker", signed=True, task_id="work-2")
     report(team, "old_startup", exiting=True, identity=exited_identity())
     report(team, "old_worker", exiting=True)
     assert await gone_owner_ids(team, ["old_startup", "old_worker"], purpose=TEST) == ["old_startup", "old_worker"]
@@ -380,7 +380,7 @@ async def test_lead_stores_sender_last_seen(team, caplog):
 @pytest.mark.asyncio
 async def test_replayed_snapshot_cannot_revive_dead_agent(team):
     held_work(team, owner="crashed_startup", signed=True)
-    held_work(team, owner="crashed_worker", signed=True)
+    held_work(team, owner="crashed_worker", signed=True, task_id="work-2")
     lead = new_lead(team)
     await receive(lead, status("crashed_startup", identity=exited_identity()))
     await receive(lead, status("crashed_worker", seen_ago=GONE_AFTER + timedelta(seconds=5)))
@@ -392,9 +392,10 @@ async def test_replayed_snapshot_cannot_revive_dead_agent(team):
 
 
 @pytest.mark.asyncio
-async def test_startup_takeover_logs_a_lost_race_and_continues(team, monkeypatch, caplog):
+async def test_startup_takeover_that_loses_a_race_reads_again_and_continues(team, monkeypatch, caplog):
     """Two agents of one type start together; the one that loses must keep starting."""
     held_work(team, owner="gone_owner", signed=True)
+    report(team, "rival")  # alive: the loser's second read must not take the rival's work
     rival = TaskManager(db_path=team.task_manager._db_path)
     rival.set_owner_identity(agent_id="rival", agent_name="rival", team_id="team", named_agent_type="Worker")
     starting = TaskManager(db_path=team.task_manager._db_path)
@@ -420,7 +421,9 @@ async def test_startup_takeover_logs_a_lost_race_and_continues(team, monkeypatch
     ))
     with caplog.at_level(logging.WARNING):
         await recover_runtime_after_restart(agent)
-    assert "event=role_takeover_lost_race" in caplog.text
+    # The loser reads the saved work again once (PR 6): the rival holds it now,
+    # so the second read adopts nothing and the agent keeps starting.
+    assert "event=runtime_recovery_conflict_retrying" in caplog.text
     assert starting.list_task_infos() == []
     assert [info.task.task_id for info in rival.list_task_infos()] == ["work-1"]
 

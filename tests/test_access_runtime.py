@@ -56,8 +56,10 @@ def agent(storage, *, agent_type="WebResearchAgent", lead=False, role="worker", 
         current_task_id="task-1",
         get_task_info=lambda _task_id: SimpleNamespace(meta=meta),
         terminal_callbacks=[],
+        release_callbacks=[],
     )
     task_manager.add_task_terminal_callback = task_manager.terminal_callbacks.append
+    task_manager.add_task_release_callback = task_manager.release_callbacks.append
     return SimpleNamespace(
         id=f"agent-{agent_type}",
         named_agent_type=agent_type,

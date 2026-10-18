@@ -63,7 +63,7 @@ def test_a_claim_from_another_worker_counts_one_move(settings):
     _claim(repository, "w1")
     # The same worker after its own restart is not a move.
     assert _claim(repository, "w1").moved is False
-    repository.mark_requeued(team_id="t", task_id="a", publish_sequence=9)
+    repository.mark_requeued(team_id="t", task_id="a", publish_sequence=9, from_holder_agent_id="w1")
     queued = repository.get("t", "a")
     assert (queued.status, queued.holder_agent_id, queued.publish_sequence) == ("queued", None, 9)
     outcome = _claim(repository, "w2")
@@ -71,6 +71,34 @@ def test_a_claim_from_another_worker_counts_one_move(settings):
     assert outcome.record.interruptions == 1
     assert outcome.record.holders == ["w1", "w2"]
     assert _claim(repository, "w3").record.interruptions == 2
+
+
+def test_recording_a_publication_never_undoes_a_claim(settings):
+    """Regression (2026-10-17): a worker's claim handled before the requester wrote
+    the publication record (the claim handler creates it) was reset to "queued"
+    with no holder when the record was written; stops then never reached the worker."""
+
+    repository = DelegatedTaskRepository(settings)
+    _publish(repository, sequence=None)  # the claim handler's record for a claim that came first
+    _claim(repository, "w1")
+    again = _publish(repository, sequence=None)  # the outbox's own write, or an outbox retry
+    assert (again.status, again.holder_agent_id, again.holders) == ("running", "w1", ["w1"])
+    filled = repository.set_publish_sequence(team_id="t", task_id="a", publish_sequence=7)
+    assert (filled.status, filled.holder_agent_id, filled.publish_sequence) == ("running", "w1", 7)
+    closed = repository.mark_closed(team_id="t", task_id="a", status="finished")
+    assert _publish(repository).status == closed.status == "finished"
+
+
+def test_requeue_after_a_handback_keeps_a_newer_claim(settings):
+    repository = DelegatedTaskRepository(settings)
+    _publish(repository)
+    _claim(repository, "w1")
+    requeued = repository.mark_requeued(team_id="t", task_id="a", publish_sequence=None, from_holder_agent_id="w1")
+    assert (requeued.status, requeued.holder_agent_id) == ("queued", None)
+    _claim(repository, "w2")  # the re-sent task's new worker claims it
+    # A retried handback of w1's task must not undo w2's claim.
+    assert repository.mark_requeued(team_id="t", task_id="a", publish_sequence=None, from_holder_agent_id="w1") is None
+    assert repository.get("t", "a").holder_agent_id == "w2"
 
 
 def test_a_claim_for_an_unknown_task_returns_no_record(settings):
