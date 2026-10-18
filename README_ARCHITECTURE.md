@@ -114,7 +114,8 @@ an old snapshot does not make a stopped worker look newly alive.
 An explicit live probe accepts its correlated reply, or a presence snapshot
 whose sender time falls between the probe's start and arrival. Older retained
 snapshots remain discovery data and cannot verify an exact delegation target.
-Before changing discovery or acting on an exit, the receiver selects the newest
+Before changing discovery or acting on an exit, the receiver calls
+`custom_agents.agent_liveness.reconcile_received_status` to select the newest
 sender-written status from the message, memory and the shared database.
 An old exit cannot fail current work after a newer running status, and an old
 running snapshot cannot restore an agent whose newer status says it exited.

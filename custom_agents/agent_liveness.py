@@ -195,6 +195,33 @@ def newest_agent_status(incoming: AgentStatus, *known: Optional[AgentStatus]) ->
     )
 
 
+async def reconcile_received_status(agent: Any, status: AgentStatus) -> AgentStatus:
+    """Persist and select current sender-written evidence before status effects.
+
+    A newer own refresh, or a status already received in memory, wins over
+    retained presence. Every receiver reads the shared store, but only the
+    team lead writes other agents' records. Keep this ordering here so exit
+    effects and discovery cannot disagree with the liveness store.
+    """
+    agent_id = status.self_id
+    status.last_seen_at = received_status_time(agent, status)
+    status = newest_agent_status(status, agent.known_agents.agent_map.get(agent_id))
+    stored_status = None
+    if agent._agent_state_store:
+        written = False
+        if agent.is_team_lead:
+            written = await agent.task_manager.operations_runtime.run(
+                agent._agent_state_store.upsert_if_newer, status
+            )
+        if not written:
+            stored_status = await agent.task_manager.operations_runtime.run(
+                agent._agent_state_store.get_by_id, agent_id
+            )
+    return newest_agent_status(
+        status, stored_status, agent.known_agents.agent_map.get(agent_id)
+    )
+
+
 def owner_gone_after(agent: Any) -> timedelta:
     """The one heartbeat threshold (module docstring, rule 3)."""
     settings = StuckTaskSettings.from_schedule_maintenance(getattr(agent, "schedule_maintenance", None))
