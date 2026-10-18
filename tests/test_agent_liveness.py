@@ -452,7 +452,7 @@ async def test_a_delayed_older_status_cannot_overwrite_a_newer_row(team):
     assert datetime.now(timezone.utc) - parse_utc(row.last_seen_at) < timedelta(seconds=20)
 
 
-@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.live)])
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=[pytest.mark.live, pytest.mark.postgres])])
 def status_repository(request, tmp_path):
     if request.param == "postgres":
         dsn = os.environ.get("LIVE_TEST_POSTGRES_DSN")

@@ -5,7 +5,7 @@ Why: takeover moves an agent's saved work (``active_task_runtime`` and
 gone (``custom_agents.agent_liveness``). If that decision is ever wrong, the old
 owner is still running the same tasks. Until 2026-10-17 its next save simply
 wrote its row again, so two agents held and ran the same task. Saves now expect
-the owner's own row (``storage.runtime_state_repository.RuntimeCustodyLost``),
+the owner's own row (``storage.runtime_custody.RuntimeCustodyLost``),
 and this module handles the refusal.
 
 How a refusal is handled:
@@ -14,9 +14,9 @@ How a refusal is handled:
    deferred inbox (``deferred_message_runtime``) gets a save refused. In the same
    step, under the task lane or the inbox lock, it drops the taken-over tasks or
    messages from memory, so nothing in this agent can start or save them again,
-   and calls the listener installed here. A deferred message cannot run twice
-   either: it leaves the deferred row only in the same transaction as the task
-   save that records its handling, and only while this agent holds that row.
+   and calls the listener installed here. A deferred request leaves its row
+   atomically with its own task's admission. Other messages remain until their
+   handling completes, with exact-message custody checked on each task save.
 2. The listener runs on the storage thread and moves to the agent's event loop.
 3. If a turn of released work is running, it is stopped. The stop is marked as
    a transfer (``control_runtime.consume_handback_interrupt``), so the task gets
@@ -92,7 +92,9 @@ def _release_tasks(agent: Any, task_ids: tuple[str, ...]) -> None:
 
 
 async def _stop_released_turn(agent: Any, state: CustodyRelease, task_id: str, released: set[str]) -> None:
-    stopped = await state.interrupt_turn(agent, root_task_id=task_id, graph_task_ids=released)
+    stopped = await state.interrupt_turn(
+        agent, root_task_id=task_id, graph_task_ids=released, reason="custody_lost",
+    )
     if stopped is None:
         # The turn ended before the stop arrived; nothing will consume the marker.
         state.interrupting_task_ids.discard(task_id)

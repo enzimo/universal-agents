@@ -21,6 +21,7 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
+from .runtime_custody import DeferredMessageClaim, check_deferred_message
 from .sqlite_connection import connect_sqlite
 
 
@@ -46,6 +47,7 @@ class ScheduleRepository(Protocol):
         claim_named_agent_type: Optional[str] = None,
         claim_agent_id: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        deferred_message: DeferredMessageClaim | None = None,
     ) -> None: ...
 
     def add_schedule_row_if_absent(
@@ -676,8 +678,12 @@ class SqliteScheduleRepository(_RelationalScheduleRepository):
         claim_named_agent_type: Optional[str] = None,
         claim_agent_id: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        deferred_message: DeferredMessageClaim | None = None,
     ) -> None:
         with self._connect() as conn:
+            if deferred_message is not None:
+                conn.execute("BEGIN IMMEDIATE")
+                check_deferred_message(conn, self._dialect, deferred_message, consume=True, logger=self._logger)
             conn.execute(
                 f"""
                 INSERT OR REPLACE INTO scheduled_messages
@@ -872,8 +878,11 @@ class PostgresScheduleRepository(_RelationalScheduleRepository):
         claim_named_agent_type: Optional[str] = None,
         claim_agent_id: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        deferred_message: DeferredMessageClaim | None = None,
     ) -> None:
         with self._connect() as conn:
+            if deferred_message is not None:
+                check_deferred_message(conn, self._dialect, deferred_message, consume=True, logger=self._logger)
             conn.execute(
                 f"""
                 INSERT INTO scheduled_messages

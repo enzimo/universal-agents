@@ -394,7 +394,9 @@ async def test_a_crash_right_after_the_hand_off_leaves_the_message_in_the_task_r
     old_inbox = inbox_for(OLD, old)
     envelope = _envelope("m1")
     await old_inbox.admit(envelope)
-    handoff = DeferredHandoff(envelope.msg_header.message_id, dispatch_task=asyncio.current_task())
+    handoff = DeferredHandoff(
+        envelope.msg_header.message_id, dispatch_task=asyncio.current_task(), admission_task_id="m1",
+    )
     token = _CURRENT_HANDOFF.set(handoff)
     try:
         admit(old, "m1")

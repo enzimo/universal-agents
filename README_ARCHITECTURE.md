@@ -676,19 +676,27 @@ waiting subtasks, deferred messages, and recent in-flight Tasks. Outboxes record
 ordered actions before external effects. Execution attempts and worker starts
 use leases and fencing, so a stale holder cannot commit after another takes
 over. A stopped or handed-back turn ends its running commands before the task
-is archived or handed back. Saved runtime snapshots and deferred messages move only from an agent
+is archived or handed back. Saved runtime snapshots and deferred messages move
+only from an agent
 that counts as gone, in one transaction that deletes its row. A previous owner
 that is still running finds its row gone at its next save, which is refused
 (`RuntimeCustodyLost`) before anything is written; it then drops that work from
 memory without replying and keeps running (`custom_agents.custody_loss`). A
-deferred message leaves the deferred row in the same transaction as the first
-task save that the dispatching asyncio task itself makes (typically its
-admission), and only while the agent still holds that row
-(`deferred_message_runtime.DeferredHandoff`); saves of work started during the
-dispatch never count. When its handling saves nothing, a checked removal
-follows, and a dispatch that ends any other way closes the hand-off. So the saved effects of a task or deferred message
-are written by one agent only, and a crash keeps the message either in the
-deferred row or, through its effect, in the task row. What is not covered: work
+deferred request leaves its row atomically with admission of its own task.
+The reply choosing a delayed provider retry leaves atomically with insertion
+of its retry schedule. Both use `storage.runtime_custody` to check ownership
+inside the effect's transaction.
+Restart keeps a delayed-retry task paused until its timer fires.
+Other messages, including clarification replies, stay until their handler
+completes: saving query history alone does not apply a resume or cancel
+decision. Every task snapshot or history write by the dispatching asyncio task
+checks the exact message in the locked deferred row
+(`deferred_message_runtime.DeferredHandoff`). A recreated row holding newer
+messages cannot authorize an old dispatch, and that dispatch cannot clear the
+new inbox when it finishes. Child tasks and other threads never inherit this
+handoff. A crash therefore keeps an unadmitted request or unfinished reply in
+the deferred row; an admitted request is held by its task snapshot. Intermediate
+reply handling can be replayed after restart. What is not covered: work
 a previous owner does before its first save after the takeover (a model turn in
 progress until it is stopped) and handling that saves nothing (such as a reply
 about a task it no longer holds) may still happen on both agents. Repairs and

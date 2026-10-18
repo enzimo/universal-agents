@@ -1650,9 +1650,13 @@ class TaskManager(
     def _export_runtime_state(self) -> Dict[str, Any]:
         return self.runtime_snapshot_coordinator._export_runtime_state()
 
-    def _persist_runtime_state(self, *, schedule_admission: "ScheduleOccurrenceV1 | None" = None) -> None:
+    def _persist_runtime_state(
+        self, *, schedule_admission: "ScheduleOccurrenceV1 | None" = None,
+        deferred_admission_task_id: Optional[str] = None,
+    ) -> None:
         self.runtime_snapshot_coordinator._persist_runtime_state(
-            schedule_admission=schedule_admission
+            schedule_admission=schedule_admission,
+            deferred_admission_task_id=deferred_admission_task_id,
         )
 
     def set_custody_lost_listener(self, listener: Optional[Callable[[tuple[str, ...]], None]]) -> None:
@@ -2896,7 +2900,9 @@ class TaskManager(
         try:
             # Establish durable custody before history/Plan/Objective side effects.
             # A failed initial admission must not become an in-memory duplicate.
-            self._persist_runtime_state(schedule_admission=schedule_admission)
+            self._persist_runtime_state(
+                schedule_admission=schedule_admission, deferred_admission_task_id=task.task_id,
+            )
         except Exception as error:
             if _task_row_taken_over(error):
                 # Another agent took this agent's task row over: the snapshot

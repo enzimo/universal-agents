@@ -249,7 +249,7 @@ def test_a_deferred_hand_off_and_a_deferred_takeover_serialize(recovery_store):
             contender.save_task_runtime(
                 owner_agent_id=owners[0], owner_agent_name="Original", team_id="recovery_tests",
                 owner_named_agent_type="Worker", runtime_state_json=snapshot_json("m1"),
-                expect_existing=False, deferred_handoff="m1",
+                expect_existing=False, deferred_message_id="m1", consume_deferred_message=True,
             )
         except RuntimeCustodyLost:
             return "refused"
@@ -275,3 +275,107 @@ def test_a_deferred_hand_off_and_a_deferred_takeover_serialize(recovery_store):
     taken_rows = repo.load_deferred_messages_by_owner(owners[1])
     in_new_deferred = bool(taken_rows) and "m1" in taken_rows[0].messages_json
     assert in_task_row != in_new_deferred
+
+
+@pytest.mark.parametrize("write_kind", ["snapshot", "admission", "history"])
+def test_a_recreated_deferred_row_does_not_authorize_a_transferred_message(recovery_store, write_kind):
+    """Full, admitting and partial writes all prove the named message, not just its row."""
+    from custom_messages.contracts.runtime_snapshot_v3 import decode_runtime_snapshot
+
+    repo, _, owners = recovery_store
+    save(repo, "task_runtime", owners[0], expect_existing=False)
+    sources = seed(repo, "deferred_messages", owners[0])
+    repo.commit_deferred_messages_recovery(
+        sources=sources, replacement=replace(sources[0], owner_agent_id=owners[1]),
+    )
+    save(repo, "deferred_messages", owners[0], expect_existing=False, message_id="work2")
+    before_task = repo.load_task_runtime_by_owner(owners[0])
+    before_deferred = repo.load_deferred_messages_by_owner(owners[0])
+    with pytest.raises(RuntimeCustodyLost) as refused:
+        if write_kind == "history":
+            [task] = decode_runtime_snapshot(snapshot_json()).tasks
+            repo.save_task_runtime_task(
+                owner_agent_id=owners[0], task=task,
+                task_plan_links={}, task_objective_links={}, plan_objective_links={},
+                deferred_message_id="work",
+            )
+        else:
+            repo.save_task_runtime(
+                owner_agent_id=owners[0], owner_agent_name="Original", team_id="recovery_tests",
+                owner_named_agent_type="Worker", runtime_state_json=snapshot_json(),
+                expect_existing=True, deferred_message_id="work",
+                consume_deferred_message=write_kind == "admission",
+            )
+    assert refused.value.store.value == "deferred_messages"
+    assert repo.load_task_runtime_by_owner(owners[0]) == before_task
+    assert repo.load_deferred_messages_by_owner(owners[0]) == before_deferred
+    assert repo.load_deferred_messages_by_owner(owners[1])[0].messages_json == sources[0].messages_json
+
+
+def test_an_intermediate_snapshot_keeps_the_deferred_message(recovery_store):
+    repo, _, owners = recovery_store
+    seed(repo, "deferred_messages", owners[0])
+    repo.save_task_runtime(
+        owner_agent_id=owners[0], owner_agent_name="Original", team_id="recovery_tests",
+        owner_named_agent_type="Worker", runtime_state_json=snapshot_json(),
+        expect_existing=False, deferred_message_id="work",
+    )
+    assert repo.load_task_runtime_by_owner(owners[0])
+    assert json.loads(repo.load_deferred_messages_by_owner(owners[0])[0].messages_json)[0]["msg_header"]["message_id"] == "work"
+
+
+@pytest.mark.parametrize("outcome", ["commit", "lost", "write_failed"])
+def test_a_completed_schedule_and_its_deferred_reply_commit_together(recovery_store, monkeypatch, outcome):
+    from contextlib import contextmanager
+    from datetime import datetime, timedelta, timezone
+
+    from custom_agents.schedule_store import ScheduleStore
+    from custom_messages.contracts.schedule_v1 import ScheduledMessage
+    from custom_messages.contracts.task_v1 import Task
+    from custom_messages.enums import MessageMetaType, ScheduleManagementClass
+    from storage.runtime_custody import DeferredMessageClaim
+
+    repo, config, owners = recovery_store
+    sources = seed(repo, "deferred_messages", owners[0])
+    store = ScheduleStore(storage_settings=resolve_storage_settings(config))
+    schedule = ScheduledMessage(
+        schedule_id=owners[2], payload=Task(task_type=MessageMetaType.REQUEST),
+        management_class=ScheduleManagementClass.USER,
+        next_fire_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+    )
+    if outcome == "lost":
+        repo.commit_deferred_messages_recovery(
+            sources=sources, replacement=replace(sources[0], owner_agent_id=owners[1]),
+        )
+    if outcome == "write_failed":
+        connect = store._repository._connect
+
+        @contextmanager
+        def refuse_insert():
+            with connect() as conn:
+                class FailingInsert:
+                    def execute(self, sql, *args, **kwargs):
+                        if "INSERT" in sql and "scheduled_messages" in sql:
+                            raise RuntimeError("Schedule insert failed after the deferred check")
+                        return conn.execute(sql, *args, **kwargs)
+
+                    def __getattr__(self, name):
+                        return getattr(conn, name)
+
+                yield FailingInsert()
+
+        monkeypatch.setattr(store._repository, "_connect", refuse_insert)
+    claim = DeferredMessageClaim(owners[0], "work")
+    try:
+        if outcome == "commit":
+            store.add(schedule, deferred_message=claim)
+            assert store.get_row(schedule.schedule_id) is not None
+            assert json.loads(repo.load_deferred_messages_by_owner(owners[0])[0].messages_json) == []
+        else:
+            with pytest.raises(RuntimeCustodyLost if outcome == "lost" else RuntimeError):
+                store.add(schedule, deferred_message=claim)
+            assert store.get_row(schedule.schedule_id) is None
+            owner = owners[1] if outcome == "lost" else owners[0]
+            assert repo.load_deferred_messages_by_owner(owner)[0].messages_json == sources[0].messages_json
+    finally:
+        store.remove(schedule.schedule_id)

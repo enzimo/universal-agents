@@ -48,15 +48,15 @@ class DeferredInboxFull(RuntimeError):
 class DeferredHandoff:
     """One deferred message being dispatched, and whether its handling was saved.
 
-    The rule: the first full task save that the dispatching asyncio task itself
-    makes while the dispatch runs takes the message out of the deferred row, in
-    the same transaction (``RuntimeStateRepository.save_task_runtime``,
-    ``deferred_handoff``). That save is the message's handling, typically its
-    admission (``add_task``). A save counts only when the dispatching task
-    submitted it, through the task lane (``task_operation_runtime.submitting_task``)
-    or directly on the event loop. Saves of tasks or threads started during the
-    dispatch, which copy its context, never carry it, nor does any save once the
-    dispatch ended in any way (``closed``).
+    Every task save by the dispatching asyncio task checks that this exact
+    message still belongs to the inbox. Admission of the request's own task
+    consumes it atomically (``TaskManager.add_task``), as does insertion of a
+    completed delayed-retry decision's schedule. Other handlers keep
+    the message until dispatch completes: a saved query history entry, for
+    example, does not yet apply a person's resume or cancel decision. These
+    checks apply through the task lane (``submitting_task``) or directly on the
+    event loop. Child tasks, other threads and saves after dispatch closes
+    never carry this handoff.
 
     Why the task and not the context alone: ``create_task``, ``to_thread`` and
     ``run_coroutine_threadsafe`` copy the context, so with the context alone an
@@ -69,20 +69,22 @@ class DeferredHandoff:
 
     message_id: str
     dispatch_task: Optional["asyncio.Task[Any]"] = None
+    admission_task_id: Optional[str] = None
+    custody_version: int = 0
     committed: bool = False
     failure: Optional[BaseException] = None
     closed: bool = False
 
     @property
     def pending(self) -> bool:
-        return not (self.committed or self.closed or self.failure is not None)
+        return not (self.committed or self.closed)
 
 
 _CURRENT_HANDOFF: ContextVar[Optional[DeferredHandoff]] = ContextVar("deferred_handoff", default=None)
 
 
 def pending_deferred_handoff() -> Optional[DeferredHandoff]:
-    """The deferred message this save takes over, if the dispatching task itself makes it (class docstring)."""
+    """The message whose custody this dispatching task's save must check (class docstring)."""
     handoff = _CURRENT_HANDOFF.get()
     if handoff is None or not handoff.pending or handoff.dispatch_task is None:
         return None
@@ -106,9 +108,10 @@ class DeferredMessageInbox:
 
     Like the task snapshot, the inbox remembers whether it holds a saved row,
     and its writes name messages (add, remove) instead of rewriting the list.
-    A message leaves the row when its handling is saved: in the same
-    transaction as the first task save of its dispatch (``DeferredHandoff``),
-    or, when the dispatch saved nothing, by a checked removal afterwards. When
+    A request leaves the row atomically with admission of its own task. A
+    delayed-retry reply leaves with its schedule's insertion. Other
+    messages stay until their dispatch completes, with custody checked at
+    each task save (``DeferredHandoff``). When
     a write finds the row gone (``RuntimeCustodyLost``: another agent took these
     messages over), the inbox forgets every message, never retries them here,
     and tells ``on_custody_lost`` (``custom_agents.custody_loss``).
@@ -125,6 +128,8 @@ class DeferredMessageInbox:
     _mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _io: BlockingIOLane = field(default_factory=BlockingIOLane, init=False)
     _holds_row: bool = field(default=False, init=False)
+    # A dispatch of released work must never settle against fresh custody.
+    _custody_version: int = field(default=0, init=False)
     # Called on the event loop with the number of forgotten messages.
     on_custody_lost: Callable[[int], None] | None = field(default=None, init=False)
 
@@ -191,6 +196,7 @@ class DeferredMessageInbox:
         released = len(message_ids)
         self._messages = deque()
         self._holds_row = False
+        self._custody_version += 1
         self._check_backlog()
         self.logger.warning(
             "Another agent took this agent's deferred messages over; dropped them from memory "
@@ -377,7 +383,7 @@ class DeferredMessageInbox:
         dispatch: Callable[[MessageEnvelope], Awaitable[None]],
         available: Callable[[], bool],
     ) -> bool:
-        """Dispatch messages in order; each leaves the row once its handling is saved.
+        """Dispatch in order; consume requests at admission and other messages at completion.
 
         Keep failed or cancelled work and end the pass without a tight retry
         loop. If the row turns out to belong to another agent, every message is
@@ -386,7 +392,14 @@ class DeferredMessageInbox:
         while self._messages and available():
             envelope = self._messages[0]
             message_id = envelope.msg_header.message_id
-            handoff = DeferredHandoff(message_id, dispatch_task=asyncio.current_task())
+            content = envelope.msg_content
+            handoff = DeferredHandoff(
+                message_id,
+                dispatch_task=asyncio.current_task(),
+                admission_task_id=content.task_id
+                if isinstance(content, Task) and content.task_type == MessageMetaType.REQUEST else None,
+                custody_version=self._custody_version,
+            )
             token = _CURRENT_HANDOFF.set(handoff)
             error: Optional[BaseException] = None
             try:
@@ -407,7 +420,7 @@ class DeferredMessageInbox:
 
     def _forget_handed_off(self, envelope: MessageEnvelope, handoff: DeferredHandoff) -> None:
         """A cancelled dispatch whose handling was saved: the message is done here."""
-        if not handoff.committed:
+        if not handoff.committed or handoff.custody_version != self._custody_version:
             return
         message_id = envelope.msg_header.message_id
         self._messages = deque(item for item in self._messages if item.msg_header.message_id != message_id)
@@ -422,6 +435,10 @@ class DeferredMessageInbox:
         self, envelope: MessageEnvelope, handoff: DeferredHandoff, error: Optional[BaseException]
     ) -> bool:
         """Remove a dispatched message unless it must stay; True to continue the pass."""
+        if handoff.custody_version != self._custody_version:
+            # An admission already released this dispatch's inbox. A fresh
+            # row may now hold new messages; this old dispatch cannot clear it.
+            return False
         message_id = envelope.msg_header.message_id
         lost = handoff.failure if isinstance(handoff.failure, RuntimeCustodyLost) else error
         if isinstance(lost, RuntimeCustodyLost) and lost.store is CustodyStore.DEFERRED_MESSAGES:
@@ -440,6 +457,10 @@ class DeferredMessageInbox:
         # Saved with its handling, or its handling saved nothing: remove it now.
         try:
             async with self._mutation_lock:
+                if handoff.custody_version != self._custody_version:
+                    # Admission may have released this inbox while settlement
+                    # waited for the lock. Leave the new row and queue alone.
+                    return False
                 await self._remove({message_id})
         except RuntimeCustodyLost:
             return False

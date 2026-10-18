@@ -50,15 +50,18 @@ from custom_messages.contracts.runtime_v1 import (
     TEAM_ARCHITECT_AGENT_TYPE,
 )
 from custom_agents.deferred_message_runtime import (
+    DeferredHandoff,
     DeferredInboxOwner,
     DeferredMessageInbox,
     requires_execution_slot,
     is_priority_deferred_message,
+    pending_deferred_handoff,
 )
 from custom_agents.agent_team_runtime import LocalAgentTeamRuntime, unregister_local_worker
 from custom_agents.liveness_observation import LivenessObservation, NATS_PRESENCE_HEARTBEAT_SECONDS
 from custom_agents.agent_liveness import own_process_identity, received_status_time
 from custom_agents.custody_loss import install_custody_listeners
+from storage.runtime_custody import DeferredMessageClaim, RuntimeCustodyLost
 from custom_agents.runtime_paths import (
     agent_layout,
     fill_missing_instance_paths,
@@ -2701,6 +2704,7 @@ class UniversalAgent(BaseModel):
         task_info: TaskInfo,
         retry_at: datetime,
         marker: str = PROVIDER_COOLDOWN_RETRY_MARKER,
+        deferred_handoff: Optional[DeferredHandoff] = None,
     ) -> ScheduledMessage:
         """Store a one-time retry of a task paused by a model provider's limits.
 
@@ -2720,11 +2724,29 @@ class UniversalAgent(BaseModel):
             repeat_count=1,
             next_fire_at=retry_at.isoformat(),
         )
-        await self.task_manager.operations_runtime.run(
-            self._ensure_schedule_store().add,
-            schedule,
-            **schedule_claim_scope_for_agent(self),
-        )
+        def install_retry() -> None:
+            # This insertion completes a delayed-retry decision. Consume its
+            # reply in the same transaction, before a shutdown can replay it.
+            if deferred_handoff is not None and isinstance(deferred_handoff.failure, RuntimeCustodyLost):
+                raise deferred_handoff.failure
+            try:
+                self._ensure_schedule_store().add(
+                    schedule,
+                    deferred_message=None if deferred_handoff is None else DeferredMessageClaim(
+                        self.id, deferred_handoff.message_id,
+                    ),
+                    **schedule_claim_scope_for_agent(self),
+                )
+            except RuntimeCustodyLost as lost:
+                if deferred_handoff is not None:
+                    deferred_handoff.failure = lost
+                raise
+            if deferred_handoff is not None:
+                # The lane waits through cancellation until this operation
+                # finishes, so the inbox also observes a committed handoff.
+                deferred_handoff.committed = True
+
+        await self.task_manager.operations_runtime.run(install_retry)
         if self._scheduler_wake is not None:
             self._scheduler_wake.set()
         return schedule
@@ -2744,6 +2766,7 @@ class UniversalAgent(BaseModel):
             task_info=task_info,
             retry_at=retry_at,
             marker=pause_id or task_query_id or "unknown",
+            deferred_handoff=pending_deferred_handoff(),
         )
         await self.task_manager.operations_runtime.run(
             self.task_manager.append_history_entry,

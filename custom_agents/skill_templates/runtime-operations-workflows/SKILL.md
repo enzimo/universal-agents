@@ -135,7 +135,11 @@ whether their process still runs; only when that cannot be checked
 (`event=owner_liveness_unknown`) are they judged by their heartbeat. If the logs show
 `event=runtime_custody_released`, another agent took that work over and runs it;
 the agent that logged it dropped its copy, so do not resend or recreate the
-task. A cleared task warning means its reported
+task. After a restart, allow queued clarification replies to finish; check the
+task's state before asking the person to repeat a resume or cancel decision.
+Let a chosen delayed retry wait for its timer after restart; do not create
+another retry schedule for it.
+A cleared task warning means its reported
 condition ended, not proof of new task progress. Check the task history and
 current state before describing it as moving again. Distinguish system maintenance
 from work a person requested; maintenance runs work for no person and reach

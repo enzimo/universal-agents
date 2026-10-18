@@ -47,7 +47,8 @@ class RuntimeStateStore:
         runtime_state_json: str,
         expect_existing: bool,
         schedule_admission: ScheduleOccurrenceV1 | None = None,
-        deferred_handoff: Optional[str] = None,
+        deferred_message_id: Optional[str] = None,
+        consume_deferred_message: bool = False,
     ) -> None:
         self._repository.save_task_runtime(
             owner_agent_id=owner_agent_id,
@@ -57,17 +58,20 @@ class RuntimeStateStore:
             runtime_state_json=runtime_state_json,
             expect_existing=expect_existing,
             schedule_admission=schedule_admission,
-            deferred_handoff=deferred_handoff,
+            deferred_message_id=deferred_message_id,
+            consume_deferred_message=consume_deferred_message,
         )
 
     def save_task_runtime_task(
         self, *, owner_agent_id: str, task: TaskSnapshotRecord,
         task_plan_links: dict[str, str], task_objective_links: dict[str, str],
         plan_objective_links: dict[str, str],
+        deferred_message_id: Optional[str] = None,
     ) -> None:
         self._repository.save_task_runtime_task(
             owner_agent_id=owner_agent_id, task=task, task_plan_links=task_plan_links,
             task_objective_links=task_objective_links, plan_objective_links=plan_objective_links,
+            deferred_message_id=deferred_message_id,
         )
 
     def clear_task_runtime(self, owner_agent_id: str) -> None:

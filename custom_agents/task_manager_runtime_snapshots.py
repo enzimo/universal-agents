@@ -119,31 +119,40 @@ class RuntimeSnapshotCoordinator:
             objectives_enabled=self.operations.objectives_enabled(),
         ).model_dump(mode="json")
 
-    def _persist_runtime_state(self, *, schedule_admission: "ScheduleOccurrenceV1 | None" = None) -> None:
+    def _persist_runtime_state(
+        self, *, schedule_admission: "ScheduleOccurrenceV1 | None" = None,
+        deferred_admission_task_id: Optional[str] = None,
+    ) -> None:
         owner_agent_id = self.identity.owner_agent_id
         if not owner_agent_id:
             if schedule_admission is not None:
                 raise ValueError("Schedule admission requires durable runtime identity")
             return
 
-        # The deferred message this dispatch is handling, if its handling is not
-        # saved yet: it leaves the deferred row in this same save.
+        # Every save checks the dispatch's exact message. Only the request's
+        # explicit admission can remove it before the whole handler finishes.
         handoff = pending_deferred_handoff()
         try:
-            self._write_runtime_state(owner_agent_id, schedule_admission, handoff)
+            if handoff is not None and isinstance(handoff.failure, RuntimeCustodyLost):
+                raise handoff.failure
+            self._write_runtime_state(owner_agent_id, schedule_admission, handoff, deferred_admission_task_id)
         except Exception as error:
             self._note_failed_save(error, handoff)
             raise
 
     def _write_runtime_state(
         self, owner_agent_id: str, schedule_admission: "ScheduleOccurrenceV1 | None",
-        handoff: Optional[DeferredHandoff],
+        handoff: Optional[DeferredHandoff], deferred_admission_task_id: Optional[str],
     ) -> None:
         if not self.task_state.tasks:
             self.runtime_state_store.clear_task_runtime(owner_agent_id)
             self._holds_custody = False
             self._saved_task_ids = frozenset()
             return
+        consume_message = (
+            handoff is not None and deferred_admission_task_id is not None
+            and deferred_admission_task_id == handoff.admission_task_id
+        )
         self.runtime_state_store.save_task_runtime(
             owner_agent_id=owner_agent_id,
             owner_agent_name=self.identity.owner_agent_name,
@@ -151,12 +160,13 @@ class RuntimeSnapshotCoordinator:
             owner_named_agent_type=self.identity.owner_named_agent_type,
             runtime_state_json=json.dumps(self._export_runtime_state()),
             expect_existing=self._holds_custody,
-            deferred_handoff=None if handoff is None else handoff.message_id,
+            deferred_message_id=None if handoff is None else handoff.message_id,
+            consume_deferred_message=consume_message,
             **({"schedule_admission": schedule_admission} if schedule_admission is not None else {}),
         )
         self._holds_custody = True
         self._saved_task_ids = frozenset(self.task_state.tasks)
-        if handoff is not None:
+        if handoff is not None and consume_message:
             handoff.committed = True
 
     def _note_failed_save(self, error: Exception, handoff: Optional[DeferredHandoff]) -> None:
@@ -172,16 +182,25 @@ class RuntimeSnapshotCoordinator:
     def persist_task_history(self, task_id: str) -> None:
         if not self.identity.owner_agent_id:
             return
+        handoff = pending_deferred_handoff()
         try:
+            if handoff is not None and isinstance(handoff.failure, RuntimeCustodyLost):
+                raise handoff.failure
             self.runtime_state_store.save_task_runtime_task(
                 owner_agent_id=self.identity.owner_agent_id,
                 task=capture_task(self.task_state.tasks[task_id]),
                 task_plan_links=self.plan_state.task_to_plan_id if self.operations.plans_enabled() else {},
                 task_objective_links=self.objective_state.task_to_objective_id if self.operations.objectives_enabled() else {},
                 plan_objective_links=self.objective_state.plan_to_objective_id if self.operations.objectives_enabled() else {},
+                deferred_message_id=None if handoff is None else handoff.message_id,
             )
             return
         except RuntimeCustodyLost as lost:
+            if handoff is not None:
+                handoff.failure = lost
+            if lost.store is CustodyStore.DEFERRED_MESSAGES:
+                # The task row is still ours; only this message was transferred.
+                raise
             if self._holds_custody:
                 self._release_lost_custody(lost)
                 raise

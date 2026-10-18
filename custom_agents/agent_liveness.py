@@ -47,8 +47,9 @@ agent's identity names the old host, so nothing replaced it, no notice went
 out, and schedule coalescing folded every new fire into its dead run. Falling
 back to the heartbeat is safe because a previous owner that is in fact still
 running cannot save the work again: its task saves are refused once its task
-row moved, and a deferred message leaves its deferred row only in the same
-transaction as the task save that records its handling (``RuntimeCustodyLost``,
+row moved, and each task save during deferred dispatch checks that exact
+message's custody. A deferred request leaves its row atomically with its
+task's admission; other messages remain until handling completes (``RuntimeCustodyLost``,
 ``custom_agents.custody_loss``, ``deferred_message_runtime.DeferredHandoff``).
 
 Assumption: every agent process of a team is a child of one supervisor run on

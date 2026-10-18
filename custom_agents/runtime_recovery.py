@@ -12,7 +12,7 @@ from custom_agents.task_human_interaction_blockers import (
 )
 from custom_agents.task_manager import TaskInfo
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
-from custom_messages.enums import ProgressState, TaskHistoryImportance, TaskHistoryType
+from custom_messages.enums import ProgressState, TaskHistoryImportance, TaskHistoryType, TaskQueryDecision
 from storage.runtime_state_repository import CustodyStore, RuntimeRecoveryConflict
 
 
@@ -181,6 +181,22 @@ async def discard_runtime_state_for_team_change(
             )
 
 
+def _has_delayed_retry_decision(manager: Any, task_id: str) -> bool:
+    """A resolved retry choice still holds its pause until its timer requeues it.
+
+    The deferred reply may still be installing that timer after a crash, or
+    may already have committed it. Neither case makes the task an orphaned
+    pause. Only the latest pause's decision counts for a later pause.
+    """
+    records = [record for record in manager.task_state.recoverable_pause_records.values() if record.task_id == task_id]
+    if not records:
+        return False
+    latest = max(records, key=lambda record: record.created_at)
+    return latest.user_decision in {
+        TaskQueryDecision.RETRY_IN_5_MINUTES.value, TaskQueryDecision.RETRY_IN_10_MINUTES.value,
+    }
+
+
 async def _preserve_or_requeue_recovered_pause(
     agent: Any,
     *,
@@ -193,6 +209,12 @@ async def _preserve_or_requeue_recovered_pause(
     if await agent.task_manager.operations_runtime.run(
         partial(has_explicit_queue_pause, agent.task_manager), task_id,
     ):
+        return
+    if await agent.task_manager.operations_runtime.run(partial(_has_delayed_retry_decision, agent.task_manager), task_id):
+        agent._logger.info(
+            "Recovery kept the task paused until its chosen retry timer. "
+            "event=recovery_preserved_delayed_retry agent_id=%s task_id=%s", agent.id, task_id,
+        )
         return
     pending_guidance = await agent.task_manager.operations_runtime.run(
         agent.task_manager.get_pending_recoverable_pause, task_id
