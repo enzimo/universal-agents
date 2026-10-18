@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -380,3 +381,42 @@ def test_the_agent_runs_a_drain_pass_when_another_holder_releases_the_slot(tmp_p
 
     asyncio.run(scenario())
     agent._continue_pending_work.assert_awaited_once()
+
+
+# -- owned work and a deferred message's hand-off (main's DeferredHandoff rule) --
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owned_by", ["start_owned_task", "tool_send"])
+async def test_a_save_by_owned_work_started_during_a_dispatch_does_not_take_the_message(tmp_path, owned_by):
+    """Only the dispatching task's own save may take a waiting message (``DeferredHandoff``).
+
+    Owned work runs as its own asyncio task: ``start_owned_task`` creates one,
+    and a tool's send runs in a task the tool thread starts on the agent loop.
+    Both copy the dispatch's context, so only the task check
+    (``submitting_task``) keeps their saves from the hand-off. Here the owned
+    work admits the message's own task, the one save that would take the
+    message out of the deferred row, and then the dispatch fails: the message
+    must stay in the deferred row for the retry.
+    """
+    from custom_agents.pending_work_runtime import start_owned_task
+    from tests.test_custody_loss import admit, deferred_ids, held_and_deferred, OLD
+
+    task_manager, inbox = await held_and_deferred(tmp_path)
+    agent = _tool_agent(asyncio.get_running_loop())
+
+    async def admit_the_message_task():
+        # The lane copies an operation's arguments, so the manager goes in the operation itself.
+        await task_manager.operations_runtime.run(partial(admit, task_manager, "m1"))
+
+    async def dispatch(_envelope):
+        if owned_by == "start_owned_task":
+            await start_owned_task(agent, admit_the_message_task, name="owned:admit")
+        else:
+            await _send_from_tool_thread(agent, admit_the_message_task())
+        raise RuntimeError("handling failed after the owned work saved")
+
+    assert await inbox.drain(dispatch=dispatch, available=lambda: True) is False
+    assert deferred_ids(task_manager.runtime_state_store, OLD) == ["m1"]
+    assert [item.msg_content.task_id for item in inbox.messages] == ["m1"]
+    assert agent._owned_tasks == set()
