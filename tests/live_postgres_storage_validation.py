@@ -250,14 +250,17 @@ def exercise_runtime_state_store(
     assert store.load_task_runtime_by_owner("agent_runtime_1") == []
     assert len(store.load_task_runtime_by_owner("agent_runtime_replacement")) == 1
 
-    deferred_payload = json.dumps([{"message_id": "msg_1", "content": "deferred"}])
-    store.save_deferred_messages(
-        expect_existing=False,
+    deferred_message = {"msg_header": {"message_id": "msg_1"}, "content": "deferred"}
+    deferred_payload = json.dumps([deferred_message])
+    store.add_deferred_message(
         owner_agent_id="agent_runtime_2",
         owner_agent_name="Live Deferred",
         team_id="team_live_pg",
         owner_named_agent_type="TeamArchitect",
-        messages_json=deferred_payload,
+        message_id="msg_1",
+        envelope_json=json.dumps(deferred_message),
+        first=False,
+        expect_existing=False,
     )
     assert store.get_deferred_messages_team_id("agent_runtime_2") == "team_live_pg"
     deferred_rows = store.load_deferred_messages_by_owner("agent_runtime_2")

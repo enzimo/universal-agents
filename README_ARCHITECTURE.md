@@ -636,9 +636,11 @@ that is still running finds its row gone at its next save, which is refused
 (`RuntimeCustodyLost`) before anything is written; it then drops that work from
 memory without replying and keeps running (`custom_agents.custody_loss`). A
 deferred message leaves the deferred row in the same transaction as the first
-task save its handling makes, and only while the agent still holds that row
-(`deferred_message_runtime.DeferredHandoff`); when its handling saves nothing,
-a checked removal follows. So the saved effects of a task or deferred message
+task save that the dispatching asyncio task itself makes (typically its
+admission), and only while the agent still holds that row
+(`deferred_message_runtime.DeferredHandoff`); saves of work started during the
+dispatch never count. When its handling saves nothing, a checked removal
+follows, and a dispatch that ends any other way closes the hand-off. So the saved effects of a task or deferred message
 are written by one agent only, and a crash keeps the message either in the
 deferred row or, through its effect, in the task row. What is not covered: work
 a previous owner does before its first save after the takeover (a model turn in

@@ -120,7 +120,8 @@ class RuntimeSnapshotCoordinator:
         ).model_dump(mode="json")
 
     def _persist_runtime_state(self, *, schedule_admission: "ScheduleOccurrenceV1 | None" = None) -> None:
-        if not self.identity.owner_agent_id:
+        owner_agent_id = self.identity.owner_agent_id
+        if not owner_agent_id:
             if schedule_admission is not None:
                 raise ValueError("Schedule admission requires durable runtime identity")
             return
@@ -129,21 +130,22 @@ class RuntimeSnapshotCoordinator:
         # saved yet: it leaves the deferred row in this same save.
         handoff = pending_deferred_handoff()
         try:
-            self._write_runtime_state(schedule_admission, handoff)
+            self._write_runtime_state(owner_agent_id, schedule_admission, handoff)
         except Exception as error:
             self._note_failed_save(error, handoff)
             raise
 
     def _write_runtime_state(
-        self, schedule_admission: "ScheduleOccurrenceV1 | None", handoff: Optional[DeferredHandoff]
+        self, owner_agent_id: str, schedule_admission: "ScheduleOccurrenceV1 | None",
+        handoff: Optional[DeferredHandoff],
     ) -> None:
         if not self.task_state.tasks:
-            self.runtime_state_store.clear_task_runtime(self.identity.owner_agent_id)
+            self.runtime_state_store.clear_task_runtime(owner_agent_id)
             self._holds_custody = False
             self._saved_task_ids = frozenset()
             return
         self.runtime_state_store.save_task_runtime(
-            owner_agent_id=self.identity.owner_agent_id,
+            owner_agent_id=owner_agent_id,
             owner_agent_name=self.identity.owner_agent_name,
             team_id=self.identity.team_id,
             owner_named_agent_type=self.identity.owner_named_agent_type,

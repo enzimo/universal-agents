@@ -78,14 +78,14 @@ def seeded_store(request, tmp_path):
         owner_named_agent_type="TeamArchitect",
         runtime_state_json=snapshot_json("current_work"),
     )
-    repo.save_deferred_messages(
-        expect_existing=False,
-        owner_agent_id="old_a",
-        owner_agent_name="Manager",
-        team_id="nova",
-        owner_named_agent_type="TeamArchitect",
-        messages_json="[]",
-    )
+    # An owner's emptied deferred row, as a hand-off can leave it.
+    with maintenance._connection(settings) as conn:
+        bind = conn.dialect.bind
+        conn.execute(
+            f"INSERT INTO agent_deferred_messages VALUES ({', '.join([bind] * 6)})",
+            ("old_a", "Manager", "nova", "TeamArchitect", "[]", "2026-09-08T00:00:00Z"),
+        )
+        conn.commit()
     repo.record_task_cancellations(
         team_id="nova",
         root_task_id="cancelled",

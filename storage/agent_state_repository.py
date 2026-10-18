@@ -221,7 +221,9 @@ class _RelationalAgentStateRepository:
 
         The team lead prunes rows of agents that are gone
         (``agent_liveness.prune_departed_agent_rows``). An agent that reported in
-        between that read and this delete keeps its row.
+        between that read and this delete keeps its row. The time matches as
+        given or in the stored fixed-width form (``_sortable_time``), so a caller
+        may pass the time an agent sent as well as the time read back.
         """
         bind = self._dialect.bind
         params: tuple[str, ...]
@@ -229,8 +231,8 @@ class _RelationalAgentStateRepository:
             statement, params = f"DELETE FROM agent_states WHERE agent_id = {bind} AND last_seen_at IS NULL", (agent_id,)
         else:
             statement, params = (
-                f"DELETE FROM agent_states WHERE agent_id = {bind} AND last_seen_at = {bind}",
-                (agent_id, last_seen_at),
+                f"DELETE FROM agent_states WHERE agent_id = {bind} AND last_seen_at IN ({bind}, {bind})",
+                (agent_id, last_seen_at, _sortable_time(last_seen_at) or last_seen_at),
             )
         try:
             with self._connect() as conn:

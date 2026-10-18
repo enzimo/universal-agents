@@ -223,8 +223,8 @@ async def test_fire_merges_into_an_unfinished_run_on_a_live_worker(
     _insert(records, _occurrence("o1", due=_now() - timedelta(minutes=30)))
     agent = _firing_agent(records)
 
-    async def stale_owners(_agent, owner_ids, *, purpose):
-        assert purpose == "schedule_coalescing"
+    async def stale_owners(_agent, owner_ids, *, purpose, scope):
+        assert (purpose, scope) == ("schedule_coalescing", "sched_1")
         return [] if owner_live else list(owner_ids)
 
     monkeypatch.setattr("custom_agents.agent_liveness.gone_owner_ids", stale_owners)

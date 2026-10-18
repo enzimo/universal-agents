@@ -379,15 +379,18 @@ async def _coalesce_into_run_elsewhere(
         if record.occurrence_id != schedule_admission.occurrence_id
         and record.agent_id != agent.id
     ]
-    if not unfinished:
-        return False
+    # Asked even with no unfinished run, so this schedule's decision records
+    # about owners it no longer waits on are forgotten (agent_liveness).
     stale = set(
         await gone_owner_ids(
             agent,
             sorted({record.agent_id for record in unfinished}),
             purpose=LivenessPurpose.SCHEDULE_COALESCING,
+            scope=schedule_id,
         )
     )
+    if not unfinished:
+        return False
     live = sorted(
         (record for record in unfinished if record.agent_id not in stale),
         key=lambda record: record.due_at,

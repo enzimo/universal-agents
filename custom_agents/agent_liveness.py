@@ -57,11 +57,13 @@ runtime for the instance folder). A process from another run counts as gone
 whatever host it names, so agent processes of another runtime sharing the
 database would be judged gone at once; that deployment is not supported.
 
-Each observer logs an owner's decision, per asking purpose, when it first
-makes it and whenever it changes (``event=owner_liveness_decided``), not on
-every pass. The record behind that is bounded: each pass or call keeps only the
-owners it decided about (``retain_decisions``), so owners whose saved work or
-status row is gone drop out.
+Each observer logs an owner's decision, per asking purpose and scope, when it
+first makes it and whenever it changes (``event=owner_liveness_decided``), not
+on every pass. The record behind that is bounded: each pass or call keeps only
+the owners it decided about within its own scope (``retain_decisions``), so
+owners whose saved work or status row is gone drop out. The lead's passes look
+at the whole team (no scope); schedule coalescing asks per schedule, so one
+schedule's fire does not forget another schedule's owners.
 
 It depends only on stores and settings, so every runtime module may import it.
 """
@@ -272,10 +274,14 @@ def _observer_memory(agent: Any, name: str, empty: Callable[[], Any]) -> Any:
     return memory
 
 
-def _note_decision(agent: Any, decision: OwnerLiveness, purpose: LivenessPurpose) -> None:
+# Decision records: (purpose, scope, owner) -> (evidence, unchecked process).
+_DecisionRecords = dict[tuple[LivenessPurpose, str, str], tuple[Any, ...]]
+
+
+def _note_decision(agent: Any, decision: OwnerLiveness, purpose: LivenessPurpose, scope: str) -> None:
     """Log an owner's decision the first time and whenever it changes, not on every pass."""
-    memory: dict[tuple[LivenessPurpose, str], tuple[Any, ...]] = _observer_memory(agent, "_liveness_decisions", dict)
-    key = (purpose, decision.owner_agent_id)
+    memory: _DecisionRecords = _observer_memory(agent, "_liveness_decisions", dict)
+    key = (purpose, scope, decision.owner_agent_id)
     current = (decision.evidence, decision.unchecked_process)
     previous = memory.get(key)
     if previous == current:
@@ -306,11 +312,13 @@ def _note_decision(agent: Any, decision: OwnerLiveness, purpose: LivenessPurpose
     )
 
 
-def retain_decisions(agent: Any, purpose: LivenessPurpose, owner_agent_ids: Iterable[str]) -> None:
-    """Forget this purpose's decisions about owners the latest pass or call did not see."""
-    memory: dict[tuple[LivenessPurpose, str], tuple[Any, ...]] = _observer_memory(agent, "_liveness_decisions", dict)
+def retain_decisions(
+    agent: Any, purpose: LivenessPurpose, owner_agent_ids: Iterable[str], *, scope: str = ""
+) -> None:
+    """Forget decisions of this purpose and scope about owners the latest pass or call did not see."""
+    memory: _DecisionRecords = _observer_memory(agent, "_liveness_decisions", dict)
     seen = set(owner_agent_ids)
-    for key in [key for key in memory if key[0] is purpose and key[1] not in seen]:
+    for key in [key for key in memory if key[0] is purpose and key[1] == scope and key[2] not in seen]:
         del memory[key]
 
 
@@ -319,25 +327,34 @@ def owner_liveness(
     owner_agent_id: str,
     *,
     purpose: LivenessPurpose,
+    scope: str = "",
     now: datetime | None = None,
     status: Optional[AgentStatus] = None,
 ) -> OwnerLiveness:
-    """Decide whether one owner is gone (module docstring); ``status`` skips a second read."""
+    """Decide whether one owner is gone (module docstring); ``status`` skips a second read.
+
+    ``scope`` names what the asking call covers (a schedule id for coalescing,
+    nothing for the lead's whole-team passes); it only groups decision records.
+    """
     moment = now or datetime.now(timezone.utc)
     known_status = status if status is not None else lookup_owner_status(agent, owner_agent_id)
     decision = _decide(agent, owner_agent_id, known_status, moment)
-    _note_decision(agent, decision, purpose)
+    _note_decision(agent, decision, purpose, scope)
     return decision
 
 
 async def gone_owner_ids(
-    agent: Any, owner_agent_ids: Iterable[str], *, purpose: LivenessPurpose
+    agent: Any, owner_agent_ids: Iterable[str], *, purpose: LivenessPurpose, scope: str = ""
 ) -> list[str]:
-    """The owners among these that are gone, never this agent."""
+    """The owners among these that are gone, never this agent; ``scope`` as in ``owner_liveness``."""
     moment = datetime.now(timezone.utc)
     decided = [owner for owner in dict.fromkeys(owner_agent_ids) if owner and owner != agent.id]
-    gone = [owner for owner in decided if owner_liveness(agent, owner, purpose=purpose, now=moment).gone]
-    retain_decisions(agent, purpose, decided)
+    gone = [
+        owner
+        for owner in decided
+        if owner_liveness(agent, owner, purpose=purpose, scope=scope, now=moment).gone
+    ]
+    retain_decisions(agent, purpose, decided, scope=scope)
     return gone
 
 

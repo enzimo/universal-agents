@@ -2,14 +2,34 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from copy import deepcopy
 import asyncio
-from typing import Any, Callable, ParamSpec, TypeVar
+from typing import Any, Callable, Optional, ParamSpec, TypeVar
 
 from runtime_hosting.blocking_io import BlockingIOLane
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
+
+# The asyncio task that submitted the operation now running on the lane. The
+# lane runs each operation in a copy of the submitter's context, so code inside
+# the operation can tell which task asked for it (submitting_task).
+_SUBMITTING_TASK: ContextVar[Optional["asyncio.Task[Any]"]] = ContextVar("submitting_task", default=None)
+
+
+def submitting_task() -> Optional["asyncio.Task[Any]"]:
+    """The asyncio task a task operation runs for: its lane submitter, else the current task.
+
+    None in a thread that is neither the lane nor the event loop.
+    """
+    task = _SUBMITTING_TASK.get()
+    if task is not None:
+        return task
+    try:
+        return asyncio.current_task()
+    except RuntimeError:
+        return None
 
 
 def _detached_operation(
@@ -58,4 +78,8 @@ class TaskOperationRuntime:
         if self.loop is not None and self.loop is not loop and self.loop.is_running():
             raise RuntimeError("Task operations must use one owning event loop.")
         self.loop = loop
-        return await self._io.run(_detached_operation, operation, args, kwargs)
+        token = _SUBMITTING_TASK.set(asyncio.current_task())
+        try:
+            return await self._io.run(_detached_operation, operation, args, kwargs)
+        finally:
+            _SUBMITTING_TASK.reset(token)

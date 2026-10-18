@@ -28,13 +28,15 @@ def test_operator_deferred_failure_keeps_custody_until_archive_commits(
         msg_header=MessageHeader(),
         msg_meta=MessageMeta(),
     )
-    repository.save_deferred_messages(
-        expect_existing=False,
+    repository.add_deferred_message(
         owner_agent_id="worker",
         owner_agent_name="Worker",
         team_id="team",
         owner_named_agent_type="Worker",
-        messages_json=json.dumps([envelope.model_dump(mode="json")]),
+        message_id=envelope.msg_header.message_id,
+        envelope_json=json.dumps(envelope.model_dump(mode="json")),
+        first=False,
+        expect_existing=False,
     )
     original = repository.load_deferred_messages_by_owner("worker")
 

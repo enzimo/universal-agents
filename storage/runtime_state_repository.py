@@ -134,18 +134,6 @@ class RuntimeStateRepository(Protocol):
 
     def peek_task_runtime_by_team(self, team_id: str) -> List[TaskRuntimeSnapshotRow]: ...
 
-    def save_deferred_messages(
-        self,
-        *,
-        owner_agent_id: str,
-        owner_agent_name: Optional[str],
-        team_id: Optional[str],
-        owner_named_agent_type: Optional[str],
-        messages_json: str,
-        expect_existing: bool,
-    ) -> None: ...
-
-    def clear_deferred_messages(self, owner_agent_id: str) -> None: ...
 
     def add_deferred_message(
         self,
@@ -593,56 +581,6 @@ class _RelationalRuntimeStateRepository:
             skip_unreadable=True,
         )
 
-    def save_deferred_messages(
-        self,
-        *,
-        owner_agent_id: str,
-        owner_agent_name: Optional[str],
-        team_id: Optional[str],
-        owner_named_agent_type: Optional[str],
-        messages_json: str,
-        expect_existing: bool,
-    ) -> None:
-        """Save an owner's deferred messages; refused like ``save_task_runtime`` once taken over."""
-        bind = self._dialect.bind
-        try:
-            with self._connect() as conn:
-                self._begin_recovery(conn)
-                previous = conn.execute(
-                    f"SELECT owner_agent_id FROM agent_deferred_messages WHERE owner_agent_id = {bind}{self._recovery_lock_clause}",
-                    (owner_agent_id,),
-                ).fetchone()
-                if previous is None and expect_existing:
-                    raise RuntimeCustodyLost(owner_agent_id, CustodyStore.DEFERRED_MESSAGES)
-                conn.execute(
-                    f"""
-                    INSERT INTO agent_deferred_messages
-                        (owner_agent_id, owner_agent_name, team_id, owner_named_agent_type, messages_json, updated_at)
-                    VALUES ({bind}, {bind}, {bind}, {bind}, {bind}, {bind})
-                    ON CONFLICT(owner_agent_id) DO UPDATE SET
-                        owner_agent_name = excluded.owner_agent_name,
-                        team_id = excluded.team_id,
-                        owner_named_agent_type = excluded.owner_named_agent_type,
-                        messages_json = excluded.messages_json,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        owner_agent_id,
-                        owner_agent_name,
-                        team_id,
-                        owner_named_agent_type,
-                        messages_json,
-                        datetime.now(timezone.utc).isoformat(),
-                    ),
-                )
-                conn.commit()
-        except RuntimeCustodyLost as lost:
-            self._log_custody_refused(lost)
-            raise
-        except Exception:
-            self._logger.exception("Failed to persist deferred messages", extra={"owner_agent_id": owner_agent_id})
-            raise
-
     def _locked_deferred_messages(self, conn: Any, owner_agent_id: str) -> Optional[list[Any]]:
         """The owner's deferred messages, locked for this transaction; None without a row."""
         row = conn.execute(
@@ -746,9 +684,6 @@ class _RelationalRuntimeStateRepository:
         except Exception:
             self._logger.exception("Failed to remove deferred messages", extra={"owner_agent_id": owner_agent_id})
             raise
-
-    def clear_deferred_messages(self, owner_agent_id: str) -> None:
-        self._delete_rows("agent_deferred_messages", [owner_agent_id], "deferred messages")
 
     def get_deferred_messages_team_id(self, owner_agent_id: str) -> Optional[str]:
         try:

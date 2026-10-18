@@ -37,6 +37,7 @@ from storage.runtime_state_repository import (
 )
 from default_values import AGENT_DEFAULTS
 from runtime_hosting.blocking_io import BlockingIOLane
+from custom_agents.task_operation_runtime import submitting_task
 
 
 class DeferredInboxFull(RuntimeError):
@@ -47,16 +48,27 @@ class DeferredInboxFull(RuntimeError):
 class DeferredHandoff:
     """One deferred message being dispatched, and whether its handling was saved.
 
-    While the inbox dispatches a message it sets ``_CURRENT_HANDOFF`` in the
-    dispatching context. The storage lane runs each save in a copy of the
-    caller's context (``BlockingIOLane``), so the first full task save of that
-    dispatch sees it and takes the message out of the deferred row in the same
-    transaction (``RuntimeStateRepository.save_task_runtime``,
-    ``deferred_handoff``). Unrelated saves of other handlers run in other
-    contexts and never carry it.
+    The rule: the first full task save that the dispatching asyncio task itself
+    makes while the dispatch runs takes the message out of the deferred row, in
+    the same transaction (``RuntimeStateRepository.save_task_runtime``,
+    ``deferred_handoff``). That save is the message's handling, typically its
+    admission (``add_task``). A save counts only when the dispatching task
+    submitted it, through the task lane (``task_operation_runtime.submitting_task``)
+    or directly on the event loop. Saves of tasks or threads started during the
+    dispatch, which copy its context, never carry it, nor does any save once the
+    dispatch ended in any way (``closed``).
+
+    Why the task and not the context alone: ``create_task``, ``to_thread`` and
+    ``run_coroutine_threadsafe`` copy the context, so with the context alone an
+    unrelated save of work started during the dispatch took the message out of
+    the deferred row while its handling had not been saved, and a failure then
+    left it in no row (review, 2026-10-17). Passing the message id explicitly
+    through every handler that can save was the alternative; it would touch
+    every message handler, so the hand-off is tied to the dispatching task.
     """
 
     message_id: str
+    dispatch_task: Optional["asyncio.Task[Any]"] = None
     committed: bool = False
     failure: Optional[BaseException] = None
     closed: bool = False
@@ -70,9 +82,11 @@ _CURRENT_HANDOFF: ContextVar[Optional[DeferredHandoff]] = ContextVar("deferred_h
 
 
 def pending_deferred_handoff() -> Optional[DeferredHandoff]:
-    """The deferred message the current dispatch has not yet saved, if any."""
+    """The deferred message this save takes over, if the dispatching task itself makes it (class docstring)."""
     handoff = _CURRENT_HANDOFF.get()
-    return handoff if handoff is not None and handoff.pending else None
+    if handoff is None or not handoff.pending or handoff.dispatch_task is None:
+        return None
+    return handoff if submitting_task() is handoff.dispatch_task else None
 
 
 @dataclass(frozen=True)
@@ -372,18 +386,37 @@ class DeferredMessageInbox:
         while self._messages and available():
             envelope = self._messages[0]
             message_id = envelope.msg_header.message_id
-            handoff = DeferredHandoff(message_id)
+            handoff = DeferredHandoff(message_id, dispatch_task=asyncio.current_task())
             token = _CURRENT_HANDOFF.set(handoff)
             error: Optional[BaseException] = None
             try:
                 await dispatch(envelope)
             except Exception as exc:
                 error = exc
+            except BaseException:
+                # Cancelled (a stop or shutdown): settle without waiting.
+                self._forget_handed_off(envelope, handoff)
+                raise
             finally:
+                # No later save may take this message, whatever ended the dispatch.
+                handoff.closed = True
                 _CURRENT_HANDOFF.reset(token)
             if not await self._settle_dispatched(envelope, handoff, error):
                 return False
         return True
+
+    def _forget_handed_off(self, envelope: MessageEnvelope, handoff: DeferredHandoff) -> None:
+        """A cancelled dispatch whose handling was saved: the message is done here."""
+        if not handoff.committed:
+            return
+        message_id = envelope.msg_header.message_id
+        self._messages = deque(item for item in self._messages if item.msg_header.message_id != message_id)
+        self._check_backlog()
+        self.logger.info(
+            "A cancelled dispatch had already saved its message's handling; dropped it from memory",
+            extra={"event": "deferred_dispatch_cancelled_after_save", "agent_id": self.owner.agent_id,
+                   "message_id": message_id},
+        )
 
     async def _settle_dispatched(
         self, envelope: MessageEnvelope, handoff: DeferredHandoff, error: Optional[BaseException]
@@ -393,12 +426,10 @@ class DeferredMessageInbox:
         lost = handoff.failure if isinstance(handoff.failure, RuntimeCustodyLost) else error
         if isinstance(lost, RuntimeCustodyLost) and lost.store is CustodyStore.DEFERRED_MESSAGES:
             # The task save that would have taken this message refused: the row is gone.
-            handoff.closed = True
             self._release_lost_custody(lost)
             return False
         if not handoff.committed and (error is not None or handoff.failure is not None):
             # Nothing of its handling was saved here; the message stays in the row.
-            handoff.closed = True
             self.logger.warning(
                 "Deferred dispatch did not complete; retaining durable work",
                 extra={"event": "deferred_dispatch_retained", "agent_id": self.owner.agent_id,
@@ -406,9 +437,7 @@ class DeferredMessageInbox:
                 exc_info=error or handoff.failure,
             )
             return False
-        # Saved with its handling (the row may still list it if that save came
-        # later in a child task), or its handling saved nothing: remove it now.
-        handoff.closed = True
+        # Saved with its handling, or its handling saved nothing: remove it now.
         try:
             async with self._mutation_lock:
                 await self._remove({message_id})

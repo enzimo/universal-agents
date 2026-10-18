@@ -100,28 +100,6 @@ class RuntimeStateStore:
     def peek_task_runtime_by_team(self, team_id: str) -> List[TaskRuntimeSnapshotRow]:
         return self._repository.peek_task_runtime_by_team(team_id)
 
-    def save_deferred_messages(
-        self,
-        *,
-        owner_agent_id: str,
-        owner_agent_name: Optional[str],
-        team_id: Optional[str],
-        owner_named_agent_type: Optional[str],
-        messages_json: str,
-        expect_existing: bool,
-    ) -> None:
-        self._repository.save_deferred_messages(
-            owner_agent_id=owner_agent_id,
-            owner_agent_name=owner_agent_name,
-            team_id=team_id,
-            owner_named_agent_type=owner_named_agent_type,
-            messages_json=messages_json,
-            expect_existing=expect_existing,
-        )
-
-    def clear_deferred_messages(self, owner_agent_id: str) -> None:
-        self._repository.clear_deferred_messages(owner_agent_id)
-
     def add_deferred_message(
         self,
         *,

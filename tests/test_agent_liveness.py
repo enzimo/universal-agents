@@ -521,16 +521,48 @@ async def test_decision_records_keep_only_owners_still_seen(team):
     now = datetime.now(timezone.utc)
     assert _orphaned_owners(team, now)
     memory = team._liveness_decisions
-    assert (LivenessPurpose.REPLACEMENT_PASS, "owner_a") in memory
+    assert (LivenessPurpose.REPLACEMENT_PASS, "", "owner_a") in memory
     team.task_manager.runtime_state_store.clear_task_runtime("owner_a")  # its saved work is gone
     _orphaned_owners(team, now)
-    assert (LivenessPurpose.REPLACEMENT_PASS, "owner_a") not in memory
+    assert (LivenessPurpose.REPLACEMENT_PASS, "", "owner_a") not in memory
 
     await gone_owner_ids(team, ["owner_b"], purpose=TEST)
     await gone_owner_ids(team, ["owner_c"], purpose=TEST)
-    assert {key for key in memory if key[0] is TEST} == {(TEST, "owner_c")}
+    assert {key for key in memory if key[0] is TEST} == {(TEST, "", "owner_c")}
 
     assert prune_departed_agent_rows(team) == 1  # owner_a's silent row
-    assert (LivenessPurpose.STATUS_ROW_PRUNE, "owner_a") in memory
+    assert (LivenessPurpose.STATUS_ROW_PRUNE, "", "owner_a") in memory
     prune_departed_agent_rows(team)
-    assert (LivenessPurpose.STATUS_ROW_PRUNE, "owner_a") not in memory
+    assert (LivenessPurpose.STATUS_ROW_PRUNE, "", "owner_a") not in memory
+
+
+
+@pytest.mark.asyncio
+async def test_alternating_schedules_log_an_unchanged_decision_once(team, caplog):
+    """Coalescing asks per schedule: one schedule's fire must not forget the other's owners."""
+    report(team, "w_sched_a", seen_ago=timedelta(seconds=30))
+    report(team, "w_sched_b", seen_ago=timedelta(seconds=30))
+    coalescing = LivenessPurpose.SCHEDULE_COALESCING
+    with caplog.at_level(logging.INFO):
+        for _ in range(5):
+            await gone_owner_ids(team, ["w_sched_a"], purpose=coalescing, scope="schedule_a")
+            await gone_owner_ids(team, ["w_sched_b"], purpose=coalescing, scope="schedule_b")
+    decided = [r.getMessage() for r in caplog.records if "event=owner_liveness_decided" in r.getMessage()]
+    assert sum("owner_agent_id=w_sched_a " in line for line in decided) == 1
+    assert sum("owner_agent_id=w_sched_b " in line for line in decided) == 1
+    # The bound holds per scope: a fire with no unfinished run forgets that schedule's owners.
+    await gone_owner_ids(team, [], purpose=coalescing, scope="schedule_a")
+    assert {key for key in team._liveness_decisions if key[0] is coalescing} == {(coalescing, "schedule_b", "w_sched_b")}
+
+
+def test_a_status_row_is_removed_by_the_time_as_sent_or_as_stored(status_repository):
+    """Times are stored in one fixed-width form; the conditional delete accepts both."""
+    agent_id = f"agent_{uuid4().hex}"
+    sent = "2026-10-17T12:00:05+00:00"
+    status_repository.upsert(status(agent_id, seen_ago=None).model_copy(update={"last_seen_at": sent}))
+    stored = status_repository.get_by_id(agent_id).last_seen_at
+    assert stored == "2026-10-17T12:00:05.000000+00:00"
+    assert status_repository.remove_unseen(agent_id, "2026-10-17T12:00:04+00:00") is False
+    assert status_repository.remove_unseen(agent_id, sent) is True
+    status_repository.upsert(status(agent_id, seen_ago=None).model_copy(update={"last_seen_at": sent}))
+    assert status_repository.remove_unseen(agent_id, stored) is True

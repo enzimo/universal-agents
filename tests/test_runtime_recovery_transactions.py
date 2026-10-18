@@ -14,7 +14,7 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from tests.runtime_snapshot_fixtures import snapshot_json
+from tests.runtime_snapshot_fixtures import seed_deferred, snapshot_json
 
 from storage.config import resolve_storage_settings
 from storage.runtime_state_repository import (
@@ -40,19 +40,25 @@ def recovery_store(request, tmp_path):
     yield repo, config, owners
     for owner in owners:
         repo.clear_task_runtime(owner)
-        repo.clear_deferred_messages(owner)
+        repo.remove_deferred_messages(owner_agent_id=owner, message_ids=SEEDED_MESSAGES, expect_existing=False)
+
+
+SEEDED_MESSAGES = ("work", "work2", "m1")
+
+
+def save(repo, kind, owner, *, expect_existing, message_id="work"):
+    """One write of the given kind of saved work, as its owner makes it."""
+    if kind == "task_runtime":
+        repo.save_task_runtime(
+            owner_agent_id=owner, owner_agent_name="Original", team_id="recovery_tests",
+            owner_named_agent_type="Worker", runtime_state_json=snapshot_json(), expect_existing=expect_existing,
+        )
+    else:
+        seed_deferred(repo, owner, message_id, team_id="recovery_tests", expect_existing=expect_existing)
 
 
 def seed(repo, kind, owner):
-    payload = "runtime_state_json" if kind == "task_runtime" else "messages_json"
-    getattr(repo, f"save_{kind}")(
-        owner_agent_id=owner,
-        expect_existing=False,
-        owner_agent_name="Original",
-        team_id="recovery_tests",
-        owner_named_agent_type="Worker",
-        **{payload: snapshot_json() if kind == "task_runtime" else '[{"work":1}]'},
-    )
+    save(repo, kind, owner, expect_existing=False)
     return getattr(repo, f"load_{kind}_by_owner")(owner)
 
 
@@ -86,7 +92,7 @@ def test_recovery_rejects_a_snapshot_changed_since_decode(recovery_store, kind):
     repo, _, owners = recovery_store
     original = seed(repo, kind, owners[0])
     # A current owner wrote another snapshot while the replacement decoded its copy.
-    seed(repo, kind, owners[0])
+    save(repo, kind, owners[0], expect_existing=True, message_id="work2")
     with pytest.raises(RuntimeRecoveryConflict):
         getattr(repo, f"commit_{kind}_recovery")(
             sources=original, replacement=replace(original[0], owner_agent_id=owners[1])
@@ -144,15 +150,7 @@ os._exit(19)
 
 
 def save_again(repo, kind, owner, *, expect_existing):
-    payload = "runtime_state_json" if kind == "task_runtime" else "messages_json"
-    getattr(repo, f"save_{kind}")(
-        owner_agent_id=owner,
-        owner_agent_name="Original",
-        team_id="recovery_tests",
-        owner_named_agent_type="Worker",
-        expect_existing=expect_existing,
-        **{payload: snapshot_json() if kind == "task_runtime" else '[{"work":2}]'},
-    )
+    save(repo, kind, owner, expect_existing=expect_existing, message_id="work2")
 
 
 @pytest.mark.parametrize("kind", ["task_runtime", "deferred_messages"])

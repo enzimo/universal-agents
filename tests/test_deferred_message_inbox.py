@@ -125,14 +125,13 @@ async def test_only_the_committed_replacement_exposes_recovered_messages(inbox):
 
 @pytest.mark.asyncio
 async def test_malformed_recovery_keeps_its_original_durable_owner(inbox):
-    inbox.repository.save_deferred_messages(
-        expect_existing=False,
-        owner_agent_id="worker",
-        owner_agent_name="Worker",
-        team_id="team",
-        owner_named_agent_type="Worker",
-        messages_json='{"not":"a message list"}',
-    )
+    # A damaged row, written directly: the repository never stores one itself.
+    with inbox.repository._connect() as conn:
+        conn.execute(
+            "INSERT INTO agent_deferred_messages VALUES (?, ?, ?, ?, ?, ?)",
+            ("worker", "Worker", "team", "Worker", '{"not":"a message list"}', "2026-10-17T00:00:00+00:00"),
+        )
+        conn.commit()
     with pytest.raises(ValueError, match="message list"):
         await inbox.restore()
     assert len(inbox) == 0

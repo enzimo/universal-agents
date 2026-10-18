@@ -394,7 +394,7 @@ async def test_a_crash_right_after_the_hand_off_leaves_the_message_in_the_task_r
     old_inbox = inbox_for(OLD, old)
     envelope = _envelope("m1")
     await old_inbox.admit(envelope)
-    handoff = DeferredHandoff(envelope.msg_header.message_id)
+    handoff = DeferredHandoff(envelope.msg_header.message_id, dispatch_task=asyncio.current_task())
     token = _CURRENT_HANDOFF.set(handoff)
     try:
         admit(old, "m1")
@@ -456,3 +456,100 @@ async def test_emptying_the_inbox_is_a_checked_delete(tmp_path):
         await old_inbox.clear()
     assert len(old_inbox) == 0 and old_inbox._holds_row is False
     assert deferred_ids(old.runtime_state_store, NEW) == ["m1"]
+
+
+
+# -- review 2026-10-17 (C1, S1): only the dispatching task's own save takes the message --
+
+
+async def held_and_deferred(tmp_path):
+    """This agent holds ``other`` and has ``m1`` waiting in its deferred inbox."""
+    task_manager = manager(tmp_path, OLD)
+    admit(task_manager, "other")
+    inbox = inbox_for(OLD, task_manager)
+    await inbox.admit(_envelope("m1"))
+    return task_manager, inbox
+
+
+async def unrelated_save(task_manager):
+    """A full save of another task through the real storage lane, as background work makes it."""
+    await task_manager.operations_runtime.run(
+        task_manager.update_main_task_state, "other", ProgressState.IN_PROGRESS, now()
+    )
+
+
+def assert_only_deferred(task_manager, inbox):
+    assert deferred_ids(task_manager.runtime_state_store, OLD) == ["m1"]
+    assert [item.msg_content.task_id for item in inbox.messages] == ["m1"]
+    assert holders(task_manager) == {OLD: ["other"]}
+
+
+@pytest.mark.asyncio
+async def test_a_save_by_a_task_started_during_the_dispatch_does_not_take_the_message(tmp_path):
+    """Probe A1: before, the child's save took m1 out and the failed dispatch left it in no row."""
+    task_manager, inbox = await held_and_deferred(tmp_path)
+
+    async def dispatch(envelope):
+        await asyncio.create_task(unrelated_save(task_manager))
+        raise RuntimeError("handling failed before it saved anything")
+
+    assert await inbox.drain(dispatch=dispatch, available=lambda: True) is False
+    assert_only_deferred(task_manager, inbox)
+
+
+@pytest.mark.asyncio
+async def test_a_save_from_a_thread_joining_the_lane_does_not_take_the_message(tmp_path):
+    """Probe A2: a synchronous tool in a thread saves through run_sync while the dispatch runs."""
+    task_manager, inbox = await held_and_deferred(tmp_path)
+
+    def tool_in_thread():
+        task_manager.operations_runtime.run_sync(
+            task_manager.update_main_task_state, "other", ProgressState.IN_PROGRESS, now()
+        )
+
+    async def dispatch(envelope):
+        await asyncio.to_thread(tool_in_thread)
+        raise RuntimeError("handling failed")
+
+    assert await inbox.drain(dispatch=dispatch, available=lambda: True) is False
+    assert_only_deferred(task_manager, inbox)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_dispatch_closes_its_hand_off(tmp_path):
+    """Probe A3: work started during a cancelled dispatch saves later; the message stays put."""
+    task_manager, inbox = await held_and_deferred(tmp_path)
+    go = asyncio.Event()
+    children: list[asyncio.Task] = []
+
+    async def later_work():
+        await go.wait()
+        await unrelated_save(task_manager)
+
+    async def dispatch(envelope):
+        children.append(asyncio.create_task(later_work()))
+        await asyncio.sleep(3600)  # cancelled here (a stop or shutdown)
+
+    drain = asyncio.create_task(inbox.drain(dispatch=dispatch, available=lambda: True))
+    await asyncio.sleep(0.05)
+    drain.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await drain
+    go.set()
+    await children[0]
+    assert_only_deferred(task_manager, inbox)
+
+
+@pytest.mark.asyncio
+async def test_the_dispatching_tasks_own_save_through_the_lane_takes_the_message(tmp_path):
+    """Probe A4 through the real lane: the admission moves m1 into the task row."""
+    task_manager, inbox = await held_and_deferred(tmp_path)
+
+    async def dispatch(envelope):
+        asyncio.create_task(unrelated_save(task_manager))
+        await task_manager.operations_runtime.run(partial(admit, task_manager, envelope.msg_content.task_id))
+
+    assert await inbox.drain(dispatch=dispatch, available=lambda: True) is True
+    await asyncio.sleep(0.05)
+    assert deferred_ids(task_manager.runtime_state_store, OLD) == []
+    assert holders(task_manager) == {OLD: ["m1", "other"]}
