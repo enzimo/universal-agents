@@ -974,15 +974,31 @@ authority.
 
 Objective controls have distinct meanings:
 
-- **Pause** prevents future managed runs but leaves current work alone.
+- **Pause** prevents future managed runs but leaves current work alone. When
+  that work finishes, the Objective stays paused until you resume it.
 - **Stop** pauses future runs and asks current Objective work to halt at a safe
   boundary.
-- **Resume** re-enables only links that the Objective control previously
-  disabled.
+- **Resume** re-enables only links and work sessions that an Objective control
+  previously disabled. A work-session setting you turned off yourself stays off.
 - **Abandon** stops work and retains a terminal Objective record.
 - **Delete** runs a recoverable state machine: it disables linked policies,
   schedules, and heartbeat items, stops active work, and then retains a
   `deleted` tombstone with Plans, evidence, checkpoints, and audit history.
+  Only you can delete your Objective; the team lead cannot.
+
+Each Objective shows only the controls its current status allows, and these
+controls refuse any other: for example, a satisfied Objective can only be
+deleted. Repeating the control that set the current status is allowed: if a
+pause or abandon reports that a schedule did not switch, send the same command
+in chat again (for example `/pause objective <id>`) to retry the parts that did
+not finish. An unfinished deletion is retried with Delete or
+`/delete objective <id>`.
+
+Asking the team lead in chat to pause or resume an Objective also pauses or
+resumes its work sessions and the schedules and heartbeat items it manages,
+except schedules the system manages: the team lead leaves those as they are and
+says so. Unlike these controls, the team lead can still set a finished
+Objective back to active when you ask it to.
 
 Delete and abandon require a second confirmation click. Every Web mutation is
 bound to the signed-in browser, same origin, an in-memory CSRF token, canonical

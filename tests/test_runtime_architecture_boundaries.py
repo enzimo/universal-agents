@@ -813,3 +813,30 @@ def test_work_is_pulled_and_only_the_transport_adapter_subscribes() -> None:
             ):
                 offenders.append(f"{relative}:{node.lineno} {func.attr}")
     assert offenders == []
+
+
+# Who may write a whole Objective record. ``save_objective`` overwrites the
+# stored record, so every change goes through
+# ``ObjectiveCoordinator.change_objective`` (load, change and save in one task
+# operation). The team import writes into a stopped instance.
+OBJECTIVE_RECORD_WRITERS = {
+    "storage/objective_repository.py",
+    "custom_agents/task_manager_objectives.py",
+    "team_transfer/objectives.py",
+}
+
+
+def test_only_the_objective_coordinator_saves_objective_records() -> None:
+    offenders: list[str] = []
+    for path in _production_python_files():
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        if relative in OBJECTIVE_RECORD_WRITERS:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr in {"save_objective", "_save_objective", "_save_objective_logged"}
+            ):
+                offenders.append(f"{relative}:{node.lineno} {node.attr}")
+    assert offenders == []

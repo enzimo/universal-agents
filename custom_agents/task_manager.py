@@ -7,6 +7,7 @@ from custom_agents.task_runtime_state import (
 )
 from custom_agents.task_manager_ports import (
     AfterActionReportCoordinatorOperations,
+    ObjectiveChange,
     PlanCoordinatorOperations,
     RuntimeOperationsCoordinatorOperations,
     RuntimeSnapshotCoordinatorOperations,
@@ -219,7 +220,7 @@ class TaskManager(
                 enqueue_next_plan_step_task=self._enqueue_next_plan_step_task,
                 objectives_enabled=self._objectives_enabled,
                 persist_runtime_state=self._persist_runtime_state,
-                save_objective=self._save_objective_logged,
+                change_objective=self._change_objective,
                 save_plan=self._save_plan,
                 durable_manager_scope_id=self.durable_manager_scope_id,
                 get_objective=self.get_objective,
@@ -248,7 +249,7 @@ class TaskManager(
                 new_plan_id=partial(new_id, "plan_id"),
                 persist_runtime_state=self._persist_runtime_state,
                 plans_enabled=self._plans_enabled,
-                save_objective=self._save_objective_logged,
+                change_objective=self._change_objective,
                 add_task=self.add_task,
                 append_history_entry=self.append_history_entry,
                 append_history_entry_to_archived_task=self.append_history_entry_to_archived_task,
@@ -573,11 +574,10 @@ class TaskManager(
     def _objectives_enabled(self) -> bool:
         return self._plans_enabled()
 
-    def _save_objective(self, objective: ObjectiveRecord) -> None:
-        self.objective_coordinator._save_objective(objective)
-
-    def _save_objective_logged(self, objective: ObjectiveRecord, *, step: str) -> bool:
-        return self.objective_coordinator._save_objective_logged(objective, step=step)
+    def _change_objective(
+        self, objective_id: str, change: ObjectiveChange, *, step: str
+    ) -> Optional[ObjectiveRecord]:
+        return self.objective_coordinator.change_objective(objective_id, change, step=step)
 
     def _append_objective_event(
         self,
@@ -758,36 +758,6 @@ class TaskManager(
             include_closed=include_closed,
         )
 
-    def link_task_to_objective(
-        self,
-        objective_id: str,
-        task_id: str,
-        *,
-        user_visible: bool = False,
-        reason: Optional[str] = None,
-    ) -> Optional[ObjectiveRecord]:
-        return self.objective_coordinator.link_task_to_objective(
-            objective_id,
-            task_id,
-            user_visible=user_visible,
-            reason=reason,
-        )
-
-    def link_plan_to_objective(
-        self,
-        objective_id: str,
-        plan_id: str,
-        *,
-        user_visible: bool = False,
-        reason: Optional[str] = None,
-    ) -> Optional[ObjectiveRecord]:
-        return self.objective_coordinator.link_plan_to_objective(
-            objective_id,
-            plan_id,
-            user_visible=user_visible,
-            reason=reason,
-        )
-
     def link_schedule_to_objective(
         self,
         objective_id: str,
@@ -894,6 +864,7 @@ class TaskManager(
         task_id: Optional[str] = None,
         plan_id: Optional[str] = None,
         user_visible: bool = True,
+        deletion_operation_id: Optional[str] = None,
     ) -> Optional[ObjectiveRecord]:
         return self.objective_coordinator.update_objective_status(
             objective_id,
@@ -904,6 +875,7 @@ class TaskManager(
             task_id=task_id,
             plan_id=plan_id,
             user_visible=user_visible,
+            deletion_operation_id=deletion_operation_id,
         )
 
     def review_objective_after_task_terminal(
@@ -3254,11 +3226,10 @@ class TaskManager(
         objective_id = incoming_objective_id or parent_objective_id
         if objective_id and self._objectives_enabled():
             self.objective_state.task_to_objective_id[subtask.task_id] = objective_id
-            objective = self._get_objective_record(objective_id)
-            if (
-                objective is not None
-                and subtask.task_id not in objective.related_task_ids
-            ):
+
+            def link_subtask(objective: ObjectiveRecord) -> bool:
+                if subtask.task_id in objective.related_task_ids:
+                    return False
                 objective.related_task_ids.append(subtask.task_id)
                 self._append_objective_event(
                     objective,
@@ -3268,7 +3239,9 @@ class TaskManager(
                     user_visible=False,
                     details={"parent_task_id": parent_task_id},
                 )
-                self._save_objective_logged(objective, step="subtask_linked")
+                return True
+
+            self._change_objective(objective_id, link_subtask, step="subtask_linked")
         self._logger.info(
             f"Subtask {subtask.task_id} added for parent {parent_task_id}."
         )

@@ -465,6 +465,42 @@ A failed completion therefore leaves the Objective deleting and retryable;
 there is no later metadata write after the record becomes deleted, because
 repeated deletion commands return immediately for a completed deletion.
 
+Every Objective change loads the stored record, changes it and saves it inside
+one operation of the team lead's task operation lane
+(`ObjectiveCoordinator.change_objective` in
+`custom_agents/task_manager_objectives.py`). The store writes whole records, so
+a copy kept from an earlier operation and saved later would erase whatever was
+stored in between. Until 2026-10-17 this happened: a person's pause or resume
+erased the work-session policy's own event every time, and the team lead's
+status tool could erase a progress update or a schedule linked by a parallel
+tool call. A static test keeps every other module from saving Objective
+records, and a lane refuses an operation submitted from inside one of its own
+operations (`NestedTaskOperation`) instead of waiting for itself.
+
+A lifecycle change (`custom_agents/objective_lifecycle.py`) is one such
+operation for both a person's Runtime controls and the team lead's
+`objectives(action="update_status")`: it saves the status, then turns the
+bounded work policy and the managed schedules and heartbeat items off, or back
+on after an earlier control, and records which links changed. Each caller
+passes its own rules for switching schedules (the person's gateway-signed
+permit, or the agent rule that leaves system-managed schedules to
+`apply_change`); a schedule the agent rule leaves alone, or a switch that
+fails, is reported instead of recorded as switched. Runtime controls check
+ownership and the actions the current status offers in the same operation as
+the change, and refuse other actions with a plain reply and no new status. A
+record digest in the request is checked in that operation too. The Web page
+sends the digest of the record it showed, so a change made after the person
+looked is refused; a chat command takes the digest just before it sends, which
+guards only against a change in that moment; a trusted stop (a departing
+person's Objectives) sends none. A control whose status is already stored is
+accepted as a retry: it records no new status or policy event and switches only
+the links that did not switch before, so a pause or abandon whose schedule
+failed can be repeated. The team lead cannot set `deleting` or `deleted`:
+deletion is the person's control. A task that ends while its Objective is
+paused or being deleted keeps that status. Objective changes from the host
+command line were removed, because they wrote the record from another process
+while the team lead ran.
+
 The memory system has the five stores the README lists, which agents recall
 from (conversation history, user memory, team memory, the memory graph and the
 knowledge base), plus task history:

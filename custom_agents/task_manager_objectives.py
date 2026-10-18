@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from custom_agents.task_manager_ports import ObjectiveCoordinatorOperations
+from custom_agents.task_manager_ports import ObjectiveChange, ObjectiveCoordinatorOperations
 from custom_agents.task_runtime_state import RuntimeOwnerIdentity
 from custom_agents.task_runtime_state import ObjectiveRuntimeState
 from custom_agents.task_runtime_state import PlanRuntimeState
@@ -39,6 +39,16 @@ class ObjectiveSaveFailed(RuntimeError):
             "Try again later; if it keeps failing, tell the person."
         )
         self.objective_id = objective_id
+
+
+# Statuses a person set that a task-end review keeps, with the review's
+# conclusion. Before this, a task that ended while its Objective was paused or
+# being deleted set the Objective active or blocked again, with its schedules
+# and work policy still off and Resume no longer offered.
+_HELD_REVIEW_CONCLUSIONS = {
+    ObjectiveStatus.PAUSED: "objective_paused",
+    ObjectiveStatus.DELETING: "objective_deletion_pending",
+}
 
 
 class ObjectiveCoordinator:
@@ -128,6 +138,40 @@ class ObjectiveCoordinator:
         for task_id in objective.related_task_ids + objective.recovery_task_ids:
             if task_id:
                 self.objective_state.task_to_objective_id[task_id] = objective.objective_id
+
+    def change_objective(
+        self,
+        objective_id: str,
+        change: ObjectiveChange,
+        *,
+        step: Optional[str] = None,
+    ) -> Optional[ObjectiveRecord]:
+        """Load the stored Objective, apply ``change`` and save it, in the caller's one operation.
+
+        Why this is the way to change an Objective from outside this class:
+        ``ObjectiveRepository.save_objective`` writes the whole record, so a
+        copy loaded in an earlier manager operation and saved later silently
+        erases everything stored in between (a work-policy event, a progress
+        update, a schedule link). The task operation lane runs one operation
+        at a time, so loading, changing and saving inside one operation sees
+        and keeps every earlier change. Callers run this inside a lane
+        operation and never keep a record to save later.
+
+        ``change`` edits the record in place and returns False when there is
+        nothing to save. Returns the record after the change, or None when the
+        Objective does not exist. Without ``step`` a failed save raises
+        ``ObjectiveSaveFailed``; with ``step`` it is logged (see
+        ``_save_objective_logged``) and None is returned.
+        """
+        objective = self._get_objective_record(objective_id)
+        if objective is None:
+            return None
+        if not change(objective):
+            return objective
+        if step is None:
+            self._save_objective(objective)
+            return objective
+        return objective if self._save_objective_logged(objective, step=step) else None
 
     def _save_objective_logged(self, objective: ObjectiveRecord, *, step: str) -> bool:
         """Write the Objective for a step that goes on without it; False when the write failed.
@@ -608,93 +652,6 @@ class ObjectiveCoordinator:
         except Exception as exc:
             self._logger.error("Failed to list objectives: %s", exc)
             return []
-
-    def link_task_to_objective(
-        self,
-        objective_id: str,
-        task_id: str,
-        *,
-        user_visible: bool = False,
-        reason: Optional[str] = None,
-    ) -> Optional[ObjectiveRecord]:
-        objective = self._get_objective_record(objective_id)
-        if objective is None:
-            self._logger.warning("Cannot link task %s to unknown objective %s.", task_id, objective_id)
-            return None
-        if task_id not in self.task_state.tasks and self.operations.get_task_from_db(task_id) is None:
-            self._logger.warning("Cannot link unknown task %s to objective %s.", task_id, objective_id)
-            return None
-
-        changed = False
-        self.objective_state.task_to_objective_id[task_id] = objective.objective_id
-        if task_id not in objective.related_task_ids:
-            objective.related_task_ids.append(task_id)
-            changed = True
-            self._append_objective_event(
-                objective,
-                ObjectiveEventType.TASK_LINKED,
-                f"Linked task {task_id} to objective.",
-                task_id=task_id,
-                user_visible=user_visible,
-                details={"reason": reason} if reason else {},
-            )
-        plan_id = self.operations.get_task_plan_id(task_id)
-        if plan_id:
-            linked = self.link_plan_to_objective(objective.objective_id, plan_id, user_visible=False, reason=reason)
-            if linked is not None:
-                objective = linked
-        elif changed:
-            self._save_objective(objective)
-        self.operations.persist_runtime_state()
-        return objective
-
-    def link_plan_to_objective(
-        self,
-        objective_id: str,
-        plan_id: str,
-        *,
-        user_visible: bool = False,
-        reason: Optional[str] = None,
-    ) -> Optional[ObjectiveRecord]:
-        objective = self._get_objective_record(objective_id)
-        if objective is None:
-            self._logger.warning("Cannot link plan %s to unknown objective %s.", plan_id, objective_id)
-            return None
-        plan = self.operations.get_plan(plan_id)
-        if plan is None:
-            self._logger.warning("Cannot link unknown plan %s to objective %s.", plan_id, objective_id)
-            return None
-
-        changed = False
-        self.objective_state.plan_to_objective_id[plan_id] = objective.objective_id
-        if plan_id not in objective.plan_ids:
-            objective.plan_ids.append(plan_id)
-            changed = True
-            self._append_objective_event(
-                objective,
-                ObjectiveEventType.PLAN_LINKED,
-                f"Linked plan {plan_id} to objective.",
-                task_id=plan.root_task_id,
-                plan_id=plan_id,
-                user_visible=user_visible,
-                details={"reason": reason} if reason else {},
-            )
-        if objective.current_plan_id != plan_id:
-            objective.current_plan_id = plan_id
-            changed = True
-        for related_task_id in plan.related_task_ids:
-            self.objective_state.task_to_objective_id[related_task_id] = objective.objective_id
-            if related_task_id not in objective.related_task_ids:
-                objective.related_task_ids.append(related_task_id)
-                changed = True
-
-        plan.objective_id = objective.objective_id
-        plan.objective_title = objective.title
-        self.operations.save_plan(plan)
-        if changed:
-            self._save_objective(objective)
-        self.operations.persist_runtime_state()
-        return objective
 
     def link_schedule_to_objective(
         self,
@@ -1258,7 +1215,15 @@ class ObjectiveCoordinator:
         task_id: Optional[str] = None,
         plan_id: Optional[str] = None,
         user_visible: bool = True,
+        deletion_operation_id: Optional[str] = None,
     ) -> Optional[ObjectiveRecord]:
+        """Set an Objective's lifecycle status from its stored record, in one operation.
+
+        A request that changes nothing (a second pause, a retried deletion
+        step) records no event and saves nothing. Entering ``deleting``
+        records ``deletion_operation_id`` and the request time in the same
+        write as the status, so a deletion never exists without them.
+        """
         objective = self._get_objective_record(objective_id)
         if objective is None:
             return None
@@ -1276,44 +1241,41 @@ class ObjectiveCoordinator:
 
         previous_status = objective.status
         now_ts = datetime.now(timezone.utc).isoformat()
-        objective.status = target_status
-        if summary is not None:
-            objective.progress_summary = summary.strip() or objective.progress_summary
-        if user_confirmation_summary:
-            objective.user_confirmation_summary = user_confirmation_summary.strip()
-            self._append_objective_event(
-                objective,
-                ObjectiveEventType.USER_CONFIRMATION_RECORDED,
-                "Recorded user confirmation for objective.",
-                task_id=task_id or satisfied_by_task_id,
-                plan_id=plan_id or objective.current_plan_id,
-                user_visible=True,
-                details={"user_confirmation_summary": objective.user_confirmation_summary},
-                timestamp=now_ts,
-            )
-        if target_status == ObjectiveStatus.SATISFIED:
-            objective.satisfied_by_task_id = satisfied_by_task_id or task_id or objective.satisfied_by_task_id
-            objective.satisfied_at = objective.satisfied_at or now_ts
-        if target_status == ObjectiveStatus.DELETED:
-            # Commit the completed tombstone in one write. Once DELETED is
-            # stored, repeated deletion commands return without changing it.
-            objective.deleted_at = objective.deleted_at or now_ts
-            objective.deletion_summary = (summary or "").strip() or "Objective deletion completed."
-
-        self._append_objective_event(
+        before = objective.model_dump(mode="json")
+        self._apply_objective_status_fields(
             objective,
-            ObjectiveEventType.STATUS_CHANGED,
-            f"Objective status changed from {previous_status.value} to {target_status.value}.",
-            task_id=task_id or satisfied_by_task_id,
-            plan_id=plan_id or objective.current_plan_id,
-            user_visible=user_visible,
-            details={
-                "previous_status": previous_status.value,
-                "new_status": target_status.value,
-                "summary": summary,
-            },
+            target_status,
+            summary=summary,
+            user_confirmation_summary=user_confirmation_summary,
+            satisfied_by_task_id=satisfied_by_task_id,
+            task_id=task_id,
+            plan_id=plan_id,
+            deletion_operation_id=deletion_operation_id,
             timestamp=now_ts,
         )
+        if previous_status == target_status:
+            if objective.model_dump(mode="json") == before:
+                # Nothing to record; a terminal status still closes a Plan
+                # left open (the step does nothing when it is closed).
+                self._transition_current_plan_for_objective_status(
+                    objective, target_status, summary=summary, task_id=task_id or satisfied_by_task_id, timestamp=now_ts
+                )
+                return self._get_objective_record(objective.objective_id) or objective
+        else:
+            self._append_objective_event(
+                objective,
+                ObjectiveEventType.STATUS_CHANGED,
+                f"Objective status changed from {previous_status.value} to {target_status.value}.",
+                task_id=task_id or satisfied_by_task_id,
+                plan_id=plan_id or objective.current_plan_id,
+                user_visible=user_visible,
+                details={
+                    "previous_status": previous_status.value,
+                    "new_status": target_status.value,
+                    "summary": summary,
+                },
+                timestamp=now_ts,
+            )
         # Saved before its Plan closes, so a failed save leaves both unchanged.
         self._save_objective(objective)
         self._transition_current_plan_for_objective_status(
@@ -1335,6 +1297,47 @@ class ObjectiveCoordinator:
         self.operations.persist_runtime_state()
         # Closing the Plan may have saved its own links on the Objective.
         return self._get_objective_record(objective.objective_id) or objective
+
+    def _apply_objective_status_fields(
+        self,
+        objective: ObjectiveRecord,
+        target_status: ObjectiveStatus,
+        *,
+        summary: Optional[str],
+        user_confirmation_summary: Optional[str],
+        satisfied_by_task_id: Optional[str],
+        task_id: Optional[str],
+        plan_id: Optional[str],
+        deletion_operation_id: Optional[str],
+        timestamp: str,
+    ) -> None:
+        """Set the status and the fields recorded with it on a loaded record."""
+        objective.status = target_status
+        if summary is not None:
+            objective.progress_summary = summary.strip() or objective.progress_summary
+        if user_confirmation_summary:
+            objective.user_confirmation_summary = user_confirmation_summary.strip()
+            self._append_objective_event(
+                objective,
+                ObjectiveEventType.USER_CONFIRMATION_RECORDED,
+                "Recorded user confirmation for objective.",
+                task_id=task_id or satisfied_by_task_id,
+                plan_id=plan_id or objective.current_plan_id,
+                user_visible=True,
+                details={"user_confirmation_summary": objective.user_confirmation_summary},
+                timestamp=timestamp,
+            )
+        if target_status == ObjectiveStatus.SATISFIED:
+            objective.satisfied_by_task_id = satisfied_by_task_id or task_id or objective.satisfied_by_task_id
+            objective.satisfied_at = objective.satisfied_at or timestamp
+        if target_status == ObjectiveStatus.DELETING:
+            objective.deletion_operation_id = objective.deletion_operation_id or deletion_operation_id
+            objective.deletion_requested_at = objective.deletion_requested_at or timestamp
+        if target_status == ObjectiveStatus.DELETED:
+            # Commit the completed tombstone in one write. Once DELETED is
+            # stored, repeated deletion commands return without changing it.
+            objective.deleted_at = objective.deleted_at or timestamp
+            objective.deletion_summary = (summary or "").strip() or "Objective deletion completed."
 
     def _review_objective_with_active_plan(
         self,
@@ -1429,6 +1432,25 @@ class ObjectiveCoordinator:
 
         active_task_ids = self._active_task_ids_for_objective(objective)
         active_plan_ids = self._active_plan_ids_for_objective(objective)
+        held_conclusion = _HELD_REVIEW_CONCLUSIONS.get(objective.status)
+        if held_conclusion is not None:
+            # A person's pause or pending deletion outranks the review: the
+            # Objective keeps its status and its links stay off. Nothing
+            # re-reviews it on resume; the next task, schedule or work
+            # session that ends does.
+            self._append_objective_review_completed(
+                objective,
+                task_id=task_id,
+                timestamp=now_ts,
+                conclusion=held_conclusion,
+                summary=f"Objective review deferred because the Objective is {objective.status.value}.",
+                terminal_state=terminal_state_value,
+                active_task_ids=active_task_ids,
+                active_plan_ids=active_plan_ids,
+            )
+            self._save_objective_logged(objective, step=f"task_end_review:{held_conclusion}")
+            self.operations.persist_runtime_state()
+            return objective
         if active_task_ids:
             objective.progress_summary = (
                 summary.strip()
@@ -1458,21 +1480,6 @@ class ObjectiveCoordinator:
                 timestamp=now_ts,
                 task_summary=summary,
             )
-
-        if objective.status == ObjectiveStatus.PAUSED:
-            self._append_objective_review_completed(
-                objective,
-                task_id=task_id,
-                timestamp=now_ts,
-                conclusion="objective_paused",
-                summary="Objective review deferred because the Objective is paused.",
-                terminal_state=terminal_state_value,
-                active_task_ids=[],
-                active_plan_ids=[],
-            )
-            self._save_objective_logged(objective, step="task_end_review:objective_paused")
-            self.operations.persist_runtime_state()
-            return objective
 
         continuing_links = self._objective_has_continuing_links(objective)
         if (

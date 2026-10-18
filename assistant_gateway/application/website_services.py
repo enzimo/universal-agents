@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
+from assistant_gateway.application.objective_control_text import objective_control_text
 from assistant_gateway.application.gateway_application import (
     GatewayApplicationResponse,
     GatewayDeliveryEvent,
@@ -1237,7 +1238,7 @@ class WebsiteOperationsApplication:
                 else "unknown"
             ),
             success=bool(response.success),
-            message=response.message,
+            message=objective_control_text(response, for_web=True) or response.message,
             cancellation_receipts=tuple(
                 item.model_dump(mode="json") for item in response.cancellation_receipts
             ),
