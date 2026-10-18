@@ -48,7 +48,7 @@ from custom_agents.schedule_management import (
     SystemScheduleMutationDenied,
     build_schedule_mutation_permit,
 )
-from custom_agents.schedule_store import ScheduleStore
+from custom_agents.schedule_store import AdvanceOutcome, ScheduleStore
 from custom_messages.contracts.routing_v1 import PERSON_GATEWAY_FIELDS
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.control_v1 import AgentStatus
@@ -554,7 +554,7 @@ def exercise_schedule_store(settings: StorageSettings, report: dict[str, Any]) -
         )
         is True
     )
-    assert store.update_after_fire(msg.schedule_id) is True
+    assert store.update_after_fire(msg.schedule_id) == AdvanceOutcome.ADVANCED
     restored = store.get_scheduled_message(msg.schedule_id)
     assert restored is not None
     assert restored.repeat_count == 2

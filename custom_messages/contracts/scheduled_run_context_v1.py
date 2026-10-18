@@ -38,6 +38,7 @@ class ScheduledRunContextRefusal(StrEnum):
     SENDER_MISMATCH = "sender_mismatch"  # the sender is not the agent the request names
     SCHEDULE_NOT_FOUND = "schedule_not_found"
     CLAIM_NOT_HELD = "claim_not_held"  # the requesting agent does not hold this claim (or it expired)
+    SCHEDULE_STOPPED = "schedule_stopped"  # paused, turned off or past its end after it was claimed
     SCHEDULED_JOB_MISMATCH = "scheduled_job_mismatch"  # the schedule the context would name differs from the row's
     HEARTBEAT_ITEM_NOT_FOUND = "heartbeat_item_not_found"  # no such item of this heartbeat schedule
     OWNER_INACTIVE = "owner_inactive"  # the schedule's person is disabled or removed

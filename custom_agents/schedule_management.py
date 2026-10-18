@@ -204,20 +204,18 @@ def schedule_control_state_digest(schedule: Any) -> str:
     return contract_sha256(schedule_control_state_payload(schedule))
 
 
-# Moved by every run of the schedule; not part of what a person reviews.
-_RUN_BOOKKEEPING_FIELDS = frozenset({"next_fire_at"})
-
-
 def schedule_reviewed_state_digest(schedule: Any) -> str:
-    """The schedule as a person reviews it: the control state without its next run time.
+    """The person-controlled state shared by staged changes and listed controls.
 
-    A person's approval of a system-schedule change binds this, so a run
-    between staging and approval does not make the approval stale. The store
-    permit still binds the exact current state (``schedule_control_state_digest``).
+    Repeating run times and run-note content change automatically. A one-time
+    run time, note kind and notification settings are decisions by a person,
+    so changing them must invalidate an older edit or staged approval.
+    The store permit still binds the exact current control state.
     """
 
-    payload = schedule_control_state_payload(schedule)
-    return contract_sha256({key: value for key, value in payload.items() if key not in _RUN_BOOKKEEPING_FIELDS})
+    from custom_messages.contracts.schedule_v1 import schedule_listing_digest
+
+    return schedule_listing_digest(schedule)
 
 
 def schedule_reviewed_change_digest(

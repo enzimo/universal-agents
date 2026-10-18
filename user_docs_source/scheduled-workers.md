@@ -189,7 +189,7 @@ picked up is **stuck**. You are told about it, without asking:
   `agent.schedule_workers.missed_one_time_after_seconds` late (one hour by
   default) is turned off instead, and its owner is told it was missed, so a
   reminder never arrives days late. Ask your assistant to set it up again if
-  you still need it.
+  you still need it. A run a worker has just started is not turned off.
 
 To fix a stuck schedule, ask your assistant about it in your normal
 conversation; it inspects the schedule and repairs what it can, keeping the
@@ -200,6 +200,28 @@ Recreating the timer is not the normal repair. When you change a schedule
 yourself (through your assistant), or a person approves a change to a schedule
 the runtime manages, its worker policy follows automatically; the schedule
 does not wait for a second confirmation.
+
+A change never overwrites a newer one. If the schedule was paused, turned off,
+changed or deleted after your assistant read it, the change is refused and the
+assistant reads the schedule again. The controls on the Schedules page and the
+chat commands (`/pause schedule`, `/resume schedule`, `/disable schedule`,
+`/delete schedule`) are refused the same way when someone changed the schedule
+after you saw it; a run that only moved a repeating schedule's next run time or
+wrote its notes does not count, so a schedule that runs often can still be
+paused. A run that writes its notes never undoes your change. Pausing or
+turning off a schedule just before a run starts stops that run, and pausing it
+while it runs does not make that run happen again when you resume it. If you
+move a one-time schedule while its run is under way (a reminder moved to
+tomorrow), it keeps the new time and runs then. A schedule with a set number of
+runs still stops after its last run, even if that run moved its next time. A
+one-time schedule always runs once: asking for more runs needs an interval or a
+cron time.
+
+Moving a run that a worker has reserved, before it starts, releases that
+reservation and waits for the new time. The run is counted only when it starts.
+An older edit cannot replace a newer reminder time or notification setting.
+When changing a repeating schedule's next run time, your assistant must read it
+again if that time changed meanwhile, including when a run advanced it.
 
 The runtime notices and reports; it does not guarantee a repair. Disallowed
 types, missing tools or credentials, or a stopped team lead can still need an
@@ -508,6 +530,17 @@ schedule (`cron_timezone`) when it is created:
 - An agent passes `cron_timezone` (an IANA name such as `Europe/Berlin`) only
   when the person asks for another zone. `update_scheduled_job` changes it the
   same way, and schedule listings show it.
+
+Daylight saving changes follow the classic cron rule. When clocks go back, the
+times of the repeated hour happen twice: a schedule at fixed times of day (01:30
+in New York, 02:30 in Berlin, `0,30 1 * * *` or `0 1-2 * * *`) runs once at each
+of its times that night, while an hourly or every-few-minutes schedule
+(`0 * * * *`, `*/30 * * * *`) runs in both copies of the hour, as in every other
+real hour.
+When clocks go forward, a time in the skipped hour runs at the first time after
+it: a 02:30 schedule runs at 03:00 that day.
+The same rule applies in time zones whose clock change repeats more than one
+hour; none of those fixed local times runs again.
 
 Interval schedules ("every 6 hours") do not depend on a time zone. Objective
 work plans use their `cadence_timezone`, which is `owner` by default (see

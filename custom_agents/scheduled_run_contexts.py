@@ -51,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import partial
 from typing import Any
 
@@ -59,6 +60,7 @@ from access_control.people_directory import PersonNow
 from custom_agents.heartbeat_store import HeartbeatStore, is_heartbeat_launcher
 from custom_agents.schedule_management import is_system_managed_schedule
 from custom_agents.schedule_permits import attach_run_permit
+from custom_agents.schedule_store import schedule_stopped_reason
 from custom_agents.task_context_runtime import (
     context_verifier,
     inactive_owner,
@@ -152,6 +154,18 @@ async def sign_scheduled_run(agent: Any, meta: Any, run: ScheduledRun) -> bool:
     ):
         return True
     signed = await _manager_signed_context(agent, meta, run)
+    if signed == ScheduledRunContextRefusal.SCHEDULE_STOPPED:
+        # A person paused, turned off or ended the schedule after it was
+        # claimed: nothing failed, and the run waits for the schedule itself.
+        logger.info(
+            "A claimed schedule was paused, turned off or ended before its run started; the run is skipped "
+            "and the claim released. event=scheduled_run_skipped_schedule_stopped agent_id=%s schedule_id=%s "
+            "scheduled_job_id=%s reason=manager_refused",
+            agent.id,
+            run.schedule.schedule_id,
+            run.scheduled_job_id,
+        )
+        return False
     if isinstance(signed, str):
         logger.warning(
             "A scheduled run was not started because the manager did not sign its task context; the claim is "
@@ -369,6 +383,9 @@ def _signed_or_refusal(
         return ScheduledRunContextRefusal.SCHEDULE_NOT_FOUND
     if not store.holds_claim(request.schedule_id, claim_token=request.claim_token, claimer_agent_id=request.agent_id):
         return ScheduledRunContextRefusal.CLAIM_NOT_HELD
+    # A claim survives a pause or turn-off; such a schedule's run must not start.
+    if schedule_stopped_reason(schedule, datetime.now(timezone.utc)) is not None:
+        return ScheduledRunContextRefusal.SCHEDULE_STOPPED
     target = _run_target(agent, schedule, request)
     if isinstance(target, ScheduledRunContextRefusal):
         return target

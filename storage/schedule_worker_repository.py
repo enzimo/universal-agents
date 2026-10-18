@@ -385,7 +385,11 @@ class ScheduleWorkerRepository:
             if definition_record is not None:
                 self._write_definition_record(conn, definition_record)
             if not pending:
-                self._apply_target(conn, candidate)
+                # Run notes are not control state: keep the ones runs wrote
+                # since the candidate was read, rather than the candidate's copy.
+                self._apply_target(
+                    conn, candidate.model_copy(update={"schedule_memory": schedule_from_row(row).schedule_memory})
+                )
             conn.commit()
             return pending
 
@@ -518,6 +522,7 @@ class ScheduleWorkerRepository:
             or row["claim_token"] != occurrence.claim_token
             or row["claimed_by_agent_id"] != occurrence.agent_id
             or row["next_fire_at"] != occurrence.due_at
+            or row["next_fire_at"] > now
             or not row["enabled"]
             or not row["claim_expires_at"]
             or row["claim_expires_at"] <= now

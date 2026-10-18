@@ -1055,6 +1055,16 @@ schedule is reported as not found.
   person's agreement and pass `confirmed=true`. A refused change ("the schedule
   changed after this change was staged", for example because it ran) needs a
   fresh call of the same tool; never retry the old `change_id`.
+- **A change refused with `reason_code` `schedule_changed` or
+  `schedule_not_found`** means someone paused, turned off, changed or deleted
+  the schedule after it was read. Nothing was saved. List it again, tell the
+  person what is different, and repeat the change only if they still want it.
+  A run's own notes and automatic run times do not invalidate unrelated edits.
+  When explicitly setting a next run time, a changed run time needs a fresh
+  read too. A newer reminder time, schedule kind or notification setting
+  always invalidates an older edit.
+- A one-time schedule (no interval or cron) runs once: `repeat_count=0` keeps it
+  at one run, and more runs need `interval_seconds` or `cron_expression`.
 
 ## Generated Specialist Provisioning
 

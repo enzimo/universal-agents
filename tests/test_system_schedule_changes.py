@@ -29,7 +29,7 @@ from custom_agents.schedule_management import (
     ScheduleMutationOperation,
     build_schedule_mutation_permit,
 )
-from custom_agents.schedule_store import ScheduleStore
+from custom_agents.schedule_store import AdvanceOutcome, ScheduleStore
 from custom_messages.contracts.access_v2 import AccessRequestKind, AccessRequestStatus, AccessReviewChoice
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
@@ -200,12 +200,12 @@ def test_a_run_between_staging_and_approval_does_not_make_the_change_stale(tmp_p
     assert staged["status"] == "approval_required"
 
     # The scheduler runs the schedule, which moves its next run time.
-    assert lead._schedule_store.update_after_fire("hb_sched_ran")
+    assert lead._schedule_store.update_after_fire("hb_sched_ran") == AdvanceOutcome.ADVANCED
     call = ToolCall()
     with pytest.raises(InterruptException):
         run_apply_change(lead, staged["change_id"], call)
     decide(lead, call)
-    assert lead._schedule_store.update_after_fire("hb_sched_ran")  # and again while it waited
+    assert lead._schedule_store.update_after_fire("hb_sched_ran") == AdvanceOutcome.ADVANCED  # and again while it waited
     applied = run_apply_change(lead, staged["change_id"], call)
 
     assert applied["status"] == "applied", applied

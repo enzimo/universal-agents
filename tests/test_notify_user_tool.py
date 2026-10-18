@@ -189,7 +189,12 @@ def test_notify_user_publishes_user_notification_to_gateway_preferred_target(
     )
 
 
-def test_notify_user_records_scheduled_notification_in_memory(tmp_path: Path) -> None:
+def test_notify_user_records_scheduled_notification_in_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Notes are recorded only on a schedule of the person the task verifiably
+    # works for, as record_scheduled_run does.
+    use_signed_contexts(monkeypatch)
     config_path = _write_config(tmp_path)
     schedule_store = ScheduleStore(db_path=str(tmp_path / "schedule.db"))
     schedule_store.add(
@@ -200,12 +205,17 @@ def test_notify_user_records_scheduled_notification_in_memory(tmp_path: Path) ->
                 task_type=MessageMetaType.REQUEST,
                 problem_statement="Check the match.",
             ),
+            payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id="usr_notify_owner")),
             interval_ms=60_000,
             repeat_count=None,
             schedule_memory=ScheduleTaskMemory(schedule_kind="live_sports_monitor"),
         )
     )
     active_context = GatewayContext(
+        canonical_user_id="usr_notify_owner",
+        task_context=context_signer().issue(
+            team_id="test_team", person_id="usr_notify_owner", person_roles=("member",)
+        ),
         session_key="source_session",
         channel_name="telegram",
         chat_id="-100999",

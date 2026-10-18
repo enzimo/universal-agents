@@ -4,14 +4,15 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from threading import Barrier
 from uuid import uuid4
 
 import pytest
 
-from custom_agents.schedule_management import schedule_control_state_digest
+from custom_agents.schedule_management import SystemScheduleMutationDenied, schedule_control_state_digest
 from custom_agents.schedule_store import ScheduleStore
+from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.schedule_worker_v1 import (
@@ -24,11 +25,11 @@ from custom_messages.contracts.schedule_worker_v1 import (
     utc_now,
 )
 from custom_messages.contracts.task_v1 import Task
-from custom_messages.enums import MessageMetaType, ScheduleManagementClass
+from custom_messages.enums import MessageMetaType, ScheduleManagementClass, SystemScheduleKind
 
 from storage.agent_launch_repository import AgentLaunchRepository, LaunchCapacity, LaunchConflict
 from storage.config import resolve_storage_settings
-from storage.runtime_custody import RuntimeCustodyLost
+from storage.runtime_custody import DeferredMessageClaim, RuntimeCustodyLost, deferred_message_id
 from storage.runtime_state_repository import create_runtime_state_repository
 from storage.schedule_worker_repository import ScheduleWorkerConflict
 from tests.runtime_snapshot_fixtures import snapshot_json
@@ -239,6 +240,40 @@ def test_stale_claim_rolls_back_new_runtime_custody(stores):
     assert store.worker_records.for_task(occurrence.task_id, "team") is None
 
 
+def test_a_retained_claim_cannot_admit_a_future_occurrence(stores):
+    store, runtime, _ = stores
+    schedule = seed_schedule(store)
+    occurrence = claim_occurrence(store, schedule)
+    base = store.get_scheduled_message(schedule.schedule_id)
+    future = (utc_now() + timedelta(days=1)).isoformat()
+    store.update(base.model_copy(update={"next_fire_at": future}), base=base)
+    future_id = occurrence_identity(schedule.schedule_id, future)
+    future_occurrence = occurrence.model_copy(
+        update={"due_at": future, "occurrence_id": future_id, "task_id": "task_" + future_id}
+    )
+
+    with pytest.raises(ScheduleWorkerConflict, match="stale_schedule_admission_claim"):
+        admit(runtime, future_occurrence)
+
+    assert runtime.load_task_runtime_by_owner("worker") == []
+    assert store.worker_records.get_occurrence(future_id, "team") is None
+
+
+def test_a_run_already_due_in_the_current_second_is_admitted(stores):
+    store, runtime, _ = stores
+    schedule = seed_schedule(store)
+    base = store.get_scheduled_message(schedule.schedule_id)
+    due = datetime.now(timezone.utc).replace(microsecond=1).isoformat()
+    schedule = base.model_copy(update={"next_fire_at": due})
+    store.update(schedule, base=base)
+    occurrence = claim_occurrence(store, schedule)
+
+    admit(runtime, occurrence)
+
+    assert len(runtime.load_task_runtime_by_owner("worker")) == 1
+    assert store.worker_records.get_occurrence(occurrence.occurrence_id, "team").state == "admitted"
+
+
 def test_recovery_transfers_occurrence_and_runtime_custody(stores):
     store, runtime, _ = stores
     occurrence = claim_occurrence(store, seed_schedule(store))
@@ -327,6 +362,43 @@ def test_retarget_defers_behind_live_claim_and_preserves_due_count(stores):
             expected_revision=0,
             expected_control_digest=schedule_control_state_digest(updated),
         )
+
+
+def test_configuring_a_worker_keeps_run_notes_written_after_the_read(stores):
+    """The schedule's saved JSON used to come from the candidate, dropping newer run notes (2026-10-17)."""
+    store, _, _ = stores
+    schedule = seed_schedule(store)
+    base = store.get_scheduled_message(schedule.schedule_id)
+
+    def note(memory):
+        memory.state.summary = "written by a run"
+        return True
+
+    store.edit_schedule_memory(schedule.schedule_id, note)
+    binding = ScheduleWorkerBindingV1(
+        schedule_id=schedule.schedule_id,
+        team_id="team",
+        owner_canonical_user_id="owner",
+        target_agent_type="Replacement",
+        definition_digest="b" * 64,
+        execution_digest="c" * 64,
+        revision=1,
+        policy=ScheduleWorkerPolicySpecV1(),
+        actor_principal_id="lead",
+        authority_mode="agreement",
+    )
+
+    pending = store.worker_records.configure(
+        binding,
+        base.model_copy(update={"claim_named_agent_type": "Replacement"}),
+        expected_revision=0,
+        expected_control_digest=schedule_control_state_digest(base),
+    )
+
+    saved = store.get_scheduled_message(schedule.schedule_id)
+    assert not pending
+    assert saved.claim_named_agent_type == "Replacement"
+    assert saved.schedule_memory.state.summary == "written by a run"
 
 
 def test_retargeted_live_claim_keeps_its_prior_policy_until_admission(stores):
@@ -474,3 +546,56 @@ def test_a_refused_save_records_no_outcome_and_keeps_the_receipt_with_the_new_ow
     receipt = store.worker_records.get_occurrence(occurrence.occurrence_id, "team")
     assert (receipt.agent_id, receipt.state, receipt.finished_at_utc) == ("replacement", "admitted", None)
     assert runtime.load_task_runtime_by_owner("worker") == []
+
+
+def deferred_retry_reply(runtime):
+    envelope = MessageEnvelope(msg_content=Task(task_type=MessageMetaType.REQUEST, problem_statement="Retry later"))
+    runtime.add_deferred_message(
+        owner_agent_id="worker", owner_agent_name="worker", team_id="team",
+        owner_named_agent_type="Worker", message_id=envelope.msg_header.message_id,
+        envelope_json=envelope.model_dump_json(), first=False,
+        expect_existing=bool(runtime.load_deferred_messages_by_owner("worker")),
+    )
+    return DeferredMessageClaim("worker", envelope.msg_header.message_id)
+
+
+def deferred_reply_ids(runtime):
+    return [
+        deferred_message_id(message)
+        for row in runtime.load_deferred_messages_by_owner("worker")
+        for message in json.loads(row.messages_json)
+    ]
+
+
+def test_a_retry_install_consumes_only_its_reply_and_cannot_replay(stores):
+    store, runtime, _ = stores
+    reply, later_reply = deferred_retry_reply(runtime), deferred_retry_reply(runtime)
+    schedule = seed_schedule(store).model_copy(deep=True)
+    schedule.schedule_id = "retry"
+
+    store.add(schedule, deferred_message=reply)
+
+    assert store.get_scheduled_message("retry") is not None
+    assert deferred_reply_ids(runtime) == [later_reply.message_id]
+    schedule.schedule_id = "duplicate-retry"
+    with pytest.raises(RuntimeCustodyLost):
+        store.add(schedule, deferred_message=reply)
+    assert store.get_scheduled_message("duplicate-retry") is None
+    assert deferred_reply_ids(runtime) == [later_reply.message_id]
+
+
+def test_a_refused_schedule_install_keeps_its_reply(stores):
+    store, runtime, _ = stores
+    schedule = seed_schedule(store).model_copy(deep=True)
+    schedule.schedule_id = "system-retry"
+    schedule.management_class = ScheduleManagementClass.SYSTEM
+    schedule.system_schedule_kind = SystemScheduleKind.PROVIDER_OVERLOAD_RETRY
+    store.add(schedule)
+    reply = deferred_retry_reply(runtime)
+    schedule.enabled = False
+
+    with pytest.raises(SystemScheduleMutationDenied):
+        store.add(schedule, deferred_message=reply)
+
+    assert store.get_scheduled_message("system-retry").enabled is True
+    assert deferred_reply_ids(runtime) == [reply.message_id]

@@ -45,7 +45,7 @@ from custom_agents.schedule_management import (
     is_system_managed_schedule,
 )
 from custom_agents.schedule_execution_identity import follow_authorized_change
-from custom_agents.schedule_store import owner_canonical_user_id_for_schedule
+from custom_agents.schedule_store import ScheduleWriteConflict, owner_canonical_user_id_for_schedule
 from custom_messages.contracts.routing_v1 import PERSON_GATEWAY_FIELDS
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from id_generation import new_id
@@ -126,11 +126,11 @@ def refresh_schedule_gateway_context(agent: Any, incoming: ScheduledMessage) -> 
         team_id=str(getattr(agent, "team_id", "") or ""),
         candidate=candidate,
     )
-    row = store.get_row(incoming.schedule_id) or {}
     try:
-        store.add(candidate, remaining_count_override=row.get("remaining_count"), system_mutation_permit=permit)
-    except SystemScheduleMutationDenied as exc:
-        # The schedule changed in between (for example it just fired); the next refresh applies.
+        store.update(candidate, base=existing, system_mutation_permit=permit)
+    except (SystemScheduleMutationDenied, ScheduleWriteConflict) as exc:
+        # The schedule changed or went away in between (for example it just
+        # fired); nothing was written, and the next refresh applies.
         logger.warning(
             "A schedule context refresh lost a race with another change and was not applied. "
             "event=schedule_context_refresh_conflict schedule_id=%s reason=%s",

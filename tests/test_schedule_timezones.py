@@ -25,6 +25,7 @@ from custom_messages.contracts.routing_v1 import MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ScheduleManagementClass
+from storage.schedule_repository import RowWrite
 from custom_messages.records.objectives import OWNER_CADENCE_TIMEZONE, ObjectiveWorkBudget, ObjectiveWorkProfile
 
 CHICAGO = "America/Chicago"
@@ -100,7 +101,9 @@ def test_old_cron_schedules_get_their_owners_zone_once_at_scheduler_start(
     row = store.get_row(old.schedule_id)
     legacy = json.loads(row["schedule_json"])
     legacy.pop("cron_timezone")
-    store._repository.set_timing(old.schedule_id, schedule_json=json.dumps(legacy), next_fire_at=row["next_fire_at"])
+    store._repository.write_locked(
+        old.schedule_id, lambda _row: RowWrite(columns={"schedule_json": json.dumps(legacy)})
+    )
     interval = ScheduledMessage(
         management_class=ScheduleManagementClass.USER,
         payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Every hour"),

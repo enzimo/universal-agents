@@ -17,7 +17,7 @@ def test_schedule_repository_claims_due_row_once_and_releases(tmp_path: Path) ->
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()
 
-    repo.add_schedule_row(
+    assert repo.add_schedule_row_if_absent(
         schedule_id="sched_claim",
         payload_json="{}",
         schedule_json=None,

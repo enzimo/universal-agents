@@ -1194,6 +1194,99 @@ def test_builtin_policy_has_live_calibrated_token_headroom() -> None:
     assert policy.custom_profiles.budget_bounds.maximum.total_tokens == 3_000_000
 
 
+def test_a_failed_objective_work_schedule_replacement_restores_controls_and_keeps_new_notes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Install and rollback change definitions; notes written meanwhile stay current."""
+
+    manager = _manager(tmp_path, policy=True, focused_profile=True)
+    task, objective = _objective(manager)
+    _agent, schedule_store = _tool_agent(manager, task.task_id, monkeypatch)
+    first = yaml.safe_load(
+        objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the daily profile.", profile_name="daily", confirmed=True)
+    )
+    assert "error" not in first, first
+    [daily_row] = schedule_store.get_all()
+
+    def prior_note(memory):
+        memory.state.summary = "Notes from the prior run"
+
+    schedule_store.edit_schedule_memory(daily_row["schedule_id"], prior_note)
+    daily = schedule_store.get_scheduled_message(daily_row["schedule_id"])
+
+    def fail_link(*_args, **_kwargs):
+        installed = schedule_store.get_scheduled_message(daily.schedule_id)
+        assert installed.schedule_memory.state.summary == "Notes from the prior run"
+
+        def new_note(memory):
+            memory.state.summary = "Notes written during reconfiguration"
+
+        schedule_store.edit_schedule_memory(daily.schedule_id, new_note)
+        raise RuntimeError("Injected Objective link failure")
+
+    monkeypatch.setattr(manager, "link_schedule_to_objective", fail_link)
+    replaced = yaml.safe_load(
+        objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the focused profile.", profile_name="focused", confirmed=True)
+    )
+
+    assert "error" in json.dumps(replaced)
+    restored = schedule_store.get_scheduled_message(daily.schedule_id)
+    assert (restored.cron_expression, restored.interval_ms) == (daily.cron_expression, daily.interval_ms)
+    assert restored.payload.problem_statement == daily.payload.problem_statement
+    assert restored.schedule_memory.state.summary == "Notes written during reconfiguration"
+
+
+@pytest.mark.parametrize("first_install", [False, True])
+def test_failed_objective_schedule_install_keeps_a_concurrent_operator_stop(tmp_path, monkeypatch, first_install):
+    from custom_agents.schedule_management import (
+        ScheduleMutationAuthorityMode,
+        ScheduleMutationOperation,
+        build_schedule_mutation_permit,
+    )
+
+    manager = _manager(tmp_path, policy=True, focused_profile=True)
+    task, objective = _objective(manager)
+    _agent, store = _tool_agent(manager, task.task_id, monkeypatch)
+    if not first_install:
+        first = yaml.safe_load(
+            objective_work_sessions(
+                action="enable", objective_id=objective.objective_id, confirmation_summary="Use daily sessions.",
+                profile_name="daily", confirmed=True,
+            )
+        )
+        assert "error" not in first, first
+    stopped = []
+
+    def stop_then_fail(*_args, **_kwargs):
+        [row] = store.get_all()
+        installed = store.get_scheduled_message(row["schedule_id"])
+        permit = build_schedule_mutation_permit(
+            schedule=installed,
+            operation=ScheduleMutationOperation.DISABLE,
+            authority_mode=ScheduleMutationAuthorityMode.TRUSTED_RUNTIME,
+            actor_principal_id="operator",
+            owner_canonical_user_id=installed.payload_meta.gateway_context.canonical_user_id,
+            team_id=installed.claim_team_id,
+            candidate=installed.model_copy(update={"enabled": False}),
+        )
+        assert store.set_enabled(installed.schedule_id, False, system_mutation_permit=permit)
+        stopped.append(store.get_scheduled_message(installed.schedule_id))
+        raise RuntimeError("Injected Objective link failure after an operator stop")
+
+    monkeypatch.setattr(manager, "link_schedule_to_objective", stop_then_fail)
+    result = yaml.safe_load(
+        objective_work_sessions(
+            action="enable", objective_id=objective.objective_id, confirmation_summary="Use focused sessions.",
+            profile_name="focused", confirmed=True,
+        )
+    )
+
+    assert "error" in json.dumps(result)
+    assert len(stopped) == 1
+    assert store.get_scheduled_message(stopped[0].schedule_id) == stopped[0]
+
+
 # -- Objective lifecycle changes and the work policy ----------------------------------
 
 
