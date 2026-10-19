@@ -91,9 +91,9 @@ jobs:
   fast:
     if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
-    # Setup plus the full suite exceeded 45 minutes while still progressing
-    # on the shared runner. Keep a deadline that allows the suite to finish.
-    timeout-minutes: 60
+    # Setup, the full suite, and mandatory cleanup took 63 minutes on the
+    # shared runner. Leave time for cleanup after successful verification.
+    timeout-minutes: 75
     steps:
       - name: Require managed local runner
         run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
