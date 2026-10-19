@@ -948,6 +948,18 @@ later turn act on it again; a repeated delegation is not deduplicated across
 turns. Details are in the runtime execution architecture document of the
 ua-architecture repository ("Pending work and shutdown", "Context assembly").
 
+Each model turn starts with an empty model conversation, so a later turn of a
+task knows only the task's saved history. When a turn ends with its task still
+open (it delegated, escalated, asked a question, sent a credential form, or
+paused at its tool-call budget), trusted code saves what the turn did before
+anything is sent: the tools it called with short input previews and their
+results, and what it sent (`custom_agents/turn_work_notes.py`). Every later
+turn of the task shows this as "Work already done in this task", says the
+task is continuing and labels its request accordingly. Rationale: without it a
+resumed turn saw only the original request and did the work again; a scheduled
+audit that escalated its findings re-ran itself after every reply from the team
+lead.
+
 ## Authorization and credentials
 
 Every trust boundary keeps its own deterministic checks. These include gateway

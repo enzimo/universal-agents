@@ -34,7 +34,16 @@ def extract_display_request_text(text: str | None) -> str:
     return str(text or "").strip()
 
 
-def render_current_request_context(task: Task, meta: Optional[MessageMeta]) -> str:
+# A later turn of a task sees its request under this label, so the model does
+# not read it as a new request and start over (custom_agents.turn_work_notes).
+CONTINUING_REQUEST_LABEL = (
+    "Current Request (started earlier and continuing; see \"Work already done in this task\"):"
+)
+
+
+def render_current_request_context(
+    task: Task, meta: Optional[MessageMeta], *, continuing: bool = False
+) -> str:
     sections = parse_bracketed_prompt_sections(task.problem_statement)
     request_text = extract_display_request_text(task.problem_statement) or "(no request text provided)"
     lines = []
@@ -67,7 +76,7 @@ def render_current_request_context(task: Task, meta: Optional[MessageMeta]) -> s
 
     if lines:
         lines.append("")
-    lines.extend(["Current Request:", request_text])
+    lines.extend([CONTINUING_REQUEST_LABEL if continuing else "Current Request:", request_text])
     lines.extend(_replied_message_block(getattr(task, "replied_message", None)))
     attachment_lines = _render_attachment_summary(getattr(task, "attachments", None))
     if attachment_lines:

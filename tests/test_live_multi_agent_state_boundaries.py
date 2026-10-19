@@ -1193,6 +1193,145 @@ async def test_live_worker_manager_escalation_round_trips_through_team_architect
                 await connection.close()
 
 
+class WorkingThenEscalatingFakeStrandsAgent(FakeStrandsAgent):
+    """A worker model whose first turn edits a page (a tool call) before it escalates."""
+
+    async def invoke_async(self, prompt: str, **kwargs: object) -> FakeAgentResult:
+        if not self.invocations:
+            self.messages.extend(
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "toolUse": {
+                                    "toolUseId": "edit_1",
+                                    "name": "knowledge_write",
+                                    "input": {"path": "team/home.md", "change": "link five personal pages"},
+                                }
+                            }
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [{"toolResult": {"toolUseId": "edit_1", "status": "success", "content": [{"text": "saved"}]}}],
+                    },
+                ]
+            )
+        return await super().invoke_async(prompt, **kwargs)
+
+
+async def test_live_resumed_worker_turn_continues_after_the_lead_answers_its_escalation() -> None:
+    """2026-10-19: a scheduled audit re-ran itself every time the lead answered its escalation.
+
+    The worker's first turn edits a page and escalates; the lead answers. The
+    worker's next turn must see that edit and the escalation it sent, and its
+    request labelled as continuing, instead of a fresh "Current Request".
+    """
+
+    team_id = new_id("team_resume")
+    manager_id = new_id("manager")
+    worker_id = new_id("internal")
+    worker_task_id = new_id("worker_schedule")
+    manager_route = f"{team_id}_{TEAM_ARCHITECT_AGENT_TYPE}"
+    worker_route = f"{team_id}_InternalImprovementAgent"
+    request_text = "Scheduled worker task: audit the knowledge base and fix what is wrong."
+    escalation_text = "AUDIT_FINDINGS: linked the home page to five pages; need the owner to confirm two IDs."
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        db_path = tmp_path / "resume-work.db"
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+
+        manager_llm = FakeStrandsAgent(_task_response("LEAD_REPLY: the owner confirmed both IDs."))
+        worker_llm = WorkingThenEscalatingFakeStrandsAgent(
+            _manager_escalation_request(
+                escalation_text,
+                escalation=ManagerEscalationContext(
+                    escalation_type="needs_user_input",
+                    source_task_id=worker_task_id,
+                    original_requester="worker_schedule",
+                ),
+            ),
+            _task_response("WORKER_FINAL: recorded the confirmed IDs."),
+        )
+
+        with (
+            patch("custom_agents.strands_agent.Agent", side_effect=[manager_llm, worker_llm]),
+            patch("custom_agents.strands_agent.UniversalAgent._configure_model", return_value=MagicMock()),
+        ):
+            manager = _agent(
+                agent_id=manager_id,
+                name="manager",
+                team_id=team_id,
+                named_agent_type=TEAM_ARCHITECT_AGENT_TYPE,
+                db_path=db_path,
+                workspace_dir=workspace_dir,
+                is_lead=True,
+            )
+            manager.named_agent_type_queue_map.update({"InternalImprovementAgent": worker_route})
+            worker = _agent(
+                agent_id=worker_id,
+                name="internal",
+                team_id=team_id,
+                named_agent_type="InternalImprovementAgent",
+                db_path=db_path,
+                workspace_dir=workspace_dir,
+            )
+            worker.named_agent_type_queue_map.update({TEAM_ARCHITECT_AGENT_TYPE: manager_route})
+
+            agent_tasks: list[tuple[UniversalAgent, asyncio.Task]] = []
+            connection = await _connect_nats(team_id)
+            try:
+                channel = await connection.channel()
+                result_queue = await channel.declare_queue(new_id("usr_resume"), durable=False, auto_delete=True)
+                for agent in (manager, worker):
+                    agent_tasks.append((agent, await _start_agent(agent)))
+
+                await _publish_envelope(
+                    channel,
+                    worker_route,
+                    MessageEnvelope(
+                        msg_content=Task(
+                            task_id=worker_task_id,
+                            task_type=MessageMetaType.REQUEST,
+                            problem_statement=request_text,
+                        ),
+                        msg_header=MessageHeader(
+                            from_agent_id="live-test-scheduler",
+                            to_routing_path=worker_route,
+                            response_routing_key=result_queue.name,
+                        ),
+                        msg_meta=MessageMeta(
+                            from_agent_name="live-test-scheduler",
+                            requester_type=RequesterType.TIMER_REQUESTER,
+                            is_response_requested=True,
+                            msg_correlation_id=f"corr_{worker_task_id}",
+                            conversation_id=f"conversation_{worker_task_id}",
+                        ),
+                    ),
+                )
+
+                final_envelope = await _wait_for_response(result_queue, timeout=40)
+                assert isinstance(final_envelope.msg_content, Task)
+                assert final_envelope.msg_content.answer == "WORKER_FINAL: recorded the confirmed IDs."
+                assert len(worker_llm.invocations) == 2
+
+                first, resumed = worker_llm.invocations
+                assert "Current Request:\n" + request_text in first
+                assert "Work already done in this task" not in first
+                assert "Work already done in this task" in resumed
+                assert "called `knowledge_write` (success)" in resumed
+                assert "team/home.md" in resumed
+                assert escalation_text in resumed
+                assert "Current Request (started earlier and continuing" in resumed
+                assert "Current Request:\n" not in resumed
+            finally:
+                await _stop_agents(agent_tasks)
+                await connection.close()
+
+
 def _register_manager_delegation(
     manager: UniversalAgent,
     *,

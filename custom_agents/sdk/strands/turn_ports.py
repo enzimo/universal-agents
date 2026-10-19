@@ -246,6 +246,17 @@ class ReleaseTurnStartNotesOperation(Protocol):
     def __call__(self, notes: TurnStartNotes) -> None: ...
 
 
+class RecordTurnWorkOperation(Protocol):
+    def __call__(
+        self,
+        task_id: str,
+        details: Dict[str, Any],
+        *,
+        agent_name: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> Optional[TaskHistoryEntry]: ...
+
+
 class CountRecoverablePausesOperation(Protocol):
     def __call__(self, task_id: str) -> int: ...
 
@@ -395,6 +406,8 @@ class TurnTaskOperations:
     read_partial_tool_call_limit: ReadPartialToolCallLimitOperation
     read_runtime_resume_directive: ReadRuntimeResumeDirectiveOperation
     release_turn_start_notes: ReleaseTurnStartNotesOperation
+    # Saves what a turn did when its task stays open (custom_agents.turn_work_notes).
+    record_turn_work: RecordTurnWorkOperation
     count_recoverable_pauses: CountRecoverablePausesOperation
     get_task_info: GetTaskInfoOperation
     is_isolated_recovery_task: IsIsolatedRecoveryTaskOperation

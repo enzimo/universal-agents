@@ -6057,6 +6057,7 @@ class UniversalAgent(BaseModel):
                     read_partial_tool_call_limit=self.task_manager.read_partial_tool_call_limit,
                     read_runtime_resume_directive=self.task_manager.read_runtime_resume_directive,
                     release_turn_start_notes=self.task_manager.release_turn_start_notes,
+                    record_turn_work=self.task_manager.record_turn_work,
                     count_recoverable_pauses=self.task_manager.count_recoverable_pauses,
                     get_task_info=self.task_manager.get_task_info,
                     is_isolated_recovery_task=self.task_manager.is_isolated_recovery_task,
