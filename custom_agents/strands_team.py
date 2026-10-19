@@ -27,6 +27,7 @@ from default_values import (
     TRANSPORT_DEFAULTS,
 )
 from runtime_settings.instance_layout import InstanceLayout
+from custom_agents.change_requests_runtime import register_change_requests
 from custom_agents.lease_loss_wind_down import is_winding_down
 from custom_agents.agent_instantiation_skill import (
     ensure_runtime_agent_instantiation_skill,
@@ -920,6 +921,9 @@ def create_strands_agent(config: dict):
         agent_kwargs["id"] = config["id"]
 
     agent = UniversalAgent(**agent_kwargs)
+    # Each person's request this agent receives is opened and closed in the
+    # change ledger (custom_agents.change_requests_runtime).
+    register_change_requests(agent)
 
     # NOTE: Callers must call set_agent_ref(agent) in their own execution context
     # (main thread or spawned thread) so tools have access to the correct agent.

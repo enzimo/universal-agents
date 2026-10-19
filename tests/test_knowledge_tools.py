@@ -85,6 +85,14 @@ def test_the_signed_person_wins_over_a_claimed_one(tmp_path):
     assert actor.work_person_id == "alice" and actor.work_id
 
 
+def test_a_persons_request_is_named_for_the_change_ledger(tmp_path):
+    # The gateway signed this task's context for a person: it is that person's
+    # request, so its personal page changes are checked against their other requests.
+    actor = knowledge_actor(_Agent(tmp_path / "kb.db", signed_for="alice"))
+    assert actor.request_id and actor.request_id == actor.work_id
+    assert knowledge_actor(_Agent(tmp_path / "kb.db", signed_for=None)).request_id == ""
+
+
 def test_without_a_signed_context_the_work_is_for_nobody(tmp_path):
     agent = _Agent(tmp_path / "kb.db", signed_for=None, claimed="bob")
     assert knowledge_actor(agent).work_person_id == ""

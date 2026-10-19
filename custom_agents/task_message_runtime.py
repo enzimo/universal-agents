@@ -11,6 +11,7 @@ from functools import partial
 from typing import Any, Awaitable, Callable, Optional, Union
 
 
+from custom_agents.change_requests_runtime import open_admitted_request
 from custom_agents.control_runtime import handle_interrupted_turn
 from custom_agents.lease_loss_wind_down import may_start_next_task
 from custom_agents.pending_work_runtime import schedule_pending_work
@@ -1360,6 +1361,8 @@ async def _handle_task_request(
             self, task_request, msg_header, normalized_meta, conversation_admitted=True,
         )
         return
+    # A person's request starts here for the change ledger (its first task only).
+    await open_admitted_request(self, task_request, normalized_meta)
 
     if not await apply_redispatch_notice(self, task_request.task_id, normalized_meta):
         return
