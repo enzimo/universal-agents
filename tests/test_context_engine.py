@@ -156,6 +156,74 @@ def _engine(
     )
 
 
+def test_escalation_context_keeps_details_needed_for_lead_decision():
+    from custom_messages.contracts.routing_v1 import ManagerEscalationContext
+
+    task = Task(
+        task_id="task_context_1",
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Choose a provider.",
+    )
+    meta = MessageMeta(
+        manager_escalation=ManagerEscalationContext(
+            escalation_type="needs_user_input",
+            source_task_id="worker_task",
+            choice_mode="single",
+            target_specialist_type="WebResearchAgent",
+            choices=[
+                {
+                    "option_id": "existing",
+                    "label": "Use existing account",
+                    "description": "Reuse the linked account",
+                }
+            ],
+            proposed_config_changes=[
+                {"setting": "agent.model", "value": "candidate-model"}
+            ],
+        )
+    )
+    assembly = _engine().assemble(
+        _request(
+            incoming_content=task,
+            incoming_header=MessageHeader(),
+            incoming_meta=meta,
+            incoming_message_json="",
+        )
+    )
+    prompt = assembly.prompt
+    for detail in (
+        "needs_user_input",
+        "worker_task",
+        "single",
+        "WebResearchAgent",
+        "existing",
+        "Use existing account",
+        "Reuse the linked account",
+        "agent.model",
+        "candidate-model",
+    ):
+        assert detail in prompt
+
+
+def test_worker_question_text_reaches_model_context():
+    from custom_messages.contracts.task_v1 import TaskQuery
+
+    query = TaskQuery(
+        query_type=MessageMetaType.REQUEST,
+        parent_task_id="task_context_1",
+        message="Should I use the staging account?",
+    )
+    assembly = _engine().assemble(
+        _request(
+            incoming_content=query,
+            incoming_header=MessageHeader(),
+            incoming_meta=MessageMeta(from_agent_name="Worker"),
+            incoming_message_json="",
+        )
+    )
+    assert query.message in assembly.prompt
+
+
 def test_default_context_engine_uses_model_count_tokens_when_available():
     model = _CountingModel()
     task = Task(
@@ -838,7 +906,8 @@ def test_default_context_engine_hydrates_delivery_context_from_instance_config_e
     )
     assert "Instance Delivery Context:" in first.prompt
     assert "Quiet hours enabled: false" in first.prompt
-    assert "Default delivery chat id: -100123" in first.prompt
+    assert "Default delivery channel: telegram" in first.prompt
+    assert "-100123" not in first.prompt
     assert "Notification routing mode: source_thread_or_default" in first.prompt
     assert "Preferred user communication tool: notify_user" in first.prompt
 
@@ -863,8 +932,8 @@ def test_default_context_engine_hydrates_delivery_context_from_instance_config_e
     )
     assert "Quiet hours enabled: true" in second.prompt
     assert "Quiet hours: 21:00-7:00 local time" in second.prompt
-    assert "Default delivery chat id: -100456" in second.prompt
-    assert "Default delivery chat id: -100123" not in second.prompt
+    assert "-100456" not in second.prompt
+    assert "-100123" not in second.prompt
     sources = {item["name"]: item for item in second.source_lengths}
     assert (
         sources["instance_delivery_context"]["source"]

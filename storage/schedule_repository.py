@@ -926,3 +926,43 @@ def create_schedule_repository(
     raise NotImplementedError(
         f"ScheduleRepository has no implementation for backend {storage_settings.backend!r}."
     )
+
+
+def transfer_task_timer_claims(
+    conn: Any, dialect: SqlDialect, *, sources: tuple[str, ...], replacement_agent_id: str,
+    team_id: str | None, task_ids: tuple[str, ...],
+) -> None:
+    """Move task-local timers with the same transaction that recovers their tasks."""
+    from custom_messages.contracts.schedule_v1 import ScheduledMessage
+    from custom_messages.enums import SystemScheduleKind
+
+    if not task_ids or not team_id:
+        return
+    table_query = (
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_messages'"
+        if dialect.name == "SQLite" else
+        "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND table_name='scheduled_messages'"
+    )
+    if conn.execute(table_query).fetchone() is None:
+        return
+    p = dialect.bind
+    lock_clause = " FOR UPDATE" if dialect == POSTGRES else ""
+    rows = conn.execute(
+        f"SELECT schedule_id,schedule_json FROM scheduled_messages WHERE claim_team_id={p} AND claim_agent_id IN ({','.join([p] * len(sources))}) ORDER BY schedule_id{lock_clause}",
+        (team_id, *sources),
+    ).fetchall()
+    for row in rows:
+        schedule = ScheduledMessage.model_validate_json(row[1])
+        if schedule.system_schedule_kind == SystemScheduleKind.PROVIDER_OVERLOAD_RETRY:
+            task_id = schedule.payload.task_id
+        elif schedule.system_schedule_kind == SystemScheduleKind.ISOLATED_RECOVERY_CHECKPOINT:
+            task_id = getattr(schedule.payload_meta, "followup_to_task_id", None)
+        else:
+            continue
+        if task_id not in task_ids:
+            continue
+        schedule.claim_agent_id = replacement_agent_id
+        conn.execute(
+            f"UPDATE scheduled_messages SET claim_agent_id={p},schedule_json={p},claimed_by_agent_id=NULL,claim_token=NULL,claim_expires_at=NULL,claimed_at=NULL WHERE schedule_id={p}",
+            (replacement_agent_id, schedule.model_dump_json(), schedule.schedule_id),
+        )

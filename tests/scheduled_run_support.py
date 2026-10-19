@@ -34,7 +34,7 @@ from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task
-from custom_messages.enums import MessageMetaType, ScheduleManagementClass
+from custom_messages.enums import MessageMetaType, ScheduleManagementClass, SystemScheduleKind
 from custom_messages.transport_codec import decode_envelope, encode_envelope
 from custom_transport.base import InboundDelivery
 from custom_transport.subjects import NatsSubjectMapper
@@ -179,7 +179,8 @@ def save_schedule(
     schedule = ScheduledMessage(
         schedule_id=schedule_id,
         schedule_name=f"heartbeat:{heartbeat_source_id}" if heartbeat_source_id else "Starship launch check",
-        management_class=ScheduleManagementClass.USER,
+        management_class=ScheduleManagementClass.SYSTEM if heartbeat_source_id else ScheduleManagementClass.USER,
+        system_schedule_kind=SystemScheduleKind.HEARTBEAT_LAUNCHER if heartbeat_source_id else None,
         payload=Task(task_id=f"task_{schedule_id}", task_type=MessageMetaType.REQUEST, problem_statement="Check launches."),
         payload_header=MessageHeader(from_agent_id="gateway", to_routing_path=MANAGER_ID),
         payload_meta=MessageMeta(

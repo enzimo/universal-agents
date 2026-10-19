@@ -183,7 +183,9 @@ class TeamComms(BaseModel):
                     durable=is_presence,
                     broadcast=not is_presence,
                     presence=is_presence,
-                    ttl_seconds=180.0,
+                    # Presence retention belongs to its stream. A shorter
+                    # message TTL would discard still-retained replay data.
+                    ttl_seconds=None if is_presence else 180.0,
                     idempotency_key=message.msg_header.idempotency_key or message.msg_header.message_id,
                 ),
             )

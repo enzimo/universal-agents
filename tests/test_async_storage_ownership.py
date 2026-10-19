@@ -54,6 +54,7 @@ async def test_runtime_shutdown_propagates_cancellation_without_cancelling_durab
         paused=False,
         _logger=logging.getLogger(__name__),
         _refresh_self_agent_state=AsyncMock(),
+        _announce_execution_state=AsyncMock(),
         process_llm_interaction=invocation,
         _consume_stop_reason=lambda _: None,
         _cancel_task_tree_locally=AsyncMock(),

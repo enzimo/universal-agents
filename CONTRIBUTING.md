@@ -108,7 +108,9 @@ the network fails. Catalog data therefore updates with the installed LiteLLM
 version; explicit endpoint metadata requests remain live. Fast tests and
 collection select the same bundled mode for direct SDK imports. Subprocess tests
 force the failed-download thread ordering and verify both production import paths
-make no catalog HTTP requests or retry threads.
+make no catalog HTTP requests or retry threads. Their 90-second watchdog detects
+deadlocks rather than enforcing a cold-start speed target; thread stacks are
+captured every 20 seconds and included if the subprocess times out.
 
 After editing an input, regenerate the universal, hash-checked locks with the
 development environment's uv 0.12.24:
@@ -152,6 +154,14 @@ Build the Cedar evaluator and run the hermetic test profile:
 cargo build --locked --workspace
 ./scripts/run_tests.sh fast -q
 ```
+
+Use events to hold fake workers while testing concurrent requests, and release
+them in a `finally` block. Put a deadline around the whole test rather than
+letting a held worker time out: a slow status request must not end the operation
+whose pending state the test is checking.
+When several agents save results independently, wait for every saved record
+that the test checks. One agent's reply or saved task does not establish that
+another agent has finished saving its task.
 
 The access tests start the evaluator (`target/debug/ua-cedar-authorizer
 serve-access`) as a real process. After changing the Cedar files in

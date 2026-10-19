@@ -1831,110 +1831,8 @@ h1 {
   padding: 12px;
 }
 
-.status-live-success {
-  width: 44px;
-  height: 44px;
-  display: grid;
-  place-items: center;
-  justify-self: center;
-  overflow: hidden;
-  border: 1px solid rgba(22, 163, 74, 0.24);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.34);
-  color: var(--green-dark);
-}
-
-.status-live-success-icon,
-.status-live-success svg {
-  display: block;
-  width: 20px;
-  height: 20px;
-  max-width: 20px;
-  max-height: 20px;
-}
-
-.status-live-success svg,
-.status-live-success svg * {
-  fill: none;
-  stroke: currentColor !important;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 2;
-}
-
 .download-button {
   min-width: 112px;
-}
-
-.status-item {
-  display: grid;
-  grid-template-columns: 14px 1fr auto;
-  gap: 12px;
-  align-items: center;
-  border: 1px solid var(--inner-line);
-  border-radius: var(--radius);
-  background: rgba(255, 255, 255, 0.30);
-  padding: 12px;
-}
-
-.status-agent {
-  display: grid;
-  gap: 0;
-}
-
-.status-agent.is-expanded .status-item {
-  border-color: rgba(7, 89, 133, 0.42);
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-}
-
-.status-agent-details {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px 12px;
-  margin: 0;
-  border: 1px solid rgba(7, 89, 133, 0.24);
-  border-top: 0;
-  border-radius: 0 0 var(--radius) var(--radius);
-  background: rgba(255, 255, 255, 0.24);
-  padding: 12px;
-}
-
-.status-agent-details dt {
-  color: var(--muted);
-  font-size: 0.76rem;
-  font-weight: 820;
-  text-transform: uppercase;
-}
-
-.status-agent-details dd {
-  margin: 0;
-  color: var(--ink);
-  font-size: 0.88rem;
-  font-weight: 760;
-}
-
-.status-dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--blue);
-  box-shadow: 0 0 0 5px rgba(8, 145, 178, 0.10);
-}
-
-.status-dot.green {
-  background: var(--green);
-  box-shadow: 0 0 0 5px rgba(22, 163, 74, 0.12);
-}
-
-.status-dot.amber {
-  background: var(--amber);
-  box-shadow: 0 0 0 5px rgba(183, 121, 31, 0.12);
-}
-
-.status-dot.red {
-  background: var(--danger);
-  box-shadow: 0 0 0 5px rgba(185, 28, 28, 0.12);
 }
 
 .standby-meter {
@@ -2172,9 +2070,7 @@ h1 {
 :root[data-color-mode="dark"] .channel-item,
 :root[data-color-mode="dark"] .agent-row,
 :root[data-color-mode="dark"] .review-summary,
-:root[data-color-mode="dark"] .download-row,
-:root[data-color-mode="dark"] .status-item,
-:root[data-color-mode="dark"] .status-agent-details {
+:root[data-color-mode="dark"] .download-row {
   border-color: var(--dark-border-subtle);
   background: var(--dark-pane);
   color: var(--ink);
@@ -2198,8 +2094,7 @@ h1 {
 :root[data-color-mode="dark"] .runtime-note,
 :root[data-color-mode="dark"] .configuration-note,
 :root[data-color-mode="dark"] .status-docs-note,
-:root[data-color-mode="dark"] .begin-import-skipped,
-:root[data-color-mode="dark"] .status-live-success {
+:root[data-color-mode="dark"] .begin-import-skipped {
   border-color: var(--dark-border-subtle);
   background: var(--dark-control);
   color: var(--muted);
@@ -8031,8 +7926,7 @@ body.is-theme-customizing {
 @media (max-width: 620px) {
   .top-bar,
   .page-actions,
-  .agent-row,
-  .status-item {
+  .agent-row {
     grid-template-columns: 1fr;
   }
 

@@ -1379,7 +1379,7 @@ def start_isolated_recovery(
             checkpoint_schedule.payload_meta.objective_id = objective_id
             _schedule_store(agent).add(
                 checkpoint_schedule,
-                **schedule_claim_scope_for_agent(agent),
+                **schedule_claim_scope_for_agent(agent, task_local=True),
             )
             checkpoint_link_fields = _link_to_objective(
                 agent,

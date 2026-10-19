@@ -59,6 +59,29 @@ def seed(repo, kind, owner):
     return getattr(repo, f"load_{kind}_by_owner")(owner)
 
 
+def test_task_recovery_moves_only_its_task_local_timers(recovery_store):
+    from datetime import datetime, timedelta, timezone
+    from custom_agents.schedule_store import ScheduleStore
+    from custom_messages.contracts.schedule_v1 import ScheduledMessage
+    from custom_messages.contracts.task_v1 import Task
+    from custom_messages.enums import MessageMetaType, ScheduleManagementClass, SystemScheduleKind
+
+    repo, config, owners = recovery_store
+    sources = seed(repo, "task_runtime", owners[0])
+    store = ScheduleStore(storage_settings=resolve_storage_settings(config))
+    for task_id in ("work", "unrelated"):
+        store.add(ScheduledMessage(
+            schedule_id=f"timer_{owners[0]}_{task_id}", management_class=ScheduleManagementClass.SYSTEM,
+            system_schedule_kind=SystemScheduleKind.PROVIDER_OVERLOAD_RETRY,
+            payload=Task(task_id=task_id, task_type=MessageMetaType.REQUEST),
+            next_fire_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+        ), claim_agent_id=owners[0], claim_named_agent_type="Worker", claim_team_id="recovery_tests")
+    repo.commit_task_runtime_recovery(sources=sources, replacement=replace(sources[0], owner_agent_id=owners[1]))
+    claimed = store.claim_next_due(claimer_agent_id=owners[1], claimer_named_agent_type="Worker", claimer_team_id="recovery_tests")
+    assert claimed["schedule_id"] == f"timer_{owners[0]}_work"
+    assert store.get_scheduled_message(f"timer_{owners[0]}_unrelated").claim_agent_id == owners[0]
+
+
 @pytest.mark.parametrize("kind", ["task_runtime", "deferred_messages"])
 def test_only_one_replacement_can_commit_the_same_recovery(recovery_store, kind):
     repo, config, owners = recovery_store

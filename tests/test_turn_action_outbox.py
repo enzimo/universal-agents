@@ -139,6 +139,33 @@ def _make_agent(tmp_path, *, task_manager: TaskManager | None = None, **kwargs):
 
 
 @pytest.mark.asyncio
+async def test_normal_schedule_action_keeps_context_without_repair_anomaly(tmp_path):
+    from custom_agents.structured_llm_messages import ScheduleMessageAction, StructuredScheduledMessagePayload
+    from custom_agents.schedule_store import ScheduleStore
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    info = manager.get_task_info(parent.task_id)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent._schedule_store = ScheduleStore(db_path=manager._db_path)
+    agent._record_runtime_repair_anomaly = AsyncMock()
+    await agent._execute_turn_decision_outbox(
+        decision=StructuredAgentTurnDecision(actions=[ScheduleMessageAction(
+            scheduled_message=StructuredScheduledMessagePayload(
+                schedule_id="normal_schedule", payload=StructuredTaskPayload(task_type=MessageMetaType.REQUEST, problem_statement="Check later"),
+                interval_ms=60_000,
+            ),
+        ), TaskResponseAction(task=StructuredTaskPayload(task_type=MessageMetaType.RESPONSE, answer="I scheduled the check."))]), incoming_content=parent, incoming_header=info.header, incoming_meta=info.meta,
+    )
+    stored = agent._schedule_store.get_scheduled_message("normal_schedule")
+    assert stored.payload_header == info.header
+    assert stored.payload_meta.msg_correlation_id == info.meta.msg_correlation_id
+    repairs = [call.args[0] for call in agent._record_runtime_repair_anomaly.await_args_list]
+    assert "scheduled_message_payload_header_preserved" not in repairs
+    assert "scheduled_message_payload_meta_preserved" not in repairs
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("gateway_team", ["test_team", "other_team", None])
 async def test_setup_pages_for_delegated_work_route_to_the_configured_gateway(tmp_path, gateway_team):
     """set_up_tools sends its pages to the person's chat even when a worker needed the account."""
@@ -1276,6 +1303,58 @@ def test_timer_response_after_notify_user_is_auto_suppressed(tmp_path) -> None:
         include_pending_delivery=False,
     )
     assert [item["task_id"] for item in visible_turns] == [parent.task_id]
+
+
+def test_model_facing_query_response_defaults_are_not_repairs_after_outbox_storage(
+    tmp_path,
+):
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    info = manager.get_task_info(parent.task_id)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    incoming = TaskQuery(
+        task_query_id="question",
+        parent_task_id=parent.task_id,
+        query_type=MessageMetaType.REQUEST,
+        message="Which account?",
+    )
+    model_decision = ModelAgentTurnDecision.model_validate(
+        {
+            "actions": [
+                {
+                    "action_type": "task_query",
+                    "task_query": {"query_type": "response", "message": "Use staging."},
+                }
+            ]
+        }
+    )
+    decision = agent._turn_decision_from_structured_output(model_decision)
+    result = asyncio.run(
+        agent._execute_turn_decision_outbox(
+            decision=decision,
+            incoming_content=incoming,
+            incoming_header=info.header,
+            incoming_meta=info.meta,
+        )
+    )
+    assert result.task_query_id == incoming.task_query_id
+    assert result.parent_task_id == parent.task_id
+    assert (
+        "task_query_response_id_corrected" not in agent._runtime_repair_anomaly_counts
+    )
+    assert (
+        "task_query_parent_task_id_corrected"
+        not in agent._runtime_repair_anomaly_counts
+    )
+    batch = next(iter(manager.execution_state.turn_action_batches.values()))
+    (stored,) = manager.list_turn_action_records(batch.batch_id)
+    assert (
+        stored.payload_json["action"]["task_query"]["task_query_id"]
+        == incoming.task_query_id
+    )
+    assert (
+        stored.payload_json["action"]["task_query"]["parent_task_id"] == parent.task_id
+    )
 
 
 def test_model_facing_task_response_preserves_gateway_metadata_and_route(

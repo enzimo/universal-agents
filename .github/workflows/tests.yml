@@ -91,9 +91,9 @@ jobs:
   fast:
     if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
-    # Setup plus the full suite exceeded 45 minutes while still progressing
-    # on the shared runner. Keep a deadline that allows the suite to finish.
-    timeout-minutes: 60
+    # Setup, the full suite, and mandatory cleanup took 63 minutes on the
+    # shared runner. Leave time for cleanup after successful verification.
+    timeout-minutes: 75
     steps:
       - name: Require managed local runner
         run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
@@ -172,7 +172,7 @@ jobs:
         working-directory: assistant_gateway/interactive_apps/photon_sidecar
         run: npm ci --no-audit --no-fund
       - name: Test browser page lifecycle
-        run: node --test tests/browser_lifecycle.test.mjs tests/access_inbox.test.mjs tests/access_map.test.mjs tests/chat_links.test.mjs tests/chat_assistant_name.test.mjs tests/chat_delivery.test.mjs tests/workflow_page.test.mjs tests/workflow_card.test.mjs tests/chat_transcript_view.test.mjs tests/settings_controls.test.mjs tests/appearance_customizer.test.mjs tests/ui_motion.test.mjs tests/intro_word.test.mjs tests/panel_motion.test.mjs tests/chat_sign_in.test.mjs tests/team_controls.test.mjs tests/memory_controls.test.mjs tests/status_page.test.mjs tests/knowledge_page.test.mjs tests/team_transfer_review.test.mjs tests/onboarding_secrets_source.test.mjs tests/onboarding_account_sharing.test.mjs
+        run: node --test tests/browser_lifecycle.test.mjs tests/access_inbox.test.mjs tests/access_map.test.mjs tests/chat_links.test.mjs tests/chat_assistant_name.test.mjs tests/chat_delivery.test.mjs tests/workflow_page.test.mjs tests/workflow_card.test.mjs tests/chat_transcript_view.test.mjs tests/settings_controls.test.mjs tests/appearance_customizer.test.mjs tests/ui_motion.test.mjs tests/intro_word.test.mjs tests/panel_motion.test.mjs tests/chat_sign_in.test.mjs tests/team_controls.test.mjs tests/memory_controls.test.mjs tests/status_page.test.mjs tests/knowledge_page.test.mjs tests/team_transfer_review.test.mjs tests/onboarding_secrets_source.test.mjs tests/onboarding_account_sharing.test.mjs tests/onboarding_status_handoff.test.mjs
       - name: Test Photon sidecar
         working-directory: assistant_gateway/interactive_apps/photon_sidecar
         run: npm test

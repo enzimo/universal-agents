@@ -32,7 +32,7 @@ from assistant_gateway.domain.identity import (
     GatewayUserWebTokenRecord,
     TeamRoleHolderRequired,
 )
-from assistant_gateway.domain.request_state import PendingQueryRecord, RequestRecord, ToolSetupRecord
+from assistant_gateway.domain.request_state import CredentialCollectionRecord, PendingQueryRecord, RequestRecord, ToolSetupRecord
 from assistant_gateway.domain.sessions import (
     SessionConversationListRecord,
     SessionConversationRecord,
@@ -49,6 +49,7 @@ from assistant_gateway.domain.transcript import (
     TranscriptStreamState,
 )
 from assistant_gateway.ports.repositories import (
+    CredentialCollectionRepository,
     DeliveryRepository,
     DeliveryUnitOfWork,
     IdentityRepository,
@@ -145,6 +146,7 @@ class GatewayStateRepository(
     SessionRepository,
     RequestRepository,
     ToolSetupRepository,
+    CredentialCollectionRepository,
     DeliveryRepository,
     IdentityRepository,
     TranscriptRepository,
@@ -988,6 +990,14 @@ class _RelationalGatewayStateRepository:
             )
             self._ensure_column(conn, "gateway_requests", "active_task_id", "TEXT")
             # Setup pages tasks wait on (assistant_gateway.application.tool_setup).
+            conn.execute("""CREATE TABLE IF NOT EXISTS gateway_credential_collections (
+                credential_request_id TEXT PRIMARY KEY, broker_session_id TEXT NOT NULL,
+                person_id TEXT NOT NULL, session_key TEXT NOT NULL, correlation_id TEXT NOT NULL,
+                conversation_id TEXT, parent_task_id TEXT, service_name TEXT NOT NULL,
+                credential_key TEXT NOT NULL, display_name TEXT, flow TEXT NOT NULL,
+                source TEXT, source_item_id TEXT, source_item_name TEXT,
+                continue_task INTEGER NOT NULL, expires_at_utc TEXT NOT NULL
+            )""")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS gateway_tool_setups (
@@ -2218,6 +2228,29 @@ class _RelationalGatewayStateRepository:
                  WHERE correlation_id = {self._dialect.bind}
                 """,
                 (status, normalized_task_id, correlation_id),
+            )
+            conn.commit()
+
+    def record_credential_collection(self, record: CredentialCollectionRecord) -> None:
+        values = asdict(record)
+        values["continue_task"] = int(record.continue_task)
+        with self._connect() as conn:
+            conn.execute(
+                f"INSERT INTO gateway_credential_collections ({','.join(values)}) VALUES ({','.join([self._dialect.bind] * len(values))})",
+                tuple(values.values()),
+            )
+            conn.commit()
+
+    def list_credential_collections(self) -> list[CredentialCollectionRecord]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM gateway_credential_collections ORDER BY credential_request_id").fetchall()
+        return [CredentialCollectionRecord(**{**dict(row), "continue_task": bool(row["continue_task"])}) for row in rows]
+
+    def remove_credential_collection(self, credential_request_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                f"DELETE FROM gateway_credential_collections WHERE credential_request_id={self._dialect.bind}",
+                (credential_request_id,),
             )
             conn.commit()
 
@@ -3959,6 +3992,7 @@ class _RelationalGatewayStateRepository:
     _PERSON_SESSION_TABLES = (
         "gateway_session_conversations",
         "gateway_requests",
+        "gateway_credential_collections",
         "gateway_deliveries",
         "gateway_attachments",
         "gateway_pending_queries",

@@ -195,9 +195,9 @@ def query_agent_state(
                     )
                 matched_statuses = agent_state_store.query(filters)
                 live_targets = [
-                    status.agent_id
+                    status.self_id
                     for status in matched_statuses
-                    if getattr(status, "agent_id", None)
+                    if status.self_id
                 ]
 
             for raw_target in live_targets:

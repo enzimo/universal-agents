@@ -1798,6 +1798,7 @@ async def test_gateway_rejects_malformed_credential_session_before_waiting(
     assert response.transcript_text == response.text
     assert response.transient_action is None
     assert gateway._credential_workflow.pending_poll_count == 0
+    assert state_store.credential_collection_repository.list_credential_collections() == []
     request_record = state_store.get_request("correlation_invalid_collection")
     assert request_record is not None
     assert request_record.status == "pending"
@@ -2144,9 +2145,9 @@ def _credential_form_gateway(tmp_path: Path):
 async def test_credential_form_closes_when_manager_delivery_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     gateway, events, request = _credential_form_gateway(tmp_path)
 
-    # Use the real disconnected client: a lost transport must not hide the form's completion.
-    with pytest.raises(RuntimeError, match="Gateway is not connected"):
-        await _watch_credential_form(gateway, monkeypatch, request, "credential_stored")
+    gateway._manager_client.publish_durable = AsyncMock(side_effect=[RuntimeError("Gateway is not connected"), None])
+    await _watch_credential_form(gateway, monkeypatch, request, "credential_stored")
+    assert gateway._manager_client.publish_durable.await_count == 2
 
     [closing] = [event for event in events if event.message_type == "secure_credential_result"]
     assert closing.correlation_id == request.credential_request_id
@@ -2635,7 +2636,7 @@ async def test_gateway_installs_schedule_after_manager_owned_heartbeat_seed(
             "HEARTBEAT.*.md"
         )
     )
-    assert len(published) == 1
+    assert [message.msg_content.install_mode for message in published] == ["ensure", "refresh"]
     assert isinstance(published[0].msg_content, ScheduledMessage)
     assert published[0].msg_content.schedule_id == "hb_sched_test"
     payload_meta = published[0].msg_content.payload_meta
@@ -2719,7 +2720,7 @@ async def test_gateway_heartbeat_reuses_legacy_non_cli_delivery_session_after_ow
 
     await gateway._maintenance_schedules.ensure_heartbeat()
 
-    assert len(published) == 1
+    assert [message.msg_content.install_mode for message in published] == ["ensure", "refresh"]
     schedule = published[0].msg_content
     assert isinstance(schedule, ScheduledMessage)
     assert schedule.payload_meta is not None
@@ -5543,7 +5544,7 @@ async def test_gateway_delivers_urgent_user_notification_through_gateway_context
     assert not gateway.state_store.list_pending_deliveries()
     assert len(manager_transport.durable) == 1
     published, routing_key = manager_transport.durable[0]
-    assert routing_key == config.manager.manager_agent_id
+    assert routing_key == config.gateway.team_id
     assert isinstance(published.msg_content, DeliveryReceipt)
     assert published.msg_content.task_id == "task_1"
     assert published.msg_content.conversation_id == "conversation_1"
@@ -5611,7 +5612,7 @@ async def test_gateway_delivers_current_thread_user_notification_during_quiet_ho
     assert not gateway.state_store.list_pending_deliveries()
     assert len(manager_transport.durable) == 1
     published, routing_key = manager_transport.durable[0]
-    assert routing_key == config.manager.manager_agent_id
+    assert routing_key == config.gateway.team_id
     assert isinstance(published.msg_content, DeliveryReceipt)
     assert published.msg_content.task_id == "task_1"
     assert published.msg_content.conversation_id == "conversation_1"
@@ -6046,7 +6047,7 @@ async def test_gateway_unsolicited_timer_delivery_emits_receipt_immediately(
     assert request.status == "delivered"
     assert len(manager_transport.durable) == 1
     published, routing_key = manager_transport.durable[0]
-    assert routing_key == config.manager.manager_agent_id
+    assert routing_key == config.gateway.team_id
     assert isinstance(published.msg_content, DeliveryReceipt)
     assert published.msg_content.task_id == "task_id_reminder_fire"
     assert published.msg_content.delivery_via == "immediate"
@@ -6117,7 +6118,7 @@ async def test_gateway_deferred_timer_delivery_emits_receipt_on_digest_release(
     assert request.status == "delivered"
     assert len(manager_transport.durable) == 1
     published, routing_key = manager_transport.durable[0]
-    assert routing_key == config.manager.manager_agent_id
+    assert routing_key == config.gateway.team_id
     assert isinstance(published.msg_content, DeliveryReceipt)
     assert published.msg_content.task_id == "task_id_reminder_fire"
     assert published.msg_content.delivery_via == "digest"
@@ -6277,7 +6278,7 @@ async def test_gateway_automation_reply_still_emits_delivery_receipt(
     assert request.status == "delivered"
     assert len(manager_transport.durable) == 1
     published, routing_key = manager_transport.durable[0]
-    assert routing_key == config.manager.manager_agent_id
+    assert routing_key == config.gateway.team_id
     assert isinstance(published.msg_content, DeliveryReceipt)
     assert published.msg_content.task_id == "task_automation_reply_1234"
     assert published.msg_content.delivery_via == "immediate"

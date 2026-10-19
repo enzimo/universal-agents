@@ -17,11 +17,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class DelegatedTaskClaimedV1(BaseModel):
-    """A worker admitted a delegated task; sent to the task's requester.
+    """A worker took a delegated task; sent to the task's requester.
 
     Sent after durable admission, and again by a worker that holds the task
     after a restart or took it over from a worker that is gone (``recovered``).
-    Carries identifiers only; it grants nothing.
+    Also sent before reporting an admission rejection, which has no saved
+    executable task. Carries identifiers only; it grants nothing and cannot
+    override active task custody or the completed-task archive.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)

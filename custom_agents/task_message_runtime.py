@@ -7,6 +7,7 @@ from custom_messages.records.task_results import TaskResultUpdate
 import asyncio
 import json
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any, Awaitable, Callable, Optional, Union
 
 
@@ -1443,7 +1444,7 @@ async def _check_and_process_next_task(self) -> bool:
         return False
 
     try:
-        await self._refresh_self_agent_state()
+        await self._announce_execution_state()
         task_result: Union[
             Task,
             TaskQuery,
@@ -1731,6 +1732,12 @@ async def _handle_task_response(
         self._logger.error(
             f"[{self.id}] Received response for unknown subtask {subtask_id}. Discarding."
         )
+        return
+    from custom_agents.delegated_work_runtime import task_response_matches_holder
+
+    if not await self.task_manager.operations_runtime.run(
+        partial(task_response_matches_holder, self), subtask_info, sub_task_response, msg_header.from_agent_id
+    ):
         return
     if subtask_info.state in {
         ProgressState.COMPLETED,

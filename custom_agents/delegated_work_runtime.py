@@ -33,6 +33,8 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Optional
 
+from id_generation import new_id
+
 from custom_messages.contracts.control_v1 import ControlInstruction, Instruction
 from custom_messages.contracts.delegated_work_v1 import (
     DelegatedTaskClaimedV1,
@@ -142,6 +144,87 @@ def delegation_holder(agent: Any, subtask_id: str) -> Optional[str]:
 
     record = delegated_tasks(agent).get(str(agent.team_id), subtask_id)
     return record.holder_agent_id if record is not None else None
+
+
+class DelegatedTaskClaimPending(RuntimeError):
+    """Keep a result in broker custody until its worker's claim can be recorded."""
+
+
+def _persisted_result_holder(agent: Any, task_id: str, parent_id: str | None) -> tuple[bool, str | None]:
+    """Read active custody first, then the archive written before custody release.
+
+    These are the same lifecycle records admission uses. A lost or delayed
+    claim must not discard a result, and an old claim cannot overrule takeover.
+    """
+    manager = agent.task_manager
+    custody = manager.runtime_state_store.get_task_custody(str(agent.team_id), [task_id]).get(task_id)
+    if custody is not None:
+        return True, custody.holder_agent_id
+    archived = manager.get_task_from_db(task_id, include_all_agents=True)
+    if archived is not None:
+        matches = (
+            archived["team_id"] == agent.team_id
+            and archived["main_task"].parent_task_id == parent_id
+        )
+        return True, archived["owner_agent_id"] if matches else None
+    return False, None
+
+
+def task_response_matches_holder(
+    agent: Any, task_info: Any, response: Any, sender_id: Optional[str]
+) -> bool:
+    """Check reply linkage and the recorded recipient before a result changes state.
+
+    Active custody and the completed archive prove admitted work's holder.
+    A rejection before admission has only its recorded claim. A claim still
+    awaiting processing retains the result for transport retry.
+    """
+
+    record = delegated_tasks(agent).get(str(agent.team_id), response.task_id)
+    claimed_sender = record.holder_agent_id if record is not None else None
+    expected_parent = task_info.task.parent_task_id
+    persisted, expected_sender = _persisted_result_holder(agent, response.task_id, expected_parent)
+    if not persisted:
+        expected_sender = claimed_sender
+    if not persisted and record is None:
+        recipient_name = getattr(task_info.meta, "to_agent_name", None)
+        expected_sender = (getattr(agent, "_agent_id_by_name", {}) or {}).get(
+            recipient_name
+        )
+    if (
+        not persisted and record is not None and not expected_sender
+        and sender_id and expected_parent == response.parent_task_id
+    ):
+        agent._logger.warning(
+            "Retained a delegated result until its worker claim is recorded. "
+            "event=delegated_task_result_waiting_for_claim agent_id=%s task_id=%s sender=%s",
+            agent.id, response.task_id, sender_id,
+        )
+        raise DelegatedTaskClaimPending(response.task_id)
+    if (
+        expected_parent == response.parent_task_id
+        and expected_sender
+        and expected_sender == sender_id
+    ):
+        if persisted and claimed_sender != expected_sender:
+            agent._logger.warning(
+                "Verified a result using task custody while its admission claim was missing or delayed. "
+                "event=delegated_task_claim_missing_at_result agent_id=%s task_id=%s sender=%s recorded_holder=%s",
+                agent.id, response.task_id, sender_id, claimed_sender,
+            )
+        return True
+    agent._logger.warning(
+        "Ignored a delegated result whose sender or parent does not match the held task. "
+        "event=delegated_task_response_rejected agent_id=%s task_id=%s sender=%s "
+        "expected_sender=%s parent_task_id=%s expected_parent_task_id=%s",
+        agent.id,
+        response.task_id,
+        sender_id,
+        expected_sender,
+        response.parent_task_id,
+        expected_parent,
+    )
+    return False
 
 
 def record_check_back(agent: Any, *, parent_task_id: str, minutes: float) -> None:
@@ -265,10 +348,6 @@ def end_unpublished_delegation(
 # -- claims (worker) ---------------------------------------------------------------
 
 
-def _claim_id(task_id: str, worker_agent_id: str, recovered: bool) -> str:
-    return f"claim:{task_id}:{worker_agent_id}:{'recovered' if recovered else 'admitted'}"
-
-
 async def send_task_claim(
     agent: Any,
     *,
@@ -277,6 +356,8 @@ async def send_task_claim(
     header: Any,
     meta: Any,
     recovered: bool = False,
+    required: bool = False,
+    routing_key: Optional[str] = None,
 ) -> bool:
     """Tell a delegated task's requester that this worker holds it.
 
@@ -284,7 +365,7 @@ async def send_task_claim(
     response; the claim goes to the task's reply route.
     """
 
-    route = getattr(header, "response_routing_key", None)
+    route = routing_key or getattr(header, "response_routing_key", None)
     if (
         not parent_task_id
         or not route
@@ -294,7 +375,9 @@ async def send_task_claim(
     ):
         return False
     claim = DelegatedTaskClaimedV1(
-        claim_id=_claim_id(task_id, str(agent.id), recovered),
+        # Each admission is a new event, even if this worker held the task
+        # earlier. Reusing a task/worker key suppresses real moves in JetStream.
+        claim_id=new_id("claim"),
         team_id=str(agent.team_id),
         task_id=task_id,
         parent_task_id=parent_task_id,
@@ -323,8 +406,9 @@ async def send_task_claim(
     try:
         await agent.team_comms.send_message(message=envelope, routing_key=route)
     except Exception:
-        # Advisory: the result still reaches the requester. Without the claim
-        # the requester cannot check this worker or count a move.
+        # Admitted work has transactional custody even if its announcement
+        # fails. A pre-admission rejection has no such record: its claim must
+        # publish first or the original delivery must retry.
         agent._logger.warning(
             "Could not tell the requester which worker holds its task. "
             "event=delegated_task_claim_send_failed agent_id=%s task_id=%s route=%s",
@@ -333,6 +417,8 @@ async def send_task_claim(
             route,
             exc_info=True,
         )
+        if required:
+            raise
         return False
     agent._logger.info(
         "Told the requester this worker holds its task. event=delegated_task_claim_sent "
@@ -364,6 +450,22 @@ async def report_held_delegated_tasks(agent: Any) -> int:
         ):
             sent += 1
     return sent
+
+
+async def send_rejection_claim(
+    agent: Any, *, task: Any, header: Any, meta: Any, routing_key: str,
+) -> None:
+    """Announce only unadmitted errors; saved failures already prove their holder."""
+    if not task.parent_task_id or getattr(meta, "requester_type", None) != RequesterType.AGENT_REQUESTER:
+        return
+    persisted, _ = await agent.task_manager.operations_runtime.run(
+        partial(_persisted_result_holder, agent), task.task_id, task.parent_task_id,
+    )
+    if not persisted:
+        await send_task_claim(
+            agent, task_id=task.task_id, parent_task_id=task.parent_task_id,
+            header=header, meta=meta, required=True, routing_key=routing_key,
+        )
 
 
 # -- claims (requester) ------------------------------------------------------------
@@ -455,6 +557,14 @@ async def handle_delegated_task_claimed(
         )
         return
     repository = delegated_tasks(agent)
+    persisted, holder = await run(partial(_persisted_result_holder, agent), claim.task_id, claim.parent_task_id)
+    if persisted and holder != claim.worker_agent_id:
+        agent._logger.warning(
+            "Ignored a claim from a worker that no longer holds this task. "
+            "event=delegated_task_claim_custody_rejected agent_id=%s task_id=%s sender=%s holder=%s",
+            agent.id, claim.task_id, claim.worker_agent_id, holder,
+        )
+        return
     outcome = await run(
         partial(
             repository.record_claim,

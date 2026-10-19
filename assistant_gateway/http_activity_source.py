@@ -55,7 +55,7 @@ class HttpGatewayActivitySource:
             self._session = aiohttp.ClientSession(timeout=self._timeout)
         async with self._session.get(
             f"{self._base_url}/api/user/recent-activity",
-            params={"token": self._token},
+            headers={"Authorization": f"Bearer {self._token}"},
         ) as response:
             if response.status >= 300:
                 raise RuntimeError(

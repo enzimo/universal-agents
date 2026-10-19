@@ -106,3 +106,33 @@ def test_tool_setup_primary_route_uses_trusted_header(response_route, sender, ex
     assert requester_bound_primary_route(request, MessageHeader(
         response_routing_key=response_route, from_agent_id=sender,
     )) == expected
+
+
+def test_lead_question_about_worker_escalation_reaches_person(monkeypatch):
+    from assistant_gateway.config import GatewayInstanceConfig
+    from custom_agents.message_routing import requester_bound_primary_route
+    from custom_messages.contracts.task_v1 import TaskQuery
+    from custom_messages.enums import RequesterType
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        GatewayInstanceConfig,
+        "load_for_process",
+        lambda _path: SimpleNamespace(
+            manager=SimpleNamespace(team_id="team", response_queue_name="gateway_reply")
+        ),
+    )
+    question = TaskQuery(
+        query_type=MessageMetaType.REQUEST,
+        message="Which account?",
+        parent_task_id="escalation",
+    )
+    route = requester_bound_primary_route(
+        question,
+        MessageHeader(from_agent_id="worker", response_routing_key="worker"),
+        instance_config_path="instance.yaml",
+        team_id="team",
+        requester_type=RequesterType.AGENT_REQUESTER,
+        sender_is_team_lead=True,
+    )
+    assert route == "gateway_reply"

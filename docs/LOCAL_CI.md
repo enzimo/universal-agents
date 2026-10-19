@@ -20,10 +20,12 @@ checks test and build the site without uploading it. Only a manual Pages deploym
 uploads the site, and that upload must succeed before deployment. Container builds
 and image publication do not require these stored artifacts.
 
-The fast job allows 60 minutes for setup and the complete hermetic suite. The
-suite exceeded the previous 45-minute limit while still making progress on the
-shared runner. It stops at the first failure so its traceback is reported before
-a later deadline can hide it, and reports the slowest tests after completion.
+The fast job allows 75 minutes for setup, the complete hermetic suite, and
+mandatory runner cleanup. A successful suite took 50 minutes on the shared
+runner; setup and cleanup brought the job to 63 minutes and exceeded the
+previous one-hour deadline. It stops at the first failure so its traceback is
+reported before a later deadline can hide it, and reports the slowest tests
+after completion.
 
 The runtime produces Linux amd64 and arm64 container images that run under
 Docker on Windows, macOS, and Linux. Native desktop installers belong to the

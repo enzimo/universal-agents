@@ -155,8 +155,8 @@ def test_notify_user_publishes_user_notification_to_gateway_preferred_target(
 
     assert result["status"] == "success"
     assert result["channel_name"] == "telegram"
-    assert result["chat_id"] == "-100123"
-    assert result["thread_id"] == "42"
+    assert "chat_id" not in result
+    assert "thread_id" not in result
     assert result["attachment_count"] == 1
     assert result["attachments"][0]["path"] == str(screenshot)
     assert result["task_history_recorded"] is True
@@ -190,6 +190,8 @@ def test_notify_user_publishes_user_notification_to_gateway_preferred_target(
         == "User-visible notification sent through notify_user: Done with the GitHub task."
     )
     assert history_call.kwargs["details"]["event"] == "notify_user_sent"
+    assert "chat_id" not in history_call.kwargs["details"]
+    assert "thread_id" not in history_call.kwargs["details"]
     assert (
         history_call.kwargs["details"]["message_preview"]
         == "Done with the GitHub task."
@@ -285,8 +287,8 @@ def test_notify_user_can_target_current_thread(tmp_path: Path) -> None:
 
     assert result["status"] == "success"
     assert result["channel_name"] == "telegram"
-    assert result["chat_id"] == "-100999"
-    assert result["thread_id"] == "99"
+    assert "chat_id" not in result
+    assert "thread_id" not in result
 
     team_comms.send_message.assert_awaited_once()
     envelope = team_comms.send_message.await_args.kwargs["message"]
@@ -342,7 +344,7 @@ def test_notify_user_auto_targets_active_web_chat_thread(tmp_path: Path, monkeyp
 
     assert result["status"] == "success"
     assert result["channel_name"] == "website"
-    assert result["chat_id"] == "web-chat"
+    assert "chat_id" not in result
     assert result["attachment_count"] == 1
 
     team_comms.send_message.assert_awaited_once()
@@ -381,7 +383,7 @@ def test_notify_user_explicit_default_uses_preferred_target_during_interactive_t
 
     assert result["status"] == "success"
     assert result["channel_name"] == "telegram"
-    assert result["chat_id"] == "-100123"
+    assert "chat_id" not in result
 
     team_comms.send_message.assert_awaited_once()
     envelope = team_comms.send_message.await_args.kwargs["message"]
@@ -426,7 +428,7 @@ def test_notify_user_memory_class_forces_memory_notification_target(
     assert result["requested_target"] == "current_thread"
     assert result["effective_target"] == "default"
     assert result["channel_name"] == "telegram"
-    assert result["chat_id"] == "-100123"
+    assert "chat_id" not in result
 
     team_comms.send_message.assert_awaited_once()
     envelope = team_comms.send_message.await_args.kwargs["message"]
@@ -468,7 +470,7 @@ def test_notify_user_auto_can_be_forced_to_preferred_target_during_interactive_t
 
     assert result["status"] == "success"
     assert result["channel_name"] == "telegram"
-    assert result["chat_id"] == "-100123"
+    assert "chat_id" not in result
 
     team_comms.send_message.assert_awaited_once()
     envelope = team_comms.send_message.await_args.kwargs["message"]

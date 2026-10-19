@@ -163,11 +163,11 @@ def test_production_onboarding_shell_has_no_preview_export_button() -> None:
     assert "The team is up and running with basic options" not in app_text
     assert 'nextButton.hidden = page.id === "standby";' in app_text
     assert "function webChatUrl()" in app_text
-    assert "window.location.href = webChatUrl();" in app_text
-    assert 'class="status-party-icon" width="20" height="20"' in app_text
+    assert "finalization.openStatus();" in app_text
+    assert 'operations.webChatUrl() + "?view=status"' in app_text
     assert 'spinner.className = "standby-spinner";' in app_text
     assert 'status.setAttribute("role", "status");' in app_text
-    assert "/api/agents/status" in app_text
+    assert "/api/agents/status" not in app_text
     assert "/download/instance_config.yaml" in app_text
     assert "previewConfigYaml" not in app_text
     assert "previewTeamEnv" not in app_text
@@ -188,8 +188,6 @@ def test_production_onboarding_shell_has_no_preview_export_button() -> None:
     assert ".runtime-provider-setup" in styles_text
     assert ".runtime-inline-toggle" in styles_text
     assert ".runtime-capability-list" in styles_text
-    assert ".status-live-success-icon,\n.status-live-success svg {" in styles_text
-    assert "max-width: 20px;" in styles_text
     assert ".standby-spinner {" in styles_text
     assert "@keyframes ua-standby-spin" in styles_text
 
@@ -270,9 +268,7 @@ def test_dark_onboarding_surfaces_use_deep_ocean_roles() -> None:
         ':root[data-color-mode="dark"] .channel-item,',
         ':root[data-color-mode="dark"] .agent-row,',
         ':root[data-color-mode="dark"] .review-summary,',
-        ':root[data-color-mode="dark"] .download-row,',
-        ':root[data-color-mode="dark"] .status-item,',
-        ':root[data-color-mode="dark"] .status-agent-details',
+        ':root[data-color-mode="dark"] .download-row',
     ):
         assert selector in pane_rule
     assert "background: var(--dark-pane);" in pane_rule
@@ -288,7 +284,6 @@ def test_dark_onboarding_surfaces_use_deep_ocean_roles() -> None:
         ':root[data-color-mode="dark"] .runtime-note,',
         ':root[data-color-mode="dark"] .configuration-note,',
         ':root[data-color-mode="dark"] .status-docs-note,',
-        ':root[data-color-mode="dark"] .status-live-success',
     ):
         assert selector in control_rule
     assert "background: var(--dark-control);" in control_rule

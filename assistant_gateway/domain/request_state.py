@@ -19,6 +19,28 @@ class RequestRecord:
     active_task_id: str | None = None
 
 
+@dataclass(frozen=True)
+class CredentialCollectionRecord:
+    """A form's recoverable watch, without submitted fields, secrets or page addresses."""
+
+    credential_request_id: str
+    broker_session_id: str
+    person_id: str
+    session_key: str
+    correlation_id: str
+    conversation_id: str | None
+    parent_task_id: str | None
+    service_name: str
+    credential_key: str
+    display_name: str | None
+    flow: str
+    source: str | None
+    source_item_id: str | None
+    source_item_name: str | None
+    continue_task: bool
+    expires_at_utc: str
+
+
 @dataclass
 class ToolSetupRecord:
     """One setup page a task waits on (``assistant_gateway.application.tool_setup``).

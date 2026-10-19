@@ -53,6 +53,10 @@ authority, and verify a real run before calling it fixed. Keep the pending
 occurrence and exact target intact until real admission; a change to a schedule
 the runtime manages is staged and needs a person's approval (see below).
 
+When creating a schedule with the structured `schedule_message` action, follow
+it with `task_response` confirming the saved schedule, or an action that waits
+for a result. A schedule alone cannot finish the person's current request.
+
 When a worker loses its launch lease it winds down: it returns unstarted and
 running tasks to you, keeps tasks waiting on a person or subtask for
 `agent.schedule_workers.lease_loss_wait_timeout_seconds`, then exits. Your runtime,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from custom_messages.contracts.common_v1 import contract_sha256
 from custom_messages.contracts.delivery_v1 import DeliveryReceipt, UserNotification
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -54,6 +55,12 @@ def build_delivery_receipt_envelope(
     if task_id is None:
         return None
     receipt = DeliveryReceipt(
+        receipt_id="deliv_rcpt_" + contract_sha256({
+            "message_id": envelope.msg_header.message_id,
+            "task_id": task_id,
+            "delivery_state": delivery_state,
+            "delivery_via": delivery_via,
+        }),
         task_id=task_id,
         conversation_id=meta.conversation_id,
         correlation_id=meta.msg_correlation_id,
@@ -77,6 +84,7 @@ def build_delivery_receipt_envelope(
             from_agent_id=response_queue_name,
             to_routing_path=manager_agent_id,
             response_routing_key=response_queue_name,
+            idempotency_key=receipt.receipt_id,
             agent_signature="",
         ),
     )

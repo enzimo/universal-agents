@@ -105,6 +105,7 @@ class SecureResultPublisher:
                 ),
             ),
             msg_header=MessageHeader(
+                idempotency_key=f"secure_result:{request_kind}:{result.get_id()}",
                 from_agent_id=self._settings.response_route,
                 to_routing_path=manager_id,
                 response_routing_key=self._settings.response_route,

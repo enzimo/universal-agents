@@ -9,6 +9,13 @@ posts one secret-free line in the person's chat under the form's own id (the
 credential request id), so Web Chat closes the form's card then rather than at
 the agent's final answer.
 
+The gateway saves the broker session id and result routing before it starts a
+watch, so startup can resume forms that remain open across a gateway restart.
+Submitted fields and page URLs are never saved. Final results remain with the
+owned watcher through temporary manager delivery failures, and the saved wait
+is removed only after publication succeeds. A broker that no longer knows the
+session produces an unconfirmed result rather than an invented success.
+
 This workflow also owns the other broker page watchers, so they share one
 owner and close together: the tool setup pages tasks ask for
 (``tool_setup.GatewayToolSetups``) and the pages people open themselves with
@@ -28,6 +35,7 @@ from assistant_gateway.application.broker_session_watch import (
     WATCH_FINISHED,
     BrokerSessionWatches,
     watch_broker_session,
+    watch_deadline,
 )
 from assistant_gateway.application.broker_sessions import (
     validated_broker_form_session,
@@ -60,7 +68,8 @@ from assistant_gateway.application.transient_presentation import (
 )
 from assistant_gateway.domain.message_types import SECURE_CREDENTIAL_RESULT_MESSAGE_TYPE
 from assistant_gateway.domain.sessions import SessionRecord
-from assistant_gateway.ports.repositories import SessionRepository, ToolSetupRepository
+from assistant_gateway.domain.request_state import CredentialCollectionRecord
+from assistant_gateway.ports.repositories import CredentialCollectionRepository, SessionRepository, ToolSetupRepository
 from custom_messages.contracts.credentials_v1 import (
     SecureCredentialCollectionRequest,
     SecureCredentialCollectionResult,
@@ -143,6 +152,7 @@ class GatewayCredentialWorkflow:
         manager_client: GatewayManagerClient,
         session_repository: SessionRepository,
         tool_setup_repository: ToolSetupRepository,
+        collection_repository: CredentialCollectionRepository,
         request_service: GatewayRequestService,
         setup_states: Any = None,
         clock: GatewayClock,
@@ -153,6 +163,8 @@ class GatewayCredentialWorkflow:
         self._broker = broker
         self._manager_client = manager_client
         self._session_repository = session_repository
+        self._collections = collection_repository
+        self._collection_watches: set[str] = set()
         self._request_service = request_service
         self._clock = clock
         self._event_output = event_output
@@ -309,17 +321,29 @@ class GatewayCredentialWorkflow:
                 REQUEST_STATUS_WAITING_FOR_CREDENTIAL,
             )
         session_id = broker_session.session_id
-        self._watches.start(
-            self.poll_session(
-                status_url=broker_session.status_url,
-                session_id=session_id,
-                request_content=request_content,
-                correlation_id=correlation_id,
-                conversation_id=conversation_id,
-                session_key=session_key,
-            ),
-            name=f"gateway_credential_poll_{session_id[:12] or correlation_id}",
+        record = CredentialCollectionRecord(
+            broker_session_id=session_id, person_id=owner_canonical_user_id,
+            session_key=session_key, correlation_id=correlation_id,
+            conversation_id=conversation_id, expires_at_utc=broker_session.expires_at,
+            **{key: getattr(request_content, key) for key in (
+                "credential_request_id", "parent_task_id", "service_name", "credential_key",
+                "display_name", "flow", "source", "source_item_id", "source_item_name", "continue_task",
+            )},
         )
+        try:
+            self._collections.record_credential_collection(record)
+        except Exception:
+            self._logger.exception(
+                "Could not save a credential form's result watch. "
+                "event=gateway_credential_collection_save_failed credential_request_id=%s correlation_id=%s",
+                request_content.credential_request_id, correlation_id,
+            )
+            return await self._collection_start_failure(
+                request_content=request_content, request_envelope=request_envelope,
+                correlation_id=correlation_id, conversation_id=conversation_id, session_key=session_key,
+                text="The secure credential form could not be prepared. Please try again.",
+            )
+        self._watch_collection(record, request_content, status_url=broker_session.status_url)
 
         if self._is_deletion_request(request_content):
             text = (
@@ -440,6 +464,54 @@ class GatewayCredentialWorkflow:
             ),
         )
 
+    def _watch_collection(
+        self, record: CredentialCollectionRecord, request_content: SecureCredentialCollectionRequest,
+        *, status_url: str = "",
+    ) -> None:
+        if record.credential_request_id in self._collection_watches:
+            return
+        self._collection_watches.add(record.credential_request_id)
+
+        async def watch() -> None:
+            try:
+                await self.poll_session(
+                    status_url=status_url, session_id=record.broker_session_id,
+                    request_content=request_content, correlation_id=record.correlation_id,
+                    conversation_id=record.conversation_id, session_key=record.session_key,
+                    expires_at_utc=record.expires_at_utc,
+                )
+            finally:
+                self._collection_watches.discard(record.credential_request_id)
+
+        self._watches.start(watch(), name=f"gateway_credential_poll_{record.broker_session_id[:12]}")
+
+    async def recover_collections(self) -> int:
+        """Resume open forms by broker session id; never store or reconstruct a page URL."""
+        recovered = 0
+        for record in self._collections.list_credential_collections():
+            if record.credential_request_id in self._collection_watches:
+                continue
+            session = self._session_repository.get_session(record.session_key)
+            if session is None or session.owner_canonical_user_id != record.person_id:
+                self._logger.warning(
+                    "Cannot recover a credential form whose chat owner no longer matches. "
+                    "event=gateway_credential_collection_recovery_refused credential_request_id=%s session_key=%s",
+                    record.credential_request_id, record.session_key,
+                )
+                continue
+            request = SecureCredentialCollectionRequest(
+                purpose="Resume the credential form's result watch.",
+                **{key: getattr(record, key) for key in (
+                    "credential_request_id", "parent_task_id", "service_name", "credential_key",
+                    "display_name", "flow", "source", "source_item_id", "source_item_name", "continue_task",
+                )},
+            )
+            self._watch_collection(record, request)
+            recovered += 1
+        if recovered:
+            self._logger.info("Resumed credential form watches. event=gateway_credential_collection_recovered count=%s", recovered)
+        return recovered
+
     async def poll_session(
         self,
         *,
@@ -449,6 +521,7 @@ class GatewayCredentialWorkflow:
         correlation_id: str,
         conversation_id: str | None,
         session_key: str,
+        expires_at_utc: str | None = None,
     ) -> None:
         def read_failed(exc: Exception) -> None:
             self._logger.warning(
@@ -468,8 +541,10 @@ class GatewayCredentialWorkflow:
             ),
             is_final=lambda payload: str(payload.get("status") or "")
             in _TERMINAL_COLLECTION_STATUSES,
-            deadline=self._clock.now_utc()
-            + timedelta(seconds=self._broker.collection_ttl_seconds + 30),
+            deadline=max(
+                watch_deadline(expires_at_utc),
+                self._clock.now_utc() + timedelta(seconds=self._settings.poll_interval_seconds * 2 + 1),
+            ) if expires_at_utc else self._clock.now_utc() + timedelta(seconds=self._broker.collection_ttl_seconds + 30),
             clock=self._clock,
             poll_interval_seconds=self._settings.poll_interval_seconds,
             on_read_failed=read_failed,
@@ -509,9 +584,38 @@ class GatewayCredentialWorkflow:
             ),
             return_exceptions=True,
         )
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
+        if isinstance(results[0], Exception):
+            self._logger.warning(
+                "Could not close the credential form's chat card. "
+                "event=gateway_credential_collection_closing_failed credential_request_id=%s error=%s",
+                request_content.credential_request_id, results[0],
+            )
+        elif isinstance(results[0], BaseException):
+            raise results[0]
+        published = results[1]
+        retry_seconds = max(1.0, self._settings.poll_interval_seconds)
+        while published is False or isinstance(published, Exception):
+            if isinstance(published, Exception):
+                self._logger.warning(
+                    "Credential form result delivery failed; the saved outcome will be retried. "
+                    "event=gateway_credential_collection_result_retry credential_request_id=%s correlation_id=%s error=%s",
+                    request_content.credential_request_id, correlation_id, published,
+                )
+            # Keep the final broker outcome while its destination is absent.
+            # Re-reading later could lose it when the broker expires the session.
+            await asyncio.sleep(retry_seconds)
+            try:
+                published = await self.publish_result(
+                    request_content=request_content, session_payload=final_payload,
+                    correlation_id=correlation_id, conversation_id=conversation_id, session_key=session_key,
+                )
+            except Exception as exc:
+                published = exc
+            retry_seconds = min(30.0, retry_seconds * 2)
+        if isinstance(published, BaseException):
+            raise published
+        if published is True:
+            self._collections.remove_credential_collection(request_content.credential_request_id)
 
     async def publish_result(
         self,
@@ -521,7 +625,7 @@ class GatewayCredentialWorkflow:
         correlation_id: str,
         conversation_id: str | None,
         session_key: str,
-    ) -> None:
+    ) -> bool:
         """Send the waiting task the form's secret-free result."""
 
         result_payload = _mapping(session_payload.get("result"))
@@ -550,7 +654,7 @@ class GatewayCredentialWorkflow:
             error=str(result_payload.get("error") or "") or None,
             continue_task=request_content.continue_task,
         )
-        await self._publisher.publish(
+        return await self._publisher.publish(
             result,
             session=session,
             correlation_id=correlation_id,

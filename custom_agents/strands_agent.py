@@ -13,6 +13,7 @@ from custom_agents.worker_handback_runtime import handle_worker_task_handback
 from custom_agents.task_queue_notifications import QueuePressureNotifications
 from custom_agents.dead_letter_watch import DeadLetterWatchState
 from custom_agents.task_admission_runtime import handle_busy_delivery
+from custom_agents.delegated_work_runtime import send_rejection_claim
 from custom_agents import task_steering_runtime
 from runtime_hosting.blocking_io import BlockingIOLane
 from runtime_hosting.agent_execution import AgentExecutionGate
@@ -1259,6 +1260,7 @@ class UniversalAgent(BaseModel):
         default_factory=dict
     )
     _processed_task_steering_ids: set[str] = PrivateAttr(default_factory=set)
+    _consumed_task_steering_ids: Dict[str, set[str]] = PrivateAttr(default_factory=dict)
     _runtime_repair_anomaly_counts: Dict[str, int] = PrivateAttr(default_factory=dict)
     _runtime_repair_anomalies: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
     _runtime_repair_anomaly_limit: int = PrivateAttr(default=50)
@@ -2306,6 +2308,8 @@ class UniversalAgent(BaseModel):
         outgoing_content: ContentType,
     ) -> None:
         if isinstance(incoming_content, Task):
+            if isinstance(outgoing_content, ScheduledMessage):
+                return
             if isinstance(outgoing_content, Task):
                 if (
                     outgoing_content.task_type == MessageMetaType.RESPONSE
@@ -2658,8 +2662,6 @@ class UniversalAgent(BaseModel):
             task_type=MessageMetaType.RESPONSE,
             problem_statement=task_request.problem_statement,
             errors=error_list,
-            task_plan=task_request.task_plan,
-            execution_history=list(task_request.execution_history or []),
             answer=error_message,
             failure=task_request.failure,
         )
@@ -2696,6 +2698,12 @@ class UniversalAgent(BaseModel):
             repair_recorder=self._record_runtime_repair_anomaly,
         )
         publish_team_id = self._extract_team_id_from_routing_value(routing_key)
+        # Admission failures have no saved task custody. Announce the worker
+        # reporting the rejection before its result; a failed send leaves the
+        # original delivery available for retry.
+        await send_rejection_claim(
+            self, task=task_request, header=msg_header, meta=msg_meta, routing_key=routing_key,
+        )
         await self.team_comms.send_message(
             message=MessageEnvelope(
                 msg_content=error_task, msg_meta=error_meta, msg_header=header
@@ -2753,7 +2761,7 @@ class UniversalAgent(BaseModel):
                     deferred_message=None if deferred_handoff is None else DeferredMessageClaim(
                         self.id, deferred_handoff.message_id,
                     ),
-                    **schedule_claim_scope_for_agent(self),
+                    **schedule_claim_scope_for_agent(self, task_local=True),
                 )
             except RuntimeCustodyLost as lost:
                 if deferred_handoff is not None:
@@ -2950,8 +2958,6 @@ class UniversalAgent(BaseModel):
             task_type=MessageMetaType.RESPONSE,
             problem_statement=task_request.problem_statement,
             errors=error_list,
-            task_plan=task_request.task_plan,
-            execution_history=list(task_request.execution_history or []),
             answer=f"Delegated work paused: {error_message}",
         )
         paused_task.execution_history.append(
@@ -4260,11 +4266,13 @@ class UniversalAgent(BaseModel):
         if isinstance(msg_content, TaskSteering):
             target_task_id = getattr(msg_content, "target_task_id", None)
             target_correlation_id = getattr(msg_content, "target_correlation_id", None)
-            if (
-                target_task_id
-                and self.task_manager.get_task_info(target_task_id) is not None
-            ):
-                return True
+            if target_task_id:
+                # A directly addressed receiver must answer STALE when the
+                # task ended. Unaddressed fanout still belongs only to the
+                # worker holding the exact task, never a correlation sibling.
+                return bool(target_agent_id or target_agent_name) or (
+                    self.task_manager.get_task_info(target_task_id) is not None
+                )
             if (
                 target_correlation_id
                 and self.task_manager.find_task_info_by_correlation_id(
@@ -4678,7 +4686,10 @@ class UniversalAgent(BaseModel):
             if generated_content.task_type == MessageMetaType.RESPONSE and isinstance(
                 incoming_content, Task
             ):
-                if generated_content.task_id != incoming_content.task_id:
+                if (
+                    "task_id" in generated_content.model_fields_set
+                    and generated_content.task_id != incoming_content.task_id
+                ):
                     await self._record_runtime_repair_anomaly(
                         "task_response_task_id_corrected",
                         "Task response task_id did not match inbound task; runtime corrected the reply linkage.",
@@ -4692,7 +4703,8 @@ class UniversalAgent(BaseModel):
                 generated_content.task_id = incoming_content.task_id
                 if incoming_content.parent_task_id:
                     if (
-                        generated_content.parent_task_id
+                        "parent_task_id" in generated_content.model_fields_set
+                        and generated_content.parent_task_id
                         != incoming_content.parent_task_id
                     ):
                         await self._record_runtime_repair_anomaly(
@@ -4710,34 +4722,37 @@ class UniversalAgent(BaseModel):
         elif isinstance(generated_content, TaskQuery):
             if isinstance(incoming_content, Task):
                 if not generated_content.parent_task_id:
-                    await self._record_runtime_repair_anomaly(
-                        "task_query_parent_task_id_filled",
-                        "TaskQuery request omitted parent_task_id; runtime filled it from the inbound task.",
-                        related_task_id=incoming_content.task_id,
-                        details={
-                            "task_query_id": generated_content.task_query_id,
-                            "expected_parent_task_id": incoming_content.task_id,
-                            "query_type": generated_content.query_type.value,
-                        },
-                    )
+                    if "parent_task_id" in generated_content.model_fields_set:
+                        await self._record_runtime_repair_anomaly(
+                            "task_query_parent_task_id_filled",
+                            "TaskQuery request omitted parent_task_id; runtime filled it from the inbound task.",
+                            related_task_id=incoming_content.task_id,
+                            details={
+                                "task_query_id": generated_content.task_query_id,
+                                "expected_parent_task_id": incoming_content.task_id,
+                                "query_type": generated_content.query_type.value,
+                            },
+                        )
                     generated_content.parent_task_id = incoming_content.task_id
             elif isinstance(incoming_content, TaskQuery):
                 if generated_content.parent_task_id != incoming_content.parent_task_id:
-                    await self._record_runtime_repair_anomaly(
-                        "task_query_parent_task_id_corrected",
-                        "TaskQuery parent_task_id did not match the inbound query; runtime corrected the reply linkage.",
-                        related_task_id=incoming_content.parent_task_id,
-                        details={
-                            "generated_parent_task_id": generated_content.parent_task_id,
-                            "expected_parent_task_id": incoming_content.parent_task_id,
-                            "task_query_id": generated_content.task_query_id,
-                            "inbound_task_query_id": incoming_content.task_query_id,
-                            "query_type": generated_content.query_type.value,
-                        },
-                    )
+                    if "parent_task_id" in generated_content.model_fields_set:
+                        await self._record_runtime_repair_anomaly(
+                            "task_query_parent_task_id_corrected",
+                            "TaskQuery parent_task_id did not match the inbound query; runtime corrected the reply linkage.",
+                            related_task_id=incoming_content.parent_task_id,
+                            details={
+                                "generated_parent_task_id": generated_content.parent_task_id,
+                                "expected_parent_task_id": incoming_content.parent_task_id,
+                                "task_query_id": generated_content.task_query_id,
+                                "inbound_task_query_id": incoming_content.task_query_id,
+                                "query_type": generated_content.query_type.value,
+                            },
+                        )
                     generated_content.parent_task_id = incoming_content.parent_task_id
                 if (
                     generated_content.query_type == MessageMetaType.RESPONSE
+                    and "task_query_id" in generated_content.model_fields_set
                     and generated_content.task_query_id
                     != incoming_content.task_query_id
                 ):
@@ -5547,7 +5562,7 @@ class UniversalAgent(BaseModel):
                 return started
         finally:
             if refresh_state:
-                await self._refresh_self_agent_state()
+                await self._announce_execution_state()
 
     async def _apply_task_processing_result(self, *args, **kwargs):
         return await task_message_runtime._apply_task_processing_result(
@@ -6150,6 +6165,13 @@ class UniversalAgent(BaseModel):
         self, msg_content: ContentType, msg_header: MessageHeader, msg_meta: MessageMeta
     ) -> ContentType:
         async with self._execution_scope():
+            # A fresh turn must reread guidance whose previous turn ended
+            # without a durable decision, including failover in this process.
+            task_id = (
+                msg_content.task_id if isinstance(msg_content, Task)
+                else getattr(msg_content, "parent_task_id", None)
+            )
+            getattr(self, "_consumed_task_steering_ids", {}).pop(task_id, None)
             # Stop cancels this child turn, never the transport/runtime owner.
             # Keep the execution gate held until the SDK finishes unwinding.
             return await asyncio.create_task(

@@ -4209,7 +4209,7 @@ async def test_internal_website_proxies_live_agent_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    config.interactive_apps.internal_website.web_chat_enabled = True
+    _enable_web_chat(config, monkeypatch)
     monkeypatch.setenv("ACTIVITY_COLLECTOR_ADMIN_TOKEN", "admin-token")
     observed_authorization = []
 
@@ -4253,7 +4253,7 @@ async def test_internal_website_proxies_live_agent_status(
             config, gateway=_FakeGateway(), bridge=SimpleNamespace()
         )
         async with TestClient(TestServer(website.build_app())) as client:
-            response = await client.get("/api/agents/status")
+            response = await client.get("/api/agents/status", headers=await _signed_in(client))
             payload = await response.json()
 
     assert response.status == 200

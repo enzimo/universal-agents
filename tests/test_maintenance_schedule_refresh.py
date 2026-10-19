@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -226,6 +227,28 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _record_people(world)
     yield world
     forget_task_context_keys()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interval_seconds", [60, 120])
+async def test_gateway_restart_keeps_heartbeat_due_time_and_configured_cadence(world, interval_seconds):
+    application = _gateway(world.identity, world.route)
+    application._settings = replace(application._settings, heartbeat=GatewayHeartbeatScheduleSettings(
+        enabled=True, source_id="heartbeat_source", schedule_id="heartbeat_launcher", interval_seconds=60,
+    ))
+    await application.ensure_heartbeat()
+    for envelope in world.route.published:
+        await handle_scheduled_message(world.manager, envelope.msg_content)
+    before = world.manager._schedule_store.get_scheduled_message("heartbeat_launcher")
+    assert before is not None
+    world.route.published.clear()
+    application._settings = replace(application._settings, heartbeat=replace(application._settings.heartbeat, interval_seconds=interval_seconds))
+    await application.ensure_heartbeat()
+    for envelope in world.route.published:
+        await handle_scheduled_message(world.manager, envelope.msg_content)
+    after = world.manager._schedule_store.get_scheduled_message("heartbeat_launcher")
+    assert after is not None
+    assert (after.next_fire_at, after.interval_ms) == (before.next_fire_at, interval_seconds * 1000)
 
 
 def _escalation_for(world, *, task_id: str = ESCALATION_TASK) -> tuple[Any, Any]:

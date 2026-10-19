@@ -94,17 +94,13 @@ class GatewayDeferredDeliveryApplication:
         delivery_via: str,
         delivered_at: str,
     ) -> None:
-        """Publish a receipt when the delivery and manager route support it."""
+        """Queue the receipt for the lead, including while discovery is pending."""
 
         if not is_receiptable_delivery(envelope):
             return
-        manager_id = self._manager.manager_id
-        if manager_id is None:
-            self._logger.warning(
-                "Gateway skipped delivery receipt because the manager is not "
-                "currently available. event=gateway_delivery_receipt_manager_unavailable"
-            )
-            return
+        # The team route survives lead replacement and needs no live presence.
+        # JetStream retains the receipt until a lead can consume it.
+        manager_id = self._manager.settings.team_id
         receipt_envelope = build_delivery_receipt_envelope(
             envelope=envelope,
             instance_name=self._settings.instance_name,

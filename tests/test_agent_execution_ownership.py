@@ -284,7 +284,8 @@ async def test_empty_queue_probe_does_not_publish_busy_idle_presence(host):
 
 
 @pytest.mark.asyncio
-async def test_a_turn_broadcasts_busy_when_it_starts_and_idle_when_it_ends(host):
+@pytest.mark.parametrize("drained", [False, True], ids=["direct", "queued"])
+async def test_a_turn_broadcasts_busy_when_it_starts_and_idle_when_it_ends(host, drained):
     """Web Chat's activity mesh hears of work as it starts and ends.
 
     The heartbeat alone reports a change up to 20 seconds late.
@@ -298,7 +299,11 @@ async def test_a_turn_broadcasts_busy_when_it_starts_and_idle_when_it_ends(host)
     host._publish_presence_status = publish
     original = Task(task_id="original", task_type=MessageMetaType.REQUEST, problem_statement="original")
     host.provider.release.set()
-    await asyncio.wait_for(host.process_llm_interaction(original, MessageHeader(), MessageMeta()), 3)
+    if drained:
+        add_task(host, original.task_id)
+        assert await asyncio.wait_for(host._check_and_process_next_task(), 3)
+    else:
+        await asyncio.wait_for(host.process_llm_interaction(original, MessageHeader(), MessageMeta()), 3)
     assert seen == [(True, False), (False, False)]
 
 
@@ -311,6 +316,36 @@ async def test_a_failed_presence_broadcast_never_affects_the_turn(host, caplog):
         await asyncio.wait_for(host.process_llm_interaction(original, MessageHeader(), MessageMeta()), 3)
     assert host.preparations == ["original"]
     assert "event=agent_execution_presence_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_turn_reloads_guidance_after_the_prior_turn_fails(host):
+    from custom_agents.task_steering_runtime import consume_pending_proactive_guidance_message, handle_task_steering_message
+    from custom_messages.contracts.task_v1 import TaskSteering
+    from custom_messages.enums import TaskSteeringType
+
+    task = add_task(host, "guided")
+    host.mid_turn_steering = {"enabled": True}
+    host._pending_proactive_task_steering = {}
+    host._processed_task_steering_ids = set()
+    host._consumed_task_steering_ids = {}
+    await handle_task_steering_message(
+        host,
+        TaskSteering(steering_type=TaskSteeringType.PROACTIVE_GUIDANCE, target_task_id=task.task_id, guidance_text="Use the revised budget."),
+        MessageHeader(), MessageMeta(is_response_requested=False),
+    )
+    read = []
+    async def invoke(content, _header, _meta):
+        read.append(await consume_pending_proactive_guidance_message(host, content.task_id))
+        if len(read) == 1:
+            raise RuntimeError("provider failed before recording a decision")
+        return Task(task_id=content.task_id, task_type=MessageMetaType.RESPONSE)
+    host.turn_executor.process_llm_interaction = invoke
+    with pytest.raises(RuntimeError, match="before recording a decision"):
+        await host.process_llm_interaction(task, MessageHeader(), MessageMeta())
+    await host.process_llm_interaction(task, MessageHeader(), MessageMeta())
+    assert len(read) == 2
+    assert all("Use the revised budget." in guidance for guidance in read)
 
 
 @pytest.mark.asyncio

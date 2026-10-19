@@ -246,7 +246,7 @@ async def test_activity_collector_user_and_admin_views(collector_config: Gateway
         assert response.status == 202
         assert payload["inserted"] == 4
 
-        user_summary = await client.get("/api/user/team-summary", params={"token": "user-token"})
+        user_summary = await client.get("/api/user/team-summary", headers={"Authorization": "Bearer user-token"})
         user_payload = await user_summary.json()
         assert user_summary.status == 200
         assert user_payload["team"]["manager_name"] == "Manager One"
@@ -270,20 +270,20 @@ async def test_activity_collector_user_and_admin_views(collector_config: Gateway
         assert "details" in user_notice
         assert user_notice["user_visible"] is True
 
-        admin_agents = await client.get("/api/admin/agents", params={"token": "admin-token"})
+        admin_agents = await client.get("/api/admin/agents", headers={"Authorization": "Bearer admin-token"})
         admin_agents_payload = await admin_agents.json()
         assert admin_agents.status == 200
         assert {agent["agent_id"] for agent in admin_agents_payload["agents"]} == {"manager-1", "worker-1"}
 
-        admin_tasks = await client.get("/api/admin/tasks", params={"token": "admin-token"})
+        admin_tasks = await client.get("/api/admin/tasks", headers={"Authorization": "Bearer admin-token"})
         admin_tasks_payload = await admin_tasks.json()
         assert admin_tasks_payload["tasks"][0]["events"][-1]["trace_url"] == "https://otel.example/traces/trace-1234"
 
-        admin_objectives = await client.get("/api/admin/objectives", params={"token": "admin-token"})
+        admin_objectives = await client.get("/api/admin/objectives", headers={"Authorization": "Bearer admin-token"})
         admin_objectives_payload = await admin_objectives.json()
         assert admin_objectives_payload["objectives"][0]["objective_id"] == "objective_id_docs"
 
-        admin_health = await client.get("/api/admin/health", params={"token": "admin-token"})
+        admin_health = await client.get("/api/admin/health", headers={"Authorization": "Bearer admin-token"})
         admin_health_payload = await admin_health.json()
         assert admin_health_payload["repository"]["total_events"] == 4
         assert admin_health_payload["collector"]["ingested_events"] == 4

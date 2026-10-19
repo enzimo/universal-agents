@@ -20,7 +20,7 @@ const configuration = createConfiguration({ sharedState, lifecycle, requestClien
 const model_setup = createModelSetup({ model_setupState, sharedState, lifecycle, requestClient, operations: { advancedInput: (...args) => advancedInput(...args), advancedSecretInput: (...args) => advancedSecretInput(...args), advancedSelect: (...args) => advancedSelect(...args), advancedToggle: (...args) => advancedToggle(...args), composedInstanceName: (...args) => composedInstanceName(...args), composedTeamId: (...args) => composedTeamId(...args), createInfoButton: (...args) => createInfoButton(...args), iconMarkup: (...args) => iconMarkup(...args), optionalBooleanSelect: (...args) => finalization.optionalBooleanSelect(...args), providerTestHttpErrorMessage: (...args) => finalization.providerTestHttpErrorMessage(...args), renderAdvancedGrid: (...args) => renderAdvancedGrid(...args), renderAdvancedSection: (...args) => renderAdvancedSection(...args), renderCurrentPage: (...args) => renderCurrentPage(...args), renderRevealableControl: (...args) => renderRevealableControl(...args), responseErrorMessage: (...args) => finalization.responseErrorMessage(...args) } });
 const account_sharing = createAccountSharing({ sharedState, lifecycle, operations: { renderCurrentPage: (...args) => renderCurrentPage(...args) } });
 const team_import = createTeamImport({ sharedState, lifecycle, requestClient, operations: { navigate: url => window.location.assign(url), renderCurrentPage: (...args) => renderCurrentPage(...args), renderRevealableControl: (...args) => renderRevealableControl(...args) } });
-const finalization = createFinalization({ finalizationState, sharedState, lifecycle, requestClient, operations: { accountSharingPayload: (...args) => account_sharing.payload(...args), accountSharingSummary: (...args) => account_sharing.summary(...args), agentDisplayName: (...args) => agentDisplayName(...args), channelSelectPayloadValue: (...args) => channelSelectPayloadValue(...args), clamp: (...args) => appearance.clamp(...args), commaSeparatedFieldValues: (...args) => commaSeparatedFieldValues(...args), communicationValidationText: (...args) => communicationValidationText(...args), composedInstanceName: (...args) => composedInstanceName(...args), composedTeamId: (...args) => composedTeamId(...args), currentAppearanceSettings: (...args) => appearance.currentAppearanceSettings(...args), currentXAIOAuthSettings: (...args) => model_setup.currentXAIOAuthSettings(...args), getChannelFieldValue: (...args) => getChannelFieldValue(...args), getChannelToggleValue: (...args) => getChannelToggleValue(...args), iconMarkup: (...args) => iconMarkup(...args), isTeamArchitect: (...args) => isTeamArchitect(...args), renderCurrentPage: (...args) => renderCurrentPage(...args), runtimeTokenForSelectedProvider: (...args) => model_setup.runtimeTokenForSelectedProvider(...args), setPage: (...args) => setPage(...args), teamSkillRepoUrls: (...args) => teamSkillRepoUrls(...args), validateCommunicationSettings: (...args) => validateCommunicationSettings(...args) } });
+const finalization = createFinalization({ finalizationState, sharedState, lifecycle, requestClient, operations: { webChatUrl: () => webChatUrl(), accountSharingPayload: (...args) => account_sharing.payload(...args), accountSharingSummary: (...args) => account_sharing.summary(...args), agentDisplayName: (...args) => agentDisplayName(...args), channelSelectPayloadValue: (...args) => channelSelectPayloadValue(...args), clamp: (...args) => appearance.clamp(...args), commaSeparatedFieldValues: (...args) => commaSeparatedFieldValues(...args), communicationValidationText: (...args) => communicationValidationText(...args), composedInstanceName: (...args) => composedInstanceName(...args), composedTeamId: (...args) => composedTeamId(...args), currentAppearanceSettings: (...args) => appearance.currentAppearanceSettings(...args), currentXAIOAuthSettings: (...args) => model_setup.currentXAIOAuthSettings(...args), getChannelFieldValue: (...args) => getChannelFieldValue(...args), getChannelToggleValue: (...args) => getChannelToggleValue(...args), iconMarkup: (...args) => iconMarkup(...args), isTeamArchitect: (...args) => isTeamArchitect(...args), renderCurrentPage: (...args) => renderCurrentPage(...args), runtimeTokenForSelectedProvider: (...args) => model_setup.runtimeTokenForSelectedProvider(...args), setPage: (...args) => setPage(...args), teamSkillRepoUrls: (...args) => teamSkillRepoUrls(...args), validateCommunicationSettings: (...args) => validateCommunicationSettings(...args) } });
 window.addEventListener("pagehide", () => lifecycle.dispose(), { once: true });
 
 "use strict";
@@ -218,14 +218,14 @@ sharedState.pages = [
       label: "Launch",
       kicker: "Container Restart",
       title: "We're Launching Your Team!",
-      copy: "We're on our way to launch your team. After the system restarts, this page will refresh with your team status.",
+      copy: "We're on our way to launch your team. After the system restarts, open Status to sign in and check your team.",
       kind: "standby",
     },
     {
       id: "status",
       label: "Status",
       kicker: "Team Online",
-      title: "The Team Is Online and Ready to Go!",
+      title: "Your Team Has Started",
       copy: "The team is up and running.",
       kind: "status",
     },
@@ -647,13 +647,6 @@ sharedState.state = {
     teamSkillsValidationStatus: "",
     teamSkillsValidationKind: "pending",
     teamSkillsValidationInFlight: false,
-    expandedStatusAgent: "",
-    liveAgents: [],
-    liveAgentStatus: "pending",
-    liveAgentStatusMessage: "Waiting for live agent status from Activity Collector...",
-    liveAgentStatusInFlight: false,
-    liveAgentStatusRefreshTimer: 0,
-    liveAgentStatusLastFetchAt: 0,
     configurationFinalized: false,
     configurationFinalizing: false,
     configurationStatus: "",
@@ -1829,9 +1822,6 @@ function appendLinkedLabel(label, labelText, linkText, href) {
 function iconMarkup(name) {
     if (name === "copy") {
       return '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="10" height="10" rx="2"></rect><path d="M5 15V7a2 2 0 0 1 2-2h8"></path></svg>';
-    }
-    if (name === "party") {
-      return '<svg class="status-party-icon" width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5.8 11.3 3 21l9.7-2.8"></path><path d="M4.5 19.5 11.2 13"></path><path d="m8.5 10.5 5 5"></path><path d="M14 4.5c.9 1.1.8 2.4-.3 3.6"></path><path d="M18.6 7.2c-1.4.2-2.3 1.1-2.6 2.6"></path><path d="M19.5 3.5 20 3"></path><path d="M21 11h.5"></path><path d="M12.5 2v.5"></path></svg>';
     }
     if (name === "send") {
       return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-7-7 14-2-5-5-2Z"></path><path d="m12 14 7-9"></path></svg>';
@@ -3444,9 +3434,6 @@ function renderCurrentPage() {
     if (page.id !== "runtime") {
       model_setup.stopXAIDeviceLoginTimers();
     }
-    if (page.id !== "status") {
-      finalization.stopLiveAgentStatusRefresh();
-    }
     shellState.pageKicker.textContent = page.kicker;
     shellState.pageTitle.textContent = page.title;
     if (page.id === "runtime") {
@@ -3466,7 +3453,7 @@ function renderCurrentPage() {
     shellState.progressLabel.parentElement.hidden = page.id === "status";
     sharedState.nextButton.hidden = page.id === "standby";
     if (page.id === "status") {
-      sharedState.nextButton.textContent = "Web Chat";
+      sharedState.nextButton.textContent = "Open Status";
       sharedState.nextButton.className = "button primary web-chat-button";
     } else if (page.id === "review") {
       sharedState.nextButton.textContent = "Launch!";
@@ -3527,7 +3514,7 @@ lifecycle.listen(shellState.backButton, "click", function () {
 lifecycle.listen(sharedState.nextButton, "click", function () {
     var currentPage = sharedState.pages[sharedState.state.pageIndex];
     if (currentPage.id === "status") {
-      window.location.href = webChatUrl();
+      finalization.openStatus();
       return;
     }
     if (currentPage.id === "runtime" && !model_setup.runtimeReadyToProceed()) {

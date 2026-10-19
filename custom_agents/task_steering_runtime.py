@@ -7,7 +7,7 @@ import asyncio
 from functools import partial
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from strands.hooks import BeforeToolCallEvent, HookRegistry
 
@@ -52,8 +52,11 @@ from custom_messages.enums import (
     TaskSteeringType,
 )
 from id_generation import new_id
+from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 
 logger = logging.getLogger(__name__)
+GUIDANCE_ACCEPTED_EVENT = "task_steering_proactive_guidance_accepted"
+GUIDANCE_APPLIED_EVENT = "task_steering_proactive_guidance_applied"
 
 
 @dataclass
@@ -149,6 +152,7 @@ def _discard_task_steering_memory(
     proactive = getattr(agent, "_pending_proactive_task_steering", {}).pop(
         task_id, None
     )
+    getattr(agent, "_consumed_task_steering_ids", {}).pop(task_id, None)
     if session is not None and session.strands_agent is getattr(
         agent, "_strands_agent", None
     ):
@@ -293,8 +297,9 @@ async def _find_target_task_info(agent: Any, steering: TaskSteering) -> Any:
         task_info = await agent.task_manager.operations_runtime.run(
             agent.task_manager.get_task_info, steering.target_task_id
         )
-        if task_info is not None:
-            return task_info
+        # An explicit subtask id is authoritative. Siblings share correlation
+        # ids, so falling back would apply guidance to the wrong task.
+        return task_info
     return await agent.task_manager.operations_runtime.run(
         agent.task_manager.find_task_info_by_correlation_id,
         steering.target_correlation_id,
@@ -354,27 +359,30 @@ async def _send_steering_status_response(
 
 async def _record_guidance_history(
     agent: Any, task_id: str, steering: TaskSteering, *, applied: bool = False
-) -> None:
+) -> bool:
     text = steering.guidance_text or ""
     summary = (
         "Mid-turn proactive steering applied: "
         if applied
         else "Mid-turn proactive steering accepted: "
     )
-    await agent.task_manager.operations_runtime.run(
+    entry = await agent.task_manager.operations_runtime.run(
         agent.task_manager.append_history_entry,
         task_id,
         summary + text,
         entry_type=TaskHistoryType.TASK_EVENT,
         importance=TaskHistoryImportance.HIGH,
         details={
-            "event": "task_steering_proactive_guidance_applied"
+            "event": GUIDANCE_APPLIED_EVENT
             if applied
-            else "task_steering_proactive_guidance_accepted",
+            else GUIDANCE_ACCEPTED_EVENT,
             "steering_id": steering.steering_id,
             "conversation_id": steering.conversation_id,
+            "dedupe_key": steering.idempotency_key or steering.steering_id,
+            **({"steering": steering.model_dump(mode="json")} if not applied else {}),
         },
     )
+    return entry is not None
 
 
 async def _forward_proactive_guidance_to_pending_subtasks(
@@ -590,7 +598,8 @@ async def handle_task_steering_message(
 
     seen = agent._processed_task_steering_ids
     dedupe_key = steering.idempotency_key or steering.steering_id
-    if dedupe_key in seen:
+    _saved_guidance, saved_keys = _saved_proactive_guidance(task_info)
+    if dedupe_key in seen or dedupe_key in saved_keys:
         await _send_steering_status_response(
             agent,
             steering,
@@ -600,8 +609,6 @@ async def handle_task_steering_message(
             reason="Duplicate steering event ignored.",
         )
         return
-    seen.add(dedupe_key)
-
     if steering.steering_type == TaskSteeringType.PROACTIVE_GUIDANCE:
         if not (steering.guidance_text or "").strip():
             await _send_steering_status_response(
@@ -613,8 +620,18 @@ async def handle_task_steering_message(
                 reason="Proactive guidance must include guidance_text.",
             )
             return
+        # Acknowledge only after the complete guidance is in the task's durable
+        # history. Restart reconstructs pending guidance and deduplication there.
+        if not await _record_guidance_history(agent, task_id, steering, applied=False):
+            await _send_steering_status_response(
+                agent, steering, msg_header, msg_meta,
+                status=TaskSteeringStatus.STALE,
+                reason="This agent no longer holds the target task.",
+                status_code=TaskSteeringStatusCode.TARGET_TASK_NOT_FOUND,
+            )
+            return
+        seen.add(dedupe_key)
         agent._pending_proactive_task_steering.setdefault(task_id, []).append(steering)
-        await _record_guidance_history(agent, task_id, steering, applied=False)
         forwarded_count = await _forward_proactive_guidance_to_pending_subtasks(
             agent,
             task_id,
@@ -637,6 +654,7 @@ async def handle_task_steering_message(
         return
 
     if steering.steering_type == TaskSteeringType.INTERRUPT_RESPONSE:
+        seen.add(dedupe_key)
         response_text = _format_interrupt_responses(steering)
         session = agent._interrupted_turn_sessions.get(task_id)
         if session is not None:
@@ -1105,22 +1123,79 @@ async def send_interrupt_request_for_result(
     return steering
 
 
-def pop_pending_proactive_guidance(
-    agent: Any, task_id: Optional[str]
-) -> List[TaskSteering]:
-    if not task_id:
-        return []
-    return list(agent._pending_proactive_task_steering.pop(task_id, []))
+def _saved_proactive_guidance(
+    task_info: Any, batch_exists: Callable[[str], bool] = lambda _batch_id: False,
+) -> tuple[dict[str, TaskSteering], set[str]]:
+    """Keep guidance until the turn that read it records a durable decision.
+
+    A checkpoint records that a live model turn read the guidance. It cannot
+    discard it across restart because that turn's model input is in memory.
+    A prepared action batch is the existing durable decision boundary.
+    """
+    pending: dict[str, TaskSteering] = {}
+    seen: set[str] = set()
+    read_by_turn: set[str] = set()
+    for entry in getattr(getattr(task_info, "task", None), "execution_history", []) or []:
+        details = entry.details or {}
+        event = details.get("event")
+        if event == "turn_action_batch_prepared" and batch_exists(details.get("batch_id", "")):
+            for key in read_by_turn:
+                pending.pop(key, None)
+            read_by_turn.clear()
+            continue
+        if event not in {GUIDANCE_ACCEPTED_EVENT, GUIDANCE_APPLIED_EVENT}:
+            continue
+        key = details.get("dedupe_key") or details.get("steering_id")
+        if not key:
+            continue
+        seen.add(key)
+        if event == GUIDANCE_APPLIED_EVENT:
+            read_by_turn.add(key)
+        elif "steering" in details:
+            pending[key] = TaskSteering.model_validate(details["steering"])
+    return pending, seen
+
+
+def _pending_guidance_state(manager: Any, task_id: str) -> dict[str, TaskSteering]:
+    pending, _seen = _saved_proactive_guidance(
+        manager.get_task_info(task_id),
+        lambda batch_id: manager.get_turn_action_batch(batch_id) is not None,
+    )
+    return pending
 
 
 async def consume_pending_proactive_guidance_message(
     agent: Any, task_id: Optional[str]
 ) -> str:
     """Return queued proactive guidance as a prompt-ready block and mark it applied."""
-    guidance = pop_pending_proactive_guidance(agent, task_id)
+    if not task_id:
+        return ""
+    saved = await agent.task_manager.operations_runtime.run(
+        partial(_pending_guidance_state, agent.task_manager), task_id
+    )
+    if not hasattr(agent, "_consumed_task_steering_ids"):
+        agent._consumed_task_steering_ids = {}
+    consumed = agent._consumed_task_steering_ids.setdefault(task_id, set())
+    guidance_by_key = {
+        item.idempotency_key or item.steering_id: item
+        for item in agent._pending_proactive_task_steering.get(task_id, [])
+    }
+    guidance_by_key.update(saved)
+    guidance_by_key = {key: item for key, item in guidance_by_key.items() if key not in consumed}
+    guidance = list(guidance_by_key.values())
     if not guidance:
         return ""
-    return await _guidance_block(agent, task_id, guidance)
+    text = await _guidance_block(agent, task_id, guidance)
+    consumed.update(guidance_by_key)
+    remaining = [
+        item for item in agent._pending_proactive_task_steering.get(task_id, [])
+        if (item.idempotency_key or item.steering_id) not in guidance_by_key
+    ]
+    if remaining:
+        agent._pending_proactive_task_steering[task_id] = remaining
+    else:
+        agent._pending_proactive_task_steering.pop(task_id, None)
+    return text
 
 
 class RuntimeSteeringPlugin:
@@ -1159,7 +1234,8 @@ async def _guidance_block(
     lines = []
     for item in guidance:
         if task_id:
-            await _record_guidance_history(agent, task_id, item, applied=True)
+            if not await _record_guidance_history(agent, task_id, item, applied=True):
+                raise RuntimeCustodyLost(agent.id, CustodyStore.TASK_RUNTIME)
         lines.append(f"- {item.guidance_text}")
         if item.replied_message is not None:
             lines.extend(

@@ -1641,10 +1641,11 @@ its history. Steps with linked requests cannot use this correction.
   create it, and the `<NAME>_FILE` alternative, never a value. **Launch!**
   stays disabled while the list is not empty, because the runtime cannot
   start without them; adding the Docker secrets restarts the container.
-- Status removes progress framing and focuses on live agent state plus Web Chat
-  entry. Keep completion messaging terse, such as `The team is up and
-  running.`, rather than presenting a documentation upsell on the status screen.
-- The Status `Web Chat` action uses the live browser-facing website origin and
+- Onboarding completion removes progress framing and offers **Open Status**.
+  It explains that the person must sign in to see team status, and does not
+  poll private agent data. The action opens the existing Web Chat Status view,
+  which handles sign-in and enrollment before loading diagnostic data.
+- The completion **Open Status** action uses the live browser-facing website origin and
   public port supplied by onboarding bootstrap. It must not substitute the
   container listener/bind port when those ports differ.
 - The post-launch reload/standby page should show a compact animated loading
