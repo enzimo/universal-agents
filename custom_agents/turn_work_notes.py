@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable, Mapping, Optional
 
+from custom_agents.structured_llm_messages import is_worker_result_escalation
 from custom_messages.contracts.credentials_v1 import SecureCredentialCollectionRequest
 from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskQuery
 from custom_messages.enums import MessageMetaType
@@ -157,10 +158,12 @@ def action_starts_wait(action: Any) -> bool:
 
     A delegation (and a manager escalation, which is a delegation to the team
     lead), a question to the requester, a credential form or signup request.
+    A worker's report (``worker_result``) gets no reply, so it does not wait
+    (``custom_agents.worker_result_reports``).
     """
 
     if getattr(action, "action_type", None) == "delegate_task":
-        return True
+        return not is_worker_result_escalation(action)
     content = _action_content(action)
     if isinstance(content, TaskQuery):
         return content.query_type == MessageMetaType.REQUEST
@@ -220,7 +223,9 @@ def _describe_sent(action: Any) -> Optional[str]:
 def _describe_delegation(action: Any) -> str:
     escalation = getattr(action, "manager_escalation", None)
     target = getattr(action, "target_agent_name", None) or getattr(action, "target_named_agent_type", None)
-    if escalation is not None:
+    if is_worker_result_escalation(action):
+        kind = f"report (worker_result, no reply expected) to {target}"
+    elif escalation is not None:
         kind = f"manager escalation ({escalation.escalation_type}) to {target}"
     else:
         kind = f"delegated task to {target}"

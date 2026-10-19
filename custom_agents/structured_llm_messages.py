@@ -34,10 +34,27 @@ from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 SCHEDULE_REQUIRES_CONTINUATION = (
     "schedule_message must be followed by a task_response or an action that waits for a result."
 )
+WORKER_RESULT_REQUIRES_RESPONSE = (
+    "A manager_escalation with escalation_type=worker_result is a report TeamArchitect does not "
+    "answer: end the same action batch with your own task_response (suppress_outbound_dispatch=true "
+    "for a scheduled run). To ask TeamArchitect for a decision or help, use needs_user_input or "
+    "needs_specialist_support instead."
+)
+
+
+def is_worker_result_escalation(action: Any) -> bool:
+    """A worker's report to TeamArchitect (custom_agents.worker_result_reports)."""
+
+    escalation = getattr(action, "escalation", None) or getattr(action, "manager_escalation", None)
+    return getattr(escalation, "escalation_type", None) == "worker_result"
 
 
 def _validate_action_batch_end(actions: List[Any]) -> None:
-    """A saved schedule is a side effect, not an answer to the accepted task."""
+    """A saved schedule or a report is a side effect, not an answer to the accepted task."""
+    if any(is_worker_result_escalation(action) for action in actions) and (
+        actions[-1].action_type != "task_response"
+    ):
+        raise ValueError(WORKER_RESULT_REQUIRES_RESPONSE)
     if not any(action.action_type == "schedule_message" for action in actions):
         return
     continuations = {
@@ -153,11 +170,14 @@ Choose exactly the action that matches the turn:
   `query_type="response"` and put the answer in `actions[].task_query.message`.
 - For delegated work, use `action_type="delegate_task"` with
   `actions[].task.problem_statement` and the exact specialist target on the action.
-- If you are a specialist or worker and need user input, another specialist, or
-  manager handling for a worker-origin scheduled result, use
-  `action_type="manager_escalation"` with a task for TeamArchitect and an
+- If you are a specialist or worker and need user input or another specialist,
+  use `action_type="manager_escalation"` with a task for TeamArchitect and an
   `escalation` payload. Then wait for TeamArchitect's reply instead of
   contacting the user or another specialist directly.
+- To hand TeamArchitect a worker-origin result (for example what a scheduled
+  run changed), use `manager_escalation` with
+  `escalation.escalation_type="worker_result"` and end the same batch with your
+  own `task_response`. TeamArchitect does not answer a report; do not wait.
 - To create a schedule, use `action_type="schedule_message"` with
   `actions[].scheduled_message`, followed by `task_response` to confirm it,
   or an action that waits for a result. A schedule cannot finish a task turn.
@@ -674,7 +694,8 @@ class ModelManagerEscalationAction(BaseModel):
         return DelegateTaskAction(
             task=self.task.to_structured_task_payload(),
             target_named_agent_type=TEAM_ARCHITECT_AGENT_TYPE,
-            is_response_requested=True,
+            # A report gets no reply (custom_agents.worker_result_reports).
+            is_response_requested=not is_worker_result_escalation(self),
             requester_type=RequesterType.AGENT_REQUESTER,
             manager_escalation=self.escalation,
         )

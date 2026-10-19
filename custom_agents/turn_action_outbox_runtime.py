@@ -19,6 +19,8 @@ from custom_agents.delegated_work_runtime import (
 )
 from custom_agents.pending_work_runtime import wake_pending_work_after
 from custom_agents.task_runtime_state import TurnStartNotes
+from custom_agents.task_records import TaskInfo
+from custom_agents.worker_result_reports import is_worker_result_report, prepare_worker_result_report
 from custom_agents.conversation_delivery_states import (
     DELIVERY_STATE_NOTIFICATION_QUEUED,
     DELIVERY_STATE_SUPPRESSED,
@@ -125,6 +127,27 @@ def _external_wait_barrier_reason(content: ContentType) -> str | None:
             "are blocked until signup automation or manual fallback returns a result."
         )
     return None
+
+
+def _is_report_from_worker(self: Any, comms_message: CommsMessage, incoming_content: ContentType) -> bool:
+    """A worker's ``worker_result`` escalation for its own task (``worker_result_reports``)."""
+
+    return (
+        getattr(self, "named_agent_type", None) != TEAM_ARCHITECT_AGENT_TYPE
+        and isinstance(incoming_content, Task)
+        and incoming_content.task_type == MessageMetaType.REQUEST
+        and is_worker_result_report(comms_message.msg_meta)
+    )
+
+
+async def _incoming_task_info(self: Any, incoming_content: ContentType) -> TaskInfo:
+    task_id = getattr(incoming_content, "task_id", None)
+    task_info: Optional[TaskInfo] = await self.task_manager.operations_runtime.run(
+        self.task_manager.get_task_info, task_id
+    )
+    if task_info is None:
+        raise RuntimeError(f"Cannot send a report for task {task_id}: its local task record is missing.")
+    return task_info
 
 
 def _validate_manager_mediated_worker_delegation(self, action: TurnAction) -> None:
@@ -1317,6 +1340,16 @@ async def _execute_turn_action_record(
     if isinstance(content, Task):
         if suppress_outbound_dispatch and post_activation_guard_content is not None:
             pass
+        elif content.task_type == MessageMetaType.REQUEST and _is_report_from_worker(
+            self, comms_message, incoming_content
+        ):
+            content, header, meta = await prepare_worker_result_report(
+                self,
+                comms_message=comms_message,
+                parent_task_info=await _incoming_task_info(self, incoming_content),
+                header=header,
+                record_id=record_id,
+            )
         elif content.task_type == MessageMetaType.REQUEST:
             existing_delegated_task_id = delegated_side_effects.get("delegated_task_id")
             if existing_delegated_task_id:

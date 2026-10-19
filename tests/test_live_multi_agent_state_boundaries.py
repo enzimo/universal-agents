@@ -1332,6 +1332,144 @@ async def test_live_resumed_worker_turn_continues_after_the_lead_answers_its_esc
                 await connection.close()
 
 
+async def test_live_worker_report_finishes_the_workers_task_without_waiting_for_the_lead() -> None:
+    """A worker_result report is its own task for the lead; the worker finishes in the same turn.
+
+    Before 2026-10-19 the report was a subtask: the worker waited for the
+    lead's acknowledgment, its answer was held back, and it took another turn.
+    """
+
+    team_id = new_id("team_report")
+    manager_id = new_id("manager")
+    worker_id = new_id("internal")
+    worker_task_id = new_id("worker_schedule")
+    manager_route = f"{team_id}_{TEAM_ARCHITECT_AGENT_TYPE}"
+    worker_route = f"{team_id}_InternalImprovementAgent"
+    report_text = "AUDIT_REPORT: linked the home page to five pages."
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        db_path = tmp_path / "worker-report.db"
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+
+        manager_llm = FakeStrandsAgent(_task_response("LEAD_NOTE: told the owner about the audit."))
+        worker_llm = FakeStrandsAgent(
+            StructuredAgentTurnDecision(
+                actions=[
+                    DelegateTaskAction(
+                        task=StructuredTaskPayload(task_type=MessageMetaType.REQUEST, problem_statement=report_text),
+                        target_named_agent_type=TEAM_ARCHITECT_AGENT_TYPE,
+                        requester_type=RequesterType.AGENT_REQUESTER,
+                        is_response_requested=False,
+                        manager_escalation=ManagerEscalationContext(escalation_type="worker_result"),
+                    ),
+                    TaskResponseAction(
+                        task=StructuredTaskPayload(task_type=MessageMetaType.RESPONSE, answer="WORKER_FINAL: audit done.")
+                    ),
+                ]
+            )
+        )
+
+        with (
+            patch("custom_agents.strands_agent.Agent", side_effect=[manager_llm, worker_llm]),
+            patch("custom_agents.strands_agent.UniversalAgent._configure_model", return_value=MagicMock()),
+        ):
+            manager = _agent(
+                agent_id=manager_id,
+                name="manager",
+                team_id=team_id,
+                named_agent_type=TEAM_ARCHITECT_AGENT_TYPE,
+                db_path=db_path,
+                workspace_dir=workspace_dir,
+                is_lead=True,
+            )
+            manager.named_agent_type_queue_map.update({"InternalImprovementAgent": worker_route})
+            worker = _agent(
+                agent_id=worker_id,
+                name="internal",
+                team_id=team_id,
+                named_agent_type="InternalImprovementAgent",
+                db_path=db_path,
+                workspace_dir=workspace_dir,
+            )
+            worker.named_agent_type_queue_map.update({TEAM_ARCHITECT_AGENT_TYPE: manager_route})
+            manager_received: list[MessageEnvelope] = []
+            worker_received: list[MessageEnvelope] = []
+            for agent, received in ((manager, manager_received), (worker, worker_received)):
+                original_delivery = agent.on_nats_delivery
+
+                async def recording_delivery(delivery, _original=original_delivery, _received=received) -> None:
+                    _received.append(delivery.envelope)
+                    await _original(delivery)
+
+                object.__setattr__(agent, "on_nats_delivery", recording_delivery)
+
+            agent_tasks: list[tuple[UniversalAgent, asyncio.Task]] = []
+            connection = await _connect_nats(team_id)
+            try:
+                channel = await connection.channel()
+                result_queue = await channel.declare_queue(new_id("usr_report"), durable=False, auto_delete=True)
+                for agent in (manager, worker):
+                    agent_tasks.append((agent, await _start_agent(agent)))
+
+                await _publish_envelope(
+                    channel,
+                    worker_route,
+                    MessageEnvelope(
+                        msg_content=Task(
+                            task_id=worker_task_id,
+                            task_type=MessageMetaType.REQUEST,
+                            problem_statement="Scheduled worker task: audit the knowledge base.",
+                        ),
+                        msg_header=MessageHeader(
+                            from_agent_id="live-test-scheduler",
+                            to_routing_path=worker_route,
+                            response_routing_key=result_queue.name,
+                        ),
+                        msg_meta=MessageMeta(
+                            from_agent_name="live-test-scheduler",
+                            requester_type=RequesterType.TIMER_REQUESTER,
+                            is_response_requested=True,
+                            msg_correlation_id=f"corr_{worker_task_id}",
+                            conversation_id=f"conversation_{worker_task_id}",
+                        ),
+                    ),
+                )
+
+                final_envelope = await _wait_for_response(result_queue, timeout=40)
+                assert final_envelope.msg_content.answer == "WORKER_FINAL: audit done."
+                await _wait_for(
+                    lambda: len(manager_llm.invocations) == 1
+                    and _archive_row(worker.task_manager, worker_task_id, worker_id) is not None,
+                    timeout=30,
+                )
+                report = next(
+                    envelope
+                    for envelope in manager_received
+                    if isinstance(envelope.msg_content, Task) and envelope.msg_content.problem_statement == report_text
+                )
+                assert report.msg_content.parent_task_id is None
+                assert report.msg_meta.is_response_requested is False
+                assert report.msg_meta.manager_escalation.source_task_id == worker_task_id
+                assert report_text in manager_llm.invocations[0]
+                await _wait_for(
+                    lambda: _archive_row(manager.task_manager, report.msg_content.task_id, manager_id) is not None,
+                    timeout=20,
+                )
+                # One worker turn, and the lead's answer never went back to it.
+                await asyncio.sleep(1.0)
+                assert len(worker_llm.invocations) == 1
+                assert not any(
+                    isinstance(envelope.msg_content, Task)
+                    and envelope.msg_content.task_id == report.msg_content.task_id
+                    for envelope in worker_received
+                )
+            finally:
+                await _stop_agents(agent_tasks)
+                await connection.close()
+
+
 def _register_manager_delegation(
     manager: UniversalAgent,
     *,

@@ -87,7 +87,7 @@ def _tool_messages() -> list[dict]:
     ]
 
 
-def _escalation(escalation_type: str = "worker_result") -> DelegateTaskAction:
+def _escalation(escalation_type: str = "needs_user_input") -> DelegateTaskAction:
     return DelegateTaskAction(
         task=StructuredTaskPayload(task_type=MessageMetaType.REQUEST, problem_statement=FINDINGS),
         manager_escalation=ManagerEscalationContext(escalation_type=escalation_type),
@@ -129,6 +129,9 @@ def test_only_turns_that_wait_or_do_not_answer_leave_the_task_open():
     assert decision_starts_wait(ask) and leaves_task_open(ask)
     assert not decision_starts_wait(answer_only) and not leaves_task_open(answer_only)
     assert not decision_starts_wait(noop) and leaves_task_open(noop)
+    # A report gets no reply: the turn that sends it and answers finishes its task.
+    report_and_answer = StructuredAgentTurnDecision(actions=[_escalation("worker_result"), _response()])
+    assert not decision_starts_wait(report_and_answer) and not leaves_task_open(report_and_answer)
 
 
 def test_note_counts_tool_calls_past_its_bound():
@@ -227,7 +230,7 @@ def test_resumed_turn_after_an_answered_escalation_sees_the_work_already_done(tm
     assert CONTINUATION_NOTE in resumed
     assert "called `knowledge_write` (success)" in resumed
     assert "called `knowledge_write` (error)" in resumed
-    assert "manager escalation (worker_result) to TeamArchitect: " + FINDINGS in resumed
+    assert "manager escalation (needs_user_input) to TeamArchitect: " + FINDINGS in resumed
     assert CONTINUING_REQUEST_LABEL + "\n" + AUDIT in resumed
     assert "Current Request:\n" not in resumed
     # The note survives a reload of the saved task.
@@ -273,7 +276,8 @@ def _turn(task_manager: TaskManager) -> _TurnState:
 @pytest.mark.parametrize(
     ("decision", "ended_by", "saved"),
     [
-        (StructuredAgentTurnDecision(actions=[_escalation("needs_user_input")]), ENDED_BY_WAIT, True),
+        (StructuredAgentTurnDecision(actions=[_escalation()]), ENDED_BY_WAIT, True),
+        (StructuredAgentTurnDecision(actions=[_escalation("worker_result"), _response()]), None, False),
         (StructuredAgentTurnDecision(actions=[NoOpAction()]), ENDED_BY_OPEN, True),
         (StructuredAgentTurnDecision(actions=[_response()]), None, False),
         (None, ENDED_BY_TOOL_LIMIT, True),
