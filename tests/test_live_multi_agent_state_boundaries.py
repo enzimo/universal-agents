@@ -1164,6 +1164,13 @@ async def test_live_worker_manager_escalation_round_trips_through_team_architect
                         and len(worker_llm.invocations) == 2
                         and _archive_row(worker.task_manager, worker_task_id, worker_id)
                         is not None
+                        # Guidance can reach the worker before the manager
+                        # commits its own completed escalation task.
+                        and _archive_row(
+                            manager.task_manager,
+                            escalation_envelope.msg_content.task_id,
+                            manager_id,
+                        ) is not None
                     ),
                     timeout=20,
                 )
