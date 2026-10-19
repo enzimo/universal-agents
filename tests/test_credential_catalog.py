@@ -845,7 +845,8 @@ async def test_credential_submission_accepted_before_expiry_cannot_be_expired(
     expected_status: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    operation_started = Event()
+    operation_started = asyncio.Event()
+    loop = asyncio.get_running_loop()
     release_operation = Event()
 
     def fake_collect(request_payload, submitted_fields, *, context, scope):
@@ -854,8 +855,9 @@ async def test_credential_submission_accepted_before_expiry_cannot_be_expired(
             "username": "smith-user",
             "password": "USER-SUBMITTED-SECRET",
         }
-        operation_started.set()
-        assert release_operation.wait(timeout=5)
+        loop.call_soon_threadsafe(operation_started.set)
+        # Only the test releases this worker, after reading its pending status.
+        release_operation.wait()
         return ToolResult(
             status="success",
             content={
@@ -875,7 +877,7 @@ async def test_credential_submission_accepted_before_expiry_cannot_be_expired(
     if flow is not None:
         request_payload["flow"] = flow
 
-    async with TestClient(TestServer(service.build_app())) as client:
+    async with asyncio.timeout(60), TestClient(TestServer(service.build_app())) as client:
         create = await client.post(
             "/v1/credential-collection/sessions",
             headers=gateway_headers(),
@@ -896,7 +898,7 @@ async def test_credential_submission_accepted_before_expiry_cannot_be_expired(
             )
         )
         try:
-            assert await asyncio.to_thread(operation_started.wait, 2)
+            await operation_started.wait()
             service._credential_collection_sessions[session_id].expires_at = (
                 datetime.now(timezone.utc) - timedelta(seconds=1)
             )
@@ -1068,12 +1070,13 @@ async def test_credential_deletion_session_requires_confirmation_before_delete(
 async def test_credential_deletion_accepted_before_expiry_cannot_be_expired(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    operation_started = Event()
+    operation_started = asyncio.Event()
+    loop = asyncio.get_running_loop()
     release_operation = Event()
 
     def fake_delete(request_payload, *, context, scope):
-        operation_started.set()
-        assert release_operation.wait(timeout=5)
+        loop.call_soon_threadsafe(operation_started.set)
+        release_operation.wait()
         return ToolResult(
             status="success",
             content={
@@ -1084,7 +1087,7 @@ async def test_credential_deletion_accepted_before_expiry_cannot_be_expired(
 
     monkeypatch.setattr("secure_tool_broker.service.delete_credential", fake_delete)
     service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=open_gate())
-    async with TestClient(TestServer(service.build_app())) as client:
+    async with asyncio.timeout(60), TestClient(TestServer(service.build_app())) as client:
         create = await client.post(
             "/v1/credential-collection/sessions",
             headers=gateway_headers(),
@@ -1107,7 +1110,7 @@ async def test_credential_deletion_accepted_before_expiry_cannot_be_expired(
             client.post(form_path, data={"confirm_delete": "yes"})
         )
         try:
-            assert await asyncio.to_thread(operation_started.wait, 2)
+            await operation_started.wait()
             service._credential_collection_sessions[session_id].expires_at = (
                 datetime.now(timezone.utc) - timedelta(seconds=1)
             )
@@ -2138,7 +2141,8 @@ def test_manual_signup_form_rejects_unsafe_signup_urls(signup_url: str) -> None:
 
 @pytest.mark.asyncio
 async def test_cancelled_form_request_keeps_claim_until_worker_exits() -> None:
-    operation_started = Event()
+    operation_started = asyncio.Event()
+    loop = asyncio.get_running_loop()
     release_operation = Event()
     session = CredentialCollectionSession(
         request_payload={},
@@ -2149,23 +2153,25 @@ async def test_cancelled_form_request_keeps_claim_until_worker_exits() -> None:
     )
 
     def blocked_operation() -> None:
-        operation_started.set()
-        assert release_operation.wait(timeout=5)
+        loop.call_soon_threadsafe(operation_started.set)
+        release_operation.wait()
 
     submission = asyncio.create_task(
         _run_claimed_form_thread(session, blocked_operation)
     )
-    assert await asyncio.to_thread(operation_started.wait, 2)
-    submission.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await submission
+    try:
+        async with asyncio.timeout(60):
+            await operation_started.wait()
+            submission.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await submission
 
-    assert session.submission_in_progress is True
-    release_operation.set()
-    for _ in range(100):
-        if not session.submission_in_progress:
-            break
-        await asyncio.sleep(0.01)
+            assert session.submission_in_progress is True
+    finally:
+        release_operation.set()
+    async with asyncio.timeout(60):
+        while session.submission_in_progress:
+            await asyncio.sleep(0.01)
     assert session.submission_in_progress is False
 
 

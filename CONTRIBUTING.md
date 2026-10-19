@@ -155,6 +155,11 @@ cargo build --locked --workspace
 ./scripts/run_tests.sh fast -q
 ```
 
+Use events to hold fake workers while testing concurrent requests, and release
+them in a `finally` block. Put a deadline around the whole test rather than
+letting a held worker time out: a slow status request must not end the operation
+whose pending state the test is checking.
+
 The access tests start the evaluator (`target/debug/ua-cedar-authorizer
 serve-access`) as a real process. After changing the Cedar files in
 `ua_definitions/access/cedar/`, check that they still validate strictly:
