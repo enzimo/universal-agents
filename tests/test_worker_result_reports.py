@@ -63,7 +63,7 @@ def test_a_report_must_end_with_the_workers_own_answer():
     decision = ModelWorkerTurnDecision.model_validate(_decision(_report_action(), _RESPONSE)).to_runtime_decision()
 
     report, _ = decision.actions
-    assert report.is_response_requested is False
+    assert report.manager_escalation.escalation_type == "worker_result"
     assert report.target_named_agent_type == TEAM_ARCHITECT_AGENT_TYPE
     # The runtime contract applies the same rule (a decision built elsewhere).
     with pytest.raises(ValidationError):
@@ -72,10 +72,29 @@ def test_a_report_must_end_with_the_workers_own_answer():
 
 
 def test_other_escalations_still_wait_for_the_reply():
-    decision = ModelWorkerTurnDecision.model_validate(_decision(_report_action("needs_user_input"))).to_runtime_decision()
+    from custom_agents.turn_work_notes import decision_starts_wait
 
-    (escalation,) = decision.actions
-    assert escalation.is_response_requested is True
+    decision = ModelWorkerTurnDecision.model_validate(_decision(_report_action("needs_user_input"))).to_runtime_decision()
+    report = ModelWorkerTurnDecision.model_validate(_decision(_report_action(), _RESPONSE)).to_runtime_decision()
+
+    assert decision_starts_wait(decision)
+    assert not decision_starts_wait(report)
+
+
+def test_a_delegation_has_no_option_to_skip_the_reply():
+    """Every delegated task answers its requester; the model cannot ask otherwise."""
+
+    with pytest.raises(ValidationError, match="is_response_requested"):
+        ModelWorkerTurnDecision.model_validate(
+            _decision(
+                {
+                    "action_type": "delegate_task",
+                    "task": {"problem_statement": "Look this up."},
+                    "target_named_agent_type": "WebResearchAgent",
+                    "is_response_requested": False,
+                }
+            )
+        )
 
 
 def _worker(tmp_path) -> SimpleNamespace:

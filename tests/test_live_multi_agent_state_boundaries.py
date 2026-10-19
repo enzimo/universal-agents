@@ -1361,7 +1361,6 @@ async def test_live_worker_report_finishes_the_workers_task_without_waiting_for_
                         task=StructuredTaskPayload(task_type=MessageMetaType.REQUEST, problem_statement=report_text),
                         target_named_agent_type=TEAM_ARCHITECT_AGENT_TYPE,
                         requester_type=RequesterType.AGENT_REQUESTER,
-                        is_response_requested=False,
                         manager_escalation=ManagerEscalationContext(escalation_type="worker_result"),
                     ),
                     TaskResponseAction(

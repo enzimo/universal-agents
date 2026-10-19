@@ -61,10 +61,7 @@ def _validate_action_batch_end(actions: List[Any]) -> None:
         "task_response", "delegate_task", "manager_escalation", "task_query",
         "secure_credential_collection_request", "signup_automation_request",
     }
-    ending = actions[-1]
-    if ending.action_type not in continuations or (
-        ending.action_type == "delegate_task" and not ending.is_response_requested
-    ):
+    if actions[-1].action_type not in continuations:
         raise ValueError(SCHEDULE_REQUIRES_CONTINUATION)
 
 
@@ -449,7 +446,7 @@ class StructuredLLMResponse(BaseModel):
             "Required when `selected_message_type` is `Task`. This must be a nested object containing "
             "Task fields such as `task_type`, `task_id`, `problem_statement`, and `answer`. Do not put "
             "`task_type`, `task_id`, or `answer` at the StructuredLLMResponse top level. Do not put "
-            "`target_named_agent_type`, `target_agent_name`, `is_response_requested`, `requester_type`, "
+            "`target_named_agent_type`, `target_agent_name`, `requester_type`, "
             "or `msg_meta` inside `task`; those routing fields belong at the StructuredLLMResponse top level."
         ),
     )
@@ -481,13 +478,6 @@ class StructuredLLMResponse(BaseModel):
     requester_type: Optional[RequesterType] = Field(
         default=None,
         description="Optional semantic requester type for the outgoing message.",
-    )
-    is_response_requested: Optional[bool] = Field(
-        default=None,
-        description=(
-            "Optional top-level sibling of `task`. Set `true` when this new request expects a reply. "
-            "Leave empty for final responses. Do not place this field inside `task`."
-        ),
     )
     msg_meta: Optional[MessageMeta] = Field(
         default=None,
@@ -569,10 +559,6 @@ class StructuredLLMResponse(BaseModel):
                 normalized_task.get("requester_type"),
                 nested_meta_value("requester_type"),
             ),
-            "is_response_requested": cls._first_present(
-                normalized_task.get("is_response_requested"),
-                nested_meta_value("is_response_requested"),
-            ),
         }
 
         for field_name, nested_value in promotions.items():
@@ -590,7 +576,6 @@ class StructuredLLMResponse(BaseModel):
             "to_named_agent_type",
             "to_agent_name",
             "requester_type",
-            "is_response_requested",
             "msg_meta",
         ):
             normalized_task.pop(field_name, None)
@@ -631,8 +616,6 @@ class StructuredLLMResponse(BaseModel):
             synthesized_meta.to_agent_name = self.target_agent_name
         if self.requester_type is not None:
             synthesized_meta.requester_type = self.requester_type
-        if self.is_response_requested is not None:
-            synthesized_meta.is_response_requested = self.is_response_requested
 
         return CommsMessage(
             msg_content=payload,
@@ -653,7 +636,6 @@ class ModelDelegateTaskAction(BaseModel):
     task: ModelTaskRequestPayload = Field(description="Task request payload to delegate.")
     target_named_agent_type: Optional[str] = Field(default=None, description="Named specialist queue to receive the task.")
     target_agent_name: Optional[str] = Field(default=None, description="Specific agent name to receive the task.")
-    is_response_requested: bool = Field(default=True, description="Whether the delegated task expects a response.")
     check_back_after_minutes: Optional[float] = Field(
         default=None,
         ge=1,
@@ -673,7 +655,6 @@ class ModelDelegateTaskAction(BaseModel):
             task=self.task.to_structured_task_payload(),
             target_named_agent_type=target_named_agent_type,
             target_agent_name=self.target_agent_name,
-            is_response_requested=self.is_response_requested,
             check_back_after_minutes=self.check_back_after_minutes,
             manager_escalation=self.manager_escalation,
         )
@@ -694,8 +675,6 @@ class ModelManagerEscalationAction(BaseModel):
         return DelegateTaskAction(
             task=self.task.to_structured_task_payload(),
             target_named_agent_type=TEAM_ARCHITECT_AGENT_TYPE,
-            # A report gets no reply (custom_agents.worker_result_reports).
-            is_response_requested=not is_worker_result_escalation(self),
             requester_type=RequesterType.AGENT_REQUESTER,
             manager_escalation=self.escalation,
         )
@@ -1003,7 +982,6 @@ class FireworksModelTurnAction(BaseModel):
     task: Optional[FireworksModelTaskPayload] = Field(default=None, description="Task request or response payload.")
     target_named_agent_type: Optional[str] = Field(default=None, description="Named specialist queue for delegation.")
     target_agent_name: Optional[str] = Field(default=None, description="Specific agent name for delegation.")
-    is_response_requested: Optional[bool] = Field(default=None, description="Whether delegated work expects a reply.")
     check_back_after_minutes: Optional[float] = Field(
         default=None,
         description="Optional minutes after which to look at delegated work again before all of it ends.",
@@ -1177,7 +1155,6 @@ class DelegateTaskAction(BaseModel):
     task: StructuredTaskPayload = Field(description="Task request payload to delegate.")
     target_named_agent_type: Optional[str] = Field(default=None, description="Named specialist queue to receive the task.")
     target_agent_name: Optional[str] = Field(default=None, description="Specific agent name to receive the task.")
-    is_response_requested: bool = Field(default=True, description="Whether the delegated task expects a response.")
     requester_type: Optional[RequesterType] = Field(default=None, description="Optional requester type override.")
     check_back_after_minutes: Optional[float] = Field(
         default=None,

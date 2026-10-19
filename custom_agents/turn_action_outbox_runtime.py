@@ -173,7 +173,6 @@ def _comms_message_from_turn_action(self, action: TurnAction) -> Optional[CommsM
             to_named_agent_type=action.target_named_agent_type,
             to_agent_name=action.target_agent_name,
             requester_type=action.requester_type,
-            is_response_requested=action.is_response_requested,
             manager_escalation=action.manager_escalation,
         )
         # A delegation is always a new task, so its id is generated, never taken
@@ -695,9 +694,6 @@ def _turn_decision_from_comms_message(
                         ),
                         target_agent_name=getattr(meta, "to_agent_name", None),
                         requester_type=getattr(meta, "requester_type", None),
-                        is_response_requested=bool(
-                            getattr(meta, "is_response_requested", True)
-                        ),
                     )
                 ]
             )
