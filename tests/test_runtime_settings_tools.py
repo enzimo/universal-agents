@@ -285,6 +285,14 @@ def test_worker_eligibility_does_not_unlock_operator_controls(tmp_path, path, va
         RuntimeSettingsService(_fake_agent(config_path)).stage([{"path": path, "value": value}])
 
 
+def test_agents_cannot_turn_off_checks_between_a_persons_requests(tmp_path):
+    config_path = _write_config(tmp_path)
+    with pytest.raises(ValueError, match="operator-only: Checks between a person's separate requests"):
+        RuntimeSettingsService(_fake_agent(config_path)).stage(
+            [{"path": "agent.request_conflict_checks", "value": False}]
+        )
+
+
 @pytest.mark.parametrize("change_after_plan,reason", [
     ("definition_removed", "agent_definition_unavailable"),
     ("operator_deny", "changed after planning"),

@@ -274,3 +274,24 @@ def test_removing_a_person_deletes_their_ledger_and_request_rows(storage, setup)
     assert deleted["change_requests"] == 1 and deleted["change_ledger"] == 2
     assert request_ids(storage) == []
     assert [row[1] for row in ledger_rows(storage)] == [ChangeWriterKind.PERSON]  # Bob's page stays
+
+
+def test_with_checks_turned_off_requests_are_recorded_but_never_refused(storage, setup):
+    svc, requests = setup
+    requests.open(team_id=TEAM, request_id="req_b", person_id=ALICE, now=NOW)
+    requests.open(team_id=TEAM, request_id="req_a", person_id=ALICE, now=NOW)
+    unchecked = lambda request_id: replace(request_actor(request_id), conflict_checks=False)  # noqa: E731
+
+    assert edit(svc, unchecked("req_a"), "Leave Tuesday.", base=1) == 2
+    assert edit(svc, unchecked("req_b"), "Leave Wednesday.", base=2) == 3
+    requests.close(team_id=TEAM, request_id="req_b", person_id=ALICE, state=RequestState.ENDED, now=NOW)
+    assert edit(svc, unchecked("req_b"), "Leave Thursday.", base=3) == 4
+    # "Changed since you read it" still applies with the checks off.
+    assert refusal(svc, unchecked("req_a"), "Stale.", base=3) == ChangeRefusal.CHANGED_SINCE_READ
+
+    # Turned on again, only later changes count: req_a's own earlier changes and
+    # req_b's unchecked ones do not stop req_a.
+    assert edit(svc, request_actor("req_a"), "Leave Friday.", base=4) == 5
+    with _connect(storage) as conn:
+        checked = [int(r[0]) for r in conn.execute("SELECT checked FROM change_ledger ORDER BY position").fetchall()]
+    assert checked == [1, 0, 0, 0, 1]

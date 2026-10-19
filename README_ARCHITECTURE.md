@@ -847,6 +847,13 @@ and the request tells the person, who can repeat it in a new message.
 - **Refusal names.** The names are shared, in
   `custom_messages.enums.ChangeRefusal`. A stale revision is
   `changed_since_read`.
+- **Operator switch.** `agent.request_conflict_checks: false` turns both
+  refusals off for every agent; the revision checks stay on. Each agent logs
+  the value at start (`event=request_conflict_checks`), and the Status page
+  shows a note while it is off. Agents cannot stage it (it is an operator-only
+  runtime setting). Changes made while it is off are recorded as unchecked
+  (`ChangeWriter.checked`), so turning it on again counts only later changes.
+  The team transfer's settings section is version 6 for this setting.
 
 Before a model call, the runtime assembles context from the current request,
 system and role instructions, task state, conversation history, relevant

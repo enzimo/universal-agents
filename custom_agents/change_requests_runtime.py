@@ -17,6 +17,12 @@ request that was stopped or has ended. It needs each request's start and end:
 A failure here is logged and the task goes on: a request without a row gets
 one at its first change (``change_ledger_request_row_created_late``), and a
 request whose close failed stays open until the ledger prunes it.
+
+The operator's switch ``agent.request_conflict_checks`` (default on) is kept
+with the agent's store: with it off, writers' changes are recorded as
+unchecked and no request is refused for another's change or for having
+ended (``storage.change_ledger.ChangeWriter.checked``). Only the stores'
+"changed since you read it" checks remain.
 """
 
 from __future__ import annotations
@@ -33,15 +39,22 @@ from storage.change_ledger import ChangeRequestStore, RequestState
 logger = logging.getLogger(__name__)
 
 
-def register_change_requests(agent: Any) -> None:
+def register_change_requests(agent: Any, *, conflict_checks: bool) -> None:
     """Open the agent's request-row store and close each request when its first task ends."""
 
     agent._change_request_store = ChangeRequestStore(agent.task_manager.storage_settings)
+    agent._request_conflict_checks = conflict_checks
 
     def closed(task_id: str, state: ProgressState, _timestamp: str) -> None:
         close_ended_request(agent, task_id, state)
 
     agent.task_manager.add_task_terminal_callback(closed)
+
+
+def request_conflict_checks(agent: Any) -> bool:
+    """Whether this agent's writes are checked against the person's other requests (the operator's switch)."""
+
+    return bool(getattr(agent, "_request_conflict_checks", True))
 
 
 async def open_admitted_request(agent: Any, task_request: Any, meta: Any) -> None:
@@ -131,4 +144,4 @@ def _request_of_first_task(agent: Any, task_id: str) -> tuple[str, str] | None:
     return str(context.context_id), str(context.person_id)
 
 
-__all__ = ["close_ended_request", "open_admitted_request", "register_change_requests"]
+__all__ = ["close_ended_request", "open_admitted_request", "register_change_requests", "request_conflict_checks"]

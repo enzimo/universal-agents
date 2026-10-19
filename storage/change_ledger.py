@@ -47,6 +47,13 @@ A request whose row is missing at its first covered write (it started before
 this ledger existed) gets one then, starting at that moment, with a warning
 (``change_ledger_request_row_created_late``).
 
+The operator's switch (``agent.request_conflict_checks``, default on) turns
+rule (b) off: a writer with ``checked`` False is refused neither for another
+request's change nor for having ended, and its changes are recorded as
+unchecked. Unchecked entries never count against a request, so when the
+switch is turned on again rule (b) counts only later changes. The stores'
+version checks apply either way.
+
 Ledger rows never leave the instance: the team transfer does not carry them.
 """
 
@@ -113,6 +120,8 @@ class ChangeWriter:
     kind: ChangeWriterKind
     request_id: str = ""
     person_id: str = ""
+    # False when the operator turned checks between requests off.
+    checked: bool = True
 
     def __post_init__(self) -> None:
         if (self.kind is ChangeWriterKind.REQUEST) != bool(self.request_id):
@@ -161,6 +170,7 @@ def ledger_table_statements(dialect: SqlDialect) -> list[str]:
             request_id TEXT NOT NULL DEFAULT '',
             person_id TEXT NOT NULL DEFAULT '',
             version TEXT NOT NULL DEFAULT '',
+            checked INTEGER NOT NULL DEFAULT 1,
             changed_at_utc TEXT NOT NULL,
             PRIMARY KEY (team_id, position)
         )
@@ -256,15 +266,10 @@ def check_change(
     record: RecordRef,
     change_type: ChangeType,
     now: datetime,
-    conflict_checks: bool = True,
 ) -> None:
-    """Raise ``ChangeRefused`` when a person's request may not make this change (module docstring).
+    """Raise ``ChangeRefused`` when a person's request may not make this change (module docstring)."""
 
-    ``conflict_checks`` False turns rule (b) off (the operator's switch);
-    closed requests are still refused.
-    """
-
-    if writer.kind is not ChangeWriterKind.REQUEST:
+    if writer.kind is not ChangeWriterKind.REQUEST or not writer.checked:
         return
     start, state = _request_row(conn, dialect, team_id=team_id, writer=writer, now=now)
     if state is not RequestState.OPEN:
@@ -281,14 +286,14 @@ def check_change(
             f"This request was {state.value}, so it no longer changes anything. Nothing was changed.",
             {"request_state": state.value},
         )
-    if change_type is not ChangeType.CHANGE or not conflict_checks:
+    if change_type is not ChangeType.CHANGE:
         return
     p = dialect.bind
     competing = conn.execute(
         f"""
         SELECT position, change_type FROM change_ledger
         WHERE team_id={p} AND record_kind={p} AND record_key={p} AND position > {p}
-          AND writer_kind={p} AND request_id <> {p} AND change_type <> {p}
+          AND writer_kind={p} AND request_id <> {p} AND change_type <> {p} AND checked = 1
         ORDER BY position DESC LIMIT 1
         """,
         (
@@ -340,8 +345,8 @@ def record_change(
         f"""
         INSERT INTO change_ledger (
             team_id, position, record_kind, record_key, change_type, writer_kind,
-            request_id, person_id, version, changed_at_utc
-        ) VALUES ({', '.join([p] * 10)})
+            request_id, person_id, version, checked, changed_at_utc
+        ) VALUES ({', '.join([p] * 11)})
         """,
         (
             team_id,
@@ -353,6 +358,7 @@ def record_change(
             writer.request_id,
             writer.person_id,
             version,
+            1 if writer.checked else 0,
             now.isoformat(),
         ),
     )

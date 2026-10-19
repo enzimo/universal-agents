@@ -54,7 +54,7 @@ class _Agent:
 
     def __init__(self, db_path: Path) -> None:
         self.task_manager = _TaskManager(db_path)
-        register_change_requests(self)
+        register_change_requests(self, conflict_checks=True)
 
     def admit(self, task_id: str, signed: Any, *, parent: str | None = None) -> Any:
         meta = SimpleNamespace(gateway_context=GatewayContext(source="test", task_context=signed))

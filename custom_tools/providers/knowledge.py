@@ -74,6 +74,7 @@ def knowledge_actor(agent: Any) -> KnowledgeActor:
     """
 
     from custom_agents.access_runtime import verified_task_context
+    from custom_agents.change_requests_runtime import request_conflict_checks
 
     task_id, _meta = active_task_context(agent)
     context = verified_task_context(agent)
@@ -92,6 +93,7 @@ def knowledge_actor(agent: Any) -> KnowledgeActor:
         task_id=str(task_id or ""),
         work_id=work_id,
         request_id=work_id if is_request else "",
+        conflict_checks=request_conflict_checks(agent),
     )
 
 
