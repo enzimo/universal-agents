@@ -59,6 +59,7 @@ from custom_messages.enums import (
 )
 from custom_tools.action_inputs import actions, input_refusal
 from custom_tools.provider_contract import ToolProvider
+from custom_tools.tool_results import failed
 from custom_tools.providers.objective_work import (
     objective_work_profiles,
     objective_work_sessions,
@@ -154,18 +155,18 @@ def record_objective_work_checkpoint(
     blockers_json: str = "[]",
     in_flight_effects_json: str = "[]",
     artifacts_json: str = "[]",
-) -> str:
+) -> str | dict[str, Any]:
     """Persist the required OODA continuation checkpoint for the active bounded run."""
     agent = get_agent_ref()
     denial = _require_manager_tool(agent, "record_objective_work_checkpoint")
     if denial:
-        return json.dumps(denial)
+        return failed({"error": denial})
     current = _get_current_task_info(agent)
     session_id = getattr(
         getattr(current, "meta", None), "objective_work_session_id", None
     )
     if not session_id:
-        return json.dumps(
+        return failed(
             {"error": "The active task is not part of an Objective work session."}
         )
     try:
@@ -192,7 +193,7 @@ def record_objective_work_checkpoint(
         )
         return checkpoint.model_dump_json()
     except (RuntimeError, ValueError) as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 def _plan_in_view(agent: "UniversalAgent", plan_id: str) -> bool:
@@ -271,7 +272,7 @@ def create_objective(
     progress_summary: str = "",
     creation_mode: str = "promote_task",
     task_id: str = "",
-) -> str:
+) -> str | dict[str, Any]:
     """
     Create a durable Objective from the current manager task, or a specified manager task.
 
@@ -294,19 +295,19 @@ def create_objective(
     """
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     manager_error = _require_manager_tool(agent, "create_objective")
     if manager_error:
-        return json.dumps({"error": manager_error, "manager_only": True})
+        return failed({"error": manager_error, "manager_only": True})
 
     resolved_task_id = task_id or agent.task_manager.current_task_id
     if not resolved_task_id:
-        return json.dumps(
+        return failed(
             {"error": "No task_id provided and no task currently in progress"}
         )
     task_refusal = _named_task_refusal(agent, resolved_task_id)
     if task_refusal:
-        return json.dumps({"error": task_refusal})
+        return failed({"error": task_refusal})
     # A person's task can share a team Objective's Plan. Creating an
     # Objective from it must not move that Plan into personal ownership.
     source_objective_id = agent.task_manager.operations_runtime.run_sync(
@@ -319,7 +320,7 @@ def create_objective(
         source_objective_id
         and not _objective_in_view(agent, source_objective_id, action=PRIVATE_UPDATE)
     ) or (source_plan_id and not _plan_in_view(agent, source_plan_id)):
-        return json.dumps({"error": "No objective could be resolved from the supplied context."})
+        return failed({"error": "No objective could be resolved from the supplied context."})
 
     try:
         success_criteria = _parse_json_list(
@@ -345,10 +346,10 @@ def create_objective(
             progress_summary=progress_summary or None,
         )
     except (ValueError, json.JSONDecodeError, ObjectiveSaveFailed) as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
     if objective is None:
-        return json.dumps(
+        return failed(
             {"error": f"Failed to create objective for task {resolved_task_id}"}
         )
     returned_creation_mode = (
@@ -457,7 +458,7 @@ def _update_progress(
     task_id: str = "",
     plan_id: str = "",
     user_visible: bool = True,
-) -> str:
+) -> str | dict[str, Any]:
     """
     Update a durable Objective's progress summary, focus, or success criteria.
 
@@ -465,19 +466,19 @@ def _update_progress(
     """
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     manager_error = _require_manager_tool(agent, "objectives")
     if manager_error:
-        return json.dumps({"error": manager_error, "manager_only": True})
+        return failed({"error": manager_error, "manager_only": True})
 
     task_refusal = _named_task_refusal(agent, task_id)
     if task_refusal:
-        return json.dumps({"error": task_refusal})
+        return failed({"error": task_refusal})
     resolved_objective_id = _resolve_objective_id_for_tool(
         agent, objective_id, task_id, plan_id, action=PRIVATE_UPDATE
     )
     if not resolved_objective_id:
-        return json.dumps(
+        return failed(
             {"error": "No objective could be resolved from the supplied context."}
         )
     try:
@@ -496,10 +497,10 @@ def _update_progress(
             user_visible=_coerce_tool_bool(user_visible),
         )
     except (ValueError, json.JSONDecodeError, ObjectiveSaveFailed) as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
     if objective is None:
-        return json.dumps(
+        return failed(
             {"error": f"Failed to update objective {resolved_objective_id}"}
         )
     return json.dumps(
@@ -523,7 +524,7 @@ def _update_status(
     task_id: str = "",
     plan_id: str = "",
     user_visible: bool = True,
-) -> str:
+) -> str | dict[str, Any]:
     """
     Change a durable Objective lifecycle status.
 
@@ -532,30 +533,30 @@ def _update_status(
     """
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     manager_error = _require_manager_tool(agent, "objectives")
     if manager_error:
-        return json.dumps({"error": manager_error, "manager_only": True})
+        return failed({"error": manager_error, "manager_only": True})
 
     parsed_status = _settable_status(status)
     if isinstance(parsed_status, dict):
-        return json.dumps(parsed_status)
+        return failed(parsed_status)
     task_refusal = _named_task_refusal(agent, task_id)
     if task_refusal:
-        return json.dumps({"error": task_refusal})
+        return failed({"error": task_refusal})
     current_task_id = agent.task_manager.current_task_id
     resolved_task_id = task_id or current_task_id
     resolved_objective_id = _resolve_objective_id_for_tool(
         agent, objective_id, resolved_task_id or "", plan_id, action=PRIVATE_UPDATE
     )
     if not resolved_objective_id:
-        return json.dumps(
+        return failed(
             {"error": "No objective could be resolved from the supplied context."}
         )
     try:
         person = _task_person(agent)
     except _UnverifiedTask:
-        return json.dumps({"error": "No objective could be resolved from the supplied context."})
+        return failed({"error": "No objective could be resolved from the supplied context."})
     change = ObjectiveStatusChange(
         status=parsed_status,
         summary=summary or None,
@@ -573,10 +574,10 @@ def _update_status(
             partial(_change_status_in_operation, agent), resolved_objective_id, change
         )
     except (ValueError, ObjectiveSaveFailed) as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
     if outcome is None:
-        return json.dumps(
+        return failed(
             {"error": f"Failed to update objective {resolved_objective_id}"}
         )
     if outcome.links_switched:
@@ -746,24 +747,24 @@ def start_objective_task(
     current_focus: str = "",
     source_task_id: str = "",
     user_visible: bool = True,
-) -> str:
+) -> str | dict[str, Any]:
     """Queue a replaceable Task that continues a durable Objective and its current Plan."""
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     manager_error = _require_manager_tool(agent, "start_objective_task")
     if manager_error:
-        return json.dumps({"error": manager_error, "manager_only": True})
+        return failed({"error": manager_error, "manager_only": True})
     if not work_brief or not work_brief.strip():
-        return json.dumps({"error": "work_brief is required"})
+        return failed({"error": "work_brief is required"})
 
     resolved_source_task_id = source_task_id or agent.task_manager.current_task_id
     if not resolved_source_task_id:
-        return json.dumps({"error": "No source task is currently in progress"})
+        return failed({"error": "No source task is currently in progress"})
     # The new task works for the source task's person.
     task_refusal = _named_task_refusal(agent, resolved_source_task_id)
     if task_refusal:
-        return json.dumps({"error": task_refusal})
+        return failed({"error": task_refusal})
     resolved_objective_id = _resolve_objective_id_for_tool(
         agent,
         objective_id,
@@ -772,7 +773,7 @@ def start_objective_task(
         action=PRIVATE_UPDATE,
     )
     if not resolved_objective_id:
-        return json.dumps(
+        return failed(
             {"error": "No objective could be resolved from the supplied context."}
         )
 
@@ -786,9 +787,9 @@ def start_objective_task(
             user_visible=_coerce_tool_bool(user_visible),
         )
     except (ValueError, ObjectiveSaveFailed) as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
     if task_info is None:
-        return json.dumps(
+        return failed(
             {
                 "error": f"Failed to start a continuation Task for Objective {resolved_objective_id}"
             }
@@ -1127,7 +1128,7 @@ def record_plan_action(
 def activate_plan_execution(
     steps_json: str,
     final_review: bool = True,
-) -> str:
+) -> str | dict[str, Any]:
     """
     Promote the current manager task's plan into runtime-owned step execution.
 
@@ -1137,9 +1138,9 @@ def activate_plan_execution(
     """
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     if getattr(agent, "named_agent_type", None) != TEAM_ARCHITECT_AGENT_TYPE:
-        return json.dumps(
+        return failed(
             {
                 "error": "activate_plan_execution is manager-only; specialists should execute their assigned Task directly.",
                 "manager_only": True,
@@ -1149,26 +1150,26 @@ def activate_plan_execution(
     try:
         current_task_info = _get_current_task_info(agent)
     except ValueError as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
     try:
         parsed_steps = json.loads(steps_json)
     except json.JSONDecodeError as exc:
-        return json.dumps({"error": f"steps_json must be valid JSON: {exc}"})
+        return failed({"error": f"steps_json must be valid JSON: {exc}"})
     if not isinstance(parsed_steps, list):
-        return json.dumps({"error": "steps_json must decode to a JSON list"})
+        return failed({"error": "steps_json must decode to a JSON list"})
 
     semantic_steps: List[Dict[str, Any]] = []
     for index, raw_step in enumerate(parsed_steps):
         if not isinstance(raw_step, dict):
-            return json.dumps({"error": f"Step {index + 1} must be a JSON object"})
+            return failed({"error": f"Step {index + 1} must be a JSON object"})
         title = str(raw_step.get("title") or "").strip()
         objective = str(
             raw_step.get("objective") or raw_step.get("description") or ""
         ).strip()
         rationale = str(raw_step.get("rationale") or "").strip()
         if not title or not objective:
-            return json.dumps(
+            return failed(
                 {"error": f"Step {index + 1} requires title and objective"}
             )
         semantic_steps.append(
@@ -1189,10 +1190,10 @@ def activate_plan_execution(
             agent_id=agent.id,
         )
     except ValueError as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
     if plan is None:
-        return json.dumps({"error": "Failed to activate runtime plan execution"})
+        return failed({"error": "Failed to activate runtime plan execution"})
 
     return json.dumps(
         {
@@ -1451,7 +1452,7 @@ def objectives(
     user_confirmation_summary: Optional[str] = None,
     satisfied_by_current_task: bool = False,
     user_visible: Optional[bool] = None,
-) -> str:
+) -> str | dict[str, Any]:
     """See and update durable Objectives (manager-only).
 
     A task sees the team's Objectives and those of the person it works for, never another

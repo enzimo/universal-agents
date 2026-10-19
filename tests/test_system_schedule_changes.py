@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -53,6 +52,7 @@ from tests.change_approval_support import (
     stored_request,
     use_signed_contexts,
 )
+from tests.tool_result_support import tool_json
 
 TEAM = "team_sched"
 PERSON = "user_alice"
@@ -115,7 +115,7 @@ def _schedule(
 
 def _call(agent: Any, tool: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
     set_agent_ref(agent)
-    return json.loads(tool(*args, **kwargs))
+    return tool_json(tool(*args, **kwargs))
 
 
 def _stored(agent: Any, schedule_id: str) -> ScheduledMessage | None:
@@ -141,6 +141,9 @@ def test_owner_pauses_and_resumes_own_schedule_without_a_permit(tmp_path: Path, 
     assert foreign == {"schedule_id": "sched_bob", "paused": False, "error": "schedule not found"}
     assert foreign_removal == {"schedule_id": "sched_bob", "removed": False, "error": "schedule not found"}
     assert _stored(lead, "sched_bob").paused_until is None
+    # A change that was not made is a failed result (custom_tools.tool_results).
+    set_agent_ref(lead)
+    assert pause_scheduled_job("sched_bob", duration_minutes=30)["status"] == "error"
     # A person's own schedule needs no permit, so no protected change was permitted.
     assert PERMITTED not in caplog.text
     assert "authority_mode=owner" in caplog.text
@@ -152,8 +155,12 @@ def test_system_schedule_change_waits_for_a_person_then_applies_once(tmp_path: P
     _schedule(lead, "hb_sched_team", system=True)
     until = (datetime.now(timezone.utc) + timedelta(hours=2)).replace(microsecond=0).isoformat()
 
-    staged = _call(lead, pause_scheduled_job, "hb_sched_team", until_iso=until)
+    set_agent_ref(lead)
+    raw = pause_scheduled_job("hb_sched_team", until_iso=until)
+    staged = tool_json(raw)
 
+    # Staged for a person's approval is not a failure: the tool did what it does.
+    assert isinstance(raw, str)
     assert staged["status"] == "approval_required"
     assert staged["paused"] is False
     assert "a person approves this exact change in the Inbox" in staged["next_step"]

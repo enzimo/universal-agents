@@ -11,6 +11,7 @@ from custom_messages.contracts.schedule_worker_v1 import (
     ScheduleWorkerPolicySpecV1,
 )
 from custom_tools.runtime_context import get_agent_ref
+from custom_tools.tool_results import failed
 
 # The one requirements_json shape the scheduled-worker tools accept.
 REQUIREMENTS_SHAPE = (
@@ -176,7 +177,7 @@ def configure_scheduled_worker(
     requirements_json: str = "",
     activate_schedule: bool = False,
     convert_exact_target: bool = False,
-) -> str:
+) -> str | dict[str, Any]:
     """Save which worker type runs a schedule and when it starts automatically.
 
     Use revision 0 for the first policy. worker_policy_json accepts enabled,
@@ -214,4 +215,4 @@ def configure_scheduled_worker(
         )
         return json.dumps(configure_worker(get_agent_ref(), request), default=str)
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})

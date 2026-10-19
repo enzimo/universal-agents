@@ -24,6 +24,7 @@ from tests.test_schedule_worker_service import (  # noqa: F401
     lead,
     worker_definition,
 )
+from tests.tool_result_support import tool_json
 
 
 def ship(lead, name: str = "Worker") -> None:
@@ -61,7 +62,6 @@ def test_a_new_per_person_kind_runs_on_its_own_on_demand_worker(lead, tmp_path, 
     for its own agent type and accepts only that type as its worker, as memory
     review does, with no code change."""
 
-    import json
 
     from custom_agents.manager_control_runtime import _schedule_worker_assignment
     from custom_agents.system_schedule_changes import SystemScheduleChangeService
@@ -81,8 +81,9 @@ def test_a_new_per_person_kind_runs_on_its_own_on_demand_worker(lead, tmp_path, 
 
     set_agent_ref(lead)
     refused = configure_scheduled_worker("job", "Worker", binding.revision, worker_policy_json='{"enabled": true}')
-    assert "knowledge_review_requires_KnowledgeCuratorAgent" in refused
-    staged = json.loads(
+    assert refused["status"] == "error"
+    assert "knowledge_review_requires_KnowledgeCuratorAgent" in tool_json(refused)["error"]
+    staged = tool_json(
         configure_scheduled_worker(
             "job",
             CURATOR_AGENT_TYPE,
@@ -146,7 +147,6 @@ def test_memory_review_worker_change_is_staged_then_applied_with_agreement(lead,
     policy from a tool is an exact change applied only after approval (here
     the person's agreement, with authorization off)."""
 
-    import json
     import logging
 
     from custom_agents.system_schedule_changes import SystemScheduleChangeService
@@ -160,7 +160,7 @@ def test_memory_review_worker_change_is_staged_then_applied_with_agreement(lead,
     binding = lead._schedule_store.worker_records.get_binding("job", team_id="team")
     set_agent_ref(lead)
 
-    staged = json.loads(
+    staged = tool_json(
         configure_scheduled_worker(
             "job",
             "MemReviewAgent",

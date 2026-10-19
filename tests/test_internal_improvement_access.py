@@ -67,6 +67,7 @@ from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
 from storage.access_repository import AccessRepository
 from tests.broker_access_support import context_signer, forget_task_context_keys, use_scheduler_key
 from tests.test_internal_improvement_runtime import _Manager, _Worker
+from tests.tool_result_support import tool_json
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "target" / "debug" / "ua-cedar-authorizer"
@@ -247,7 +248,7 @@ def test_it_records_and_sees_only_the_schedule_its_context_names(world) -> None:
     assert json.loads(record_scheduled_run(schedule_id=person_schedule, outcome="success")).get("recorded") is not True
     assert json.loads(list_scheduled_jobs(schedule_id=person_schedule)).get("schedules") in (None, [])
     # A change to its own (system) schedule needs a person.
-    changed = json.loads(update_scheduled_job(schedule_id=schedule_id, interval_seconds=60))
+    changed = tool_json(update_scheduled_job(schedule_id=schedule_id, interval_seconds=60))
     assert changed.get("updated") is not True and "approval_required" not in json.dumps(changed)
 
 

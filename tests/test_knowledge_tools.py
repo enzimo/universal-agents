@@ -18,6 +18,7 @@ from custom_tools.providers.knowledge import (
     knowledge_write,
 )
 from custom_tools.runtime_context import set_agent_ref
+from custom_tools.tool_results import result_text
 from storage.config import resolve_storage_settings
 from storage.knowledge_repository import create_knowledge_repository
 from storage.pinned_memory_repository import SqlitePinnedMemoryRepository
@@ -74,7 +75,7 @@ class _Agent:
 def _call(agent, tool, **kwargs) -> dict:
     set_agent_ref(agent)
     try:
-        return json.loads(tool(**kwargs))
+        return json.loads(result_text(tool(**kwargs)))
     finally:
         set_agent_ref(None)
 
@@ -121,6 +122,14 @@ def test_tools_write_read_search_and_never_name_people(tmp_path):
 
 def test_refusals_explain_what_to_do(tmp_path):
     system = _Agent(tmp_path / "kb.db", signed_for=None)
+    # A refused change is a failed result, so a model step stops at it (custom_tools.tool_results).
+    set_agent_ref(system)
+    try:
+        raw = knowledge_write(page="team/db", title="DB", body="password: hunter22")
+        saved = knowledge_write(page="team/ok", title="OK", body="Fine.")
+    finally:
+        set_agent_ref(None)
+    assert raw["status"] == "error" and isinstance(saved, str)
     blocked = _call(system, knowledge_write, page="team/db", title="DB", body="password: hunter22")
     assert blocked["error_code"] == "sensitive_content" and "hunter22" not in json.dumps(blocked)
     missing = _call(system, knowledge_read, page="team/nothing")

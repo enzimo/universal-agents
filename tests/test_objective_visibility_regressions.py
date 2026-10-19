@@ -8,7 +8,6 @@ Plan after its person's role changes; tools still need current authority.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
@@ -42,6 +41,7 @@ from tests.test_objective_tools import (
     _people_and_objectives as _people_fixture,
     _signed_task_contexts,  # noqa: F401 -- autouse fixture
 )
+from tests.tool_result_support import tool_json
 
 _people_and_objectives = _people_fixture
 
@@ -54,16 +54,16 @@ _people_and_objectives = _people_fixture
 def test_hidden_and_missing_objectives_have_identical_replies(_people_and_objectives, inputs) -> None:
     manager, tasks, made = _people_and_objectives
     _act_as(manager, tasks["a"])
-    hidden = json.loads(objectives(objective_id=made["b"].objective_id, **inputs))
-    missing = json.loads(objectives(objective_id="objective_missing", **inputs))
+    hidden = tool_json(objectives(objective_id=made["b"].objective_id, **inputs))
+    missing = tool_json(objectives(objective_id="objective_missing", **inputs))
     assert hidden == missing
 
 
 def test_hidden_and_missing_plans_have_identical_replies(_people_and_objectives) -> None:
     manager, tasks, made = _people_and_objectives
     _act_as(manager, tasks["a"])
-    hidden = json.loads(update_execution_plan_status("cancelled", "x", plan_id=made["b"].current_plan_id))
-    missing = json.loads(update_execution_plan_status("cancelled", "x", plan_id="plan_missing"))
+    hidden = tool_json(update_execution_plan_status("cancelled", "x", plan_id=made["b"].current_plan_id))
+    missing = tool_json(update_execution_plan_status("cancelled", "x", plan_id="plan_missing"))
     assert hidden == missing
 
 
@@ -72,7 +72,7 @@ def test_unsigned_current_task_cannot_create_an_objective(_people_and_objectives
     task = _add_no_person_task(manager, "unsigned_current", signed=False)
     _act_as(manager, task)
     before = manager.objective_repository.list_objectives(limit=100, owner_agent_id=manager.durable_manager_scope_id())
-    result = json.loads(create_objective(title="Unsigned", desired_outcome="x", why="y"))
+    result = tool_json(create_objective(title="Unsigned", desired_outcome="x", why="y"))
     assert "no verified identity" in result["error"]
     assert manager.get_task_plan_id(task.task_id) is None
     assert manager.objective_repository.list_objectives(limit=100, owner_agent_id=manager.durable_manager_scope_id()) == before
@@ -82,7 +82,7 @@ def _team_timer(manager, tasks, team, *, roles: tuple[str, ...] = ("member",)) -
     """An administrator's authorized timer runs with its person's current roles."""
 
     _act_as(manager, tasks["admin"])
-    created = json.loads(create_scheduled_job(
+    created = tool_json(create_scheduled_job(
         instruction="Check team work.", delay_seconds=60, objective_id=team.objective_id,
     ))
     assert "error" not in created
@@ -104,14 +104,14 @@ def test_creation_cannot_move_a_team_plan_into_personal_ownership(_people_and_ob
     team = made["team"]
     run = _team_timer(manager, tasks, team, roles=roles)
     before = manager.get_plan(team.current_plan_id).model_dump(mode="json")
-    result = json.loads(create_objective(title="Personal", desired_outcome="x", why="y"))
+    result = tool_json(create_objective(title="Personal", desired_outcome="x", why="y"))
     assert "error" in result
     assert manager.get_plan(team.current_plan_id).model_dump(mode="json") == before
     # Future member work still cannot control the team's original Plan.
     manager.get_task_info(run.task_id).meta.gateway_context.task_context = context_signer().issue(
         team_id="team_1", person_id="usr_admin", person_roles=("member",),
     )
-    cancelled = json.loads(update_execution_plan_status("cancelled", "x", plan_id=team.current_plan_id))
+    cancelled = tool_json(update_execution_plan_status("cancelled", "x", plan_id=team.current_plan_id))
     assert "error" in cancelled
     assert manager.get_plan(team.current_plan_id).status.value == "active"
 
@@ -120,7 +120,7 @@ def test_rejected_inherited_objective_is_removed_from_schedule_payload(_people_a
     manager, tasks, made = _people_and_objectives
     team = made["team"]
     _team_timer(manager, tasks, team)
-    created = json.loads(create_scheduled_job(instruction="A separate check.", delay_seconds=60))
+    created = tool_json(create_scheduled_job(instruction="A separate check.", delay_seconds=60))
     assert "error" not in created
     schedule = get_agent_ref()._schedule_store.get_scheduled_message(created["schedule_id"])
     assert schedule.objective_id is None
@@ -136,7 +136,7 @@ def test_administrator_can_spawn_independent_objective_work_from_a_team_task(_pe
     manager, tasks, made = _people_and_objectives
     team = made["team"]
     _team_timer(manager, tasks, team, roles=("admin",))
-    created = json.loads(create_objective(title="Separate", desired_outcome="x", why="y", creation_mode="spawn_task"))
+    created = tool_json(create_objective(title="Separate", desired_outcome="x", why="y", creation_mode="spawn_task"))
     assert "error" not in created
     assert created["plan_id"] != team.current_plan_id
     assert manager.get_plan(team.current_plan_id).objective_id == team.objective_id
@@ -147,11 +147,11 @@ def test_administrator_can_spawn_independent_objective_work_from_a_team_task(_pe
 def test_existing_private_heartbeat_link_is_checked_before_mutation(_people_and_objectives, operation) -> None:
     manager, tasks, made = _people_and_objectives
     _act_as(manager, tasks["a"])
-    item = json.loads(add_heartbeat_item(instruction="A's private follow-up."))
+    item = tool_json(add_heartbeat_item(instruction="A's private follow-up."))
     _act_as(manager, tasks["b"])
-    assert json.loads(list_heartbeat_items())["items"] == []
+    assert tool_json(list_heartbeat_items())["items"] == []
     kwargs = {"instruction": "B's replacement."} if operation is update_heartbeat_item else {}
-    refused = json.loads(operation(item["heartbeat_item_id"], **kwargs))
+    refused = tool_json(operation(item["heartbeat_item_id"], **kwargs))
     if operation is remove_heartbeat_item:
         assert refused["removed"] is False
     else:
@@ -162,19 +162,19 @@ def test_existing_private_heartbeat_link_is_checked_before_mutation(_people_and_
     assert saved.enabled
     assert saved.objective_id == made["a"].objective_id
     # Naming a permitted replacement must not authorize changing the stored link.
-    relink = json.loads(update_heartbeat_item(item["heartbeat_item_id"], objective_id=made["b"].objective_id))
+    relink = tool_json(update_heartbeat_item(item["heartbeat_item_id"], objective_id=made["b"].objective_id))
     assert "not found" in relink["error"]
 
 
 def test_team_heartbeat_is_readable_but_only_administrators_change_it(_people_and_objectives) -> None:
     manager, tasks, made = _people_and_objectives
     _act_as(manager, tasks["admin"])
-    item = json.loads(add_heartbeat_item(instruction="Team check.", objective_id=made["team"].objective_id))
+    item = tool_json(add_heartbeat_item(instruction="Team check.", objective_id=made["team"].objective_id))
     _act_as(manager, tasks["a"])
-    assert json.loads(list_heartbeat_items())["returned"] == 1
-    assert "error" in json.loads(disable_heartbeat_item(item["heartbeat_item_id"]))
+    assert tool_json(list_heartbeat_items())["returned"] == 1
+    assert "error" in tool_json(disable_heartbeat_item(item["heartbeat_item_id"]))
     _act_as(manager, tasks["admin"])
-    assert json.loads(disable_heartbeat_item(item["heartbeat_item_id"]))["enabled"] is False
+    assert tool_json(disable_heartbeat_item(item["heartbeat_item_id"]))["enabled"] is False
 
 
 @pytest.mark.parametrize("objective_key,owner_key,allowed,signature", [

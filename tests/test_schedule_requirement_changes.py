@@ -30,6 +30,7 @@ from custom_tools.providers.schedule_workers import (
 from custom_tools.runtime_context import set_agent_ref
 from custom_tools.secure_cli_tool import secure_cli
 from tests.test_schedule_worker_service import lead  # noqa: F401  (fixture)
+from tests.tool_result_support import tool_json
 
 WORKER = "Worker"
 BY_FUNCTION_NAME = {"requirements": [{"capability_id": "cli:google", "operation": "secure_cli"}]}
@@ -45,7 +46,7 @@ STARTUP = {"startup_off": json.dumps({"enabled": False}), "startup_on": ""}
 
 
 def _call(tool, **kwargs) -> dict:
-    return json.loads(tool._tool_func(**kwargs))
+    return tool_json(tool._tool_func(**kwargs))
 
 
 def _saved_pairs(agent, schedule_id: str) -> list[tuple[str, str]]:

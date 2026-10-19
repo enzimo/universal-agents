@@ -47,6 +47,7 @@ from custom_messages.records.objectives import (
     ObjectiveWorkProfileProposal,
 )
 from custom_tools.action_inputs import actions, input_refusal
+from custom_tools.tool_results import failed
 from custom_tools.runtime_context import (
     get_agent_ref,
 )
@@ -364,28 +365,28 @@ def _enable_sessions(
     confirmation_summary: str,
     profile_name: str = "",
     confirmed: bool = False,
-) -> str:
+) -> str | dict[str, Any]:
     """Enable recurring bounded execution only after explicit user acceptance."""
     agent = get_agent_ref()
     denial = _require_manager_tool(agent, "objective_work_sessions")
     if denial:
-        return json.dumps(denial)
+        return failed({"error": denial})
     if not _coerce_tool_bool(confirmed):
-        return json.dumps(
+        return failed(
             {
                 "error": "Explicit user confirmation is required before enabling bounded execution."
             }
         )
     current = _get_current_task_info(agent)
     if current is None:
-        return json.dumps({"error": "No active task context is available."})
+        return failed({"error": "No active task context is available."})
     owner, owner_denial = _private_user_scope(
         agent, resource_name="Objective work sessions"
     )
     if owner_denial is not None:
-        return json.dumps(owner_denial)
+        return failed(owner_denial)
     if current.meta.requester_type != RequesterType.USER_REQUESTER:
-        return json.dumps(
+        return failed(
             {
                 "error": "direct_user_request_required",
                 "message": "Enable bounded Objective execution only in the authenticated user request that accepted it.",
@@ -395,13 +396,13 @@ def _enable_sessions(
         agent, objective_id, current.task.task_id, "", action=PRIVATE_UPDATE
     )
     if not resolved_objective_id:
-        return json.dumps(_NO_OBJECTIVE)
+        return failed(_NO_OBJECTIVE)
     policy = None
     previous_policy = None
     try:
         unavailable = missing_objective_work_skills(agent)
         if unavailable:
-            return json.dumps(
+            return failed(
                 {
                     "error": "Required Objective work-session skills are unavailable.",
                     "missing_skills": unavailable,
@@ -444,7 +445,7 @@ def _enable_sessions(
                 resolved_objective_id,
                 exc,
             )
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 def _list_profiles(include_proposals: bool = True) -> str:
@@ -562,28 +563,28 @@ def _apply_profile_proposal(
     proposal_digest: str,
     confirmation_summary: str,
     confirmed: bool = False,
-) -> str:
+) -> str | dict[str, Any]:
     """Apply one exact accepted proposal: install reusable or enable its target Objective."""
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     denial = _require_manager_tool(agent, "objective_work_profiles")
     if denial:
-        return json.dumps(denial)
+        return failed({"error": denial})
     if not _coerce_tool_bool(confirmed):
-        return json.dumps({"error": "Explicit user confirmation is required."})
+        return failed({"error": "Explicit user confirmation is required."})
     current = _get_current_task_info(agent)
     if current.meta.requester_type != RequesterType.USER_REQUESTER:
-        return json.dumps({"error": "direct_user_request_required"})
+        return failed({"error": "direct_user_request_required"})
     owner, owner_denial = _private_user_scope(
         agent,
         resource_name="Objective work profiles",
     )
     if owner_denial is not None:
-        return json.dumps(owner_denial)
+        return failed(owner_denial)
     summary = confirmation_summary.strip()
     if not summary:
-        return json.dumps({"error": "An explicit user acceptance summary is required."})
+        return failed({"error": "An explicit user acceptance summary is required."})
     coordinator = agent.task_manager.objective_work_coordinator
     policy = None
     previous_policy = None
@@ -597,7 +598,7 @@ def _apply_profile_proposal(
         # A proposal records the exact bounds, not lasting authority over
         # its Objective. The person's roles may have changed since staging.
         if not _profile_objective_in_view(agent, proposal):
-            return json.dumps(_NO_OBJECTIVE)
+            return failed(_NO_OBJECTIVE)
         if proposal.status == ObjectiveWorkProfileProposalStatus.APPLIED:
             return json.dumps(
                 {
@@ -617,7 +618,7 @@ def _apply_profile_proposal(
 
         unavailable = missing_objective_work_skills(agent)
         if unavailable:
-            return json.dumps(
+            return failed(
                 {
                     "error": "Required Objective work-session skills are unavailable.",
                     "missing_skills": unavailable,
@@ -673,7 +674,7 @@ def _apply_profile_proposal(
                 policy=policy,
                 previous_policy=previous_policy,
             )
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 def _remove_profile(
@@ -742,27 +743,27 @@ def _session_status(objective_id: str = "") -> str:
 
 def _disable_sessions(
     objective_id: str = "", confirmed: bool = False
-) -> str:
+) -> str | dict[str, Any]:
     """Disable an Objective policy; its protected schedule remains an inert auditable record."""
     agent = get_agent_ref()
     denial = _require_manager_tool(agent, "objective_work_sessions")
     if denial:
-        return json.dumps(denial)
+        return failed({"error": denial})
     if not _coerce_tool_bool(confirmed):
-        return json.dumps({"error": "Explicit user confirmation is required."})
+        return failed({"error": "Explicit user confirmation is required."})
     current = _get_current_task_info(agent)
     if current is None or current.meta.requester_type != RequesterType.USER_REQUESTER:
-        return json.dumps({"error": "direct_user_request_required"})
+        return failed({"error": "direct_user_request_required"})
     owner, owner_denial = _private_user_scope(
         agent, resource_name="Objective work sessions"
     )
     if owner_denial is not None:
-        return json.dumps(owner_denial)
+        return failed(owner_denial)
     resolved = _resolve_objective_id_for_tool(
         agent, objective_id, current.task.task_id, "", action=PRIVATE_UPDATE
     )
     if not resolved:
-        return json.dumps(_NO_OBJECTIVE)
+        return failed(_NO_OBJECTIVE)
     try:
         policy = agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.objective_work_coordinator.disable_policy,
@@ -771,30 +772,30 @@ def _disable_sessions(
         )
         return policy.model_dump_json()
     except (PermissionError, RuntimeError, ValueError) as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
-def _start_session(objective_id: str = "") -> str:
+def _start_session(objective_id: str = "") -> str | dict[str, Any]:
     """Open one explicitly requested work window on the current Objective-linked task."""
     agent = get_agent_ref()
     denial = _require_manager_tool(agent, "objective_work_sessions")
     if denial:
-        return json.dumps(denial)
+        return failed({"error": denial})
     current = _get_current_task_info(agent)
     if current is None:
-        return json.dumps({"error": "No active task context is available."})
+        return failed({"error": "No active task context is available."})
     owner, owner_denial = _private_user_scope(
         agent, resource_name="Objective work sessions"
     )
     if owner_denial is not None:
-        return json.dumps(owner_denial)
+        return failed(owner_denial)
     if current.meta.requester_type != RequesterType.USER_REQUESTER:
-        return json.dumps({"error": "direct_user_request_required"})
+        return failed({"error": "direct_user_request_required"})
     resolved = _resolve_objective_id_for_tool(
         agent, objective_id, current.task.task_id, "", action=PRIVATE_UPDATE
     )
     if not resolved:
-        return json.dumps(_NO_OBJECTIVE)
+        return failed(_NO_OBJECTIVE)
     try:
         session = agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.objective_work_coordinator.start_session,
@@ -804,7 +805,7 @@ def _start_session(objective_id: str = "") -> str:
         )
         return session.model_dump_json()
     except (PermissionError, RuntimeError, ValueError) as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 ObjectiveWorkSessionsAction = Literal["suggest", "enable", "disable", "status", "start"]
@@ -838,7 +839,7 @@ def objective_work_sessions(
     confirmation_summary: Optional[str] = None,
     profile_name: Optional[str] = None,
     confirmed: bool = False,
-) -> str:
+) -> str | dict[str, Any]:
     """Bounded, recurring work sessions on one Objective (manager-only).
 
     An Objective is `objective_id`, or else the current task's.
@@ -900,7 +901,7 @@ def objective_work_profiles(
     proposal_digest: Optional[str] = None,
     confirmation_summary: Optional[str] = None,
     confirmed: bool = False,
-) -> str:
+) -> str | dict[str, Any]:
     """The execution profiles that bound Objective work sessions (manager-only).
 
     Stage a new one-time or reusable profile with propose_objective_work_profile.

@@ -54,7 +54,7 @@ from custom_agents.schedule_store import (
     ScheduleWriteConflict,
     owner_canonical_user_id_for_schedule,
 )
-from custom_agents.system_schedule_changes import change_schedule
+from custom_agents.system_schedule_changes import STATUS_APPROVAL_REQUIRED, change_schedule
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import (
     ManagerEscalationContext,
@@ -76,6 +76,7 @@ from custom_messages.enums import (
     TaskHistoryType,
 )
 from custom_tools.provider_contract import ToolProvider
+from custom_tools.tool_results import failed
 from custom_agents.pending_work_runtime import wake_scheduler
 from custom_tools.providers._runtime import (
     _get_current_task_info,
@@ -186,14 +187,19 @@ def _validation_message(exc: ValidationError) -> str:
     return message.removeprefix("Value error, ")
 
 
-def _run_change(agent: "UniversalAgent", request: ScheduleChangeRequestV1, *, action: str) -> str:
-    """Apply (or stage) one change and tell TeamArchitect about an applied one."""
+def _run_change(agent: "UniversalAgent", request: ScheduleChangeRequestV1, *, action: str) -> str | dict[str, Any]:
+    """Apply (or stage) one change and tell TeamArchitect about an applied one.
+
+    A change neither made nor staged for a person's approval (not found, no
+    changes given, refused, a conflicting write) is a failed result
+    (``custom_tools.tool_results``).
+    """
 
     flag = RESULT_FLAGS[request.action]
     try:
         result = change_schedule(agent, request)
     except (SystemScheduleMutationDenied, ScheduleWriteConflict) as exc:
-        return json.dumps(
+        return failed(
             {"schedule_id": request.schedule_id, flag: False, "error": str(exc), "reason_code": exc.reason_code}
         )
     report = result.pop(REPORT_KEY, None)
@@ -205,6 +211,8 @@ def _run_change(agent: "UniversalAgent", request: ScheduleChangeRequestV1, *, ac
             if result.get(flag)
             else {"reported": False, "reason": "schedule_not_updated"}
         )
+    if not result.get(flag) and result.get("status") != STATUS_APPROVAL_REQUIRED:
+        return failed(result)
     return json.dumps(result, default=str)
 
 
@@ -434,7 +442,7 @@ def create_scheduled_job(
     target_agent_type: str = "",
     worker_policy_json: str = "",
     requirements_json: str = "",
-) -> str:
+) -> str | dict[str, Any]:
     """
     Create a new manager-owned ScheduledMessage tied to the current requester/session context.
 
@@ -450,12 +458,12 @@ def create_scheduled_job(
     """
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     if not instruction.strip():
-        return json.dumps({"error": "instruction is required"})
+        return failed({"error": "instruction is required"})
     current_owner, denial = _private_user_scope(agent, resource_name=_SCHEDULED_JOBS)
     if denial is not None:
-        return json.dumps(denial)
+        return failed(denial)
     if (
         sum(
             1
@@ -468,7 +476,7 @@ def create_scheduled_job(
         )
         != 1
     ):
-        return json.dumps(
+        return failed(
             {
                 "error": "Provide exactly one of interval_seconds, cron_expression, or delay_seconds."
             }
@@ -481,7 +489,7 @@ def create_scheduled_job(
             agent, objective_id, current_task_id or ""
         )
         if objective_refusal:
-            return json.dumps({"error": objective_refusal})
+            return failed({"error": objective_refusal})
         payload_header, payload_meta = _build_schedule_payload_meta(
             agent,
             schedule_id,
@@ -496,7 +504,7 @@ def create_scheduled_job(
             )
             != current_owner
         ):
-            return json.dumps(
+            return failed(
                 {"error": "Current task is not linked to the active canonical user."}
             )
         is_recurring_job = interval_seconds > 0 or bool(cron_expression.strip())
@@ -615,7 +623,7 @@ def create_scheduled_job(
             }
         )
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 @tool
@@ -789,7 +797,7 @@ def update_scheduled_job(
     notify: str = "",
     evidence_required: str = "",
     notify_on_failure: str = "",
-) -> str:
+) -> str | dict[str, Any]:
     """
     Modify an existing scheduled job.
 
@@ -807,9 +815,9 @@ def update_scheduled_job(
     """
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     if not str(schedule_id or "").strip():
-        return json.dumps({"error": "schedule_id is required"})
+        return failed({"error": "schedule_id is required"})
     try:
         update = ScheduleUpdateV1(
             schedule_name=schedule_name,
@@ -841,9 +849,9 @@ def update_scheduled_job(
         request = ScheduleChangeRequestV1(schedule_id=schedule_id.strip(), action="update", update=update)
         return _run_change(agent, request, action="update_scheduled_job")
     except ValidationError as exc:
-        return json.dumps({"schedule_id": schedule_id, "updated": False, "error": _validation_message(exc)})
+        return failed({"schedule_id": schedule_id, "updated": False, "error": _validation_message(exc)})
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 @tool
@@ -968,7 +976,7 @@ def record_scheduled_run(
 
 
 @tool
-def remove_scheduled_job(schedule_id: str) -> str:
+def remove_scheduled_job(schedule_id: str) -> str | dict[str, Any]:
     """Remove a scheduled job permanently.
 
     A schedule the runtime manages is not removed at once: the result is
@@ -976,16 +984,16 @@ def remove_scheduled_job(schedule_id: str) -> str:
     """
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     try:
         request = ScheduleChangeRequestV1(schedule_id=str(schedule_id or "").strip(), action="remove")
         return _run_change(agent, request, action="remove_scheduled_job")
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 @tool
-def disable_scheduled_job(schedule_id: str) -> str:
+def disable_scheduled_job(schedule_id: str) -> str | dict[str, Any]:
     """Disable a scheduled job indefinitely until it is resumed/enabled again.
 
     A schedule the runtime manages is not changed at once: the result is
@@ -993,16 +1001,16 @@ def disable_scheduled_job(schedule_id: str) -> str:
     """
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     try:
         request = ScheduleChangeRequestV1(schedule_id=str(schedule_id or "").strip(), action="disable")
         return _run_change(agent, request, action="disable_scheduled_job")
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 @tool
-def resume_scheduled_job(schedule_id: str) -> str:
+def resume_scheduled_job(schedule_id: str) -> str | dict[str, Any]:
     """Resume a scheduled job by clearing temporary pause and enabling it.
 
     A schedule the runtime manages is not changed at once: the result is
@@ -1010,12 +1018,12 @@ def resume_scheduled_job(schedule_id: str) -> str:
     """
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     try:
         request = ScheduleChangeRequestV1(schedule_id=str(schedule_id or "").strip(), action="resume")
         return _run_change(agent, request, action="resume_scheduled_job")
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 @tool
@@ -1023,7 +1031,7 @@ def pause_scheduled_job(
     schedule_id: str,
     duration_minutes: int = 0,
     until_iso: str = "",
-) -> str:
+) -> str | dict[str, Any]:
     """Temporarily pause a scheduled job until a specific UTC ISO timestamp or for a number of minutes.
 
     A schedule the runtime manages is not paused at once: the result is
@@ -1031,9 +1039,9 @@ def pause_scheduled_job(
     """
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     if duration_minutes <= 0 and not until_iso.strip():
-        return json.dumps({"error": "Provide duration_minutes or until_iso."})
+        return failed({"error": "Provide duration_minutes or until_iso."})
     try:
         paused_until = (
             normalize_schedule_utc_iso(until_iso, field_name="until_iso")
@@ -1045,7 +1053,7 @@ def pause_scheduled_job(
         )
         return _run_change(agent, request, action="pause_scheduled_job")
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 # Seeing the person's schedules and recording one's own scheduled run is every

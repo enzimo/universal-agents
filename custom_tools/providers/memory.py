@@ -37,6 +37,7 @@ from custom_tools.providers._user_scope import (
 )
 from custom_tools.providers.memory_review_inspection import review_job_in_scope
 from custom_tools.runtime_context import get_agent_ref
+from custom_tools.tool_results import failed
 from storage.conversation_repository import normalize_topic_tag
 from storage.pinned_memory_repository import USERMEM_BANK
 
@@ -67,8 +68,8 @@ TOPIC_TAGS_ACTIONS = actions(
 # -- pinned memory facts ----------------------------------------------------------
 
 
-def _memory_error(error_code: str, message: str) -> str:
-    return json.dumps({"ok": False, "error_code": error_code, "message": message, "error": message})
+def _memory_error(error_code: str, message: str) -> dict[str, Any]:
+    return failed({"ok": False, "error_code": error_code, "message": message, "error": message})
 
 
 @tool
@@ -85,7 +86,7 @@ def memory(
     start: Optional[int] = None,
     end: Optional[int] = None,
     sort: Optional[MemorySort] = None,
-) -> str:
+) -> str | dict[str, Any]:
     """Read and change pinned memory facts: the team's (coremem) or the person's (usermem).
 
     coremem holds facts every person on the team sees; usermem holds durable
@@ -142,7 +143,7 @@ def memory(
             # The person the task works for; usermem has no other owner here.
             resolved, denial = _private_user_scope(agent, resource_name="User memory")
             if denial is not None:
-                return json.dumps(_pinned_memory_scope_denial_payload(denial))
+                return failed(_pinned_memory_scope_denial_payload(denial))
             person = resolved or ""
         command = PinnedMemoryCommand(
             bank=bank,

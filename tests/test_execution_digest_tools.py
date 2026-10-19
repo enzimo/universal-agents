@@ -36,6 +36,7 @@ from custom_tools.runtime_context import set_agent_ref
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
+from tests.tool_result_support import tool_json
 
 # These tasks carry no signed context, so the reports describe work for nobody
 # and the fake agent's tools (no verified person) see exactly those.
@@ -96,7 +97,7 @@ def test_execution_digest_tools_update_current_task():
     task_manager.task_state.current_in_progress_task_id = task.task_id
     set_agent_ref(_FakeAgent(task_manager))
 
-    plan_result = json.loads(
+    plan_result = tool_json(
         set_execution_plan(
             "1. Add structured digest state. 2. Render it into prompts.",
             goal_summary="Keep the manager's living plan durable.",
@@ -106,7 +107,7 @@ def test_execution_digest_tools_update_current_task():
     )
     assert plan_result["digest"]["plan_summary"].startswith("1. Add structured digest state.")
 
-    step_result = json.loads(
+    step_result = tool_json(
         update_execution_plan_step(
             title="Add durable plan-item state",
             rationale="Each TODO item must carry rationale so later summaries stay intelligible.",
@@ -117,7 +118,7 @@ def test_execution_digest_tools_update_current_task():
     assert step_result["step"]["step_id"] == "plan_step_state"
     assert step_result["step"]["status"] == "in_progress"
 
-    unknown_result = json.loads(
+    unknown_result = tool_json(
         update_execution_unknown(
             summary="How much of the digest should be rendered in prompts?",
             unknown_id="unknown_prompt_budget",
@@ -127,7 +128,7 @@ def test_execution_digest_tools_update_current_task():
     )
     assert unknown_result["unknown"]["unknown_id"] == "unknown_prompt_budget"
 
-    digest_result = json.loads(get_execution_digest())
+    digest_result = tool_json(get_execution_digest())
     assert digest_result["task_id"] == task.task_id
     assert digest_result["plan_id"] is None
     assert digest_result["active"] is True
@@ -156,7 +157,7 @@ def test_execution_digest_tools_update_delegated_specialist_task():
     )
     set_agent_ref(_FakeAgent(task_manager))
 
-    plan_result = json.loads(
+    plan_result = tool_json(
         set_execution_plan(
             "Research and compare top LLMs.",
             goal_summary="Produce a sourced top-five LLM comparison.",
@@ -166,7 +167,7 @@ def test_execution_digest_tools_update_delegated_specialist_task():
     )
     assert plan_result["task_id"] == task.task_id
 
-    step_result = json.loads(
+    step_result = tool_json(
         update_execution_plan_step(
             title="Gather current references",
             rationale="The specialist needs current sources before synthesizing rankings.",
@@ -176,7 +177,7 @@ def test_execution_digest_tools_update_delegated_specialist_task():
     )
     assert step_result["step"]["step_id"] == "research_sources"
 
-    digest_result = json.loads(get_execution_digest())
+    digest_result = tool_json(get_execution_digest())
     assert digest_result["task_id"] == task.task_id
     assert digest_result["plan_id"] is None
     assert digest_result["active"] is True
@@ -198,7 +199,7 @@ def test_execution_plan_step_tool_requires_rationale():
     task_manager.task_state.current_in_progress_task_id = task.task_id
     set_agent_ref(_FakeAgent(task_manager))
 
-    result = json.loads(
+    result = tool_json(
         update_execution_plan_step(
             title="Add a step with no rationale",
             rationale="",
@@ -235,7 +236,7 @@ def test_record_plan_action_tool_records_manager_action(tmp_path):
         )
     )
 
-    result = json.loads(
+    result = tool_json(
         record_plan_action(
             "start_inline_recovery",
             "Retry with a narrower tool call.",
@@ -251,7 +252,7 @@ def test_record_plan_action_tool_records_manager_action(tmp_path):
     assert result["plan_action"]["action_type"] == "start_inline_recovery"
     assert result["plan_action"]["details"]["failure_type"] == "tool_result_budget_pressure"
 
-    digest_result = json.loads(get_execution_digest())
+    digest_result = tool_json(get_execution_digest())
     assert digest_result["recent_plan_actions"][0]["action_id"] == result["plan_action"]["action_id"]
     assert "start_inline_recovery" in digest_result["markdown"]
 
@@ -277,7 +278,7 @@ def test_record_plan_action_tool_is_manager_only(tmp_path):
     task_manager.task_state.current_in_progress_task_id = task.task_id
     set_agent_ref(_FakeAgent(task_manager, agent_id="specialist_agent", name="Specialist"))
 
-    result = json.loads(record_plan_action("checkpoint", "Specialists cannot record manager plan actions."))
+    result = tool_json(record_plan_action("checkpoint", "Specialists cannot record manager plan actions."))
 
     assert result["manager_only"] is True
 
@@ -331,13 +332,13 @@ def test_after_action_report_review_tools_list_and_resolve(tmp_path):
         )
     )
 
-    pending = json.loads(list_pending_after_action_reports(limit=5))
+    pending = tool_json(list_pending_after_action_reports(limit=5))
 
     assert pending["returned"] == 1
     review_id = pending["reviews"][0]["review_id"]
     assert pending["reviews"][0]["summary"] == "Aggregator data was stale for this research class."
 
-    resolved = json.loads(
+    resolved = tool_json(
         resolve_after_action_report_review(
             review_id,
             AfterActionReportReviewStatus.SUMMARIZED_TO_TASK_HISTORY.value,
@@ -352,7 +353,7 @@ def test_after_action_report_review_tools_list_and_resolve(tmp_path):
         history_entry.details.get("review_status") == "summarized_to_task_history"
         for history_entry in task_manager.get_task_info(parent.task_id).task.execution_history
     )
-    assert json.loads(list_pending_after_action_reports(limit=5))["returned"] == 0
+    assert tool_json(list_pending_after_action_reports(limit=5))["returned"] == 0
 
 
 def test_late_after_action_reports_batch_and_schedule_review_task(tmp_path):
@@ -479,7 +480,7 @@ def test_late_after_action_reports_batch_and_schedule_review_task(tmp_path):
             named_agent_type="TeamArchitect",
         )
     )
-    resolved = json.loads(
+    resolved = tool_json(
         resolve_after_action_report_review(
             status=AfterActionReportReviewStatus.SUMMARIZED_TO_TASK_HISTORY.value,
             decision_summary="Keep the primary-source lesson in task history.",
@@ -722,7 +723,7 @@ def test_activate_plan_execution_tool_hides_runtime_ids(tmp_path):
         )
     )
 
-    result = json.loads(
+    result = tool_json(
         activate_plan_execution(
             json.dumps(
                 [
@@ -771,7 +772,7 @@ def test_activate_plan_execution_tool_is_manager_only(tmp_path):
     task_manager.task_state.current_in_progress_task_id = task.task_id
     set_agent_ref(_FakeAgent(task_manager, agent_id="specialist_agent", name="Specialist"))
 
-    result = json.loads(
+    result = tool_json(
         activate_plan_execution(
             '[{"title":"Inspect","objective":"Inspect behavior."}]',
             final_review=False,
@@ -834,7 +835,7 @@ def test_get_runtime_pressure_reports_current_manager_task_pressure(tmp_path):
         )
     )
 
-    result = json.loads(get_runtime_pressure())
+    result = tool_json(get_runtime_pressure())
 
     assert result["current_task_id"] == task.task_id
     assert result["context_window_tokens"] == 1024
@@ -875,7 +876,7 @@ def test_get_runtime_pressure_is_manager_only(tmp_path):
     task_manager.task_state.current_in_progress_task_id = task.task_id
     set_agent_ref(_FakeAgent(task_manager, agent_id="specialist_agent", name="Specialist"))
 
-    result = json.loads(get_runtime_pressure())
+    result = tool_json(get_runtime_pressure())
 
     assert result["manager_only"] is True
 
@@ -939,7 +940,7 @@ def test_start_isolated_recovery_tool_queues_fresh_manager_task(tmp_path):
         )
     )
 
-    result = json.loads(
+    result = tool_json(
         start_isolated_recovery(
             failure_type="delegated_specialist_timeout",
             failure_summary="Verifier did not return before the manager timeout.",
@@ -1032,7 +1033,7 @@ def test_start_isolated_recovery_tool_is_manager_only(tmp_path):
     task_manager.task_state.current_in_progress_task_id = task.task_id
     set_agent_ref(_FakeAgent(task_manager, agent_id="specialist_agent", name="Specialist"))
 
-    result = json.loads(
+    result = tool_json(
         start_isolated_recovery(
             failure_type="context_pressure",
             failure_summary="The specialist should not create manager recovery lanes.",
@@ -1112,7 +1113,7 @@ def test_get_recovery_context_returns_sanitized_original_context(tmp_path):
         )
     )
 
-    result = json.loads(get_recovery_context(detail_level="all", max_entries=10))
+    result = tool_json(get_recovery_context(detail_level="all", max_entries=10))
     raw_result = json.dumps(result)
 
     assert result["recovery_context"] is True
@@ -1155,7 +1156,7 @@ def test_get_recovery_context_requires_current_recovery_task(tmp_path):
         )
     )
 
-    result = json.loads(get_recovery_context())
+    result = tool_json(get_recovery_context())
 
     assert result["recovery_task_only"] is True
 
@@ -1178,7 +1179,7 @@ def test_get_recovery_context_is_manager_only(tmp_path):
     task_manager.task_state.current_in_progress_task_id = task.task_id
     set_agent_ref(_FakeAgent(task_manager, agent_id="specialist_agent", name="Specialist"))
 
-    result = json.loads(get_recovery_context())
+    result = tool_json(get_recovery_context())
 
     assert result["manager_only"] is True
 
@@ -1199,7 +1200,7 @@ def test_get_execution_digest_reports_inactive_for_plan_only_task():
     task_manager.task_state.current_in_progress_task_id = task.task_id
     set_agent_ref(_FakeAgent(task_manager))
 
-    digest_result = json.loads(get_execution_digest())
+    digest_result = tool_json(get_execution_digest())
 
     assert digest_result["task_id"] == task.task_id
     assert digest_result["plan_id"] is None
@@ -1264,7 +1265,7 @@ def _people_tasks(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
 def _digest_as(manager: TaskManager, acting: Task, task: Task) -> dict:
     manager.task_state.current_in_progress_task_id = acting.task_id
-    return json.loads(get_execution_digest(task_id=task.task_id))
+    return tool_json(get_execution_digest(task_id=task.task_id))
 
 
 def test_a_persons_task_reads_only_that_persons_task_digests(_people_tasks, caplog) -> None:

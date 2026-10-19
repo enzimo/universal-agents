@@ -2457,6 +2457,17 @@ boundary. Durable inbox and outbox records provide ordering, duplicate
 detection, acknowledgements, and reconnect recovery without giving adapters
 gateway filesystem or repository access.
 
+A tool call's outcome is read only from its Strands result status: a returned
+dict with `status` and `content` passes through, and any other return value is
+wrapped as a success. So tools that change memory facts, knowledge pages,
+heartbeat items, Objectives, schedules or files return a failed result (status
+`error`, `custom_tools/tool_results.py`) whenever the change was not made: a
+refusal, invalid input such as a call missing an input its action needs, a
+record that does not exist, or an error. The model reads the same JSON reason
+as before. A change that was made stays a success, also with warnings, and so
+does one staged for a person's approval or proposed for review, because the
+tool did what it does.
+
 Agent definitions are declarative and list the tools a type works with as tool
 catalog ids or tool set ids (`default_tools`, `custom_agents/default_tools.py`);
 the catalog maps them to reviewed callables (`access_catalog/tool_functions.py`).
