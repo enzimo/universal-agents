@@ -1470,6 +1470,104 @@ async def test_live_worker_report_finishes_the_workers_task_without_waiting_for_
                 await connection.close()
 
 
+async def test_live_task_that_keeps_escalating_is_stopped_at_its_wait_limit(monkeypatch) -> None:
+    """A worker that escalates on every resume is stopped before its limit + 1 wait goes out."""
+
+    team_id = new_id("team_waitcap")
+    manager_id = new_id("manager")
+    worker_id = new_id("internal")
+    worker_task_id = new_id("worker_schedule")
+    manager_route = f"{team_id}_{TEAM_ARCHITECT_AGENT_TYPE}"
+    worker_route = f"{team_id}_InternalImprovementAgent"
+    limit = 2
+    # A short limit keeps the test fast; the agent reads it at each turn.
+    monkeypatch.setattr("custom_agents.strands_agent.MAX_WAITS_PER_TASK", limit)
+
+    def escalate(pass_number: int) -> StructuredAgentTurnDecision:
+        return _manager_escalation_request(
+            f"AUDIT_PASS_{pass_number}: please confirm the findings.",
+            escalation=ManagerEscalationContext(escalation_type="needs_user_input", source_task_id=worker_task_id),
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        db_path = tmp_path / "wait-limit.db"
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+
+        manager_llm = FakeStrandsAgent(*(_task_response(f"LEAD_REPLY_{index}") for index in range(limit)))
+        worker_llm = FakeStrandsAgent(*(escalate(index) for index in range(limit + 1)))
+
+        with (
+            patch("custom_agents.strands_agent.Agent", side_effect=[manager_llm, worker_llm]),
+            patch("custom_agents.strands_agent.UniversalAgent._configure_model", return_value=MagicMock()),
+        ):
+            manager = _agent(
+                agent_id=manager_id,
+                name="manager",
+                team_id=team_id,
+                named_agent_type=TEAM_ARCHITECT_AGENT_TYPE,
+                db_path=db_path,
+                workspace_dir=workspace_dir,
+                is_lead=True,
+            )
+            manager.named_agent_type_queue_map.update({"InternalImprovementAgent": worker_route})
+            worker = _agent(
+                agent_id=worker_id,
+                name="internal",
+                team_id=team_id,
+                named_agent_type="InternalImprovementAgent",
+                db_path=db_path,
+                workspace_dir=workspace_dir,
+            )
+            worker.named_agent_type_queue_map.update({TEAM_ARCHITECT_AGENT_TYPE: manager_route})
+
+            agent_tasks: list[tuple[UniversalAgent, asyncio.Task]] = []
+            connection = await _connect_nats(team_id)
+            try:
+                channel = await connection.channel()
+                result_queue = await channel.declare_queue(new_id("usr_waitcap"), durable=False, auto_delete=True)
+                for agent in (manager, worker):
+                    agent_tasks.append((agent, await _start_agent(agent)))
+
+                await _publish_envelope(
+                    channel,
+                    worker_route,
+                    MessageEnvelope(
+                        msg_content=Task(
+                            task_id=worker_task_id,
+                            task_type=MessageMetaType.REQUEST,
+                            problem_statement="Scheduled worker task: audit the knowledge base.",
+                        ),
+                        msg_header=MessageHeader(
+                            from_agent_id="live-test-scheduler",
+                            to_routing_path=worker_route,
+                            response_routing_key=result_queue.name,
+                        ),
+                        msg_meta=MessageMeta(
+                            from_agent_name="live-test-scheduler",
+                            requester_type=RequesterType.TIMER_REQUESTER,
+                            is_response_requested=True,
+                            msg_correlation_id=f"corr_{worker_task_id}",
+                            conversation_id=f"conversation_{worker_task_id}",
+                        ),
+                    ),
+                )
+
+                failure = await _wait_for_response(result_queue, timeout=60)
+                assert isinstance(failure.msg_content, Task)
+                assert failure.msg_content.task_id == worker_task_id
+                assert "was stopped because it had already waited 2 times" in (failure.msg_content.answer or "")
+                # Two escalations reached the lead; the third was never sent.
+                assert len(worker_llm.invocations) == limit + 1
+                await asyncio.sleep(1.0)
+                assert len(manager_llm.invocations) == limit
+                assert worker.task_manager.get_task_info(worker_task_id) is None
+            finally:
+                await _stop_agents(agent_tasks)
+                await connection.close()
+
+
 def _register_manager_delegation(
     manager: UniversalAgent,
     *,

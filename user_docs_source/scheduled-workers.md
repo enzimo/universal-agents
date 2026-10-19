@@ -575,6 +575,11 @@ reply. TeamLead decides whether to message you about it. A worker waits for
 TeamLead only when it needs something: your input, a decision, or help from
 another specialist.
 
+A task may send something out and wait for it at most five times. A task that
+would wait a sixth time is probably repeating itself, so it is stopped: nothing
+more is sent, and for a scheduled run you get a chat message saying so.
+Changes it already made are kept.
+
 ## Change the worker or launch rules
 
 ### Custom agent types

@@ -2069,6 +2069,12 @@ class TaskManager(
             details=details,
         )
 
+    def count_started_waits(self, task_id: str) -> int:
+        """How often the task's turns sent something out and waited for it (``task_wait_limit``)."""
+        return sum(
+            1 for entry in turn_work_notes(self.get_task(task_id)) if (entry.details or {}).get("started_wait")
+        )
+
     def render_earlier_turn_work_markdown(self, task_id: Optional[str]) -> str:
         """The "Work already done in this task" prompt section ("" on a task's first turn)."""
         if not task_id:

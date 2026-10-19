@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError
+from custom_agents.task_wait_limit import TaskWaitLimitReached
 
 import asyncio
 import hashlib
@@ -2064,7 +2065,7 @@ class LLMTurnExecutor:
                 after_action_report=turn.after_action_report,
                 error=e,
             )
-            if isinstance(e, (ProviderTimeoutError, UnroutableTaskInterruptError)):
+            if isinstance(e, (ProviderTimeoutError, UnroutableTaskInterruptError, TaskWaitLimitReached)):
                 # The task owner records and reports this classified failure once.
                 raise
             if self._is_provider_connectivity_error(e):
@@ -2728,6 +2729,33 @@ class LLMTurnExecutor:
                 decision = self.effects.turn_decision_from_comms_message(comms_message)
         return TurnDecisionOutcome(decision, structured_output_details)
 
+    async def _stop_at_wait_limit(self, turn: _TurnState, decision: Any) -> None:
+        """Refuse a wait past ``MAX_WAITS_PER_TASK`` before anything is sent (``task_wait_limit``)."""
+
+        limit = self.settings.max_waits_per_task
+        content = turn.msg_content
+        task_id = turn.active_task_id
+        if not (
+            limit
+            and task_id
+            and isinstance(content, Task)
+            and content.task_type == MessageMetaType.REQUEST
+            and decision_starts_wait(decision)
+        ):
+            return
+        waits = await self.tasks.runtime.run(self.tasks.count_started_waits, task_id)
+        if waits < limit:
+            return
+        self.logger.warning(
+            "A task would wait again after reaching its wait limit; stopping it. "
+            "event=task_wait_limit_reached agent_id=%s task_id=%s waits=%s limit=%s",
+            self.settings.id,
+            task_id,
+            waits,
+            limit,
+        )
+        raise TaskWaitLimitReached(task_id=task_id, waits=waits, limit=limit)
+
     async def _record_turn_work(
         self, turn: _TurnState, *, decision: Any, ended_by: Optional[str] = None
     ) -> None:
@@ -2854,6 +2882,7 @@ class LLMTurnExecutor:
         outcome = self.decode_result(
             result=turn.result, msg_content=turn.msg_content, msg_meta=turn.msg_meta
         )
+        await self._stop_at_wait_limit(turn, outcome.decision)
         # Saved before the outbox sends anything, so a reply cannot resume the
         # task before its next turn can see what this one did.
         await self._record_turn_work(turn, decision=outcome.decision)
