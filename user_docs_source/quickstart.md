@@ -26,8 +26,8 @@ On every platform, confirm `docker info` succeeds before continuing.
 In Terminal on macOS/Linux, or Ubuntu on Windows:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/enzimo/universal-agents/v0.9.5/install.sh -o ua-install.sh
-bash ua-install.sh --image ghcr.io/enzimo/universal-agents:0.9.5
+curl -fsSL https://raw.githubusercontent.com/enzimo/universal-agents/v0.9.6/install.sh -o ua-install.sh
+bash ua-install.sh --image ghcr.io/enzimo/universal-agents:0.9.6
 ```
 
 Open **[http://127.0.0.1:18090/](http://127.0.0.1:18090/)**. The first image download can take several minutes.
@@ -41,8 +41,8 @@ Public releases and images need no special access. If a download returns 404 or 
 ```sh
 gh auth login --hostname github.com --web --scopes read:packages
 gh auth token | docker login ghcr.io --username "$(gh api user --jq .login)" --password-stdin
-gh api repos/enzimo/universal-agents/contents/install.sh?ref=v0.9.5 -H 'Accept: application/vnd.github.raw+json' > ua-install.sh
-bash ua-install.sh --image ghcr.io/enzimo/universal-agents:0.9.5
+gh api repos/enzimo/universal-agents/contents/install.sh?ref=v0.9.6 -H 'Accept: application/vnd.github.raw+json' > ua-install.sh
+bash ua-install.sh --image ghcr.io/enzimo/universal-agents:0.9.6
 ```
 
 Your account must have repository/package access and any required organization SSO approval. Configure a [Docker credential store](https://docs.docker.com/reference/cli/docker/login/#credential-stores) first. The HTML guide includes platform-specific helper setup. Do not paste tokens into this guide or chat.
