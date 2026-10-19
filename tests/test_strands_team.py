@@ -14,6 +14,7 @@ from custom_agents.agent_instructions import (
 )
 from custom_agents.agent_instantiation_skill import render_agent_instantiation_skill
 from custom_agents.runtime_paths import infer_instance_root
+from custom_agents.sdk.strands.changes_first import ChangesFirstToolExecutor
 from custom_agents.strands_team import create_strands_agent
 from strands.tools.mcp import MCPClient
 from custom_tools.providers.capabilities import (
@@ -34,7 +35,7 @@ def test_create_strands_agent_forwards_runtime_config_to_universal_agent(tmp_pat
     }
     schedule_maintenance = {"internal_improvement_review_interval_seconds": 90}
 
-    with patch("custom_agents.strands_agent.Agent"), patch(
+    with patch("custom_agents.strands_agent.Agent") as strands_agent_class, patch(
         "custom_agents.strands_agent.UniversalAgent._configure_model",
         return_value=MagicMock(),
     ):
@@ -72,6 +73,9 @@ def test_create_strands_agent_forwards_runtime_config_to_universal_agent(tmp_pat
     assert agent.nats_url == "nats://transport.test:4222"
     assert agent.nats_process_consumer_inactive_threshold_seconds == 77.0
     assert agent._access_decision_hook is not None
+    # Record changes run first in each model step (custom_agents.sdk.strands.changes_first).
+    executor = strands_agent_class.call_args.kwargs["tool_executor"]
+    assert isinstance(executor, ChangesFirstToolExecutor)
 
 
 def test_create_strands_agent_rejects_direct_mcp_without_instance_registry(

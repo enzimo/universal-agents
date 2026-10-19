@@ -2517,6 +2517,28 @@ cache, and republish presence. Heartbeat fingerprint checks repair missed live
 hints without a process restart. External and hosted MCP tools enter through
 the same installed registry and the broker's per-call access check.
 
+A model often asks for several tool calls in one step, and Strands runs them
+side by side. Calls that change a stored record (a memory fact, a knowledge
+page, a schedule, an Objective, a heartbeat item or a file: operations with a
+`record_kind` in `functions.yaml`, `custom_messages.enums.ChangeRecordKind`)
+run first, one at a time, in the model's order
+(`custom_agents/sdk/strands/changes_first.py`). When one does not go through
+(an error result, an access denial, or a pause for a person's decision), every
+later call of that step gets a "not run" error result instead of running; the
+step's other calls run side by side only after all its changes succeeded. The
+model chose those calls assuming each change would succeed, and a person's
+separate requests can change the same record, so a refused change must not be
+followed by actions built on it. A skipped call never runs later, not even when
+a paused change resumes: Strands keeps the step's results with the pause and
+runs only the paused call again; the model sends the others again if they still
+make sense. Only a result's status is read: a failure the tool reports as a
+success with error text does not stop the step. In a tool where any operation
+names a record kind, the catalog loader refuses a changing operation that
+names none (it may say `none`), so a new action cannot change records without
+running first. The executor uses two
+private Strands names, guarded by `tests/test_changes_first_executor.py` on the
+locked SDK version.
+
 Model providers sit behind factories and adapters, so task and message
 contracts do not depend on one provider. Context budgeting, compaction, and
 artifact offloading happen in the runtime instead of relying on provider chat

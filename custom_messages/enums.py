@@ -377,3 +377,23 @@ class ControlType(StrEnum):
     NOOP                    = "NO OP"
     STATUS_REQUEST_BASIC    = "status_request_basic"
     STATUS_REQUEST_FULL     = "status_request_full"
+
+
+class ChangeRecordKind(StrEnum):
+    """Kinds of stored record whose changes run before a model step's other calls.
+
+    Two of a person's requests can run at once, so one request may change a
+    record another request is changing. Every tool operation that changes one
+    of these records names its kind in the tool catalog (``record_kind`` and
+    ``record_kinds`` in ``ua_definitions/access/tools/functions.yaml``). The
+    tool executor (``custom_agents.sdk.strands.changes_first``) runs those calls
+    first, one at a time, and stops the step at the first one that does not go
+    through.
+    """
+
+    MEMORY_FACT = "memory_fact"
+    KNOWLEDGE_PAGE = "knowledge_page"
+    SCHEDULE = "schedule"
+    OBJECTIVE = "objective"
+    HEARTBEAT_ITEM = "heartbeat_item"
+    FILE = "file"

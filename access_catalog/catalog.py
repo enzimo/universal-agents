@@ -61,6 +61,7 @@ from custom_messages.contracts.access_v2 import (
 )
 from custom_messages.contracts.cli_tool_v1 import InstalledCliV1
 from custom_messages.contracts.tool_setup_spec_v1 import ToolSetupSpecV1
+from custom_messages.enums import ChangeRecordKind
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,10 @@ class FunctionBinding:
     level: AccessLevel | None = None  # fixed level
     argument: str | None = None  # the argument whose value picks the level
     values: Mapping[str, AccessLevel] = field(default_factory=dict)
+    # The kind of record the call changes, when its changes run first in a
+    # model step (ChangeRecordKind); None changes no such record.
+    record_kind: ChangeRecordKind | None = None  # fixed-level functions
+    record_kinds: Mapping[str, ChangeRecordKind] = field(default_factory=dict)  # by argument value
 
 
 @dataclass(frozen=True)
@@ -134,6 +139,90 @@ def _level(value: Any, *, where: str) -> AccessLevel:
         return AccessLevel(str(value))
     except ValueError as exc:
         raise CatalogError(f"{where}: unknown level {value!r}") from exc
+
+
+# ``record_kind: none``: the operation changes something, but no record whose
+# changes run first in a model step.
+NO_RECORD_KIND = "none"
+_FIXED_FUNCTION_KEYS = frozenset({"level", "record_kind"})
+_ARGUMENT_FUNCTION_KEYS = frozenset({"argument", "values", "record_kinds"})
+
+
+def _record_kind(value: Any, *, where: str) -> ChangeRecordKind | None:
+    if str(value) == NO_RECORD_KIND:
+        return None
+    try:
+        return ChangeRecordKind(str(value))
+    except ValueError as exc:
+        raise CatalogError(f"{where}: unknown record kind {value!r}") from exc
+
+
+def _check_keys(spec: Mapping[str, Any], allowed: frozenset[str], required: set[str], *, where: str) -> None:
+    unknown = sorted(set(map(str, spec)) - allowed)
+    if unknown:
+        raise CatalogError(f"{where}: unknown keys {unknown}")
+    missing = sorted(required - set(map(str, spec)))
+    if missing:
+        raise CatalogError(f"{where}: missing keys {missing}")
+
+
+def _function_binding(
+    tool_id: str, function: str, spec: Any
+) -> tuple[FunctionBinding, dict[str, ChangeRecordKind | None]]:
+    """One function's binding, and the record kinds its operations declare (None for ``none``).
+
+    A function is ``function: level``, ``function: {level, record_kind}``, or
+    ``function: {argument, values, record_kinds}`` with a level per argument
+    value and a record kind per changing value.
+    """
+
+    where = f"{tool_id}.{function}"
+    if not isinstance(spec, Mapping):
+        return FunctionBinding(tool_id, function, level=_level(spec, where=where)), {}
+    if "argument" not in spec:
+        _check_keys(spec, _FIXED_FUNCTION_KEYS, {"level"}, where=where)
+        if "record_kind" not in spec:
+            return FunctionBinding(tool_id, function, level=_level(spec["level"], where=where)), {}
+        kind = _record_kind(spec["record_kind"], where=where)
+        binding = FunctionBinding(tool_id, function, level=_level(spec["level"], where=where), record_kind=kind)
+        return binding, {function: kind}
+    _check_keys(spec, _ARGUMENT_FUNCTION_KEYS, {"argument", "values"}, where=where)
+    values = {str(value): _level(level, where=where) for value, level in spec["values"].items()}
+    kinds = {str(value): _record_kind(kind, where=f"{where}.{value}") for value, kind in (spec.get("record_kinds") or {}).items()}
+    unknown = sorted(set(kinds) - set(values))
+    if unknown:
+        raise CatalogError(f"{where}: record kinds for values it does not take: {unknown}")
+    binding = FunctionBinding(
+        tool_id,
+        function,
+        argument=str(spec["argument"]),
+        values=values,
+        record_kinds={value: kind for value, kind in kinds.items() if kind is not None},
+    )
+    return binding, {f"{function}.{value}": kind for value, kind in kinds.items()}
+
+
+def _check_record_kinds(
+    tool_id: str, operations: Iterable[OperationDefinitionV1], declared: Mapping[str, ChangeRecordKind | None]
+) -> None:
+    """In a tool with record kinds, every changing function operation names one (or ``none``).
+
+    Otherwise a new action added to such a tool would change its records
+    without running first, and nothing would notice.
+    """
+
+    if not any(kind is not None for kind in declared.values()):
+        return
+    unclassified = sorted(
+        operation.name
+        for operation in operations
+        if operation.level is not AccessLevel.READ and operation.name not in declared
+    )
+    if unclassified:
+        raise CatalogError(
+            f"{tool_id}: changing operations without a record kind (use none if they change no such record): "
+            f"{unclassified}"
+        )
 
 
 CHANGE_OPERATION_PREFIX = "change:"
@@ -230,17 +319,23 @@ class ToolCatalog:
     def _load_function_tool(self, raw: Mapping[str, Any]) -> None:
         tool_id = str(raw["tool_id"])
         operations: list[OperationDefinitionV1] = []
+        declared: dict[str, ChangeRecordKind | None] = {}
         for function, spec in (raw.get("functions") or {}).items():
             if function in self.functions or function in self.function_dispatchers:
                 raise CatalogError(f"Function {function!r} is listed twice.")
-            if isinstance(spec, Mapping):
-                values = {str(value): _level(level, where=f"{tool_id}.{function}") for value, level in spec["values"].items()}
-                self.functions[function] = FunctionBinding(tool_id, function, argument=str(spec["argument"]), values=values)
-                operations += [OperationDefinitionV1(name=f"{function}.{value}", level=level) for value, level in values.items()]
+            binding, kinds = _function_binding(tool_id, str(function), spec)
+            self.functions[function] = binding
+            declared.update(kinds)
+            if binding.argument is None:
+                assert binding.level is not None
+                operations.append(OperationDefinitionV1(name=function, level=binding.level))
             else:
-                level = _level(spec, where=f"{tool_id}.{function}")
-                self.functions[function] = FunctionBinding(tool_id, function, level=level)
-                operations.append(OperationDefinitionV1(name=function, level=level))
+                operations += [
+                    OperationDefinitionV1(name=f"{function}.{value}", level=level) for value, level in binding.values.items()
+                ]
+        # Only function operations: the ones below are decided elsewhere
+        # (staged changes are checked when apply_change applies them).
+        _check_record_kinds(tool_id, operations, declared)
         # Operations an enforcement point decides itself, not through a
         # function call (the sandbox launcher's code:unconfined run).
         for name, spec in (raw.get("operations") or {}).items():
@@ -546,6 +641,17 @@ class ToolCatalog:
             level=level or AccessLevel.FULL,
             source=ClassificationSource.TRUSTED if level else ClassificationSource.UNREVIEWED,
         )
+
+    def record_kind(self, function: str, arguments: Mapping[str, Any] | None = None) -> ChangeRecordKind | None:
+        """The kind of record a function call changes, when its changes run first in a model step."""
+
+        binding = self.functions.get(function)
+        if binding is None:
+            return None
+        if binding.argument is None:
+            return binding.record_kind
+        value = str((arguments or {}).get(binding.argument) or "").strip().lower()
+        return binding.record_kinds.get(value)
 
     def resolve_http(self, method: str, url: str) -> OperationResolutionV1:
         """The web API operation a request needs, found by its host."""

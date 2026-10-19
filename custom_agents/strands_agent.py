@@ -135,6 +135,8 @@ from custom_agents.manager_control_runtime import (
     handle_task_progress_status,
 )
 from custom_agents.manager_bootstrap_runtime import run_manager_bootstrap
+from custom_agents.default_tools import builtin_tool_catalog
+from custom_agents.sdk.strands.changes_first import ChangesFirstToolExecutor
 from custom_agents.sdk.strands.skills import (
     is_agent_skills_plugin,
     list_agent_skill_names,
@@ -3370,7 +3372,9 @@ class UniversalAgent(BaseModel):
             elif self.plugins:
                 agent_hooks.extend(self.plugins)
 
-            # Create Strands Agent
+            # Create Strands Agent. Record changes run first in each model
+            # step, and a failed one skips the step's later calls
+            # (custom_agents.sdk.strands.changes_first).
             self._strands_agent = Agent(
                 system_prompt=full_system_prompt,
                 tools=model_tools,
@@ -3378,6 +3382,7 @@ class UniversalAgent(BaseModel):
                 conversation_manager=conversation_manager,
                 callback_handler=None,
                 hooks=agent_hooks,
+                tool_executor=ChangesFirstToolExecutor(builtin_tool_catalog().record_kind),
                 **agent_kwargs,
             )
             if self._context_debug_dump_plugin is not None:
