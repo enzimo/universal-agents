@@ -422,6 +422,11 @@ advance as an edit. Replacements preserve or increment the stored revision;
 they cannot reset it from an older copy. Before 2026-10-20 a tool change started from the schedule as
 it was when the call ran, and only a change racing that call was refused.
 
+`ScheduleStore.update` returns the exact snapshot saved by its transaction.
+Objective work-session rollback uses that snapshot as its base, including the
+assigned timing revision. It can reverse its own failed reconfiguration while
+keeping later run notes, and still refuses to undo a person's later stop or edit.
+
 A model's `schedule_message` turn action only creates a schedule. Its payload
 has no schedule id: the runtime names the new schedule before the turn-action
 outbox saves the action, and the outbox creates it with
