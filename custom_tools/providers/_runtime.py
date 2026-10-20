@@ -319,16 +319,34 @@ def _link_to_objective(
     if not objective_id:
         return {}
     manager = agent.task_manager
-    link = manager.link_schedule_to_objective if kind == "schedule" else manager.link_heartbeat_to_objective
     try:
+        link = (
+            manager.link_schedule_to_objective
+            if kind == "schedule"
+            else manager.link_heartbeat_to_objective
+        )
         manager.operations_runtime.run_sync(link, objective_id, item_id, **link_options)
-    except ObjectiveSaveFailed:
-        return {
-            "objective_link_warning": (
+    except Exception as exc:
+        # The item is already durable. A failed Objective/history write must
+        # not report its creation as failed and cause a duplicate on retry.
+        logger.exception(
+            "Could not confirm a saved item's Objective link. event=objective_link_failed kind=%s item_id=%s objective_id=%s",
+            kind,
+            item_id,
+            objective_id,
+        )
+        warning = (
+            (
                 f"{item_id} was saved, but Objective {objective_id} could not record it, so pausing "
                 "or closing the Objective will not pause or stop it. Tell the person."
             )
-        }
+            if isinstance(exc, ObjectiveSaveFailed)
+            else (
+                f"{item_id} was saved, but its link to Objective {objective_id} could not be confirmed. "
+                "Inspect the Objective's links before relying on it to pause or stop this item. Do not create the item again."
+            )
+        )
+        return {"objective_link_warning": warning}
     return {}
 
 

@@ -13,9 +13,10 @@ rather than guessing what was meant.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any, Mapping
+
+from custom_tools.tool_results import failed
 
 
 @dataclass(frozen=True)
@@ -57,11 +58,13 @@ def input_problem(tool: str, action: str, specs: Mapping[str, ActionInputs], inp
     return "; ".join(problems) + "." if problems else None
 
 
-def input_refusal(tool: str, action: str, specs: Mapping[str, ActionInputs], inputs: Mapping[str, Any]) -> str | None:
-    """``input_problem`` as the JSON result a tool returns (``error_code`` invalid_input), or None."""
+def input_refusal(
+    tool: str, action: str, specs: Mapping[str, ActionInputs], inputs: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """``input_problem`` as the failed result a tool returns (``error_code`` invalid_input), or None."""
 
     problem = input_problem(tool, action, specs, inputs)
-    return json.dumps({"error": problem, "error_code": "invalid_input"}) if problem else None
+    return failed({"error": problem, "error_code": "invalid_input"}) if problem else None
 
 
 __all__ = ["ActionInputs", "actions", "input_problem", "input_refusal"]
