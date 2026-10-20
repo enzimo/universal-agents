@@ -205,8 +205,8 @@ def _env_line_key(line: str) -> str | None:
     return line.split("=", 1)[0].strip()
 
 
-def _merge_source_env_file(source: Path, destination: Path) -> dict[str, str]:
-    """Merge a source dotenv file into destination, treating source keys as explicit overrides.
+def _prepare_source_env_merge(source: Path, destination: Path) -> tuple[str, dict[str, str]]:
+    """Read and prepare a dotenv merge without changing either file.
 
     Keys that are linked accounts in the credential store now
     (``REMOVED_LINKED_KEY_ENV_VARS``) are not copied, because startup refuses
@@ -222,9 +222,7 @@ def _merge_source_env_file(source: Path, destination: Path) -> dict[str, str]:
     else:
         source_lines = source.read_text(encoding="utf-8").splitlines()
         lines = [line for line in source_lines if _env_line_key(line) not in held_back]
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-    return held_back
+    return "\n".join(lines).rstrip() + "\n", held_back
 
 
 def _merged_env_lines(existing_lines: list[str], source_values: Mapping[str, str]) -> list[str]:
@@ -519,34 +517,43 @@ def bootstrap_instance(
     layout = config.layout
     layout.ensure_directories()
 
-    # Control files are written only by trusted runtime services from here on;
-    # agent tools and agent-run code cannot open control/.
+    # Render and read inputs before changing settings, so a bad catalog or
+    # unreadable source file fails before publication. A stale revision must
+    # fail before any control file, environment merge or key handover changes.
+    control_files: dict[Path, str] = {}
     for filename in BOOTSTRAP_FILES:
         destination = layout.control_dir / filename
         if destination.exists():
             continue
-        destination.write_text(
-            render_bootstrap_control_file(
-                config,
-                filename,
-                assistant_purpose=assistant_purpose,
-                assistant_response_style=assistant_response_style,
-                assistant_autonomy=assistant_autonomy,
-            ),
-            encoding="utf-8",
+        control_files[destination] = render_bootstrap_control_file(
+            config,
+            filename,
+            assistant_purpose=assistant_purpose,
+            assistant_response_style=assistant_response_style,
+            assistant_autonomy=assistant_autonomy,
         )
-        created_paths.append(destination)
 
+    env_merge = None
     if source_env_file_path and config.launch.env_file_path:
         source_env_path = Path(source_env_file_path).expanduser().resolve()
         destination = Path(config.launch.env_file_path).expanduser().resolve()
-        held_back = _merge_source_env_file(source_env_path, destination)
-        created_paths.append(destination)
-        created_paths.extend(_hand_over_env_file_keys(config, held_back))
+        content, held_back = _prepare_source_env_merge(source_env_path, destination)
+        env_merge = destination, content, held_back
 
     config_path = config.save(expected_revision=expected_config_revision)
     if config_path not in created_paths:
         created_paths.append(config_path)
+    # Control files are written only by trusted runtime services from here on;
+    # agent tools and agent-run code cannot open control/.
+    for destination, content in control_files.items():
+        destination.write_text(content, encoding="utf-8")
+        created_paths.append(destination)
+    if env_merge is not None:
+        destination, content, held_back = env_merge
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content, encoding="utf-8")
+        created_paths.append(destination)
+        created_paths.extend(_hand_over_env_file_keys(config, held_back))
     hint_path = _write_instance_root_hint(config)
     if hint_path is not None and hint_path not in created_paths:
         created_paths.append(hint_path)

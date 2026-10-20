@@ -3012,6 +3012,12 @@ backup only while the applied revision is still current. The separate lock
 file survives atomic replacement and excludes threads and processes; lock
 failure refuses the write. External hand edits cannot participate in an
 advisory lock, so stop runtime writers before editing the file directly.
+Onboarding keeps the destination revision read before reconciliation, even
+when validation builds a fresh model. Bootstrap renders controls and reads
+source files first, then accepts the checked settings write before changing
+control files, merging the environment or handing over credentials. A stale
+configuration therefore changes none of those auxiliary files. Later transfer
+batches likewise save checked settings before refreshing model defaults.
 
 The bundle used to run every
 process from a copy written at container start; settings saved while the

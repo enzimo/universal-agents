@@ -142,3 +142,51 @@ def test_runtime_settings_undo_refuses_to_erase_a_later_update(tmp_path: Path) -
             "backup_path": str(backup), "previous_existed": True, "sha256": applied_revision,
         })
     assert GatewayInstanceConfig.load(config.config_path).instance_name == "later update"
+
+
+@pytest.mark.parametrize("existing_handover", [False, True])
+def test_stale_bootstrap_does_not_change_control_env_or_key_handover_files(tmp_path, existing_handover) -> None:
+    from assistant_gateway.bootstrap import bootstrap_instance, hand_over_onboarding_keys
+
+    config = _config(tmp_path)
+    config.layout.ensure_directories()
+    env = config.instance_root_path / "team.env"
+    env.write_text("APP_TEST_VALUE=original\n", encoding="utf-8")
+    config.launch.env_file_path = str(env)
+    config.save()
+    source = tmp_path / "source.env"
+    source.write_text("APP_TEST_VALUE=replacement\nEXA_API_KEY=test-bootstrap-example-key\n", encoding="utf-8")
+    control = config.layout.control_dir / "SOUL.md"
+    control.write_text("existing identity", encoding="utf-8")
+    missing_control = config.layout.control_dir / "TEAM_TEMPLATES.yaml"
+    handover = config.layout.onboarding_account_keys_path
+    if existing_handover:
+        hand_over_onboarding_keys(config, {"http:exa": "test-existing-example-key"})
+        assert handover.is_file()
+    previous_handover = handover.read_bytes() if handover.exists() else None
+    stale = GatewayInstanceConfig.load(config.config_path)
+    other = GatewayInstanceConfig.load(config.config_path)
+    other.instance_name = "another writer"
+    other.save()
+
+    with pytest.raises(ConfigFileConflict):
+        bootstrap_instance(stale, source_env_file_path=str(source))
+
+    assert env.read_text(encoding="utf-8") == "APP_TEST_VALUE=original\n"
+    assert control.read_text(encoding="utf-8") == "existing identity"
+    assert not missing_control.exists()
+    assert (handover.read_bytes() if handover.exists() else None) == previous_handover
+    assert GatewayInstanceConfig.load(config.config_path).instance_name == "another writer"
+
+
+def test_bootstrap_checks_source_files_before_publishing_configuration(tmp_path) -> None:
+    from assistant_gateway.bootstrap import bootstrap_instance
+
+    config = _config(tmp_path)
+    config.launch.env_file_path = str(config.instance_root_path / "team.env")
+    previous = config.config_path.read_bytes()
+    source = tmp_path / "invalid.env"
+    source.write_bytes(b"\xff")
+    with pytest.raises(UnicodeDecodeError):
+        bootstrap_instance(config, source_env_file_path=str(source))
+    assert config.config_path.read_bytes() == previous
