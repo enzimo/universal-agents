@@ -1412,7 +1412,24 @@ manager storage (`storage/access_repository.py`).
 
 Every function tool call is decided the same way by one Strands
 `BeforeToolCallEvent` hook that runs last (`custom_agents/access_runtime.py`),
-so an earlier cancellation cannot use up a one-time grant. It skips calls the
+so an earlier cancellation cannot use up a one-time grant. A one-time use
+belongs to the call that took it. The hook gives each call a stable id
+(`call_operation_id`: a hash of the agent id, the `tracking_id` Strands gives
+the model step's message, and the tool use id), and the store records it with
+the use in the same transaction as the guarded update (`access_grant_uses`,
+`AccessRepository.consume`). This matters because a tool that waits for a
+person inside itself (`apply_change`, `set_up_tools`, the access workflow and
+proposal tools) pauses with a Strands interrupt, and Strands runs the call
+again from its start when it resumes, this hook included. The resumed call
+keeps its use and takes no second one. A sibling call of the same step, a
+later call (also one whose model server repeats the tool use id) and the fresh
+call a task makes after a restart all find the grant used: a paused call lives
+only in its process, so a restart never resumes it, and its use stays spent.
+The use is still taken at the decision, before the call runs, because that
+guarded update is what stops two sibling calls from both passing on one use.
+A use is never given back, also when the call then fails. The broker gate,
+folder decisions and code access decide each request once and take a use
+without a call id. It skips calls the
 broker decides, Strands' structured-output tool (the turn answer), and names the
 agent has no tool for: nothing runs for those, and Strands answers "Unknown
 tool", which the runtime guardrails extend with a hint when the name is a turn

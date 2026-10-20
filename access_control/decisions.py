@@ -11,7 +11,10 @@ For one operation (a catalog resolution: tool, operation, level) it:
    D6), so an agent never exceeds its person; a personal-login tool counts as
    the person's own there;
 4. consumes one-time grants that justified the agent side, immediately before
-   the effect;
+   the effect; a use taken for one tool call is bound to that call
+   (``operation_id``), so when Strands runs a paused call again as it resumes
+   and the call is decided again, it keeps its use and takes no second one,
+   while every other call finds the grant used up;
 5. records the decision and returns a reason with a next step.
 
 Any evaluation error denies. Hand-downs follow the plan's rules (section 5.2):
@@ -133,6 +136,7 @@ class AccessService:
         task_id: str | None,
         person_id: str | None,
         depth: int = 0,
+        operation_id: str | None = None,
     ) -> bool:
         if depth > 8 or grant.status is not GrantStatus.ACTIVE:
             return False
@@ -142,7 +146,7 @@ class AccessService:
             return False
         if grant.expires_at_utc is not None and now >= grant.expires_at_utc:
             return False
-        if grant.uses_remaining is not None and grant.uses_remaining <= 0:
+        if grant.uses_remaining is not None and grant.uses_remaining <= 0 and not self._use_held(grant, operation_id):
             return False
         if grant.lifetime in {GrantLifetime.TASK, GrantLifetime.ONE_TIME} and grant.task_id != task_id:
             return False
@@ -152,6 +156,8 @@ class AccessService:
         if parent is None:
             return False
         # A task-bound child of a parent without a task keeps the child's task.
+        # A parent is never one-time (one-time grants are never delegable), so
+        # the call's uses do not apply to it.
         return self._valid(
             parent,
             now=now,
@@ -160,6 +166,11 @@ class AccessService:
             depth=depth + 1,
         )
 
+    def _use_held(self, grant: GrantV1, operation_id: str | None) -> bool:
+        """Whether this tool call already took a use of the grant (``AccessRepository.consume``)."""
+
+        return operation_id is not None and self.store.use_held(grant.grant_id, operation_id)
+
     def valid_grants(
         self,
         subjects: Iterable[SubjectRefV1],
@@ -167,6 +178,7 @@ class AccessService:
         task_id: str | None,
         person_id: str | None = None,
         now: datetime | None = None,
+        operation_id: str | None = None,
     ) -> list[GrantV1]:
         """Grants valid now for the subjects, on a task working for ``person_id``.
 
@@ -175,6 +187,8 @@ class AccessService:
         (decision D13). A person's own grants never name a person to work for.
         Agents' grants come from ``agent_grants``, which also applies where
         an agent's access comes from ("access follows the work").
+        ``operation_id`` (one tool call, see ``decide``) keeps a used-up grant
+        valid for the call that took its use.
         """
 
         moment = now or self.clock()
@@ -183,20 +197,31 @@ class AccessService:
         return standard + [
             grant
             for grant in self.store.for_subjects(self.team_id, wanted)
-            if self._valid(grant, now=moment, task_id=task_id, person_id=person_id)
+            if self._valid(grant, now=moment, task_id=task_id, person_id=person_id, operation_id=operation_id)
         ]
 
     def _principal_grants(
-        self, principal: AgentPrincipal | PersonPrincipal, *, task_id: str | None, person_id: str | None
+        self,
+        principal: AgentPrincipal | PersonPrincipal,
+        *,
+        task_id: str | None,
+        person_id: str | None,
+        operation_id: str | None = None,
     ) -> list[GrantV1]:
         """Valid grants of an agent (on work for ``person_id``) or of a person."""
 
         if isinstance(principal, AgentPrincipal):
-            return self.agent_grants(principal, task_id=task_id, person_id=person_id)
+            return self.agent_grants(principal, task_id=task_id, person_id=person_id, operation_id=operation_id)
         return self.valid_grants(principal.subjects(), task_id=task_id)
 
     def agent_grants(
-        self, agent: AgentPrincipal, *, task_id: str | None, person_id: str | None, now: datetime | None = None
+        self,
+        agent: AgentPrincipal,
+        *,
+        task_id: str | None,
+        person_id: str | None,
+        now: datetime | None = None,
+        operation_id: str | None = None,
     ) -> list[GrantV1]:
         """The grants an agent's current work counts ("access follows the work", owner's decision 2026-09-30).
 
@@ -209,13 +234,16 @@ class AccessService:
         is in the schedule only then). Lasting access for one person's work
         never counts for a worker: a worker inherits what the team lead hands
         on to its task (``hand_on_for_task``), or, in a job run, the
-        schedule's access. Blocks always count.
+        schedule's access. Blocks always count. ``operation_id`` as in
+        ``valid_grants``.
         """
 
         lead = agent.role == AGENT_ROLE_TEAM_LEAD
         return [
             grant
-            for grant in self.valid_grants(agent.subjects(), task_id=task_id, person_id=person_id, now=now)
+            for grant in self.valid_grants(
+                agent.subjects(), task_id=task_id, person_id=person_id, now=now, operation_id=operation_id
+            )
             if lead or not _lasting_consent(grant)
         ]
 
@@ -288,9 +316,14 @@ class AccessService:
         return _SideResult(decision.allowed, grant_ids, blocking, error="; ".join(decision.errors))
 
     def _agent_side(
-        self, agent: AgentPrincipal, resolution: OperationResolutionV1, task_id: str | None, person_id: str | None
+        self,
+        agent: AgentPrincipal,
+        resolution: OperationResolutionV1,
+        task_id: str | None,
+        person_id: str | None,
+        operation_id: str | None = None,
     ) -> tuple[_SideResult, list[GrantV1]]:
-        grants = self._principal_grants(agent, task_id=task_id, person_id=person_id)
+        grants = self._principal_grants(agent, task_id=task_id, person_id=person_id, operation_id=operation_id)
         resource, entities = target_entities(self.catalog, self.team_id, resolution)
         result = self._evaluate(
             principal=agent.uid(),
@@ -328,6 +361,7 @@ class AccessService:
         task_id: str | None,
         consume: bool = True,
         hand_on_for_task: bool = False,
+        operation_id: str | None = None,
     ) -> AccessDecisionV1:
         """Decide one operation for an agent working for a person (or a person alone).
 
@@ -335,6 +369,15 @@ class AccessService:
         worker lacks access its task needs and the team lead may hand it on
         for this person's work, trusted code adds it to the worker's task and
         decides again (``hand_on_for_task``), with no extra turn for the agent.
+
+        ``operation_id`` names the one tool call decided
+        (``custom_agents.access_runtime.call_operation_id``). A one-time use
+        it takes is bound to it, and a decision of the same call again (a
+        paused call that Strands runs again as it resumes) counts the grant
+        whose use it holds and takes no second use. ``consumed_grant_ids``
+        then names that grant too: the decision rests on a one-time use.
+        Without an id, each decision that relies on a one-time grant takes its
+        own use, as at the broker, where every request is decided once.
         """
 
         tool = self.catalog.tools.get(resolution.tool_id)
@@ -371,7 +414,7 @@ class AccessService:
         agent_grants: list[GrantV1] = []
         if agent is not None:
             agent_result, agent_grants = self._agent_side(
-                agent, resolution, task_id, _person_id(person)
+                agent, resolution, task_id, _person_id(person), operation_id
             )
             if (
                 hand_on_for_task
@@ -382,7 +425,9 @@ class AccessService:
                 )
                 is not None
             ):
-                agent_result, agent_grants = self._agent_side(agent, resolution, task_id, _person_id(person))
+                agent_result, agent_grants = self._agent_side(
+                    agent, resolution, task_id, _person_id(person), operation_id
+                )
             if not agent_result.allowed:
                 blocked = _blocks(agent_result.blocking)
                 return self._finish(
@@ -442,7 +487,7 @@ class AccessService:
         consumed: tuple[str, ...] = ()
         if consume and agent_result is not None:
             try:
-                consumed = self._consume(agent_result.grant_ids, agent_grants)
+                consumed = self._consume(agent_result.grant_ids, agent_grants, operation_id=operation_id)
             except AccessStoreConflict as exc:
                 return self._finish(
                     AccessDecisionV1(
@@ -590,8 +635,14 @@ class AccessService:
         )
         return grant
 
-    def _consume(self, determining: tuple[str, ...], grants: list[GrantV1]) -> tuple[str, ...]:
-        """Use one-time grants that justified the decision (raises if one is used up)."""
+    def _consume(
+        self, determining: tuple[str, ...], grants: list[GrantV1], *, operation_id: str | None = None
+    ) -> tuple[str, ...]:
+        """Use one-time grants that justified the decision (raises if one is used up).
+
+        A use the call (``operation_id``) already holds is kept, not taken
+        again; it is still named in the result.
+        """
 
         by_id = {grant.grant_id: grant for grant in grants}
         consumed: list[str] = []
@@ -599,7 +650,13 @@ class AccessService:
             grant = by_id.get(grant_id)
             if grant is None or grant.uses_remaining is None:
                 continue
-            self.store.consume(grant_id, at=self.clock())
+            if not self.store.consume(grant_id, at=self.clock(), operation_id=operation_id):
+                logger.info(
+                    "A tool call decided again keeps the one-time use it took. event=one_time_use_kept "
+                    "grant_id=%s operation_id=%s",
+                    grant_id,
+                    operation_id,
+                )
             consumed.append(grant_id)
         return tuple(consumed)
 
