@@ -120,9 +120,12 @@ Treat these lifecycles independently after promotion:
   `objectives(action="get")`, `list` and `create_objective` return its
   `version`, and `update_progress` and `update_status` need it as
   `expected_version`. A `changed_since_read` refusal means another request
-  changed the Objective meanwhile and nothing was changed; read it again and
-  decide on what it says now. Linked tasks, Plans, schedules, heartbeat items
-  and work sessions do not change the version.
+  changed its definition or success criteria meanwhile and nothing was
+  changed; read it again and decide on what it says now. Progress text, focus,
+  status, linked tasks, Plans, schedules, heartbeat items and work sessions
+  do not change the version. Each change keeps unrelated stored fields;
+  changes to the same progress or status field follow the current lifecycle
+  rules rather than this version check.
 
 Supply semantic titles, objectives, rationale, evidence needs, and recovery
 intent. Leave runtime-owned task, plan, step, conversation, correlation, and

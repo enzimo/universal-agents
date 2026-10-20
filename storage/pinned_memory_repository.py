@@ -1113,11 +1113,6 @@ class _RelationalPinnedMemoryRepository:
         )
         return event_id
 
-    def _get(self, *, bank: str, team_id: str, canonical_user_id: str, memory_id: int) -> Optional[PinnedMemoryFactRow]:
-        with self._connect() as conn:
-            row = self._get_row(conn, bank=bank, team_id=team_id, canonical_user_id=canonical_user_id, memory_id=memory_id)
-        return self._row_to_fact(row) if row is not None else None
-
     def _get_row(self, conn: sqlite3.Connection, *, bank: str, team_id: str, canonical_user_id: str, memory_id: int) -> PinnedMemoryDatabaseRow | None:
         row: PinnedMemoryDatabaseRow | None = conn.execute(
             f"""

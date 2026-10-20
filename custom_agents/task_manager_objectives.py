@@ -1369,6 +1369,13 @@ class ObjectiveCoordinator:
         outcome: Dict[str, Any] = {"refusal": None, "previous": None}
 
         def set_status(objective: ObjectiveRecord) -> bool:
+            # Status is runtime bookkeeping, so it is outside the definition
+            # version. Check the person's deletion on the locked row instead
+            # of trusting the tool's earlier read from another connection.
+            if expected_version is not None and objective.status in {ObjectiveStatus.DELETING, ObjectiveStatus.DELETED}:
+                state = "was deleted" if objective.status == ObjectiveStatus.DELETED else "is being deleted"
+                outcome["refusal"] = f"Objective {objective_id} {state} by its person, so it can no longer change."
+                return False
             refusal = self._satisfaction_refusal(objective, target_status, user_confirmation_summary)
             if refusal:
                 outcome["refusal"] = refusal

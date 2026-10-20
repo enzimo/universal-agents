@@ -993,9 +993,10 @@ Two of your requests can work on the same Objective at once. When one of them
 changes what the Objective asks for (for example marks a success criterion
 met), Team Architect's other request can't overwrite that change with a
 decision made from what it read earlier: its change is refused, it reads the
-Objective again and decides on what it says now. Work that only records
-progress, such as a task finishing or a schedule being linked, never undoes a
-change and never blocks one.
+Objective again and decides on what it says now. Recording progress or linking
+work preserves unrelated fields and does not make that version stale. Progress
+text, current focus and lifecycle status follow their own current-state rules;
+the version check does not reject two changes to the same progress field.
 
 Heartbeat items linked to an Objective follow the same ownership rules. A
 shared heartbeat runs for its launcher's person and skips an Objective that

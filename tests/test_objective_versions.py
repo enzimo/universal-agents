@@ -513,6 +513,28 @@ def test_a_refused_status_change_turns_nothing_off(lead) -> None:
     assert manager.get_objective(objective_id).status == ObjectiveStatus.ACTIVE
 
 
+@pytest.mark.parametrize("deletion_status", ["deleting", "deleted"])
+def test_a_status_tool_cannot_reopen_an_objective_when_deletion_starts_before_its_write(
+    lead, settings, monkeypatch, deletion_status
+) -> None:
+    manager, _agent, objective_id = lead
+    second = _manager(settings, "manager_other")
+    repository = manager.objective_coordinator.objective_repository
+    change = repository.change_objective
+
+    def deletion_before_write(*args, **kwargs):
+        second.update_objective_status(objective_id, deletion_status, summary="The person requested deletion.")
+        return change(*args, **kwargs)
+
+    monkeypatch.setattr(repository, "change_objective", deletion_before_write)
+    result = tool_json(
+        objectives(action="update_status", objective_id=objective_id, expected_version=_version(objective_id), status="active")
+    )
+
+    assert "by its person, so it can no longer change" in result.get("error", "")
+    assert manager.get_objective(objective_id).status.value == deletion_status
+
+
 def test_work_on_the_objective_does_not_refuse_the_leads_next_change(lead) -> None:
     """A continuation task, a linked schedule and a task ending add bookkeeping; the version read before holds."""
 

@@ -415,7 +415,11 @@ instead of overwriting the newer change; a change to a schedule the runtime
 manages is then refused before it is staged, and approvals keep their own
 digests and exact permits. Claims, the remaining count, a repeating schedule's
 next run time and the run notes are not in the digest, so scheduler runs never
-make a read stale. Before 2026-10-20 a tool change started from the schedule as
+make a read stale. The stored schedule's `timing_revision` increments on an
+explicit timing change and participates in the digest. This lets a delayed
+retime detect another explicit retime without treating a normal scheduler
+advance as an edit. Replacements preserve or increment the stored revision;
+they cannot reset it from an older copy. Before 2026-10-20 a tool change started from the schedule as
 it was when the call ran, and only a change racing that call was refused.
 
 A model's `schedule_message` turn action only creates a schedule. Its payload
@@ -711,6 +715,11 @@ Two kinds of Objective change differ in what they check:
   `changed_since_read`; the tool returns that as a failed result and the
   agent reads the Objective again. `get`, `list`, `create_objective` and
   every change return the current version.
+  Progress text, focus and lifecycle status are outside the version: it does
+  not reject two changes to the same such field. Each change updates only its
+  supplied fields on the stored row, under current lifecycle rules. Agent
+  status changes check a person's deletion inside that write transaction;
+  a deletion that began after the tool read the record cannot be reopened.
 - **Trusted bookkeeping** (a task linked when it arrives or as a subtask, the
   review when a linked task ends, a continuation task, plans following their
   tasks, recovery tasks, work-session events, linked schedules and heartbeat

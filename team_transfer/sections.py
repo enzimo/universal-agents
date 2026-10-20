@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 SectionRecords = list[dict[str, Any]]
 SectionUpgrade = Callable[[SectionRecords], SectionRecords]
 
-# (section name, version) -> conversion to version + 1. Keep only the steps
+# (section name, source version) -> conversion to this release's version. Keep only the steps
 # from the previous release's versions; delete older ones. Empty while no
 # section has changed since the previous release.
 SECTION_UPGRADES: dict[tuple[str, int], SectionUpgrade] = {}
@@ -301,21 +301,20 @@ def readable_version_problem(
 ) -> str:
     """Why this version cannot read ``section`` at ``stored``, or empty when it can.
 
-    It reads ``version`` and, when a conversion step exists, ``version - 1``.
+    It reads ``version`` and the older source versions with explicit conversion
+    steps. A release can change the same section more than once, so a previous
+    release's source version need not be numerically adjacent to this one.
     One message for every section, plain and encrypted, so the operator always
     learns how to continue. Older exports may need several intermediate
     releases; the transfer guide owns the release-specific paths.
     """
 
-    if stored == version or (
-        stored == version - 1 and (section, stored) in SECTION_UPGRADES
-    ):
+    if stored == version or (stored < version and (section, stored) in SECTION_UPGRADES):
         return ""
-    readable = (
-        f"versions {version - 1} and {version}"
-        if (section, version - 1) in SECTION_UPGRADES
-        else f"version {version} only"
-    )
+    accepted = sorted({version, *(source for name, source in SECTION_UPGRADES if name == section and source < version)})
+    readable = f"version {version} only"
+    if len(accepted) > 1:
+        readable = "versions " + ", ".join(str(source) for source in accepted[:-1]) + f" and {accepted[-1]}"
     found = (
         f"This file's {section} section is version {stored}, but this version of Universal Agents reads "
         f"{readable}."

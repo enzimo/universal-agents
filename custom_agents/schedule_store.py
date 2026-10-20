@@ -764,7 +764,9 @@ class ScheduleStore:
                 remaining = msg.repeat_count
             else:
                 remaining = row.get("remaining_count")
-            return RowWrite(columns=_definition_columns(msg, remaining_count=remaining), result=SCHEDULE_REPLACED)
+            written = msg.model_copy(deep=True)
+            written.timing_revision = current.timing_revision + int(_next_run_changed(msg, current))
+            return RowWrite(columns=_definition_columns(written, remaining_count=remaining), result=SCHEDULE_REPLACED)
 
         try:
             write = self._repository.write_locked(
@@ -858,6 +860,10 @@ class ScheduleStore:
                 request_binding=system_mutation_request_binding,
             )
             written = candidate.model_copy(deep=True)
+            # A repeating run advances next_fire_at without changing this
+            # revision. Explicit retimes change it, so the listing digest
+            # distinguishes them even though it excludes the live run time.
+            written.timing_revision = current.timing_revision + int(_next_run_changed(candidate, base))
             if not _next_run_changed(candidate, base):
                 written.next_fire_at = row["next_fire_at"]
             if memory_edit is not None:

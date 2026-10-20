@@ -400,6 +400,11 @@ class ScheduledMessage(BaseModel):
         default=None,
         description="ISO 8601 UTC timestamp of next scheduled fire. Computed automatically.",
     )
+    timing_revision: int = Field(
+        default=0,
+        ge=0,
+        description="Store-owned revision of explicit timing changes; scheduler advances leave it unchanged.",
+    )
     paused_until: Optional[str] = Field(
         default=None,
         description="ISO 8601 UTC timestamp until which this schedule is temporarily paused.",
@@ -467,7 +472,10 @@ def schedule_listing_digest(schedule: ScheduledMessage) -> str:
     owner and routing, the run-notes settings (kind and notification policy)
     and, for a one-time schedule (no interval or cron), its run time, which
     runs never move (they delete the schedule). Leaves out a repeating
-    schedule's next run time and the run notes' content. The gateway lists
+    schedule's next run time and the run notes' content. Its timing_revision
+    changes when a writer explicitly changes timing, so a delayed retime
+    cannot replace another retime while normal runs leave the digest valid.
+    The gateway lists
     schedules with it and the manager's store checks it in the write
     transaction (``custom_agents.schedule_store``).
     """

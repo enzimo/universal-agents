@@ -13,8 +13,10 @@ Versions: reading or listing an Objective returns its ``version``
 (``objective_version``, the fields an agent decides on). The ``objectives``
 tool's changes (``update_progress``, ``update_status``) require it as
 ``expected_version`` and are refused with ``changed_since_read`` when the
-Objective changed since the agent read it, so a decision made on an older
-read never overwrites another request's change. Starting or recording work on
+Objective's definition or success criteria changed since the agent read it.
+Progress, focus and lifecycle status are outside that version; each change
+updates only its own fields on the stored row, under current lifecycle rules.
+Starting or recording work on
 an Objective (continuation tasks, plan execution, work sessions, linking a
 schedule or heartbeat item) only adds to its bookkeeping, which merges into
 the stored record, so those tools take no version. Functions with many inputs of their
@@ -713,15 +715,8 @@ def _change_status_in_operation(
     Objective is left alone.
     """
 
-    stored = agent.task_manager.get_objective(objective_id)
-    if stored is None:
-        return None
-    if stored.status in _PERSON_DELETION_STATUSES:
-        raise ValueError(
-            f"Objective {objective_id} "
-            + ("was deleted" if stored.status == ObjectiveStatus.DELETED else "is being deleted")
-            + " by its person, so it can no longer change."
-        )
+    # The status write checks deletion on the locked row. Checking it here
+    # would leave a gap where another process could begin deletion first.
     return apply_objective_lifecycle(
         agent.task_manager, objective_id, change, _AgentLinkSwitch(agent)
     )

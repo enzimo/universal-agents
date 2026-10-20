@@ -845,7 +845,8 @@ class SchedulesSection:
     # 3: two new system schedule kinds (knowledge curation) in ScheduledMessage.
     # 4: the payload Task and TaskSteering can carry the chat message a person
     #    replied to (Task.replied_message).
-    schema_version: ClassVar[int] = 4
+    # 5: ScheduledMessage carries its store-owned timing_revision.
+    schema_version: ClassVar[int] = 5
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = ScheduleTransferRecordV2
@@ -894,7 +895,12 @@ class SchedulesSection:
 __all__ = ["SchedulesSection"]
 
 
-# V4 adds the optional Task.replied_message (the chat message a request
-# replied to). V3 (v0.9.2) payloads never carry it and are otherwise the same
-# records, so the step keeps them unchanged.
+# V4 added optional Task.replied_message and V5 adds timing_revision, whose
+# initial value is zero. Already-supported V3 payloads carry neither field;
+# their records are otherwise unchanged and the current model fills both.
 SECTION_UPGRADES[(SchedulesSection.name, 3)] = lambda records: records
+
+# V4 exports have no timing_revision. ScheduledMessage reads their timing as
+# revision zero; the first explicit timing edit increments it. Keep the V3
+# conversion above for the already-supported frozen transfer fixture too.
+SECTION_UPGRADES[(SchedulesSection.name, 4)] = lambda records: records

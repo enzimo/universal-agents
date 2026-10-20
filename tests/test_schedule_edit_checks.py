@@ -449,6 +449,7 @@ def test_scheduler_runs_do_not_make_a_fresh_read_stale(tmp_path: Path, store: Sc
     )
     store.add(schedule)
     digest = _listed(agent, schedule.schedule_id)["record_digest"]
+    timing_revision = store.get_scheduled_message(schedule.schedule_id).timing_revision
 
     claimed = store.claim_next_due(claimer_agent_id="agent_lead", claimer_named_agent_type="TeamArchitect", claimer_team_id=TEAM)
     assert claimed is not None and claimed["schedule_id"] == schedule.schedule_id
@@ -459,6 +460,7 @@ def test_scheduler_runs_do_not_make_a_fresh_read_stale(tmp_path: Path, store: Sc
     ) == AdvanceOutcome.ADVANCED
     ran = store.get_row(schedule.schedule_id)
     assert ran["remaining_count"] == 4 and ran["next_fire_at"] != claimed["next_fire_at"]
+    assert store.get_scheduled_message(schedule.schedule_id).timing_revision == timing_revision
 
     paused = _call(agent, pause_scheduled_job, schedule.schedule_id, expected_record_digest=digest, until_iso=_UNTIL)
     assert paused["paused"] is True, paused
@@ -469,6 +471,46 @@ def test_scheduler_runs_do_not_make_a_fresh_read_stale(tmp_path: Path, store: Sc
     assert updated["updated"] is True, updated
     kept = store.get_scheduled_message(schedule.schedule_id)
     assert kept.schedule_memory.state.summary == "Two new posts."  # the run's notes stay
+
+
+def test_an_old_read_cannot_overwrite_an_explicit_retime_of_a_repeating_schedule(tmp_path: Path, store: ScheduleStore) -> None:
+    agent = _ToolAgent(tmp_path, store)
+    schedule = _person_schedule(PERSON_A, "Check the feed hourly.")
+    store.add(schedule)
+    old_digest = _listed(agent, schedule.schedule_id)["record_digest"]
+    first_time = (_now() + 2 * HOUR).replace(microsecond=0).isoformat()
+    first = _call(
+        agent, update_scheduled_job, schedule.schedule_id,
+        expected_record_digest=old_digest, next_fire_at=first_time,
+    )
+    assert first["updated"] is True
+    # The guard belongs to the saved schedule, not this process's memory.
+    store = ScheduleStore(storage_settings=store._storage_settings, default_cron_timezone="UTC")
+    agent._schedule_store = store
+    assert store.get_scheduled_message(schedule.schedule_id).timing_revision == 1
+
+    stale = _call(
+        agent, update_scheduled_job, schedule.schedule_id,
+        expected_record_digest=old_digest,
+        next_fire_at=(_now() + 3 * HOUR).replace(microsecond=0).isoformat(),
+    )
+
+    assert stale.get("reason_code") == ChangeRefusal.CHANGED_SINCE_READ
+    assert store.get_scheduled_message(schedule.schedule_id).next_fire_at == first_time
+
+
+def test_an_authoritative_replacement_cannot_reset_the_saved_timing_revision(store: ScheduleStore) -> None:
+    schedule = _person_schedule(PERSON_A, "Check the feed hourly.")
+    store.add(schedule)
+    old_digest = schedule_record_digest(store.get_scheduled_message(schedule.schedule_id))
+    schedule.next_fire_at = (_now() + 2 * HOUR).isoformat()
+    store.add(schedule)
+    assert store.get_scheduled_message(schedule.schedule_id).timing_revision == 1
+    # The install producer still holds revision zero, which cannot reset the stored revision.
+    store.add(schedule)
+    saved = store.get_scheduled_message(schedule.schedule_id)
+    assert saved.timing_revision == 1
+    assert schedule_record_digest(saved) != old_digest
 
 
 def test_a_one_time_schedule_keeps_its_version_while_it_is_claimed(tmp_path: Path, store: ScheduleStore) -> None:
