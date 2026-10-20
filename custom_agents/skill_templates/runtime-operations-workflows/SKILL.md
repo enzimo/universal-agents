@@ -633,14 +633,20 @@ heartbeat.
 2. Present that state and impact to the person, then call
    `apply_change(change_id, reason)`. With authorization on, a person approves
    the exact restart in the Inbox and your task waits; with it off, get their
-   agreement and pass `confirmed=true`.
-3. Applying captures the runtime state again. If tasks, queues or agents
-   changed since planning, the restart is refused; stage a fresh plan and ask
-   again. Plans last one hour.
+   agreement and pass `confirmed=true`. The person approves interrupting the
+   tasks the plan lists: every task you hold (running, queued or waiting) and,
+   for `all`, the work other agents are running. A worker's work on a task
+   you delegated counts as that task.
+3. Applying captures the runtime state again. The approval still holds when
+   listed tasks finished, changed state, or moved on to another part of the
+   same task. When a new task arrived that the restart would interrupt (a
+   message, a scheduled run, a worker's own task), the restart is refused and
+   names the new task; stage a fresh plan and ask again. Plans last one hour.
 4. Use `get_runtime_restart_status(change_id)` to check dispatch. `requested`
    means the supervisor has not accepted it yet; `dispatched` includes the
-   supervisor's receipt. Do not apply or stage the same restart again while
-   its request waits.
+   supervisor's receipt. For a plan not yet applied, `still_applies` and
+   `new_interrupted_tasks` say whether the approval still covers it. Do not
+   apply or stage the same restart again while its request waits.
 5. A `manager` or `all` restart also restarts you, so your task can stop before
    you see the result of `apply_change`, or while another tool waits for access.
    When it resumes, a runtime note says

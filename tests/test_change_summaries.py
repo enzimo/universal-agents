@@ -15,7 +15,11 @@ import pytest
 from pydantic import ValidationError
 
 from access_control.proposals import proposal_summary
-from custom_agents.runtime_restart_service import _restart_summary
+from custom_agents.runtime_restart_service import (
+    RuntimeRestartImpactSnapshot,
+    RuntimeRestartTaskState,
+    _restart_summary,
+)
 from custom_agents.runtime_settings_summary import NOTHING_CHANGES, summarize_runtime_settings
 from custom_messages.contracts.access_v2 import (
     CHANGE_SUMMARY_MAX_CHARS,
@@ -23,6 +27,7 @@ from custom_messages.contracts.access_v2 import (
     ReviewItemV1,
     summary_line,
 )
+from custom_messages.contracts.common_v1 import utc_now
 from custom_messages.contracts.runtime_v1 import (
     RESTART_SCOPE_ALL,
     RESTART_SCOPE_GATEWAY,
@@ -172,9 +177,27 @@ def test_an_access_proposal_is_counted_by_section_with_its_warnings() -> None:
     )
 
 
-def test_a_restart_summary_says_what_restarts_and_how_much_work_it_interrupts() -> None:
-    busy = SimpleNamespace(impact_snapshot=SimpleNamespace(manager_tracked_top_level_task_count=2))
-    idle = SimpleNamespace(impact_snapshot=SimpleNamespace(manager_tracked_top_level_task_count=0))
+def _restart_plan(*states: str) -> SimpleNamespace:
+    tasks = tuple(RuntimeRestartTaskState(task_id=f"task_{index}", state=state) for index, state in enumerate(states))
+    snapshot = RuntimeRestartImpactSnapshot(
+        captured_at_utc=utc_now(),
+        scope=RESTART_SCOPE_MANAGER,
+        affected_processes=("manager",),
+        manager_agent_id="agent_team_lead",
+        manager_current_task_id="",
+        manager_tracked_top_level_task_count=len(tasks),
+        manager_runnable_top_level_queue_depth=0,
+        manager_waiting_top_level_task_count=0,
+        manager_tasks=tasks,
+        known_team_agents=(),
+    )
+    return SimpleNamespace(impact_snapshot=snapshot)
 
-    assert _restart_summary(busy, "manager") == "Restart manager; 2 running tasks may be interrupted."
-    assert _restart_summary(idle, "manager, gateway") == "Restart manager, gateway; no tasks are running."
+
+def test_a_restart_summary_says_what_restarts_and_how_much_work_it_interrupts() -> None:
+    busy = _restart_plan("in_progress", "waiting")
+
+    assert _restart_summary(busy, "manager") == "Restart manager; 2 tasks may be interrupted or delayed."
+    assert _restart_summary(_restart_plan(), "manager, gateway") == (
+        "Restart manager, gateway; no tasks are running, queued or waiting."
+    )

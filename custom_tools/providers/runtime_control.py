@@ -23,7 +23,9 @@ def plan_runtime_restart(
     Records affected processes, active/queued/waiting task identifiers and
     states, and team-visible work for an ``all`` restart. It never restarts
     anything: apply the returned change_id with apply_change; a person
-    approves the exact restart (or, with authorization off, agrees in chat).
+    approves interrupting the listed tasks (or, with authorization off, agrees
+    in chat). The approval holds while those tasks finish or change state; a
+    new task the restart would interrupt needs a fresh plan and approval.
     """
     agent = get_agent_ref()
     if agent is None:
@@ -39,7 +41,9 @@ def plan_runtime_restart(
 
 @tool
 def get_runtime_restart_status(change_id: str) -> str:
-    """Inspect restart plan state, state drift, dispatch receipt, and grant use."""
+    """Inspect a restart plan: whether its approval still covers the tasks it would
+    interrupt (``still_applies``, ``new_interrupted_tasks``), its request to the
+    supervisor, and the supervisor's receipt."""
 
     agent = get_agent_ref()
     if agent is None:

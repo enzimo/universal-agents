@@ -1,11 +1,24 @@
-"""State-bound supervised runtime restarts, applied through ``apply_change``.
+"""Supervised runtime restarts bound to the work they interrupt, applied through ``apply_change``.
 
-TeamArchitect stages a plan bound to the current runtime state (tasks,
-queues, agents). A person approves the exact restart in the Inbox
+TeamArchitect stages a plan that records the runtime state and, from it, the
+tasks the restart would interrupt or delay: every task the manager holds
+(running, queued or waiting) and, for an ``all`` restart, the work other
+agents are running. A person approves the exact plan in the Inbox
 (``access_control.changes``), or, with authorization off, the person's
-conversational agreement applies it. Applying re-checks the state digest and
-writes a request the supervisor acts on; the supervisor re-checks that the
-request records an approval (``docker/launch_headless``).
+conversational agreement applies it. The plan's digest covers everything the
+person was shown; its ``runtime_state_digest`` covers what they agreed the
+restart may do: its processes and the tasks it interrupts.
+
+Applying captures the state again and writes a request the supervisor acts
+on; the supervisor re-checks that the request records an approval
+(``docker/launch_headless``). The approval stays valid while the restart
+would interrupt the same tasks or fewer: tasks finish, wait or change state
+all the time, and the person agreed to interrupt each of them. It is refused,
+and a person must approve a fresh plan, when the restart would also
+interrupt a task nobody agreed to, such as a new message or a scheduled run
+that arrived after planning. Work an agent runs for a task the manager
+delegated belongs to that task, so a specialist moving to the next part of
+an approved task changes nothing.
 
 A manager restart ends the process running TeamArchitect, so it can
 interrupt the task that asked for it before the agent reads the result of
@@ -41,7 +54,12 @@ from custom_agents.governance.authorized_operations import (
     model_digest,
 )
 from custom_agents.governance.runtime_adapters import LoggingGovernanceAuditSink
-from custom_messages.contracts.access_v2 import ChangeApprovalMode, ChangeProposalV1, summary_line
+from custom_messages.contracts.access_v2 import (
+    CHANGE_EFFECT_MAX_CHARS,
+    ChangeApprovalMode,
+    ChangeProposalV1,
+    summary_line,
+)
 from custom_messages.contracts.common_v1 import utc_now
 from custom_messages.contracts.runtime_v1 import (
     AUTHORITY_MODE_AUTHORIZATION_DISABLED,
@@ -58,13 +76,17 @@ from id_generation import new_id
 from runtime_settings.instance_layout import InstanceLayout
 
 
-RUNTIME_RESTART_PLAN_SCHEMA_VERSION = 2
-# The runtime state digest refuses a restart once tasks or agents changed.
+# Version 3 binds the approval to the tasks the restart interrupts. Earlier
+# plans told the person any state change would refuse them, so they are not
+# loaded; TeamArchitect stages them again.
+RUNTIME_RESTART_PLAN_SCHEMA_VERSION = 3
 RUNTIME_RESTART_PLAN_TTL_SECONDS = 60 * 60
 RUNTIME_RESTART_CHANGE_KIND = "runtime_restart"
 _CHANGE_ID_PATTERN = re.compile(r"runtime_restart_[0-9a-f]{12}\Z")
 # Scopes that restart the manager process, and so the task that asked.
 _SCOPES_INTERRUPTING_MANAGER_TASKS = frozenset({RESTART_SCOPE_MANAGER, RESTART_SCOPE_ALL})
+_REASON_PREFIX = "Reason: "
+RESTART_REASON_MAX_CHARS = CHANGE_EFFECT_MAX_CHARS - len(_REASON_PREFIX)
 
 logger = logging.getLogger(__name__)
 
@@ -108,33 +130,52 @@ class RuntimeRestartImpactSnapshot(BaseModel):
     known_team_agents: tuple[RuntimeRestartAgentState, ...]
     gateway_session_state: Literal["unavailable_to_agent"] = "unavailable_to_agent"
 
-    def material_payload(self) -> dict[str, Any]:
-        """Return restart-relevant state without observational clock fields."""
+    def interrupted_work(self) -> dict[str, str]:
+        """Each task this restart interrupts or delays, with what it was doing when captured.
+
+        The keys are what a person agrees to interrupt. Every task the
+        manager holds counts, whatever its state: the restart stops a running
+        one, and a queued or waiting one waits for the restart and continues
+        from saved state. Other agents' running work counts for an ``all``
+        restart (their list is empty otherwise). Work an agent runs for a
+        task the manager delegated counts as that task, so moving to its next
+        part adds nothing. An agent that runs work without reporting which
+        counts as ``<agent id>:unknown-task``.
+        """
+
+        work = {item.task_id: item.state for item in self.manager_tasks}
+        delegated_by = {child.task_id: item.task_id for item in self.manager_tasks for child in item.subtasks}
+        for agent in self.known_team_agents:
+            if not agent.is_executing:
+                continue
+            running = agent.current_task_id or f"{agent.agent_id}:unknown-task"
+            label = agent.name or agent.agent_id
+            task_id = delegated_by.get(running, running)
+            if task_id in work:
+                work[task_id] += f", {label} on {running}"
+            else:
+                work[task_id] = f"running on {label}"
+        return dict(sorted(work.items()))
+
+    def restart_terms(self) -> dict[str, Any]:
+        """What the restart does besides interrupting tasks; fixed by its scope and manager."""
 
         return {
             "scope": self.scope,
             "affected_processes": list(self.affected_processes),
             "manager_agent_id": self.manager_agent_id,
-            "manager_current_task_id": self.manager_current_task_id,
-            "manager_tracked_top_level_task_count": self.manager_tracked_top_level_task_count,
-            "manager_runnable_top_level_queue_depth": self.manager_runnable_top_level_queue_depth,
-            "manager_waiting_top_level_task_count": self.manager_waiting_top_level_task_count,
-            "manager_tasks": [item.model_dump(mode="json") for item in self.manager_tasks],
-            "known_team_agents": [
-                {
-                    "agent_id": item.agent_id,
-                    "named_agent_type": item.named_agent_type,
-                    "name": item.name,
-                    "is_executing": item.is_executing,
-                    "current_task_id": item.current_task_id,
-                    "top_level_queue_depth": item.top_level_queue_depth,
-                    "waiting_top_level_task_count": item.waiting_top_level_task_count,
-                    "deferred_message_count": item.deferred_message_count,
-                }
-                for item in self.known_team_agents
-            ],
             "gateway_session_state": self.gateway_session_state,
         }
+
+    def approval_payload(self) -> dict[str, Any]:
+        """What a person approves the restart to do (``runtime_state_digest`` covers it).
+
+        Task states, counts, queue depths and clocks are left out: they
+        describe the moment of planning and change without the restart
+        interrupting anything more.
+        """
+
+        return {**self.restart_terms(), "interrupted_tasks": list(self.interrupted_work())}
 
 
 class RuntimeRestartPlan(BaseModel):
@@ -154,6 +195,9 @@ class RuntimeRestartPlan(BaseModel):
     scope: Literal["manager", "gateway", "all"]
     reason: str
     impact_snapshot: RuntimeRestartImpactSnapshot
+    # Digest of ``impact_snapshot.approval_payload()``: the processes and the
+    # tasks the person agreed to interrupt. The supervisor's request and
+    # receipt record it with ``plan_digest``.
     runtime_state_digest: str
 
     @field_validator("schema_version")
@@ -202,7 +246,38 @@ class RuntimeRestartPaths:
 
 
 def _state_digest(snapshot: RuntimeRestartImpactSnapshot) -> str:
-    return canonical_json_sha256(snapshot.material_payload())
+    """The plan's ``runtime_state_digest``: what the person agreed the restart may do."""
+
+    return canonical_json_sha256(snapshot.approval_payload())
+
+
+def _new_interrupted_tasks(
+    approved: RuntimeRestartImpactSnapshot, current: RuntimeRestartImpactSnapshot
+) -> tuple[str, ...]:
+    """Tasks the restart would interrupt now that the person did not agree to interrupt."""
+
+    return tuple(sorted(set(current.interrupted_work()) - set(approved.interrupted_work())))
+
+
+def _outside_approval(approved: RuntimeRestartImpactSnapshot, current: RuntimeRestartImpactSnapshot) -> str:
+    """Why the approved restart no longer covers what it would do now; empty while it does.
+
+    The approval holds while the restart interrupts the same tasks or fewer.
+    The restart's other terms come from its scope and manager, which the plan
+    fixes; they are compared too, so a term added to the approval later is
+    never left unchecked.
+    """
+
+    if current.restart_terms() != approved.restart_terms():
+        return "What this restart affects changed after planning."
+    new = _new_interrupted_tasks(approved, current)
+    if not new:
+        return ""
+    count = len(approved.interrupted_work())
+    return (
+        f"New work started that this restart would interrupt: {', '.join(new)}. The approval covers "
+        f"only the {count} task{'s' if count != 1 else ''} listed when it was planned."
+    )
 
 
 def resolve_runtime_restart_paths(agent: Any) -> RuntimeRestartPaths:
@@ -343,36 +418,47 @@ def capture_runtime_restart_impact(agent: Any, scope: str) -> RuntimeRestartImpa
     )
 
 
-def _restart_summary(plan: RuntimeRestartPlan, processes: str) -> str:
-    """The restart in one line for chat: what restarts and how much running work it interrupts."""
+_APPROVAL_COVERS_TASKS = (
+    "This approval covers only the tasks listed. If some of them finish first, the restart still goes "
+    "ahead. If another task starts that the restart would interrupt, the restart is refused and a "
+    "person must approve it again."
+)
 
-    count = plan.impact_snapshot.manager_tracked_top_level_task_count
-    work = f"{count} running task{'s' if count != 1 else ''} may be interrupted" if count else "no tasks are running"
+
+def _restart_summary(plan: RuntimeRestartPlan, processes: str) -> str:
+    """The restart in one line for chat: what restarts and how many tasks it interrupts."""
+
+    count = len(plan.impact_snapshot.interrupted_work())
+    work = (
+        f"{count} task{'s' if count != 1 else ''} may be interrupted or delayed"
+        if count
+        else "no tasks are running, queued or waiting"
+    )
     return summary_line(f"Restart {processes}; {work}.")
 
 
 def _impact_summary(plan: RuntimeRestartPlan) -> str:
-    snapshot = plan.impact_snapshot
-    task_states = ", ".join(
-        f"{item.task_id} ({item.state})" for item in snapshot.manager_tasks
-    ) or "none"
-    known_executing = [
-        item.current_task_id or f"{item.agent_id}:unknown-task"
-        for item in snapshot.known_team_agents
-        if item.is_executing
-    ]
-    known_summary = ", ".join(known_executing) or "none"
-    return (
-        f"Restart supervised scope {plan.scope}; affected processes: "
-        f"{', '.join(snapshot.affected_processes)}. Manager state: current task "
-        f"{snapshot.manager_current_task_id or 'none'}, "
-        f"{snapshot.manager_tracked_top_level_task_count} tracked top-level task(s), "
-        f"{snapshot.manager_runnable_top_level_queue_depth} runnable queued, "
-        f"{snapshot.manager_waiting_top_level_task_count} waiting. Top-level task states: "
-        f"{task_states}. Team-visible executing tasks included for scope=all: {known_summary}. "
-        "Gateway session count is unavailable to the agent; connected sessions may need to "
-        "reconnect. Active work may be interrupted and recovery depends on persisted state."
-    )[:2000]
+    """The tasks the person agrees to interrupt, as one review line.
+
+    Names every task while they fit in the line; the count is always exact.
+    """
+
+    work = plan.impact_snapshot.interrupted_work()
+    if not work:
+        return "No tasks are running, queued or waiting, so the restart interrupts none."
+    entries = [f"{task_id} ({doing})" for task_id, doing in work.items()]
+
+    def line(shown: int) -> str:
+        names = ", ".join(entries[:shown])
+        left_out = len(entries) - shown
+        if left_out:
+            names = f"{names}, and {left_out} more" if names else f"{left_out} tasks"
+        return f"Tasks it may interrupt or delay ({len(entries)}), with their state when planned: {names}."
+
+    shown = len(entries)
+    while shown and len(line(shown)) > CHANGE_EFFECT_MAX_CHARS:
+        shown -= 1
+    return line(shown)
 
 
 class RuntimeRestartService:
@@ -410,6 +496,11 @@ class RuntimeRestartService:
         normalized_reason = " ".join(str(reason or "").split())
         if not normalized_reason:
             raise ValueError("Runtime restart reason must not be empty.")
+        if len(normalized_reason) > RESTART_REASON_MAX_CHARS:
+            raise ValueError(
+                f"Runtime restart reason must be at most {RESTART_REASON_MAX_CHARS} characters "
+                "so the complete reason fits in the approval review."
+            )
         snapshot = capture_runtime_restart_impact(self.agent, scope)
         now = utc_now()
         plan = RuntimeRestartPlan(
@@ -476,7 +567,7 @@ class RuntimeRestartService:
         return plan
 
     def _verify_current(self, plan: RuntimeRestartPlan, paths: RuntimeRestartPaths) -> None:
-        """The restart can still run: not dispatched yet, and the running tasks and agents unchanged.
+        """The restart can still run: not dispatched yet, and it interrupts only approved tasks.
 
         Runs before a person is asked (``describe``) and again when applying,
         so nobody approves a restart that can only be refused.
@@ -487,11 +578,16 @@ class RuntimeRestartService:
         if paths.request_for_change(plan.change_id).is_file():
             raise FileExistsError(f"Runtime restart plan {plan.change_id} already awaits the supervisor.")
         current_snapshot = capture_runtime_restart_impact(self.agent, plan.scope)
-        if _state_digest(current_snapshot) != plan.runtime_state_digest:
-            raise PermissionError(
-                "Material runtime state changed after planning; inspect the new state and "
-                "stage a fresh restart plan."
+        why = _outside_approval(plan.impact_snapshot, current_snapshot)
+        if why:
+            logger.info(
+                "A restart would now interrupt work its approval does not cover. "
+                "event=runtime_restart_outside_approval change_id=%s task_id=%s new_task_ids=%s",
+                plan.change_id,
+                plan.source_task_id,
+                ",".join(_new_interrupted_tasks(plan.impact_snapshot, current_snapshot)),
             )
+            raise PermissionError(f"{why} Inspect the new state and stage a fresh restart plan.")
 
     def describe(self, change_id: str) -> ChangeProposalV1:
         plan = self.load_plan(change_id)
@@ -506,8 +602,10 @@ class RuntimeRestartService:
             effect=(
                 f"Restarts the supervised processes: {processes}. It does not reboot the host or container.",
                 _impact_summary(plan),
-                f"Reason: {plan.reason}",
-                "If the running tasks or agents change before approval, the restart is refused and must be staged again.",
+                "Gateway session count is unavailable to the agent; connected sessions may need to "
+                "reconnect. Active work may be interrupted and recovery depends on persisted state.",
+                f"{_REASON_PREFIX}{plan.reason}",
+                _APPROVAL_COVERS_TASKS,
             ),
         )
 
@@ -596,12 +694,14 @@ class RuntimeRestartService:
             return {"status": "requested", "request": json.loads(request_path.read_text(encoding="utf-8"))}
         plan = self._plan_store(paths).load(normalized)
         current_snapshot = capture_runtime_restart_impact(self.agent, plan.scope)
-        current_digest = _state_digest(current_snapshot)
+        why = _outside_approval(plan.impact_snapshot, current_snapshot)
         return {
             "status": "pending" if plan.expires_at_utc > utc_now() else "expired",
             "plan": plan.model_dump(mode="json"),
-            "current_runtime_state_digest": current_digest,
-            "runtime_state_unchanged": current_digest == plan.runtime_state_digest,
+            # Whether the approval still covers the restart; see _outside_approval.
+            "still_applies": not why,
+            "refusal_reason": why or None,
+            "new_interrupted_tasks": list(_new_interrupted_tasks(plan.impact_snapshot, current_snapshot)),
             "current_impact_snapshot": current_snapshot.model_dump(mode="json"),
         }
 

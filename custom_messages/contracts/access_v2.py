@@ -857,6 +857,7 @@ class ChangeApprovalRecordV1(AccessContractModel):
 # A change's one-line summary (ChangeProposalV1.summary): short enough for a
 # chat message and a card heading.
 CHANGE_SUMMARY_MAX_CHARS = 300
+CHANGE_EFFECT_MAX_CHARS = 1000
 
 
 def summary_line(text: str) -> str:
@@ -943,8 +944,8 @@ class ChangeProposalV1(AccessContractModel):
     @field_validator("effect")
     @classmethod
     def _bounded_lines(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if any(not line.strip() or len(line) > 1000 for line in value):
-            raise ValueError("Each effect line is between 1 and 1000 characters.")
+        if any(not line.strip() or len(line) > CHANGE_EFFECT_MAX_CHARS for line in value):
+            raise ValueError(f"Each effect line is between 1 and {CHANGE_EFFECT_MAX_CHARS} characters.")
         return value
 
     @field_validator("summary")
@@ -1547,6 +1548,7 @@ __all__ = [
     "ChangeApprovalMode",
     "ChangeApprovalRecordV1",
     "CHANGE_SUMMARY_MAX_CHARS",
+    "CHANGE_EFFECT_MAX_CHARS",
     "ChangeProposalV1",
     "AccountLinkStatus",
     "AccountLinkV1",

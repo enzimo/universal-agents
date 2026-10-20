@@ -1956,6 +1956,29 @@ matched at their boundaries, so a shorter requester correction is retained.
 Interrupt replies include their steering event id, keeping distinct replies
 separate even when one ends at a paragraph boundary inside an earlier reply.
 
+A restart's approval covers the tasks the restart interrupts
+(`custom_agents/runtime_restart_service.py`). The plan records the runtime
+state and, from it, the tasks the restart would interrupt or delay: every
+top-level task the manager holds, whatever its state, and for an `all` restart
+the work other agents report running. Work on a task the manager delegated
+counts as that task. The plan digest covers everything the person is shown;
+`runtime_state_digest`, which the supervisor's request and receipt record,
+covers the restart's processes and that set of tasks. Applying captures the
+state again and refuses only when the restart would interrupt a task outside
+the set, such as a new message or a scheduled run; tasks finishing, waiting or
+changing state keep the approval, because the person already agreed to
+interrupt each of them. The digest used to cover every task's state, the
+current task and other agents' queue counts, so any scheduled run, heartbeat
+item, finished worker or new message made an approved restart unusable, and
+with background work running a restart could rarely be applied. A refusal uses
+the approval up, as for any plan that no longer applies, and names the new
+tasks, so TeamArchitect stages a fresh plan that lists them. Plans need schema
+3: plans staged under the earlier rule are refused rather than converted,
+because their approval text promised the stricter rule. The review lists the
+tasks in one line of at most 1000 characters, naming them while they fit and
+always giving the exact count; a busy manager used to produce a longer line,
+which could not be shown for review at all.
+
 An installed MCP server is one team tool, `mcp:<name>`, in the `mcp_servers`
 tool set that members hold as a standard set (`access_catalog/catalog.py`,
 `access_control/standard_grants.py`), so it follows grants like every other
