@@ -2756,8 +2756,24 @@ class LLMTurnExecutor:
         )
         raise TaskWaitLimitReached(task_id=task_id, waits=waits, limit=limit)
 
+    async def prepare_turn_decision(
+        self, *, msg_content: ContentType, msg_header: MessageHeader, msg_meta: MessageMeta,
+        task_id: Optional[str], decision: Any, strands_agent: Any, decision_tool_name: str = "",
+    ) -> None:
+        """Check and save a completed invocation before either path sends actions.
+
+        Live SDK interrupt resumes use their retained model, which may differ
+        from the agent's current model after another task ran in between.
+        """
+
+        turn = _TurnState(msg_content=msg_content, msg_header=msg_header, msg_meta=msg_meta)
+        turn.active_task_id = task_id
+        turn.turn_decision_tool_name = decision_tool_name
+        await self._stop_at_wait_limit(turn, decision)
+        await self._record_turn_work(turn, decision=decision, strands_agent=strands_agent)
+
     async def _record_turn_work(
-        self, turn: _TurnState, *, decision: Any, ended_by: Optional[str] = None
+        self, turn: _TurnState, *, decision: Any, ended_by: Optional[str] = None, strands_agent: Any = None
     ) -> None:
         """Save what this turn did when it leaves its task open (``turn_work_notes``).
 
@@ -2779,7 +2795,7 @@ class LLMTurnExecutor:
         if decision is not None and not leaves_task_open(decision):
             return
         started_wait = decision is not None and decision_starts_wait(decision)
-        model = self.model()
+        model = self.model() if strands_agent is None else strands_agent
         tool_calls = tool_calls_from_messages(
             list(getattr(model, "messages", None) or []),
             exclude_tool_names=(turn.turn_decision_tool_name,),
@@ -2882,10 +2898,13 @@ class LLMTurnExecutor:
         outcome = self.decode_result(
             result=turn.result, msg_content=turn.msg_content, msg_meta=turn.msg_meta
         )
-        await self._stop_at_wait_limit(turn, outcome.decision)
         # Saved before the outbox sends anything, so a reply cannot resume the
         # task before its next turn can see what this one did.
-        await self._record_turn_work(turn, decision=outcome.decision)
+        await self.prepare_turn_decision(
+            msg_content=turn.msg_content, msg_header=turn.msg_header, msg_meta=turn.msg_meta,
+            task_id=turn.active_task_id, decision=outcome.decision, strands_agent=self.model(),
+            decision_tool_name=turn.turn_decision_tool_name,
+        )
         # The outbox releases what this turn read when it records the batch;
         # a failure before that keeps it for the task's next turn.
         turn.start_notes_handed_over = True

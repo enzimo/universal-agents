@@ -77,7 +77,7 @@ from custom_agents.model_runtime_profile import (
     runtime_llm_profile_from_agent,
 )
 from env_secrets import get_env_with_file_fallback
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter
 from strands import Agent
 from strands.agent.agent_result import AgentResult
 
@@ -275,7 +275,6 @@ from custom_agents.task_runtime_coordinator import (
 )
 from custom_agents.schedule_store import ScheduleStore, schedule_claim_scope_for_agent
 from custom_agents.structured_llm_messages import (
-    StructuredAgentTurnDecision,
     TurnAction,
 )
 from custom_agents.task_manager import TaskInfo, TaskManager
@@ -366,6 +365,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 DEFAULT_TEAM_ID = AGENT_DEFAULTS.no_team_id.value
+_TURN_ACTION_ADAPTER = TypeAdapter(TurnAction)
 MARKDOWN_FENCE_PATTERN = re.compile(r"(?<!\\)```")
 MARKDOWN_INLINE_CODE_PATTERN = re.compile(r"(?<!\\)`")
 MARKDOWN_BOLD_PATTERN = re.compile(r"(?<!\\)\*\*")
@@ -4409,10 +4409,9 @@ class UniversalAgent(BaseModel):
 
     def _turn_action_from_outbox_record(self, record: Any) -> TurnAction:
         action_payload = dict(record.payload_json.get("action") or {})
-        decision = StructuredAgentTurnDecision.model_validate(
-            {"actions": [action_payload]}
-        )
-        return decision.actions[0]
+        # The full batch was validated before persistence. Recovery reads one
+        # action, which may require a later response in its original batch.
+        return _TURN_ACTION_ADAPTER.validate_python(action_payload)
 
     async def _ensure_turn_action_source_task(
         self,

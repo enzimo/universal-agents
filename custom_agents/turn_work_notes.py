@@ -266,7 +266,13 @@ def note_summary(details: Mapping[str, Any]) -> str:
 
 
 def is_turn_work_note(entry: TaskHistoryEntry) -> bool:
-    return isinstance(entry.details, Mapping) and entry.details.get("event") == TURN_WORK_EVENT
+    # High-importance child history is copied into its parent. It remains
+    # useful history, but cannot become this task's own turns or wait count.
+    return (
+        isinstance(entry.details, Mapping)
+        and entry.details.get("event") == TURN_WORK_EVENT
+        and not entry.details.get("bubbled_entry_id")
+    )
 
 
 def turn_work_notes(task: Optional[Task]) -> list[TaskHistoryEntry]:

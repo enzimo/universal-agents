@@ -1011,6 +1011,12 @@ resumed turn saw only the original request and did the work again; a scheduled
 audit that escalated its findings re-ran itself after every reply from the team
 lead.
 
+Fresh invocations and live SDK interrupt resumes share the same decision
+checks and work recording before dispatch. A resumed session records its own
+model messages even when another task replaced the facade's current model.
+Copied child history stays available as history, but does not count as the
+parent's own work notes or waits.
+
 As a backstop, one task may send something out and wait for it at most five
 times (`MAX_WAITS_PER_TASK` in `custom_agents/task_wait_limit.py`): a
 delegation, an escalation, a question or a credential form. A turn that would
@@ -1018,6 +1024,9 @@ start a sixth wait is refused before it sends anything, and the task fails with
 a plain explanation; for a scheduled run the person also gets a chat message.
 A worker's report to TeamLead (`worker_result`) is not a wait: it is sent as
 its own task that gets no reply (`custom_agents/worker_result_reports.py`).
+It retains its source task as parent without registering a pending subtask,
+so the worker finishes immediately and the report cannot close the original
+person's request ledger. Ordinary delegated work still answers its requester.
 The limit is fixed in code because a setting would change the team transfer's
 settings format.
 

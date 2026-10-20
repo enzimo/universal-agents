@@ -1448,7 +1448,7 @@ async def test_live_worker_report_finishes_the_workers_task_without_waiting_for_
                     for envelope in manager_received
                     if isinstance(envelope.msg_content, Task) and envelope.msg_content.problem_statement == report_text
                 )
-                assert report.msg_content.parent_task_id is None
+                assert report.msg_content.parent_task_id == worker_task_id
                 assert report.msg_meta.is_response_requested is False
                 assert report.msg_meta.manager_escalation.source_task_id == worker_task_id
                 assert report_text in manager_llm.invocations[0]

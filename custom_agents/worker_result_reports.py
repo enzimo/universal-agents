@@ -14,12 +14,13 @@ knowledge-base audit re-ran itself on every such turn
 (``custom_agents.turn_work_notes`` covers the lost work; this module removes
 the needless wait).
 
-Now the report is its own task for TeamArchitect, not a subtask: it has no
-parent and asks for no response. The worker's task finishes in the same turn
+Now the report is a no-reply task for TeamArchitect. Its parent identifies the
+source task, but the worker registers no pending subtask and waits for no
+response. The worker's task finishes in the same turn
 (the batch must end with its ``task_response``,
 ``structured_llm_messages.WORKER_RESULT_REQUIRES_RESPONSE``), and
 TeamArchitect's answer to the report is not sent back
-(``turn_action_outbox_runtime._should_suppress_unrequested_top_level_agent_response``).
+(``turn_action_outbox_runtime._should_suppress_unrequested_agent_response``).
 The report carries the worker task's gateway context unchanged, as the
 subtask did, so TeamArchitect's task works for the same person
 (``access_control.task_identity``); trusted code sets the escalation's source
@@ -96,6 +97,9 @@ async def prepare_worker_result_report(
     gateway_context = getattr(parent_meta, "gateway_context", None)
     task = Task(
         task_id=report_task_id(record_id),
+        # Keep request lineage without registering a wait. A parentless report
+        # would own and close the original signed request's change ledger.
+        parent_task_id=parent_task.task_id,
         task_type=MessageMetaType.REQUEST,
         problem_statement=model_task.problem_statement,
         attachments=[attachment.model_copy(deep=True) for attachment in model_task.attachments or []],

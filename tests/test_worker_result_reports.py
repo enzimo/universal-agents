@@ -1,7 +1,7 @@
 """A worker's report to the team lead gets no reply and does not hold the worker's task.
 
 custom_agents.worker_result_reports: a ``worker_result`` escalation is its own
-task for TeamArchitect (no parent, no response requested) with trusted source
+task for TeamArchitect (source parent, no response requested) with trusted source
 fields, and the worker's batch must end with its own final answer.
 """
 
@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -37,6 +39,8 @@ from custom_messages.contracts.routing_v1 import (
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState, RequesterType
+from tests.broker_access_support import context_signer
+from tests.change_approval_support import use_signed_contexts
 
 REPORT = "Audit findings: linked the home page to five pages."
 
@@ -147,7 +151,7 @@ def test_the_report_is_its_own_task_for_the_lead_with_trusted_source_fields(tmp_
     )
 
     assert task.task_id == report_task_id("action_7")
-    assert task.parent_task_id is None and task.problem_statement == REPORT
+    assert task.parent_task_id == "run_1" and task.problem_statement == REPORT
     assert (header.to_routing_path, header.response_routing_key) == ("team_TeamArchitect", "worker_1")
     assert meta.is_response_requested is False
     assert meta.requester_type == RequesterType.AGENT_REQUESTER
@@ -163,3 +167,116 @@ def test_the_report_is_its_own_task_for_the_lead_with_trusted_source_fields(tmp_
     assert any((entry.details or {}).get("event") == REPORT_SENT_EVENT for entry in history)
     # The worker's task waits for nothing.
     assert not agent.task_manager.has_pending_subtasks("run_1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", [ProgressState.COMPLETED, ProgressState.CANCELLED])
+async def test_report_terminal_state_keeps_its_original_signed_request_open(tmp_path, monkeypatch, terminal):
+    from custom_tools.providers.knowledge import knowledge_actor, knowledge_service
+    from knowledge_base.service import DraftInput
+    from storage.knowledge_repository import create_knowledge_repository
+
+    use_signed_contexts(monkeypatch)
+    db = str(tmp_path / "shared.db")
+    lead = TaskManager(db_path=db)
+    lead.set_owner_identity("lead", "Lead", "team", TEAM_ARCHITECT_AGENT_TYPE)
+    signed = context_signer().issue(team_id="team", person_id="alice", person_roles=("member",))
+    meta = MessageMeta(gateway_context=GatewayContext(task_context=signed))
+    lead.add_task(Task(task_id="request", task_type=MessageMetaType.REQUEST), MessageHeader(), meta, owner_person_id="alice")
+    lead.update_main_task_state("request", ProgressState.WAITING, datetime.now(timezone.utc).isoformat())
+    worker_tasks = TaskManager(db_path=db)
+    worker_tasks.set_owner_identity("worker", "Worker", "team", "WebResearchAgent")
+    worker_tasks.add_task(
+        Task(task_id="child", parent_task_id="request", task_type=MessageMetaType.REQUEST),
+        MessageHeader(), meta, owner_person_id="alice",
+    )
+    worker = SimpleNamespace(id="worker", name="Worker", named_agent_type="WebResearchAgent", task_manager=worker_tasks, _logger=logging.getLogger(__name__))
+    report, header, report_meta = await prepare_worker_result_report(
+        worker, comms_message=CommsMessage(
+            msg_content=Task(task_type=MessageMetaType.REQUEST, problem_statement=REPORT),
+            msg_meta=MessageMeta(manager_escalation=ManagerEscalationContext(escalation_type="worker_result")),
+        ), parent_task_info=worker_tasks.get_task_info("child"), header=MessageHeader(), record_id="report",
+    )
+    assert report.parent_task_id == "child"
+    assert lead.add_task(report, header, report_meta, owner_person_id="alice")
+    lead.update_main_task_state(report.task_id, terminal, datetime.now(timezone.utc).isoformat())
+    assert lead.get_task_info("request").state is ProgressState.WAITING
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT state FROM change_requests WHERE request_id=?", (signed.context.context_id,)).fetchone()[0] == "open"
+    # Use the tools' verified actor, not an actor assembled from claimed identity.
+    facade = SimpleNamespace(
+        id="lead", name="Lead", team_id="team", named_agent_type=TEAM_ARCHITECT_AGENT_TYPE,
+        task_manager=lead, knowledge_config={}, _knowledge_repository=create_knowledge_repository(lead.storage_settings),
+    )
+    lead.task_state.current_in_progress_task_id = "request"
+    saved = knowledge_service(facade).write(knowledge_actor(facade), "personal/notes", DraftInput(title="Notes", body="Still running."))
+    assert saved.page.revision == 1
+    lead.complete_task("request", datetime.now(timezone.utc).isoformat())
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT state FROM change_requests WHERE request_id=?", (signed.context.context_id,)).fetchone()[0] == "ended"
+
+
+@pytest.mark.parametrize(("report", "suppressed"), [(True, True), (False, False)])
+def test_only_no_reply_reports_suppress_a_response_despite_source_parentage(report, suppressed):
+    from custom_agents.turn_action_outbox_runtime import _should_suppress_unrequested_agent_response
+
+    request = Task(task_id="child", parent_task_id="parent", task_type=MessageMetaType.REQUEST)
+    meta = MessageMeta(
+        requester_type=RequesterType.AGENT_REQUESTER, is_response_requested=False,
+        manager_escalation=ManagerEscalationContext(escalation_type="worker_result") if report else None,
+    )
+    assert _should_suppress_unrequested_agent_response(
+        incoming_content=request, incoming_meta=meta,
+        outgoing_content=Task(task_id="child", task_type=MessageMetaType.RESPONSE),
+    ) is suppressed
+
+
+@pytest.mark.asyncio
+async def test_report_retry_after_publish_keeps_its_id_without_delegation_state(tmp_path, monkeypatch):
+    from custom_agents.delegated_work_runtime import delegated_tasks
+    from custom_agents.turn_action_outbox_runtime import PUBLISH_CONFIRMED, TurnActionRecoveryScheduled
+    from tests.test_turn_action_outbox import _add_active_parent_task, _make_agent, _make_task_manager
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent.named_agent_type = "WebResearchAgent"
+    agent.named_agent_type_queue_map[TEAM_ARCHITECT_AGENT_TYPE] = "test_team_TeamArchitect"
+    mark = manager.mark_turn_action_record
+    failed = False
+
+    def fail_completion_once(*args, **kwargs):
+        nonlocal failed
+        if kwargs.get("status") == "completed" and not failed:
+            failed = True
+            raise sqlite3.OperationalError("report completion save unavailable")
+        return mark(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "mark_turn_action_record", fail_completion_once)
+    decision = ModelWorkerTurnDecision.model_validate(
+        _decision(_report_action(), {**_RESPONSE, "suppress_outbound_dispatch": False})
+    ).to_runtime_decision()
+    info = manager.get_task_info(parent.task_id)
+    with pytest.raises(TurnActionRecoveryScheduled):
+        await agent._execute_turn_decision_outbox(
+            decision=decision, incoming_content=parent, incoming_header=info.header, incoming_meta=info.meta,
+        )
+    report_record = next(record for record in manager.execution_state.turn_action_outbox.values() if record.action_type == "delegate_task")
+    assert not report_record.side_effects.get(PUBLISH_CONFIRMED)
+    assert "delegated_task_id" not in report_record.side_effects
+    manager.mark_turn_action_record(report_record.action_id, next_retry_at="2000-01-01T00:00:00+00:00")
+    assert await agent._drain_due_turn_action_outbox()
+    reports = [
+        call.kwargs["message"].msg_content
+        for call in agent.team_comms.send_message.await_args_list
+        if is_worker_result_report(call.kwargs["message"].msg_meta)
+    ]
+    assert len(reports) == 2 and reports[0].task_id == reports[1].task_id
+    assert reports[0].parent_task_id == parent.task_id
+    assert delegated_tasks(agent).get(str(agent.team_id), reports[0].task_id) is None
+    assert not manager.has_pending_subtasks(parent.task_id)
+    final_answer = agent.team_comms.send_message.await_args_list[-1].kwargs["message"].msg_content
+    assert final_answer.task_type is MessageMetaType.RESPONSE
+    assert final_answer.task_id == parent.task_id
+    assert manager.get_task_info(parent.task_id) is None  # Completed work was pruned.
+    assert manager.get_turn_action_record(report_record.action_id) is None

@@ -579,6 +579,8 @@ A task may send something out and wait for it at most five times. A task that
 would wait a sixth time is probably repeating itself, so it is stopped: nothing
 more is sent, and for a scheduled run you get a chat message saying so.
 Changes it already made are kept.
+The limit counts that task's own waits, including after access or setup
+approval. A child task's waits do not use its parent's allowance.
 
 ## Change the worker or launch rules
 
