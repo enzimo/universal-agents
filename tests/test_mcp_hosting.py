@@ -85,6 +85,7 @@ from tests.change_approval_support import (
     use_signed_contexts,
 )
 from tests.test_mcp_connections import ADMIN, MEMBER, _gateway
+from tests.tool_result_support import tool_json
 
 TEAM = "team_host"
 ECHO_TOOL = {
@@ -151,7 +152,7 @@ def _call_tool(agent: Any, tool: Any, **arguments: Any) -> dict[str, Any]:
         result = tool._tool_func(**arguments)
         return asyncio.run(result) if asyncio.iscoroutine(result) else result
 
-    return json.loads(contextvars.copy_context().run(call))
+    return tool_json(contextvars.copy_context().run(call))
 
 
 def _hosted_connection(config: GatewayInstanceConfig, hosted_server_id: str):

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import pytest
+from tests.tool_result_support import tool_json
 from strands.interrupt import InterruptException
 
 from access_catalog.catalog import CatalogSource
@@ -312,7 +313,7 @@ def lead(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixtur
 
 
 async def _apply(change_id: str, call: ToolCall, *, confirmed: bool = False) -> dict[str, Any]:
-    return json.loads(await apply_change._tool_func(change_id, "Run the deployment commands", call, confirmed=confirmed))
+    return tool_json(await apply_change._tool_func(change_id, "Run the deployment commands", call, confirmed=confirmed))
 
 
 async def _type(session_id: str, text: str) -> dict[str, Any]:

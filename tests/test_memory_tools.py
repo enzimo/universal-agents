@@ -20,6 +20,7 @@ from custom_agents.conversation_store import ConversationStore
 from custom_messages.contracts.access_v2 import SubjectKind, SubjectRefV1, TargetKind, TargetRefV1
 from custom_tools.providers.memory import memory, topic_tags
 from custom_tools.runtime_context import set_agent_ref
+from custom_tools.tool_results import result_text
 from tests.test_access_request_tools import BINARY, OWNER, TEAM, make_agent, owner_service
 from tests.test_access_request_tools import storage as access_storage
 from tests.test_strands_user_scope_tools import _FakeAgent, _signed_task_contexts  # noqa: F401 - signing keys
@@ -45,7 +46,7 @@ def agent(tmp_path: Path):
 
 
 def call(tool, **inputs) -> dict:
-    return json.loads(tool(**inputs))
+    return json.loads(result_text(tool(**inputs)))
 
 
 # -- memory --------------------------------------------------------------------------
@@ -89,8 +90,11 @@ def test_every_memory_action_works_on_both_banks(agent, bank) -> None:
     ],
 )
 def test_memory_says_which_inputs_an_action_takes_and_changes_nothing(agent, inputs, message) -> None:
-    result = call(memory, **inputs)
+    raw = memory(**inputs)
+    result = json.loads(result_text(raw))
 
+    # A failed call is a failed result, so a model step stops at it (custom_tools.tool_results).
+    assert raw["status"] == "error"
     assert (result["ok"], result["error_code"], result["message"]) == (False, "invalid_input", message)
     assert call(memory, action="list", bank="coremem")["facts"] == []
 

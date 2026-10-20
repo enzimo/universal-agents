@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import json
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +33,7 @@ from custom_tools.runtime_context import set_agent_ref
 from tests.change_approval_support import change_agent, run_apply_change, use_signed_contexts
 from tests.test_access_request_tools import BINARY, OWNER, TEAM, make_agent, owner_service
 from tests.test_access_request_tools import storage as access_storage
+from tests.tool_result_support import tool_json
 
 storage = access_storage  # the shared fixture: a manager database and verify keys
 
@@ -63,7 +63,7 @@ def call(agent: Any, tool: Any, **inputs: Any) -> dict[str, Any]:
         result = tool._tool_func(**inputs)
         return asyncio.run(result) if asyncio.iscoroutine(result) else result
 
-    return json.loads(contextvars.copy_context().run(run))
+    return tool_json(contextvars.copy_context().run(run))
 
 
 def test_a_specialist_is_staged_seen_and_staged_for_removal_through_one_tool(lead) -> None:

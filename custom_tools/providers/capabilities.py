@@ -168,7 +168,7 @@ async def mcp_connections(
     target_agent_types: Optional[List[str]] = None,
     credential_injections: Optional[List[Dict[str, str]]] = None,
     confirmed: bool = False,
-) -> str:
+) -> str | dict[str, Any]:
     """See the team's MCP connections, or propose installing a remote MCP server.
 
     Actions:
@@ -313,7 +313,7 @@ async def hosted_mcp_servers(
     tools: Optional[List[Dict[str, Any]]] = None,
     target_agent_types: Optional[List[str]] = None,
     reason: Optional[str] = None,
-) -> str:
+) -> str | dict[str, Any]:
     """Declarative MCP servers the runtime hosts: list, propose, start, stop, and stage installing or removing.
 
     Actions:
@@ -495,7 +495,7 @@ def installed_permissions(
     display_name: Optional[str] = None,
     purpose: Optional[str] = None,
     justification: Optional[str] = None,
-) -> str:
+) -> str | dict[str, Any]:
     """See the team's installed procedures (installed permissions), or propose one for an administrator.
 
     Actions:
@@ -584,7 +584,7 @@ def specialist_definitions(
     reason: Optional[str] = None,
     visible: bool = False,
     change_id: Optional[str] = None,
-) -> str:
+) -> str | dict[str, Any]:
     """Stage a new generated specialist, see one's saved record, or stage removing one.
 
     Actions:

@@ -19,26 +19,14 @@ in work for its own person, and blocked content is refused again on publish.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Optional
 
 from strands import tool
 
 from custom_tools.provider_contract import ToolProvider
-from custom_tools.providers.knowledge import _by, _error, knowledge_service, _page_summary, knowledge_actor
-from custom_tools.runtime_context import get_agent_ref
+from custom_tools.providers.knowledge import _by, _page_summary, _run
 from knowledge_base.records import KnowledgeActor, KnowledgeContribution, KnowledgeError
 from knowledge_base.service import DraftInput, KnowledgeService
-
-
-def _run(action: Any) -> str:
-    agent = get_agent_ref()
-    if agent is None:
-        return _error("agent_ref_missing", "Agent reference not set")
-    try:
-        return json.dumps(action(knowledge_service(agent), knowledge_actor(agent)), default=str)
-    except KnowledgeError as error:
-        return json.dumps(error.payload(), default=str)
 
 
 def _contribution(contribution: KnowledgeContribution, *, with_text: bool) -> dict[str, Any]:
@@ -66,7 +54,7 @@ def _contribution(contribution: KnowledgeContribution, *, with_text: bool) -> di
 
 
 @tool
-def list_pending_contributions(limit: int = 20) -> str:
+def list_pending_contributions(limit: int = 20) -> str | dict[str, Any]:
     """
     List the team-page changes proposed from the work of the person this run works for, oldest last.
 
@@ -83,7 +71,7 @@ def list_pending_contributions(limit: int = 20) -> str:
 
 
 @tool
-def read_contribution(contribution_id: str) -> str:
+def read_contribution(contribution_id: str) -> str | dict[str, Any]:
     """
     Read one pending contribution in full, with the current text of the team page it changes.
 
@@ -114,7 +102,7 @@ def publish_contribution(
     base_revision: int = 0,
     note: Optional[str] = None,
     page: str = "",
-) -> str:
+) -> str | dict[str, Any]:
     """
     Publish a pending contribution to the team space, as proposed or as your edited version.
 
@@ -160,7 +148,7 @@ def publish_contribution(
 
 
 @tool
-def reject_contribution(contribution_id: str, reason: str) -> str:
+def reject_contribution(contribution_id: str, reason: str) -> str | dict[str, Any]:
     """
     Reject a pending contribution, for example when it is private to the person, wrong, or duplicates a page.
 
@@ -178,7 +166,7 @@ def reject_contribution(contribution_id: str, reason: str) -> str:
 
 
 @tool
-def knowledge_activity_report(hours: int = 24) -> str:
+def knowledge_activity_report(hours: int = 24) -> str | dict[str, Any]:
     """
     Knowledge writes per agent type, refusals by reason, the busiest team pages and frozen pages.
 
@@ -205,7 +193,7 @@ def knowledge_activity_report(hours: int = 24) -> str:
 
 
 @tool
-def knowledge_problems(stale_days: int = 180) -> str:
+def knowledge_problems(stale_days: int = 180) -> str | dict[str, Any]:
     """
     Check team pages for broken links, stale pages, open notes and exact duplicates.
 
@@ -227,7 +215,7 @@ def knowledge_problems(stale_days: int = 180) -> str:
 
 
 @tool
-def list_open_knowledge_notes(space: str = "team", limit: int = 20) -> str:
+def list_open_knowledge_notes(space: str = "team", limit: int = 20) -> str | dict[str, Any]:
     """
     List open notes waiting to be merged into their pages, oldest first.
 
@@ -257,7 +245,7 @@ def list_open_knowledge_notes(space: str = "team", limit: int = 20) -> str:
 
 
 @tool
-def resolve_knowledge_note(note_id: str, merged: bool) -> str:
+def resolve_knowledge_note(note_id: str, merged: bool) -> str | dict[str, Any]:
     """
     Close an open note: merged=true after you worked it into the page, false to dismiss it.
 
@@ -274,7 +262,7 @@ def resolve_knowledge_note(note_id: str, merged: bool) -> str:
 
 
 @tool
-def freeze_knowledge_page(page: str, minutes: int) -> str:
+def freeze_knowledge_page(page: str, minutes: int) -> str | dict[str, Any]:
     """
     Stop agents from editing a page for a while; they add notes instead. Lift it early with unfreeze_knowledge_page.
 
@@ -291,7 +279,7 @@ def freeze_knowledge_page(page: str, minutes: int) -> str:
 
 
 @tool
-def unfreeze_knowledge_page(page: str) -> str:
+def unfreeze_knowledge_page(page: str) -> str | dict[str, Any]:
     """
     Let agents edit a frozen page again, for example once you merged its notes and the disagreement is settled.
 
@@ -315,7 +303,7 @@ def merge_knowledge_pages(
     source_revision: int,
     title: str = "",
     summary: Optional[str] = None,
-) -> str:
+) -> str | dict[str, Any]:
     """
     Merge two pages about the same topic into one: the target keeps the merged text, the source is archived.
 
@@ -361,7 +349,7 @@ def merge_knowledge_pages(
 
 
 @tool
-def revert_knowledge_page(page: str, to_revision: int, base_revision: int, reason: str) -> str:
+def revert_knowledge_page(page: str, to_revision: int, base_revision: int, reason: str) -> str | dict[str, Any]:
     """
     Make an earlier revision of a page current again (as a new revision), for example after a bad or looping edit.
 

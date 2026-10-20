@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from datetime import timedelta
@@ -15,6 +16,7 @@ from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
 from custom_tools.providers.knowledge import knowledge_add_note, knowledge_history, knowledge_write
 from custom_tools.providers.knowledge import knowledge_read
+from custom_tools.runtime_context import set_agent_ref
 from custom_tools.providers.knowledge_curation import (
     freeze_knowledge_page,
     knowledge_activity_report,
@@ -34,6 +36,59 @@ from storage.knowledge_repository import create_knowledge_repository
 from tests.knowledge_support import BACKENDS, NOW, TEAM, agent, knowledge_storage, person
 from tests.test_knowledge_tools import _Agent, _call
 from tests.test_knowledge_tools import _signed_task_contexts  # noqa: F401 - autouse fixture
+from tests.tool_result_support import sdk_tool_result, tool_json
+
+
+def _sdk_result(agent, tool, **inputs):
+    set_agent_ref(agent)
+    try:
+        return asyncio.run(sdk_tool_result(tool, inputs))
+    finally:
+        set_agent_ref(None)
+
+
+def test_curator_publication_refusal_fails_the_call_and_preserves_the_current_page(tmp_path):
+    db = tmp_path / "knowledge.db"
+    team_run = _Agent(db, signed_for=None)
+    curator = _Agent(db, signed_for="alice")
+    curator.named_agent_type = "KnowledgeCuratorAgent"
+    _call(team_run, knowledge_write, page="team/guide", title="Guide", body="Initial guide.")
+    pending = _call(curator, knowledge_write, page="team/guide", body="Proposed guide.", base_revision=1)
+    _call(team_run, knowledge_write, page="team/guide", body="Newer guide.", base_revision=1)
+
+    refused = _sdk_result(curator, publish_contribution, contribution_id=pending["contribution_id"])
+
+    assert refused["status"] == "error", refused
+    assert tool_json(refused)["error_code"] == CODE_CONFLICT
+    page = _call(team_run, knowledge_read, page="team/guide")
+    assert (page["body"], page["revision"]) == ("Newer guide.", 2)
+    applied = _sdk_result(curator, publish_contribution, contribution_id=pending["contribution_id"],
+                          body="Merged guide.", base_revision=2)
+    assert applied["status"] == "success", applied
+    assert tool_json(applied)["status"] == "published"
+    page = _call(team_run, knowledge_read, page="team/guide")
+    assert (page["body"], page["revision"]) == ("Merged guide.", 3)
+
+
+def test_curator_merge_failure_leaves_both_pages_and_success_archives_the_source(tmp_path):
+    curator = _Agent(tmp_path / "knowledge.db", signed_for="alice")
+    curator.named_agent_type = "KnowledgeCuratorAgent"
+    _call(curator, knowledge_write, page="personal/source", title="Source", body="Source text.")
+    _call(curator, knowledge_write, page="personal/target", title="Target", body="Target text.")
+    inputs = {"source": "personal/source", "target": "personal/target", "body": "Merged text.",
+              "base_revision": 2, "source_revision": 1}
+
+    refused = _sdk_result(curator, merge_knowledge_pages, **inputs)
+
+    assert refused["status"] == "error", refused
+    assert tool_json(refused)["error_code"] == CODE_CONFLICT
+    assert _call(curator, knowledge_read, page="personal/source")["status"] == "active"
+    assert _call(curator, knowledge_read, page="personal/target")["revision"] == 1
+    applied = _sdk_result(curator, merge_knowledge_pages, **{**inputs, "base_revision": 1})
+    assert applied["status"] == "success", applied
+    page = _call(curator, knowledge_read, page="personal/target")
+    assert (page["body"], page["revision"]) == ("Merged text.", 2)
+    assert tool_json(applied)["archived"] == "personal/source"
 
 
 class Clock:

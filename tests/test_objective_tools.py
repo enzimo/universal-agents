@@ -29,6 +29,7 @@ from custom_tools.runtime_context import set_agent_ref
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
+from tests.tool_result_support import tool_json
 
 
 @pytest.fixture(autouse=True)
@@ -129,7 +130,7 @@ def test_objective_tools_create_list_get_update_and_complete(tmp_path: Path) -> 
     task = _add_current_task(manager)
     set_agent_ref(_FakeAgent(manager))
 
-    created = json.loads(
+    created = tool_json(
         create_objective(
             title="Maintain objective coverage",
             desired_outcome="Objective tools can create and update durable Objective records.",
@@ -161,14 +162,14 @@ def test_objective_tools_create_list_get_update_and_complete(tmp_path: Path) -> 
     assert created["objective"]["horizon"] == "long_horizon"
     assert manager.get_task_plan_id(task.task_id) == created["plan_id"]
 
-    listed = json.loads(objectives(action="list"))
+    listed = tool_json(objectives(action="list"))
     assert [row["objective_id"] for row in listed["objectives"]] == [objective_id]
 
-    fetched = json.loads(objectives(action="get"))
+    fetched = tool_json(objectives(action="get"))
     assert fetched["objective_id"] == objective_id
     assert "## Objective" in fetched["markdown"]
 
-    updated = json.loads(
+    updated = tool_json(
         objectives(action="update_progress", progress_summary="Tool objective progress updated.", current_focus="Complete tool-level tests.", criterion_updates_json=json.dumps(
                 [
                     {
@@ -184,10 +185,10 @@ def test_objective_tools_create_list_get_update_and_complete(tmp_path: Path) -> 
     )
     assert updated["objective"]["success_criteria"][0]["status"] == "met"
 
-    blocked_completion = json.loads(objectives(action="update_status", status="satisfied"))
+    blocked_completion = tool_json(objectives(action="update_status", status="satisfied"))
     assert "requires user confirmation" in blocked_completion["error"]
 
-    completed = json.loads(
+    completed = tool_json(
         objectives(action="update_status", status="satisfied", user_confirmation_summary="User confirmed tool objective completion.", satisfied_by_current_task=True)
     )
     assert completed["objective"]["status"] == "satisfied"
@@ -198,7 +199,7 @@ def test_objective_tools_continue_across_task_and_plan_attempt_failures(tmp_path
     manager = _task_manager(tmp_path)
     first_task = _add_current_task(manager)
     set_agent_ref(_FakeAgent(manager))
-    created = json.loads(
+    created = tool_json(
         create_objective(
             title="Continue durable Objective",
             desired_outcome="Replacement Tasks continue the Objective-owned Plan.",
@@ -219,7 +220,7 @@ def test_objective_tools_continue_across_task_and_plan_attempt_failures(tmp_path
     )
     manager.task_state.current_in_progress_task_id = controller.task_id
 
-    continued = json.loads(
+    continued = tool_json(
         start_objective_task(
             objective_id=created["objective_id"],
             work_brief="Resume the unfinished Plan.",
@@ -229,7 +230,7 @@ def test_objective_tools_continue_across_task_and_plan_attempt_failures(tmp_path
     assert continued["plan_id"] == first_plan_id
     assert manager.get_task_plan_id(continued["task_id"]) == first_plan_id
 
-    failed_plan = json.loads(
+    failed_plan = tool_json(
         update_execution_plan_status(
             "failed",
             "This Plan attempt is no longer viable.",
@@ -239,7 +240,7 @@ def test_objective_tools_continue_across_task_and_plan_attempt_failures(tmp_path
     assert failed_plan["plan"]["status"] == "failed"
     assert manager.get_objective(created["objective_id"]).status.value == "active"
 
-    restarted = json.loads(
+    restarted = tool_json(
         start_objective_task(
             objective_id=created["objective_id"],
             work_brief="Start a revised Plan attempt.",
@@ -255,7 +256,7 @@ def test_objective_tools_are_manager_only(tmp_path: Path) -> None:
     _add_current_task(manager)
     set_agent_ref(_FakeAgent(manager, named_agent_type="CodeWritingAgent"))
 
-    result = json.loads(
+    result = tool_json(
         create_objective(
             title="Specialist objective",
             desired_outcome="Should not be created.",
@@ -273,7 +274,7 @@ def test_objective_links_schedule_and_heartbeat_lifecycle(tmp_path: Path) -> Non
     agent = _FakeAgent(manager)
     set_agent_ref(agent)
 
-    created = json.loads(
+    created = tool_json(
         create_objective(
             title="Run recurring objective checks",
             desired_outcome="Recurring schedule and heartbeat work remain tied to one Objective.",
@@ -283,7 +284,7 @@ def test_objective_links_schedule_and_heartbeat_lifecycle(tmp_path: Path) -> Non
     )
     objective_id = created["objective_id"]
 
-    scheduled = json.loads(
+    scheduled = tool_json(
         create_scheduled_job(
             instruction="Check objective status.",
             schedule_name="objective schedule",
@@ -297,10 +298,10 @@ def test_objective_links_schedule_and_heartbeat_lifecycle(tmp_path: Path) -> Non
     assert stored_schedule.objective_id == objective_id
     assert stored_schedule.payload_meta.objective_id == objective_id
 
-    listing = json.loads(list_scheduled_jobs())
+    listing = tool_json(list_scheduled_jobs())
     assert listing["schedules"][0]["objective_id"] == objective_id
 
-    heartbeat = json.loads(
+    heartbeat = tool_json(
         add_heartbeat_item(
             instruction="Run heartbeat objective check.",
             title="Objective heartbeat",
@@ -316,7 +317,7 @@ def test_objective_links_schedule_and_heartbeat_lifecycle(tmp_path: Path) -> Non
         heartbeat_item_id
     ]
 
-    paused = json.loads(objectives(action="update_status", status="paused", objective_id=objective_id))
+    paused = tool_json(objectives(action="update_status", status="paused", objective_id=objective_id))
     assert paused["objective"]["status"] == "paused"
     assert agent._schedule_store.get_scheduled_message(schedule_id).enabled is False
     heartbeat_store = HeartbeatStore(
@@ -325,7 +326,7 @@ def test_objective_links_schedule_and_heartbeat_lifecycle(tmp_path: Path) -> Non
     )
     assert heartbeat_store.get_item(heartbeat_item_id).enabled is False
 
-    resumed = json.loads(objectives(action="update_status", status="active", objective_id=objective_id))
+    resumed = tool_json(objectives(action="update_status", status="active", objective_id=objective_id))
     assert resumed["objective"]["status"] == "active"
     assert agent._schedule_store.get_scheduled_message(schedule_id).enabled is True
     assert heartbeat_store.get_item(heartbeat_item_id).enabled is True
@@ -339,7 +340,7 @@ def test_objective_lifecycle_cannot_disable_linked_system_schedule(
     _add_current_task(manager)
     agent = _FakeAgent(manager)
     set_agent_ref(agent)
-    created = json.loads(
+    created = tool_json(
         create_objective(
             title="Protect runtime schedule",
             desired_outcome="Objective changes cannot bypass system schedule authority.",
@@ -375,7 +376,7 @@ def test_objective_lifecycle_cannot_disable_linked_system_schedule(
         managed_by_objective=True,
     )
 
-    paused = json.loads(objectives(action="update_status", status="paused", objective_id=objective_id))
+    paused = tool_json(objectives(action="update_status", status="paused", objective_id=objective_id))
 
     restored = agent._schedule_store.get_scheduled_message(schedule_id)
     assert paused["objective"]["status"] == "paused"
@@ -427,7 +428,7 @@ def _act_as(manager: TaskManager, task: Task) -> None:
 
 
 def _listed(**filters) -> set[str]:
-    return {row["objective_id"] for row in json.loads(objectives(action="list", **filters))["objectives"]}
+    return {row["objective_id"] for row in tool_json(objectives(action="list", **filters))["objectives"]}
 
 
 _NO_OBJECTIVE = "No objective could be resolved from the supplied context."
@@ -461,25 +462,25 @@ def test_a_member_sees_their_own_and_the_teams_objectives_only(_people_and_objec
     _act_as(manager, tasks["a"])
 
     assert _listed(include_closed=True) == {a.objective_id, team.objective_id}
-    assert json.loads(objectives(action="get", objective_id=team.objective_id))["objective_id"] == team.objective_id
+    assert tool_json(objectives(action="get", objective_id=team.objective_id))["objective_id"] == team.objective_id
     # Another person's Objective is refused as if it did not exist, however it is named.
     with caplog.at_level("INFO", logger="access_control.ownership"):
-        by_id = json.loads(objectives(action="get", objective_id=b.objective_id))
+        by_id = tool_json(objectives(action="get", objective_id=b.objective_id))
     assert (by_id["objective"], by_id["error"]) == (None, _NO_OBJECTIVE)
     assert f"resource_id={b.objective_id}" in caplog.text and "event=private_access_refused" in caplog.text
-    assert json.loads(objectives(action="get", plan_id=b.current_plan_id))["error"] == _NO_OBJECTIVE
-    assert json.loads(objectives(action="get", task_id=tasks["b"].task_id))["error"] == _NO_OBJECTIVE
+    assert tool_json(objectives(action="get", plan_id=b.current_plan_id))["error"] == _NO_OBJECTIVE
+    assert tool_json(objectives(action="get", task_id=tasks["b"].task_id))["error"] == _NO_OBJECTIVE
 
-    refused = json.loads(
+    refused = tool_json(
         objectives(action="update_progress", objective_id=b.objective_id, progress_summary="Changed by A.")
     )
     assert refused["error"] == _NO_OBJECTIVE
     assert manager.get_objective(b.objective_id).progress_summary != "Changed by A."
-    assert json.loads(objectives(action="update_progress", objective_id=a.objective_id, progress_summary="Mine."))[
+    assert tool_json(objectives(action="update_progress", objective_id=a.objective_id, progress_summary="Mine."))[
         "objective"
     ]["progress_summary"] == "Mine."
-    assert json.loads(start_objective_task(work_brief="Continue B.", objective_id=b.objective_id))["error"] == _NO_OBJECTIVE
-    heartbeat = json.loads(add_heartbeat_item(instruction="Check B.", objective_id=b.objective_id))
+    assert tool_json(start_objective_task(work_brief="Continue B.", objective_id=b.objective_id))["error"] == _NO_OBJECTIVE
+    heartbeat = tool_json(add_heartbeat_item(instruction="Check B.", objective_id=b.objective_id))
     assert "Unknown Objective" in heartbeat["error"]
     assert manager.get_objective(b.objective_id).heartbeat_links == []
 
@@ -489,10 +490,10 @@ def test_a_member_reads_but_does_not_change_the_teams_objectives(_people_and_obj
     team = made["team"]
     _act_as(manager, tasks["a"])
 
-    paused = json.loads(objectives(action="update_status", objective_id=team.objective_id, status="paused", summary="A pauses it."))
+    paused = tool_json(objectives(action="update_status", objective_id=team.objective_id, status="paused", summary="A pauses it."))
     assert paused["error"] == _NO_OBJECTIVE
     assert manager.get_objective(team.objective_id).status.value == "active"
-    continued = json.loads(start_objective_task(work_brief="Continue the team's.", objective_id=team.objective_id))
+    continued = tool_json(start_objective_task(work_brief="Continue the team's.", objective_id=team.objective_id))
     assert continued["error"] == _NO_OBJECTIVE
 
 
@@ -502,15 +503,15 @@ def test_an_administrator_and_system_work_change_the_teams_objectives(_people_an
 
     _act_as(manager, tasks["admin"])
     assert _listed() == {team.objective_id}  # administrators see no one else's
-    paused = json.loads(objectives(action="update_status", objective_id=team.objective_id, status="paused", summary="Admin pauses it."))
+    paused = tool_json(objectives(action="update_status", objective_id=team.objective_id, status="paused", summary="Admin pauses it."))
     assert paused["objective"]["status"] == "paused"
-    assert json.loads(objectives(action="get", objective_id=a.objective_id))["error"] == _NO_OBJECTIVE
+    assert tool_json(objectives(action="get", objective_id=a.objective_id))["error"] == _NO_OBJECTIVE
 
     _act_as(manager, tasks["system"])
     assert _listed(include_closed=True) == {team.objective_id}
-    progressed = json.loads(objectives(action="update_progress", objective_id=team.objective_id, progress_summary="System work."))
+    progressed = tool_json(objectives(action="update_progress", objective_id=team.objective_id, progress_summary="System work."))
     assert progressed["objective"]["progress_summary"] == "System work."
-    assert json.loads(objectives(action="get", objective_id=a.objective_id))["error"] == _NO_OBJECTIVE
+    assert tool_json(objectives(action="get", objective_id=a.objective_id))["error"] == _NO_OBJECTIVE
 
 
 def test_a_task_without_a_verified_identity_reaches_no_objective(_people_and_objectives, caplog) -> None:
@@ -519,7 +520,7 @@ def test_a_task_without_a_verified_identity_reaches_no_objective(_people_and_obj
 
     with caplog.at_level("WARNING", logger="custom_tools.providers._runtime"):
         assert _listed(include_closed=True) == set()
-        refused = json.loads(objectives(action="update_progress", objective_id=made["team"].objective_id, progress_summary="?"))
+        refused = tool_json(objectives(action="update_progress", objective_id=made["team"].objective_id, progress_summary="?"))
     assert refused["error"] == _NO_OBJECTIVE
     assert "event=task_identity_unverified" in caplog.text
 
@@ -531,22 +532,22 @@ def test_a_task_names_only_its_own_persons_tasks_as_a_source(_people_and_objecti
     count_before = len(manager.objective_repository.list_objectives(limit=100, owner_agent_id=manager.durable_manager_scope_id()))
 
     # An Objective made from B's task would be B's; a continuation from it would work for B.
-    created = json.loads(create_objective(title="Made from B", desired_outcome="x", why="y", task_id=tasks["b"].task_id))
+    created = tool_json(create_objective(title="Made from B", desired_outcome="x", why="y", task_id=tasks["b"].task_id))
     assert created["error"] == f"Task {tasks['b'].task_id} was not found among this person's tasks."
-    continued = json.loads(
+    continued = tool_json(
         start_objective_task(work_brief="Continue as B.", objective_id=a.objective_id, source_task_id=tasks["b"].task_id)
     )
     assert "was not found among this person's tasks" in continued["error"]
-    noted = json.loads(
+    noted = tool_json(
         objectives(action="update_progress", objective_id=a.objective_id, task_id=tasks["b"].task_id, progress_summary="x")
     )
     assert "was not found among this person's tasks" in noted["error"]
     assert len(manager.objective_repository.list_objectives(limit=100, owner_agent_id=manager.durable_manager_scope_id())) == count_before
 
     # Plans: another person's plan is out of view, and a named Objective never falls back to the task's plan.
-    by_plan = json.loads(update_execution_plan_status("failed", "A fails B's plan.", plan_id=b.current_plan_id))
+    by_plan = tool_json(update_execution_plan_status("failed", "A fails B's plan.", plan_id=b.current_plan_id))
     assert by_plan["error"] == "No plan could be resolved from the supplied context."
-    by_objective = json.loads(update_execution_plan_status("failed", "A fails B's plan.", objective_id=b.objective_id))
+    by_objective = tool_json(update_execution_plan_status("failed", "A fails B's plan.", objective_id=b.objective_id))
     assert by_objective["error"] == "No plan could be resolved from the supplied context."
     assert manager.get_plan(b.current_plan_id).status.value == "active"
     assert manager.get_plan(a.current_plan_id).status.value == "active"
@@ -570,11 +571,11 @@ def test_a_finished_tasks_plan_stays_its_persons_after_a_team_lead_restart(_peop
         conn.commit()
 
     _act_as(manager, tasks["b"])
-    refused = json.loads(update_execution_plan_status("cancelled", "B cancels A's plan.", plan_id=plan_id))
+    refused = tool_json(update_execution_plan_status("cancelled", "B cancels A's plan.", plan_id=plan_id))
     assert refused["error"] == "No plan could be resolved from the supplied context."
 
     _act_as(manager, tasks["a"])
-    cancelled = json.loads(update_execution_plan_status("cancelled", "A cancels their own plan.", plan_id=plan_id))
+    cancelled = tool_json(update_execution_plan_status("cancelled", "A cancels their own plan.", plan_id=plan_id))
     assert cancelled["plan"]["status"] == "cancelled"
 
 
@@ -600,17 +601,17 @@ def test_objective_changes_that_were_not_saved_are_reported(
     manager = _task_manager(tmp_path)
     current = _add_current_task(manager)
     set_agent_ref(_FakeAgent(manager))
-    created = json.loads(create_objective(title="Write the report", desired_outcome="A report.", why="Asked."))
+    created = tool_json(create_objective(title="Write the report", desired_outcome="A report.", why="Asked."))
     objective_id, plan_id = created["objective_id"], created["plan_id"]
     _break_objective_saves(monkeypatch, manager)
 
     with caplog.at_level("ERROR", logger="test_objective_tools"):
-        progressed = json.loads(
+        progressed = tool_json(
             objectives(action="update_progress", objective_id=objective_id, progress_summary="Half done.")
         )
     assert progressed == {"error": _not_saved(objective_id)}
     assert f"event=objective_save_failed objective_id={objective_id}" in caplog.text
-    closed = json.loads(objectives(action="update_status", status="cancelled", objective_id=objective_id))
+    closed = tool_json(objectives(action="update_status", status="cancelled", objective_id=objective_id))
     assert closed == {"error": _not_saved(objective_id)}
     stored = manager.get_objective(objective_id)
     assert (stored.progress_summary, stored.status.value) == (None, "active")
@@ -618,7 +619,7 @@ def test_objective_changes_that_were_not_saved_are_reported(
     assert manager.get_plan(plan_id).status.value == "active"
 
     # A continuation its Objective cannot record stops before it runs.
-    continued = json.loads(start_objective_task(objective_id=objective_id, work_brief="Keep going."))
+    continued = tool_json(start_objective_task(objective_id=objective_id, work_brief="Keep going."))
     assert continued == {"error": _not_saved(objective_id)}
     still_open = [
         info.task.task_id
@@ -628,26 +629,39 @@ def test_objective_changes_that_were_not_saved_are_reported(
     assert still_open == [current.task_id]
 
 
+@pytest.mark.parametrize("link_saved", [False, True])
 def test_a_schedule_or_heartbeat_item_its_objective_could_not_record_stays_with_a_warning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link_saved: bool
 ) -> None:
     manager = _task_manager(tmp_path)
     _add_current_task(manager)
     agent = _FakeAgent(manager)
     set_agent_ref(agent)
-    created = json.loads(
+    created = tool_json(
         create_objective(title="Check daily", desired_outcome="Checked.", why="Asked.", horizon="recurring")
     )
-    _break_objective_saves(monkeypatch, manager)
+    if link_saved:
+        for name in ("link_schedule_to_objective", "link_heartbeat_to_objective"):
+            original = getattr(manager, name)
 
-    scheduled = json.loads(create_scheduled_job(instruction="Check.", schedule_name="daily", interval_seconds=60))
+            def linked_then_unavailable(*args, _original=original, **kwargs):
+                _original(*args, **kwargs)
+                raise sqlite3.OperationalError("database is locked")
+
+            monkeypatch.setattr(manager, name, linked_then_unavailable)
+    else:
+        _break_objective_saves(monkeypatch, manager)
+
+    scheduled = tool_json(create_scheduled_job(instruction="Check.", schedule_name="daily", interval_seconds=60))
     assert agent._schedule_store.get_scheduled_message(scheduled["schedule_id"]) is not None
-    assert "could not record it" in scheduled["objective_link_warning"]
-    heartbeat = json.loads(add_heartbeat_item(instruction="Check.", title="Check"))
+    expected_warning = "could not be confirmed" if link_saved else "could not record it"
+    assert expected_warning in scheduled["objective_link_warning"]
+    heartbeat = tool_json(add_heartbeat_item(instruction="Check.", title="Check"))
     assert heartbeat["heartbeat_item_id"]
-    assert "could not record it" in heartbeat["objective_link_warning"]
+    assert expected_warning in heartbeat["objective_link_warning"]
     stored = manager.get_objective(created["objective_id"])
-    assert (stored.schedule_links, stored.heartbeat_links) == ([], [])
+    assert bool(stored.schedule_links) is link_saved
+    assert bool(stored.heartbeat_links) is link_saved
 
 
 def test_a_task_ends_normally_when_its_objective_review_is_not_saved(
@@ -656,7 +670,7 @@ def test_a_task_ends_normally_when_its_objective_review_is_not_saved(
     manager = _task_manager(tmp_path)
     task = _add_current_task(manager)
     set_agent_ref(_FakeAgent(manager))
-    created = json.loads(create_objective(title="Try once", desired_outcome="Tried.", why="Asked."))
+    created = tool_json(create_objective(title="Try once", desired_outcome="Tried.", why="Asked."))
     _break_objective_saves(monkeypatch, manager)
 
     with caplog.at_level("WARNING", logger="test_objective_tools"):
@@ -669,7 +683,7 @@ def test_a_task_ends_normally_when_its_objective_review_is_not_saved(
 
 
 def _recurring_objective_with_schedule(manager: TaskManager, agent: _FakeAgent) -> tuple[str, str]:
-    created = json.loads(
+    created = tool_json(
         create_objective(
             title="Check the feed",
             desired_outcome="The feed is checked every minute.",
@@ -677,7 +691,7 @@ def _recurring_objective_with_schedule(manager: TaskManager, agent: _FakeAgent) 
             horizon="recurring",
         )
     )
-    scheduled = json.loads(
+    scheduled = tool_json(
         create_scheduled_job(instruction="Check the feed.", schedule_name="feed", interval_seconds=60)
     )
     return created["objective_id"], scheduled["schedule_id"]
@@ -704,7 +718,7 @@ def test_the_status_tool_keeps_changes_stored_while_it_switches_links(tmp_path: 
 
     agent._schedule_store.set_enabled = switch_while_others_write
 
-    paused = json.loads(objectives(action="update_status", status="paused", objective_id=objective_id))
+    paused = tool_json(objectives(action="update_status", status="paused", objective_id=objective_id))
 
     assert paused["objective"]["status"] == "paused"
     stored = manager.get_objective(objective_id)
@@ -722,7 +736,7 @@ def test_the_status_tool_refuses_deletion_statuses(tmp_path: Path, status: str) 
     set_agent_ref(agent)
     objective_id, schedule_id = _recurring_objective_with_schedule(manager, agent)
 
-    refused = json.loads(objectives(action="update_status", status=status, objective_id=objective_id))
+    refused = tool_json(objectives(action="update_status", status=status, objective_id=objective_id))
 
     assert refused["error"].startswith("Only the person can delete an Objective")
     assert "deleted" not in refused["allowed_statuses"] and "deleting" not in refused["allowed_statuses"]
@@ -738,7 +752,7 @@ def test_the_status_tool_leaves_an_objective_its_person_is_deleting(tmp_path: Pa
     objective_id, _schedule_id = _recurring_objective_with_schedule(manager, agent)
     manager.update_objective_status(objective_id, "deleting", summary="Deletion requested.")
 
-    refused = json.loads(objectives(action="update_status", status="active", objective_id=objective_id))
+    refused = tool_json(objectives(action="update_status", status="active", objective_id=objective_id))
 
     assert refused["error"].endswith("is being deleted by its person, so it can no longer change.")
     assert manager.get_objective(objective_id).status.value == "deleting"
@@ -750,10 +764,10 @@ def test_the_status_tool_reports_a_linked_heartbeat_item_that_is_gone(tmp_path: 
     agent = _FakeAgent(manager)
     set_agent_ref(agent)
     objective_id, _schedule_id = _recurring_objective_with_schedule(manager, agent)
-    heartbeat_item_id = json.loads(add_heartbeat_item(instruction="Check.", title="Check"))["heartbeat_item_id"]
+    heartbeat_item_id = tool_json(add_heartbeat_item(instruction="Check.", title="Check"))["heartbeat_item_id"]
     HeartbeatStore(db_path=manager._db_path, storage_settings=manager.storage_settings).remove_item(heartbeat_item_id)
 
-    paused = json.loads(objectives(action="update_status", status="paused", objective_id=objective_id))
+    paused = tool_json(objectives(action="update_status", status="paused", objective_id=objective_id))
 
     assert paused["objective"]["status"] == "paused"
     assert paused["lifecycle_warnings"] == [
@@ -775,7 +789,7 @@ def test_the_status_tool_reports_a_schedule_it_could_not_switch(tmp_path: Path, 
     agent = _FakeAgent(manager)
     set_agent_ref(agent)
     objective_id, schedule_id = _recurring_objective_with_schedule(manager, agent)
-    heartbeat_item_id = json.loads(add_heartbeat_item(instruction="Check.", title="Check"))["heartbeat_item_id"]
+    heartbeat_item_id = tool_json(add_heartbeat_item(instruction="Check.", title="Check"))["heartbeat_item_id"]
     store = agent._schedule_store
 
     def unavailable(*_args, **_kwargs):
@@ -784,7 +798,7 @@ def test_the_status_tool_reports_a_schedule_it_could_not_switch(tmp_path: Path, 
     store.set_enabled = unavailable
 
     with caplog.at_level("WARNING", logger="custom_agents.objective_lifecycle"):
-        paused = json.loads(objectives(action="update_status", status="paused", objective_id=objective_id))
+        paused = tool_json(objectives(action="update_status", status="paused", objective_id=objective_id))
 
     assert paused["objective"]["status"] == "paused"
     assert paused["lifecycle_warnings"] == [
@@ -820,7 +834,7 @@ def test_the_status_tool_warns_when_switched_links_are_not_recorded(
 
     monkeypatch.setattr(manager.objective_repository, "save_objective", fail_when_recording_links)
 
-    paused = json.loads(objectives(action="update_status", status="paused", objective_id=objective_id))
+    paused = tool_json(objectives(action="update_status", status="paused", objective_id=objective_id))
 
     assert paused["objective"]["status"] == "paused"
     assert paused["lifecycle_warnings"] == [
