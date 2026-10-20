@@ -210,6 +210,15 @@ def _approve(agent, call: _Call, note: str = "") -> None:
     _decide(agent, call, AccessReviewChoice.APPROVE, note)
 
 
+def test_restart_approval_keeps_work_delegated_below_an_approved_child(agent) -> None:
+    service = RuntimeRestartService(agent)
+    plan = service.stage(scope="all", reason="Reload")
+    _delegate(agent, "task_child", "task_grandchild")
+    assert agent.task_manager.resolve_root_task_id("task_grandchild") == "task_restart"
+    _report(agent, _specialist_status(current_task_id="task_grandchild"))
+    assert service.describe(plan["change_id"]).change_id == plan["change_id"]
+
+
 def test_restart_reason_fits_the_review_before_a_plan_is_saved(agent) -> None:
     service = RuntimeRestartService(agent)
     limit = CHANGE_EFFECT_MAX_CHARS - len("Reason: ")

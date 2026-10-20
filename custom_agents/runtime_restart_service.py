@@ -306,8 +306,13 @@ def _enum_value(value: Any) -> str:
 
 def _task_state(task_info: Any, *, current_task_id: str, task_manager: Any) -> RuntimeRestartTaskState:
     task_id = str(getattr(getattr(task_info, "task", None), "task_id", "") or "").strip()
-    get_subtasks = getattr(task_manager, "get_subtasks", None)
-    children = tuple(get_subtasks(task_id) or ()) if callable(get_subtasks) and task_id else ()
+    # Keep the complete execution graph, flattened under its root. A worker
+    # can start a descendant of an approved child without interrupting a new
+    # request. The manager's graph resolver already handles parent cycles.
+    children = (
+        child for child in task_manager.get_execution_graph_task_infos(task_id)
+        if str(getattr(getattr(child, "task", None), "task_id", "") or "") != task_id
+    )
     return RuntimeRestartTaskState(
         task_id=task_id,
         state=_enum_value(getattr(task_info, "state", "unknown")),
