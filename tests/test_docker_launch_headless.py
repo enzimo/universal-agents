@@ -1671,3 +1671,73 @@ def test_startup_failures_and_signals_clean_up_first_start_services(
     assert all(process.poll() is not None for process in processes)
     if failure in {"step_exit", "step_spawn"}:
         assert "event=first_start_step_failed" in caplog.text
+
+
+# --- the manager database is set up before any service opens it -------------
+
+
+def test_the_manager_database_is_primed_before_each_start(tmp_path: Path) -> None:
+    import docker.launch_headless as lh
+
+    config = _make_config(tmp_path)
+    path = lh.prepare_manager_database(config)
+    assert path == lh.resolve_manager_db_path(config)
+    # In WAL mode with its first write done, so no service creates the file.
+    assert Path(f"{path}-wal").stat().st_size > 0
+    assert lh.prepare_manager_database(config) == path
+    assert Path(f"{path}-wal").stat().st_size > 0
+
+
+def test_a_postgres_manager_store_has_no_file_to_set_up(tmp_path: Path) -> None:
+    import docker.launch_headless as lh
+
+    config = _make_config(tmp_path)
+    config.state.storage.backend = "postgres"
+    assert lh.prepare_manager_database(config) is None
+    assert not lh.resolve_manager_db_path(config).exists()
+
+
+class _StopAfterPreparation(Exception):
+    pass
+
+
+def _launch_until_after_preparation(tmp_path: Path, monkeypatch, prepare) -> tuple[int | None, list[str]]:
+    """Run the launcher's main up to the step after the database setup."""
+
+    import docker.launch_headless as lh
+
+    config_path = _make_config(tmp_path).save(tmp_path / "instance" / "instance_config.yaml")
+    steps: list[str] = []
+    monkeypatch.setattr(lh, "acquire_process_run", lambda _path: steps.append("run lock") or SimpleNamespace())
+    monkeypatch.setattr(lh, "prepare_manager_database", lambda config: steps.append("prepare") or prepare(config))
+
+    def next_step(*_args, **_kwargs):
+        steps.append("manifests")
+        raise _StopAfterPreparation
+
+    monkeypatch.setattr(lh, "write_runtime_manifests", next_step)
+    monkeypatch.setattr(lh, "validate_runtime_layout", lambda config: None)
+    monkeypatch.setattr(sys, "argv", ["launch_headless.py", "--config", str(config_path)])
+    try:
+        return lh.main(), steps
+    except _StopAfterPreparation:
+        return None, steps
+
+
+def test_launch_sets_up_the_manager_database_right_after_taking_the_run_lock(tmp_path: Path, monkeypatch) -> None:
+    code, steps = _launch_until_after_preparation(tmp_path, monkeypatch, lambda config: None)
+    assert code is None and steps == ["run lock", "prepare", "manifests"]
+
+
+def test_launch_refuses_to_start_when_the_manager_database_cannot_be_set_up(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    import sqlite3
+
+    def locked(_config):
+        raise sqlite3.OperationalError("database is locked")
+
+    with caplog.at_level("ERROR", logger="docker.launch_headless"):
+        code, steps = _launch_until_after_preparation(tmp_path, monkeypatch, locked)
+    assert code == 2 and steps == ["run lock", "prepare"]
+    assert "event=manager_database_prepare_failed" in caplog.text and "database is locked" in caplog.text

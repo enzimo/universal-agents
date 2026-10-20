@@ -1161,3 +1161,59 @@ def test_private_host_allowlist_rejects_wildcards_and_urls() -> None:
         MCPNetworkPolicySettings(allowed_private_hosts=("http://crawl4ai",))
 
 
+
+
+def test_processes_starting_together_record_one_baseline(tmp_path: Path, monkeypatch) -> None:
+    """The manager and a startup agent reconcile at the same moment on a new instance.
+
+    Each read "no baseline yet" and then recorded its own baseline, stamped
+    with its own time; the second one stopped its process with "MCP static
+    upgrade baseline is immutable once recorded". The barrier lets both reads
+    happen before either write whenever the code allows it.
+    """
+
+    import itertools
+    import threading
+    from datetime import UTC, datetime, timedelta
+
+    from mcp_control import registry
+
+    config, _path = _config(tmp_path)
+    config.agent.external_mcp_servers = [
+        {"name": "shared", "transport": "streamable_http", "server_url": "https://shared.example.test/mcp"}
+    ]
+    start = datetime(2026, 10, 19, tzinfo=UTC)
+    ticks = itertools.count()
+    monkeypatch.setattr(registry, "utc_now", lambda: start + timedelta(seconds=next(ticks)))
+    both_read = threading.Barrier(2, timeout=1.0)
+    read_baseline = registry.MCPConnectionStore.baseline
+
+    def baseline_after_both_read(self):
+        value = read_baseline(self)
+        try:
+            both_read.wait()
+        except threading.BrokenBarrierError:
+            pass  # the other process could not read yet
+        return value
+
+    monkeypatch.setattr(registry.MCPConnectionStore, "baseline", baseline_after_both_read)
+    results: list[tuple] = []
+    errors: list[BaseException] = []
+
+    def process_start() -> None:
+        try:
+            results.append(reconcile_instance_mcp_connections(config))
+        except BaseException as exc:
+            errors.append(exc)
+
+    starts = [threading.Thread(target=process_start) for _ in range(2)]
+    for thread in starts:
+        thread.start()
+    for thread in starts:
+        thread.join(10)
+
+    assert errors == []
+    assert results[0] == results[1], "the second process finds the first one's records"
+    paths = registry.resolve_mcp_connection_paths(config.instance_root_path)
+    assert registry.MCPConnectionStore(paths).baseline() is not None
+    assert len(list(paths.records.glob("mcp_conn_*.json"))) == 1

@@ -29,12 +29,33 @@ behaviors made that pattern block callers for seconds:
   2.3 ms. A held connection runs no transaction, so it holds no lock and does
   not stop checkpoints.
 
+- Startup preparation (``prepare_sqlite_database``) runs alone on each launch,
+  before several processes open the file. The first connection to a new file
+  switches it to WAL, and the first write then creates the WAL. Both hold
+  SQLite's locks across several disk flushes, and the other processes' first
+  statement waits only one ``busy_timeout``. On a slow disk (one flush taking
+  about 0.6 s or more) several services opening the new manager database at
+  the same moment failed with "database is locked", and the launcher stopped
+  every service. The headless launcher therefore prepares the shared manager
+  database before it starts any service (``docker.launch_headless``). It also
+  commits a harmless header write on later starts, since an interrupted
+  transaction can leave WAL mode and uncommitted WAL frames without preparing
+  the next write. Each connection also sets ``synchronous=NORMAL`` before the
+  switch, which saves
+  one of its flushes.
+- While several processes create their tables at once, a statement can fail
+  with "database schema has changed": SQLite retries only once when the schema
+  changes while a statement is prepared. Such a statement has not run, so it
+  runs again, a bounded number of times (``_execute_with_schema_retry``).
+
 An open or statement that takes longer than ``SLOW_SQLITE_OPERATION_SECONDS``
 is logged as a warning (``sqlite_open_slow``, ``sqlite_statement_slow``) with
-the database, the thread and the statement's first words, never its values. A
-gateway froze for over 20 seconds inside a connection open with no lock
-timeout and no NFS timeout to explain it; these lines name the slow database
-and caller the next time instead of leaving only a stack sample.
+the database, the thread, the process and the statement's first words, never
+its values. A gateway froze for over 20 seconds inside a connection open with
+no lock timeout and no NFS timeout to explain it; these lines name the slow
+database and caller the next time instead of leaving only a stack sample. Lock
+failures while opening are logged the same way even when the caller passes no
+logger, so a failed start names the database and the process that gave up.
 """
 
 from __future__ import annotations
@@ -42,7 +63,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sqlite3
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -70,6 +93,13 @@ _HELD_OPEN: "OrderedDict[str, sqlite3.Connection]" = OrderedDict()
 _HELD_OPEN_LOCK = threading.Lock()
 # An open or statement slower than this is logged (module docstring).
 SLOW_SQLITE_OPERATION_SECONDS = 1.0
+# How often a statement runs at most when SQLite reports that the schema
+# changed under it, and the pause before the first rerun, doubled for each
+# further one up to the cap (``_execute_with_schema_retry``). All pauses
+# together stay under a quarter of a second.
+SCHEMA_CHANGED_ATTEMPTS = 10
+SCHEMA_CHANGED_FIRST_PAUSE_SECONDS = 0.001
+SCHEMA_CHANGED_MAX_PAUSE_SECONDS = 0.05
 # How much of a slow statement is logged: its first words, never its values.
 _SLOW_STATEMENT_PREVIEW_CHARS = 80
 _LOGGER = logging.getLogger(__name__)
@@ -92,7 +122,9 @@ def _owned_connection_type(connection_type: type) -> type:
         def execute(self, sql: str, parameters: Any = (), /) -> Any:
             started = time.perf_counter()
             try:
-                return super().execute(sql, parameters)
+                return _execute_with_schema_retry(
+                    super().execute, sql, parameters, db_path=getattr(self, "slow_log_path", "")
+                )
             finally:
                 _log_if_slow(
                     getattr(self, "slow_log_path", ""),
@@ -190,7 +222,9 @@ def _hold_open(db_path: str, *, sqlite_module: Any, logger: logging.Logger | Non
         _keep_wal_on_close(held, db_path=db_path, logger=logger)
         # Reading the schema makes this connection map the WAL index, which
         # is what keeps later opens from rebuilding it.
-        held.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        _execute_with_schema_retry(
+            held.execute, "SELECT count(*) FROM sqlite_master", (), db_path=db_path, logger=logger
+        ).fetchone()
     except BaseException:
         held.close()
         raise
@@ -205,6 +239,48 @@ def _hold_open(db_path: str, *, sqlite_module: Any, logger: logging.Logger | Non
     for connection in (extra, evicted):
         if connection is not None:
             connection.close()
+
+
+def _execute_with_schema_retry(
+    execute: Any,
+    sql: str,
+    parameters: Any,
+    *,
+    db_path: str,
+    logger: logging.Logger | None = None,
+) -> Any:
+    """Run a statement again when SQLite reports that the schema changed under it.
+
+    SQLite prepares a statement again when the schema changed after it was
+    prepared, but it retries only once when the schema changes while the
+    statement is being prepared. On a first start several processes create
+    their tables at the same moment (one commit about every 2 ms was
+    measured), and a process preparing its first statement, which reads the
+    whole schema, failed with "database schema has changed" and stopped. A
+    statement that fails this way has not run, so running it again is safe; it
+    is tried at most ``SCHEMA_CHANGED_ATTEMPTS`` times with a short growing
+    pause, so a burst of table creation can pass, and each retry is logged.
+    """
+
+    for attempt in range(1, SCHEMA_CHANGED_ATTEMPTS + 1):
+        try:
+            return execute(sql, parameters)
+        except Exception as exc:  # the stdlib's or pysqlite3's OperationalError
+            if attempt >= SCHEMA_CHANGED_ATTEMPTS or "database schema has changed" not in str(exc).lower():
+                raise
+            (logger or _LOGGER).warning(
+                "The SQLite schema changed while a statement was prepared; running it again. "
+                "event=sqlite_schema_changed_retry database=%s attempt=%s/%s pid=%s program=%s statement=%s",
+                db_path or "-",
+                attempt,
+                SCHEMA_CHANGED_ATTEMPTS,
+                os.getpid(),
+                _process_label(),
+                " ".join(str(sql).split())[:_SLOW_STATEMENT_PREVIEW_CHARS],
+                extra={"component": "sqlite_connection", "storage_target": db_path, "operation": "statement"},
+            )
+            time.sleep(min(SCHEMA_CHANGED_FIRST_PAUSE_SECONDS * 2 ** (attempt - 1), SCHEMA_CHANGED_MAX_PAUSE_SECONDS))
+    raise AssertionError("The schema-change retry loop exited unexpectedly.")
 
 
 def held_open_databases() -> list[str]:
@@ -249,16 +325,37 @@ def _log_if_slow(
     preview = " ".join(statement.split())[:_SLOW_STATEMENT_PREVIEW_CHARS]
     (logger or _LOGGER).warning(
         "A SQLite %s was slow. event=sqlite_%s_slow database=%s seconds=%.2f thread=%s on_event_loop=%s "
-        "statement=%s",
+        "pid=%s program=%s statement=%s",
         operation,
         operation,
         db_path,
         seconds,
         threading.current_thread().name,
         str(_on_event_loop()).lower(),
+        os.getpid(),
+        _process_label(),
         preview or "-",
         extra={"component": "sqlite_connection", "storage_target": db_path, "operation": operation},
     )
+
+
+# A subcommand such as ``run-secure-tool-broker``. Other arguments are left
+# out of log lines, because they can carry values.
+_SUBCOMMAND_PATTERN = re.compile(r"[a-z][a-z0-9-]*")
+
+
+def _process_label() -> str:
+    """This process for log lines: its program and subcommand, e.g. ``assistant_cli.py:run-gateway``.
+
+    Every service runs in its own process from the same few programs, so the
+    subcommand is what tells the gateway from the broker in a shared log.
+    """
+
+    argv = sys.argv or [""]
+    parts = [Path(argv[0]).name or "python"]
+    if len(argv) > 1 and _SUBCOMMAND_PATTERN.fullmatch(argv[1]):
+        parts.append(argv[1])
+    return ":".join(parts)
 
 
 def sqlite_column_names(conn: sqlite3.Connection, table_name: str) -> set[str]:
@@ -325,17 +422,57 @@ def configure_sqlite_connection(
                 f"SQLite database at {db_path!r} did not enter WAL journal mode; "
                 f"SQLite reported {journal_mode!r}."
             )
-            if logger is not None:
-                logger.error(
-                    message,
-                    extra={
-                        "component": "sqlite_connection",
-                        "storage_target": db_path,
-                        "reported_journal_mode": journal_mode,
-                    },
-                )
+            (logger or _LOGGER).error(
+                message,
+                extra={
+                    "component": "sqlite_connection",
+                    "storage_target": db_path,
+                    "reported_journal_mode": journal_mode,
+                },
+            )
             raise RuntimeError(message)
     conn.execute("PRAGMA synchronous=NORMAL")
+
+
+def prepare_sqlite_database(db_path: str, *, logger: logging.Logger | None = None) -> bool:
+    """Prime a database's next write before several processes open it.
+
+    Switches a file that is not in WAL mode yet (including a new one) to WAL
+    and makes its first write, so the WAL exists before any service opens the
+    file (module docstring). The write sets ``user_version`` to the value it
+    already has: it writes one WAL frame and changes nothing the stores read.
+    This harmless write runs on every launch: WAL mode and even a large WAL
+    can survive an interrupted, uncommitted transaction without priming the
+    next write. SQLite decides which transactions committed; file size is not
+    evidence of that. Returns whether the file was prepared. Nothing is
+    created in read-only mode or for an in-memory path.
+
+    Call it only while no other process uses the file, as the headless
+    launcher does before it starts the services.
+    """
+
+    if repositories_are_read_only() or not _should_enable_wal(db_path):
+        return False
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path, timeout=DEFAULT_SQLITE_BUSY_TIMEOUT_MS / 1000.0)
+    try:
+        # First, also for a file that is already prepared: closing the only
+        # connection would otherwise checkpoint and delete the WAL, and the
+        # services' first write would have to create it again.
+        _keep_wal_on_close(conn, db_path=db_path, logger=logger)
+        conn.execute(f"PRAGMA busy_timeout = {DEFAULT_SQLITE_BUSY_TIMEOUT_MS}")
+        configure_sqlite_connection(conn, db_path=db_path, logger=logger)
+        version = int(_first_cell(conn.execute("PRAGMA user_version").fetchone()) or 0)
+        conn.execute(f"PRAGMA user_version = {version}")
+        conn.commit()
+    finally:
+        conn.close()
+    (logger or _LOGGER).info(
+        "Prepared a SQLite database before its processes start. event=sqlite_database_prepared database=%s",
+        db_path,
+        extra={"component": "sqlite_connection", "storage_target": db_path, "operation": "prepare"},
+    )
+    return True
 
 
 def _keep_wal_on_close(
@@ -388,17 +525,24 @@ def _ensure_wal_mode(
     try:
         journal_mode = _first_cell(conn.execute("PRAGMA journal_mode").fetchone())
     except operational_error_type as exc:
-        if logger is not None and _is_sqlite_lock_error(exc):
-            logger.error(
+        if _is_sqlite_lock_error(exc):
+            (logger or _LOGGER).error(
                 "SQLite database stayed locked while opening a connection. "
-                "event=sqlite_journal_mode_check_locked database=%s busy_timeout_ms=%s",
+                "event=sqlite_journal_mode_check_locked database=%s busy_timeout_ms=%s pid=%s program=%s",
                 db_path,
                 busy_timeout_ms,
+                os.getpid(),
+                _process_label(),
                 extra={"component": "sqlite_connection", "storage_target": db_path, "operation": "check_wal"},
             )
         raise
     if journal_mode.lower() == "wal":
         return journal_mode
+    # Before the switch, so a new file's switch needs one disk flush fewer
+    # while it holds the file's locks (module docstring). Not earlier: the
+    # journal-mode read above is the open's first statement that waits for a
+    # lock, and the one that logs it.
+    conn.execute("PRAGMA synchronous=NORMAL")
     return _enable_wal_with_retry(
         conn,
         db_path=db_path,
@@ -437,13 +581,13 @@ def _enable_wal_with_retry(
 
 
 def _log_wal_init_locked(logger: logging.Logger | None, *, db_path: str, attempt: int, attempts: int) -> None:
-    if logger is None:
-        return
-    logger.error(
+    (logger or _LOGGER).error(
         "SQLite WAL initialization remained locked after bounded retries. "
-        "event=sqlite_wal_init_locked database=%s attempts=%s",
+        "event=sqlite_wal_init_locked database=%s attempts=%s pid=%s program=%s",
         db_path,
         attempt,
+        os.getpid(),
+        _process_label(),
         extra={
             "component": "sqlite_connection",
             "storage_target": db_path,
@@ -462,15 +606,15 @@ def _log_wal_init_retry(
     attempts: int,
     delay: float,
 ) -> None:
-    if logger is None:
-        return
-    logger.warning(
+    (logger or _LOGGER).warning(
         "SQLite WAL initialization raced another connection; retrying. "
-        "event=sqlite_wal_init_retry database=%s attempt=%s/%s delay_seconds=%.3f",
+        "event=sqlite_wal_init_retry database=%s attempt=%s/%s delay_seconds=%.3f pid=%s program=%s",
         db_path,
         attempt,
         attempts,
         delay,
+        os.getpid(),
+        _process_label(),
         extra={
             "component": "sqlite_connection",
             "storage_target": db_path,

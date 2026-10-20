@@ -4,15 +4,18 @@ import gc
 import logging
 import os
 import sqlite3
+import sys
 import threading
 import time
 
 import pytest
 
 from storage import sqlite_connection
+from storage.read_only import read_only_repositories
 from storage.sqlite_connection import (
     connect_sqlite,
     ensure_sqlite_column,
+    prepare_sqlite_database,
 )
 
 
@@ -330,3 +333,217 @@ def test_the_slow_log_says_whether_the_call_ran_on_an_event_loop(tmp_path, monke
     opens = [record.getMessage() for record in caplog.records if "event=sqlite_open_slow" in record.getMessage()]
     assert any("loop.db" in line and "on_event_loop=true" in line for line in opens)
     assert any("thread.db" in line and "on_event_loop=false" in line for line in opens)
+
+
+# --- startup preparation before several processes open a file ----------------
+
+
+def test_preparing_each_start_keeps_wal_ready_without_changing_database_contents(tmp_path, caplog):
+    path = str(tmp_path / "dbs" / "task_history.db")
+    with caplog.at_level(logging.INFO, logger="storage.sqlite_connection"):
+        assert prepare_sqlite_database(path) is True
+    assert "event=sqlite_database_prepared" in caplog.text
+    # The first write already created the WAL, so no service has to.
+    assert os.path.getsize(path + "-wal") > 0
+    raw = sqlite3.connect(path)
+    raw.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)  # as the stores' connections do
+    try:
+        assert raw.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert raw.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
+    finally:
+        raw.close()
+    assert prepare_sqlite_database(path) is True
+    assert os.path.getsize(path + "-wal") > 0
+
+
+def test_preparing_switches_an_existing_file_without_changing_its_content(tmp_path):
+    path = str(tmp_path / "old.db")
+    raw = sqlite3.connect(path)
+    raw.execute("CREATE TABLE work (value TEXT)")
+    raw.execute("INSERT INTO work VALUES ('kept')")
+    raw.execute("PRAGMA user_version = 7")
+    raw.commit()
+    raw.close()
+
+    assert prepare_sqlite_database(path) is True
+    raw = sqlite3.connect(path)
+    try:
+        assert raw.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert raw.execute("SELECT value FROM work").fetchall() == [("kept",)]
+    finally:
+        raw.close()
+
+
+@pytest.mark.parametrize("emptied_by_checkpoint", [False, True], ids=["missing-wal", "truncated-wal"])
+def test_preparing_wal_mode_without_a_frame_primes_it_and_preserves_records(tmp_path, emptied_by_checkpoint):
+    path = str(tmp_path / "unprimed.db")
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("CREATE TABLE work (value TEXT)")
+        raw.execute("INSERT INTO work VALUES ('kept')")
+        raw.execute("PRAGMA user_version = 7")
+        raw.commit()
+        raw.execute("PRAGMA journal_mode=WAL")
+    finally:
+        raw.close()  # An external connection's normal close removes the WAL.
+    if emptied_by_checkpoint:
+        assert prepare_sqlite_database(path)
+        with connect_sqlite(path) as conn:
+            assert conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+
+    assert prepare_sqlite_database(path) is True
+    assert os.path.getsize(path + "-wal") > 32
+    with connect_sqlite(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert conn.execute("SELECT value FROM work").fetchall() == [("kept",)]
+    assert prepare_sqlite_database(path) is True
+
+
+def test_retry_after_process_exit_between_wal_switch_and_first_write_finishes_preparing(tmp_path):
+    import subprocess
+
+    path = str(tmp_path / "interrupted.db")
+    process = subprocess.run(
+        [sys.executable, "-c", """
+import os
+import sys
+from storage import sqlite_connection as store
+configure = store.configure_sqlite_connection
+def exit_after_switch(*args, **kwargs):
+    configure(*args, **kwargs)
+    os._exit(73)
+store.configure_sqlite_connection = exit_after_switch
+store.prepare_sqlite_database(sys.argv[1])
+""", path],
+        check=False, timeout=15, capture_output=True, text=True,
+    )
+    assert process.returncode == 73, process.stderr
+    assert prepare_sqlite_database(path) is True
+    assert os.path.getsize(path + "-wal") > 32
+    with connect_sqlite(path) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
+    assert prepare_sqlite_database(path) is True
+
+
+def test_preparing_recovers_spilled_uncommitted_wal_before_other_writers_start(tmp_path):
+    import subprocess
+
+    path = str(tmp_path / "spilled.db")
+    process = subprocess.run([sys.executable, "-c", """
+import os
+import sqlite3
+import sys
+c = sqlite3.connect(sys.argv[1])
+c.execute('CREATE TABLE work (value BLOB)')
+c.commit()
+c.execute('PRAGMA journal_mode=WAL')
+c.execute('PRAGMA cache_size=5')
+c.execute('BEGIN')
+for _ in range(50):
+    c.execute('INSERT INTO work VALUES (zeroblob(10000))')
+os._exit(73)
+""", path], check=False, timeout=15, capture_output=True, text=True)
+    assert process.returncode == 73, process.stderr
+    assert os.path.getsize(path + "-wal") > 100_000, "real cache spill left full but uncommitted frames"
+    assert prepare_sqlite_database(path) is True
+    with connect_sqlite(path) as conn:
+        assert conn.execute("SELECT count(*) FROM work").fetchone()[0] == 0
+        conn.execute("INSERT INTO work VALUES ('new committed work')")
+    with connect_sqlite(path) as conn:
+        assert conn.execute("SELECT value FROM work").fetchall() == [("new committed work",)]
+
+
+def test_preparing_creates_nothing_when_read_only_or_in_memory(tmp_path):
+    path = tmp_path / "dbs" / "task_history.db"
+    with read_only_repositories():
+        assert prepare_sqlite_database(str(path)) is False
+    assert not path.parent.exists()
+    assert prepare_sqlite_database(":memory:") is False
+
+
+def test_synchronous_normal_comes_before_the_wal_switch(tmp_path):
+    class _Recording:
+        """A real connection that records each statement it runs."""
+
+        def __init__(self, conn):
+            self._conn = conn
+            self.statements: list[str] = []
+
+        def execute(self, statement):
+            self.statements.append(statement)
+            return self._conn.execute(statement)
+
+        def setconfig(self, *args):
+            return self._conn.setconfig(*args)
+
+    path = str(tmp_path / "fresh.db")
+    raw = sqlite3.connect(path)
+    try:
+        recording = _Recording(raw)
+        sqlite_connection.configure_sqlite_connection(recording, db_path=path)
+    finally:
+        raw.close()
+    # The new file's switch then needs one disk flush fewer while it holds the file's locks.
+    assert recording.statements.index("PRAGMA synchronous=NORMAL") < recording.statements.index(
+        "PRAGMA journal_mode=WAL"
+    )
+
+
+def test_a_lock_failure_names_the_process_also_without_a_caller_logger(tmp_path, caplog):
+    path = _wal_database(tmp_path / "locked.db")
+    holder = _exclusive_holder(path)
+    try:
+        with caplog.at_level(logging.ERROR, logger="storage.sqlite_connection"):
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                connect_sqlite(path, busy_timeout_ms=200)
+    finally:
+        holder.execute("COMMIT")
+        holder.close()
+    [line] = [r.getMessage() for r in caplog.records if "event=sqlite_journal_mode_check_locked" in r.getMessage()]
+    assert f"database={path}" in line and f"pid={os.getpid()}" in line and "program=" in line
+
+
+def test_the_process_label_names_the_program_and_subcommand_but_no_values(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["/app/assistant_cli.py", "run-secure-tool-broker", "--config", "/data/x.yaml"])
+    assert sqlite_connection._process_label() == "assistant_cli.py:run-secure-tool-broker"
+    monkeypatch.setattr(sys, "argv", ["/app/strands_main.py", "--agent-type", "TeamLead"])
+    assert sqlite_connection._process_label() == "strands_main.py"
+
+
+def test_a_statement_runs_again_when_the_schema_changed_while_it_was_prepared(caplog):
+    calls = []
+
+    def execute(sql, parameters):
+        calls.append(sql)
+        if len(calls) <= 2:
+            raise sqlite3.OperationalError("database schema has changed")
+        return "result"
+
+    with caplog.at_level(logging.WARNING, logger="storage.sqlite_connection"):
+        result = sqlite_connection._execute_with_schema_retry(
+            execute, "SELECT count(*) FROM sqlite_master", (), db_path="task_history.db"
+        )
+    assert result == "result" and len(calls) == 3
+    assert caplog.text.count("event=sqlite_schema_changed_retry") == 2
+    assert "statement=SELECT count(*) FROM sqlite_master" in caplog.text
+
+
+def test_only_a_schema_change_is_retried_and_only_a_bounded_number_of_times():
+    def always(message):
+        def execute(_sql, _parameters):
+            calls.append(message)
+            raise sqlite3.OperationalError(message)
+
+        return execute
+
+    calls: list[str] = []
+    with pytest.raises(sqlite3.OperationalError, match="schema has changed"):
+        sqlite_connection._execute_with_schema_retry(always("database schema has changed"), "x", (), db_path="x.db")
+    assert len(calls) == sqlite_connection.SCHEMA_CHANGED_ATTEMPTS
+    calls.clear()
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        sqlite_connection._execute_with_schema_retry(always("database is locked"), "x", (), db_path="x.db")
+    assert len(calls) == 1, "a lock keeps its own single bounded wait"

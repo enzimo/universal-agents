@@ -18,6 +18,7 @@ import shlex
 import signal
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -121,6 +122,7 @@ from secure_tool_broker.sealbox_runtime import (
     sealbox_server_env,
 )
 from storage.memory_graph_repository import create_memory_graph_repository
+from storage.sqlite_connection import prepare_sqlite_database
 from runtime_hosting.manifest_rendering import write_runtime_manifests
 from runtime_hosting.process_run import ProcessRunBusy, acquire_process_run
 from custom_tools import openshell_sandboxes
@@ -368,6 +370,26 @@ def resolve_manager_db_path(config: GatewayInstanceConfig) -> Path:
     if not settings.sqlite_path:
         return config.layout.task_database_path
     return Path(settings.sqlite_path).expanduser().resolve()
+
+
+def prepare_manager_database(config: GatewayInstanceConfig) -> Path | None:
+    """Prime the manager database before any service opens it on each launch.
+
+    The manager, gateway, secure tool broker, execution controller and
+    startup agents all open this file as they start. On the first start its
+    WAL switch and first write held SQLite's locks across several disk
+    flushes, and on a slow disk the other services' single lock wait expired
+    and every service stopped (``storage.sqlite_connection``). The launcher
+    holds the run lock here, so no process of an earlier run uses the file.
+    Returns the prepared SQLite path, or None when the manager store is not a
+    SQLite file.
+    """
+
+    if config.state.storage.backend != STORAGE_DEFAULTS.backend.value:
+        return None
+    path = resolve_manager_db_path(config)
+    prepare_sqlite_database(str(path), logger=LOGGER)
+    return path
 
 
 def build_instance_env_defaults(
@@ -2418,6 +2440,16 @@ def main() -> int:
         process_run = acquire_process_run(config.layout.process_run_lock_path)
     except ProcessRunBusy as exc:
         LOGGER.error("Headless launch refused. %s", exc)
+        return 2
+    try:
+        prepare_manager_database(config)
+    except (sqlite3.Error, OSError) as exc:
+        LOGGER.error(
+            "Headless launch refused: the manager database could not be set up before the services start. "
+            "event=manager_database_prepare_failed database=%s error=%s",
+            resolve_manager_db_path(config),
+            exc,
+        )
         return 2
     manifest_paths = write_runtime_manifests(
         config,

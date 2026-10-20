@@ -242,8 +242,18 @@ docker run --rm -d \
 Copy the existing `dbs/` folder, including every `-wal` and `-shm` file, into the
 new volume while the container is stopped. A slow database call is logged as
 `event=sqlite_open_slow` or `event=sqlite_statement_slow` with the database,
-the thread and `on_event_loop`; `on_event_loop=true` means it held up the
-gateway's chat apps and Web Chat too.
+the thread, `on_event_loop` and the process (`pid` and `program`);
+`on_event_loop=true` means it held up the gateway's chat apps and Web Chat too.
+
+Before each start's services run, the container prepares the shared manager
+database (`event=sqlite_database_prepared`), so the services never create it
+at the same moment. Without that step, a disk that takes over half a second per
+sync made their first opens fail with "database is locked" and the container
+stopped. If the setup itself fails, the container refuses to start and logs
+`event=manager_database_prepare_failed` with the database and the error.
+Preparation makes a harmless write on every start so a previous interrupted
+setup or transaction cannot leave the first slow write to competing services.
+It preserves the stored records and database version.
 
 When Kubernetes profiles are enabled, the execution artifact directory must be
 backed by the same PVC that the profile names. Mount it at
@@ -276,65 +286,6 @@ Web Chat, docs, assets, and `/api/...` to the website listener while routing
 See [Reverse Proxy and Docker Swarm](reverse-proxy.md) for the complete
 `instance_config.yaml` settings, Swarm labels, onboarding-port considerations,
 security boundaries, and verification steps.
-
-### Initialize the MCP registry serially in Docker Swarm
-
-If a new or upgraded instance fails while several agents initialize the MCP
-registry concurrently, park the Swarm service on a long-running process before
-running the serial initializer. Run service updates on a Swarm manager. Replace
-`my-stack_ua` with the deployed service name.
-
-```bash
-UA_SERVICE=my-stack_ua
-docker service update \
-  --entrypoint /usr/bin/tail \
-  --args "-f /dev/null" \
-  "$UA_SERVICE"
-```
-
-The update persists in the Swarm service specification until it is changed or
-rolled back. Verify that the task command is `tail -f /dev/null`:
-
-```bash
-docker service inspect \
-  --format '{{json .Spec.TaskTemplate.ContainerSpec.Command}} {{json .Spec.TaskTemplate.ContainerSpec.Args}}' \
-  "$UA_SERVICE"
-```
-
-Find the node that owns the running task with `docker service ps "$UA_SERVICE"`.
-On that node, identify the task container, copy the initializer into it, and run
-it as root:
-
-```bash
-UA_CONTAINER="$(docker ps \
-  --filter "label=com.docker.swarm.service.name=$UA_SERVICE" \
-  --format '{{.ID}}' | head -n 1)"
-
-test -n "$UA_CONTAINER"
-docker cp scripts/initialize_mcp_registry.py \
-  "$UA_CONTAINER:/tmp/initialize_mcp_registry.py"
-docker exec --user 0 "$UA_CONTAINER" \
-  python /tmp/initialize_mcp_registry.py \
-  --config /data/instance_config.yaml \
-  --confirm-exclusive
-```
-
-The script calls the runtime's normal secret-free reconciliation function and
-verifies `/data/runtime/mcp-connections/static-baseline-v1.json`. It does not
-connect to an MCP server. Do not run it while another Universal Agents process
-uses the same instance root, and do not delete or edit the registry by hand.
-
-If parking the service was the most recent service update, restore its previous
-entrypoint and arguments with:
-
-```bash
-docker service update --rollback "$UA_SERVICE"
-```
-
-Redeploying the original stack file also restores the declared entrypoint and
-command. A manager that still exits after successful serial initialization has
-a different startup failure; capture the manager traceback instead of deleting
-the initialized registry.
 
 ### Remove abandoned JetStream consumers in Docker Swarm
 
