@@ -30,6 +30,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import threading
 from typing import Any, Iterable, Iterator, Literal, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 
@@ -525,8 +526,25 @@ def resolve_mcp_connection_paths(instance_root: str | Path) -> MCPConnectionPath
     )
 
 
+# Registry locks this thread holds, so a store call made inside a held lock
+# (reconcile_instance_mcp_connections) does not wait for itself. flock locks an
+# open file, not a process: a second open of the lock file in the same process
+# would wait for the first forever.
+_HELD_REGISTRY_LOCKS = threading.local()
+
+
 @contextmanager
 def _registry_lock(paths: MCPConnectionPaths) -> Iterator[None]:
+    """Hold the instance's registry lock; the thread that holds it may enter again."""
+
+    held: set[str] | None = getattr(_HELD_REGISTRY_LOCKS, "paths", None)
+    if held is None:
+        held = set()
+        _HELD_REGISTRY_LOCKS.paths = held
+    key = str(paths.lock)
+    if key in held:
+        yield
+        return
     paths.ensure()
     handle = paths.lock.open("a+", encoding="utf-8")
     try:
@@ -536,8 +554,10 @@ def _registry_lock(paths: MCPConnectionPaths) -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         except ImportError:
             pass
+        held.add(key)
         yield
     finally:
+        held.discard(key)
         try:
             import fcntl
 
@@ -907,9 +927,24 @@ def resolve_record_source_config(
 def reconcile_instance_mcp_connections(
     config: Any,
 ) -> tuple[MCPConnectionRecordV1, ...]:
-    """Reconcile every static definition without performing network I/O."""
+    """Reconcile every static definition without performing network I/O.
+
+    The whole reconciliation holds the registry lock. The manager and each
+    startup agent reconcile as they start, often at the same moment; when each
+    read "no baseline yet" outside the lock, each recorded its own baseline and
+    records stamped with its own time, and the second one stopped its process
+    with "MCP static upgrade baseline is immutable once recorded". Under the
+    lock the first process records them and the others find them.
+    """
 
     store = MCPConnectionStore(resolve_mcp_connection_paths(config.instance_root_path))
+    with _registry_lock(store.paths):
+        return _reconcile_locked(config, store)
+
+
+def _reconcile_locked(
+    config: Any, store: MCPConnectionStore
+) -> tuple[MCPConnectionRecordV1, ...]:
     sources = _configured_sources(config)
     baseline = store.baseline()
     upgrade_mode = _upgrade_mode(config)
