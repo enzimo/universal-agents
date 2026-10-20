@@ -260,6 +260,17 @@ first message you type in it (slash commands do not count) and keeps that name
 unless you rename it. Updates the team sends you and notes from memory reviews
 appear as their own threads, **Updates** and **Memory review**, once there is
 something in them.
+
+To start an unrelated request while keeping your earlier chat, turn on
+**Separate request** beside the composer and send your message. Chat creates a
+new thread for that message and its files, and keeps its replies there. The
+switch turns off after the message moves to the new chat. Leave it off to
+continue the selected thread. Slash commands keep their usual behavior.
+If the new chat cannot be created, your text and files stay in the composer.
+If sending fails, use **Retry** above that chat's messages to resend the same
+request without creating another one. Retry keeps the original files and
+destination for as long as this page stays open.
+
 It loads the active thread's newest 50 messages; other threads load when selected. Scroll
 up to load earlier pages, or use **Load earlier messages**. Loading older history
 keeps your reading position, and background replies do not scroll you away.

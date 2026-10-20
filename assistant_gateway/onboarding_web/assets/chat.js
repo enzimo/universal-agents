@@ -18,6 +18,7 @@ import { createKnowledgeClient, createKnowledgePage, readPendingProposals } from
 import { createActivityMesh } from "./activity_mesh.mjs";
 import { createTeamActivity } from "./team_activity.mjs";
 import { createSettingsClient } from "./settings_support.mjs";
+import { createChatSubmission } from "./chat_submission.mjs";
 
 function mountPage() {
 "use strict";
@@ -241,6 +242,8 @@ shellState.transcriptView = createTranscriptView({ list: sharedState.messageList
 sharedState.messageForm = document.getElementById("message-form");
 
 sharedState.messageInput = document.getElementById("message-input");
+
+shellState.separateRequest = document.getElementById("separate-request-toggle");
 
 sharedState.attachmentInput = document.getElementById("message-attachment-input");
 
@@ -624,6 +627,8 @@ function clearThreadOptimisticDeliveries(thread) {
   }
 
 function clearOptimisticDeliveries() {
+    if (shellState.chatSubmission) shellState.chatSubmission.reset();
+    shellState.separateRequest.checked = false;
     sharedState.threads.forEach(clearThreadOptimisticDeliveries);
     shellState.deliveryTracker.clear();
   }
@@ -1246,6 +1251,7 @@ function renderAttachmentList(container, attachments) {
   }
 
 function addPendingFiles(files) {
+    if (shellState.chatSubmission.isPreparing()) return;
     Array.prototype.slice.call(files || []).forEach(function (file) {
       if (!file || !file.name) {
         return;
@@ -1268,6 +1274,7 @@ function addPendingFiles(files) {
   }
 
 function removePendingAttachment(id) {
+    if (shellState.chatSubmission.isPreparing()) return;
     var removed = shellState.pendingAttachments.find(function (item) { return item.id === id; });
     shellState.pendingAttachments = shellState.pendingAttachments.filter(function (item) { return item.id !== id; });
     if (removed && removed.preview_url) {
@@ -1521,8 +1528,14 @@ function createServerThread() {
     var request = requestClient.fetch("/api/web-chat/sessions", {
       method: "POST",
       credentials: "same-origin",
+      signal: AbortSignal.timeout(15000),
     }).then(function (response) {
-      return parseApiResponse(response, "Unable to create a chat thread.");
+      if (!sharedState.authSessionActive || sharedState.authSessionGeneration !== authGeneration) { return null; }
+      return parseApiResponse(response, "Unable to create a chat thread.", function () {
+        if (!sharedState.authSessionActive || sharedState.authSessionGeneration !== authGeneration) {
+          throw new Error("Chat sign-in changed while creating the thread.");
+        }
+      });
     }).then(function (payload) {
       if (!sharedState.authSessionActive || sharedState.authSessionGeneration !== authGeneration) { return null; }
       var session = payload.session || {};
@@ -2230,7 +2243,9 @@ function renderMessages(options) {
       retryButton.textContent = "Retry";
       lifecycle.listen(retryButton, "click", function () {
         clearSystemError(errorThread, errorNotice.source);
-        if (errorThread && errorNotice.source === shellState.SYSTEM_ERROR_SOURCE.HYDRATE_THREAD) {
+        if (errorNotice.retry) {
+          errorNotice.retry();
+        } else if (errorThread && errorNotice.source === shellState.SYSTEM_ERROR_SOURCE.HYDRATE_THREAD) {
           if (errorThread.historyLoaded) {
             loadEarlierHistory();
           } else {
@@ -2278,8 +2293,9 @@ function renderMessages(options) {
     });
   }
 
-function appendSystemError(thread, source, message) {
+function appendSystemError(thread, source, message, retry) {
     var notice = window.UAChatDelivery.createErrorNotice(source, message);
+    if (retry) notice.retry = retry;
     if (thread) {
       thread.transientError = notice;
     } else {
@@ -2304,7 +2320,7 @@ function clearSystemError(thread, recoveredSource) {
     return historyNotice !== sharedState.historyHydrationError;
   }
 
-function runCommand(command) {
+function runCommand(command, options) {
     var commandName = command.split(/\s+/)[0];
     if (commandName === "/new") {
       createServerThread().then(function () {
@@ -2319,20 +2335,20 @@ function runCommand(command) {
       });
       return;
     }
-    sendMessage(command, { routedCommand: true });
+    sendMessage(command, { ...options, routedCommand: true });
   }
 
 function sendMessage(content, options) {
     options = options || {};
     var attachments = Array.isArray(options.attachments) ? options.attachments : [];
     if (content.charAt(0) === "/" && !attachments.length && !options.routedCommand) {
-      runCommand(content);
+      runCommand(content, options);
       return;
     }
-    var thread = activeThread();
+    var thread = options.thread || activeThread();
     if (!thread) {
       createServerThread().then(function (created) {
-        if (created) { sendMessage(content, options); }
+        if (created) { sendMessage(content, { ...options, thread: created }); }
       }).catch(function (error) {
         appendSystemError(
           null,
@@ -2343,6 +2359,17 @@ function sendMessage(content, options) {
       });
       return;
     }
+    var authGeneration = sharedState.authSessionGeneration;
+    var current = function () {
+      return sharedState.authSessionActive && sharedState.authSessionGeneration === authGeneration
+        && sharedState.threads.includes(thread);
+    };
+    if (!current()) return;
+    // Retain both the destination and identity across an uncertain HTTP outcome.
+    // A replay reaches the server's existing exchange before it saves files.
+    var delivery = options.delivery || { clientRequestId: shellState.operationalIds.newId("web_request") };
+    if (delivery.inFlight) return;
+    delivery.inFlight = true;
     // The first ordinary message names the thread, as the server will;
     // slash commands never do (web_chat_threads.py).
     if (thread.title === NEW_CHAT_TITLE && content.trim().charAt(0) !== "/") {
@@ -2350,18 +2377,15 @@ function sendMessage(content, options) {
       thread.title = titleSource;
       thread.titleFull = normalizeThreadTitle(titleSource) || "Attachment";
     }
-    setThreadUnread(thread, false);
+    if (isReadingThread(thread)) setThreadUnread(thread, false);
     clearSystemError(thread, shellState.SYSTEM_ERROR_SOURCE.SEND_MESSAGE);
-    var clientRequestId = shellState.operationalIds.newId("web_request");
+    var clientRequestId = delivery.clientRequestId;
     var anchorSessionSequence = window.UAChatDelivery.latestDurableSessionSequence(
       thread.messages
     );
-    thread.messages.push(optimisticMessage(
-      clientRequestId,
-      content,
-      attachments,
-      anchorSessionSequence
-    ));
+    if (!thread.messages.some(function (message) { return message.clientRequestId === clientRequestId; })) {
+      thread.messages.push(optimisticMessage(clientRequestId, content, attachments, anchorSessionSequence));
+    }
     shellState.deliveryTracker.watch(clientRequestId);
     var wasWaitingForReply = Boolean(thread.pendingReply || pendingReplyCount(thread) > 0);
     var startsTerminalReplyWait = !wasWaitingForReply;
@@ -2378,7 +2402,7 @@ function sendMessage(content, options) {
     renderThreads();
     // Sending shows the person's own message even when they had scrolled up,
     // and they follow the latest message from here; replies never do this.
-    renderMessages({ scrollToBottom: true });
+    if (activeThread() === thread) renderMessages({ scrollToBottom: true });
     var requestBody = buildChatRequestBody(
       content,
       thread,
@@ -2393,9 +2417,11 @@ function sendMessage(content, options) {
     });
     liveEvents.start();
     requestPromise.then(function (response) {
+      if (!current()) return null;
       return response.json().catch(function () {
         return {};
       }).then(function (payload) {
+        if (!current()) return null;
         if (!response.ok) {
           authentication.handleUnauthorizedResponse(response);
           throw new Error(payload.message || payload.error || response.statusText || "Message failed.");
@@ -2403,6 +2429,7 @@ function sendMessage(content, options) {
         return payload;
       });
     }).then(function (payload) {
+      if (!current()) return;
       var responseSessionKey = String(payload.session_key || thread.sessionKey);
       clearSystemError(thread, shellState.SYSTEM_ERROR_SOURCE.SEND_MESSAGE);
       thread.conversationId = String(payload.conversation_id || thread.conversationId || "");
@@ -2450,6 +2477,7 @@ function sendMessage(content, options) {
         fetchSessions();
       }
     }).catch(function (error) {
+      if (!current()) return;
       if (startsTerminalReplyWait) {
         finishTerminalReplyWait(thread);
       } else if (pendingReplyCount(thread) === 0) {
@@ -2458,13 +2486,16 @@ function sendMessage(content, options) {
       appendSystemError(
         thread,
         shellState.SYSTEM_ERROR_SOURCE.SEND_MESSAGE,
-        error.message || "Message failed."
+        error.message || "Message failed.",
+        function () {
+          if (current()) sendMessage(content, { ...options, thread: thread, delivery: delivery });
+        }
       );
       thread.updatedAt = Date.now();
       saveThreads();
       renderThreads();
       renderMessages();
-    });
+    }).finally(function () { delivery.inFlight = false; });
   }
 
 lifecycle.listen(sharedState.authReveal, "click", function () {
@@ -2639,17 +2670,44 @@ if (diagnosticsState.debugContextMode) {
     lifecycle.listen(diagnosticsState.debugContextMode, "change", diagnostics.updateContextDumpDebugSettings);
   }
 
+shellState.chatSubmission = createChatSubmission({
+  readDraft: () => ({
+    content: sharedState.messageInput.value.trim(),
+    hasAttachments: shellState.pendingAttachments.length > 0,
+    separate: shellState.separateRequest.checked,
+  }),
+  context: () => ({
+    authenticated: sharedState.authSessionActive,
+    generation: sharedState.authSessionGeneration,
+    thread: activeThread(),
+  }),
+  createThread: createServerThread,
+  takeDraft: () => {
+    sharedState.messageInput.value = "";
+    shellState.separateRequest.checked = false;
+    return detachPendingAttachmentsForSend();
+  },
+  send: sendMessage,
+  preparing: (pending) => {
+    sharedState.messageForm.querySelectorAll("input, textarea, button").forEach(control => { control.disabled = pending; });
+    sharedState.newThreadButton.disabled = pending;
+    sharedState.messageForm.setAttribute("aria-busy", String(pending));
+    const status = document.getElementById("composer-status");
+    status.hidden = !pending;
+    status.textContent = pending ? "Preparing your chat…" : "";
+  },
+  failed: (error, retry) => {
+    appendSystemError(activeThread(), shellState.SYSTEM_ERROR_SOURCE.CREATE_THREAD,
+      error.message || "Unable to create a chat thread.", retry);
+    renderMessages();
+  },
+});
+
 authentication.resumeWebChatSession();
 
 lifecycle.listen(sharedState.messageForm, "submit", function (event) {
     event.preventDefault();
-    var content = sharedState.messageInput.value.trim();
-    if (!content && !shellState.pendingAttachments.length) {
-      return;
-    }
-    var attachments = detachPendingAttachmentsForSend();
-    sharedState.messageInput.value = "";
-    sendMessage(content, { attachments: attachments });
+    shellState.chatSubmission.submit();
   });
 
 // Match the platform's primary shortcut modifier and keep its visual cue local

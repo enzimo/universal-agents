@@ -4045,6 +4045,62 @@ async def test_web_chat_resent_upload_gets_the_first_answer_without_saving_again
 
 
 @pytest.mark.asyncio
+async def test_web_chat_separate_upload_and_retry_leave_the_original_question_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The browser's create-then-send flow uses the new conversation even while an older one waits."""
+
+    config = _config(tmp_path)
+    _enable_web_chat(config, monkeypatch)
+    database = tmp_path / "gateway.db"
+    store = GatewayStateStore(str(database))
+    owner = config.user.canonical_user_id
+    store.create_session(
+        session_key="pending_session",
+        conversation_id="conv_pending",
+        manager_agent_id="manager_1",
+        channel_name="website",
+        user_id=owner,
+        chat_id="web-chat",
+        owner_canonical_user_id=owner,
+    )
+    gateway = _StatefulFakeGateway(store)
+    gateway.pending_query = object()
+    app = InternalWebsiteInteractiveApp(config, gateway=gateway, bridge=SimpleNamespace())
+    async with TestClient(TestServer(app.build_app())) as client:
+        headers = await _signed_in(client)
+        created = await client.post("/api/web-chat/sessions", headers=headers)
+        assert created.status == 201
+        session = (await created.json())["session"]
+        session_key = session["session_key"]
+        assert session_key != "pending_session"
+        exchanges = []
+        for _ in range(2):
+            response = await client.post(
+                "/api/web-chat/chat",
+                headers=headers,
+                data=_upload_form(
+                    session_key=session_key,
+                    conversation_id=session["conversation_id"],
+                    client_request_id="separate_upload_1",
+                ),
+            )
+            assert response.status == 200
+            exchanges.append(await response.json())
+        earlier = await client.get("/api/web-chat/sessions/pending_session/messages")
+        assert (await earlier.json())["messages"] == []
+
+    assert len(gateway.sent_user_messages) == 1
+    assert gateway.sent_user_messages[0]["session_key"] == session_key
+    assert gateway.replies_to_pending == []
+    assert gateway.pending_query is not None
+    assert exchanges[0]["messages"] == exchanges[1]["messages"]
+    assert {message["session_key"] for message in exchanges[0]["messages"]} == {session_key}
+    assert _saved_uploads(config, database) == (1, 1)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("form_fields", "waiting_for_answer", "status"),
     [
