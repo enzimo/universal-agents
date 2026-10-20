@@ -315,6 +315,11 @@ the configuration guide's active runtime snapshot upgrade procedure and
 team ID. Use the complete snapshot preflight even when the storage header is
 supported. The preview's stored owner IDs can differ from the replacement agent ID.
 
+Before upgrading from a version without saved running-request state, have the
+operator finish or stop active interactive work and answer or close pending
+questions. Older requests are not inferred into the new running state, and
+the old pending-question table is removed without carrying its rows forward.
+
 When a person asks how to move the team to a new version, or a release needs a
 fresh instance, point the operator to the team transfer ("Moving a team to a new
 version" in the user guide): `assistant_cli team export` on the running old

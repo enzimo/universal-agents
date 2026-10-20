@@ -2444,6 +2444,10 @@ answer, expiry or final task reply makes room for the next question. Closed
 questions remain recorded so redelivery cannot reopen them. The obsolete
 one-question-per-session table is removed; questions open in that older format
 end at upgrade and their tasks reach their normal waiting limits.
+Before upgrading from a version without running-request state, operators must
+finish or stop active interactive work and answer or close pending questions.
+Older request rows are not inferred into the new running state, so leaving
+their tasks active would bypass the new busy-thread protection.
 
 Delivery receipts use the durable team-lead route, so they can wait for a
 replacement lead before discovery completes. Repeated publication of one

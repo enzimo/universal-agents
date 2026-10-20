@@ -44,8 +44,12 @@ You see one question at a time, and your plain reply answers that question.
 The next appears after the previous answer, expiry or task completion. A
 second send for an already answered question is refused.
 
-When upgrading from a version that kept only one question per chat, finish
-open questions first. Those older pending questions are not carried forward.
+Before upgrading from a version without the saved running-request state,
+finish or stop all active interactive work and answer or close pending
+questions. The gateway does not infer which older requests are still running,
+so an older request left active would lack busy-chat protection. The old
+one-question-per-chat table is removed, and its pending questions are not
+carried forward.
 
 ### Inspect and clear tasks across agents
 
