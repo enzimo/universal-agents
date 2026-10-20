@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import signal
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import textwrap
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +22,7 @@ from custom_transport.nats_consumer_reconciler import NatsConsumerReconciler
 from custom_transport.nats_consumer_state import consumer_listening_state
 from custom_transport.nats_pull import CONSUMER_METADATA_SCHEMA
 from custom_transport.subjects import NatsSubjectMapper
-from scripts.reconcile_nats_consumers import resolve_reconciliation_team_id
+from scripts.reconcile_nats_consumers import reconcile_nats_consumers, resolve_reconciliation_team_id
 
 
 def test_direct_consumer_scope_follows_agent_identity_lifetime() -> None:
@@ -218,6 +221,46 @@ async def test_reconciler_deletes_an_abandoned_pull_consumer_and_keeps_a_live_on
         "live_subscription",
     ]
     assert jetstream.deleted == [(mapper.work_stream_name(), mapper.durable_name("agent_agent_id_aaaaaaaaaaaa"))]
+
+
+def _closed_local_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@pytest.mark.asyncio
+async def test_the_consumer_report_gives_up_on_an_unreachable_server_quickly_and_names_the_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    # Credentials may also be supplied in a URL. The failure must not echo it.
+    server = f"nats://alice:example-password@127.0.0.1:{_closed_local_port()}"
+    for name in ("NATS_USER", "NATS_PASSWORD", "NATS_CREDENTIALS_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NATS_SERVERS", server)
+    monkeypatch.setenv("NATS_URL", server)
+    config_path = GatewayInstanceConfig.create(
+        instance_name="consumercheck",
+        instance_root=str(tmp_path / "instance"),
+        team_id="team_test",
+        timezone="UTC",
+    ).save(tmp_path / "instance" / "instance_config.yaml")
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError) as raised:
+        # nats-py's defaults retry the first connection for about two minutes.
+        await asyncio.wait_for(
+            reconcile_nats_consumers(config_path=config_path, apply=False, minimum_age_seconds=0),
+            timeout=10,
+        )
+
+    assert time.monotonic() - started < 10
+    message = str(raised.value)
+    assert "Could not connect to NATS:" in message
+    assert "example-password" not in message
+    assert "ConnectionRefusedError" in message
 
 
 def test_sigterm_reaches_agent_cleanup_in_subprocess() -> None:

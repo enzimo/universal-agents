@@ -942,6 +942,35 @@ startup failures. MCP tools follow their separate registration path and cannot b
 named in these lists.
 
 The topology owner establishes JetStream streams before consumers validate them.
+The gateway (or a team lead started without an instance configuration) creates
+or updates the team's streams when it connects; the manager, the startup agents
+and every worker only check, once, that they exist with the expected settings
+(`custom_transport.nats_topology`). The headless launcher starts all of them at
+the same moment, so whenever the streams were missing or out of date (a new
+team, an upgrade that adds or changes a stream, and with
+`transport.storage: memory` every start of the container's own NATS server)
+a manager whose check came first stopped, and every service stopped with it;
+slow storage delays the gateway's start enough to make that order likely. The
+launcher therefore runs the gateway's own stream setup, with the gateway's
+configuration and environment, as its last step before starting any service
+(`docker.launch_headless.prepare_message_streams`,
+`event=nats_streams_prepared`). The gateway repeats it when it connects and
+finds nothing to change. Nothing waits or polls: a participant that still finds
+no streams (for example after they were removed from NATS while the runtime
+ran) fails at once with "start the topology owner first", and a setup the
+broker refuses stops the launch with `event=nats_streams_prepare_failed`.
+This preparation owns the already-started NATS, Sealbox and OpenShell
+services until the supervisor takes over. Loading the effective gateway
+configuration also reads `team.env` overrides that the launcher's initial
+configuration load has not seen. Invalid overrides therefore refuse startup
+with the same event and stop those services. Interruption or an unexpected
+failure also cleans them up before propagating; every stop is attempted even
+if sandbox cleanup or another stop fails. Cleanup failures are logged as
+`event=nats_streams_prepare_cleanup_failed` without replacing the original
+preparation failure.
+In-app restarts keep the streams they started with, because transport settings
+are operator-owned and change only with a new launch.
+
 Each agent owns one model execution slot across turn preparation, invocation,
 and completion. Parent recovery waits for that owner; queued tasks cannot claim
 the slot during an active turn. Control and status messages remain responsive.
@@ -1131,7 +1160,7 @@ signed-in Web Chat session and sends each message as that person.
 
 Agents keep temporary files in `scratch/` of their task folder. When the
 internal-improvement maintenance schedule fires, trusted code in the manager
-deletes files there older than `tool_policy.scratch_retention_days` (14 by
+deletes files there older than `tool_policy.scratch_retention_days` (21 by
 default, 0 turns it off) from every person's and the agents' `scratch/`,
 walking folders without following links, and gives InternalImprovementAgent
 the counts (`custom_agents/scratch_retention.py`). The maintenance run itself
@@ -1280,10 +1309,13 @@ owns (`custom_tools/tool_stop.py`). The turn passes it to Strands as the
 invocation's `cancel_signal` and to the tools through `invocation_state`.
 Strands' own `agent.cancel_signal` cannot carry the stop: Strands clears it as
 soon as the invocation ends, and a stopped turn ends before a tool thread looks.
-Every turn also passes `callback_handler` to Strands as an extra keyword, so
-Strands hands tools the turn's `invocation_state` one level down; tools read
-it through `custom_tools.runtime_context.caller_invocation_state`, which
-handles both shapes.
+A turn calls Strands only with the keywords `Agent.invoke_async` declares
+(`custom_agents/sdk/strands/turn_tool_stop.py`). Strands treats any other
+keyword as deprecated and then hands tools and hooks the turn's values one
+level down. The turn's callback handler is therefore the Strands agent's own
+handler for the length of each call, and each call gets a fresh copy of the
+turn's `invocation_state`, so Strands' per-call bookkeeping (`request_state`
+and its cycle ids) never carries from one call of the turn into the next.
 
 A stop sets the signal before it cancels the turn. The process supervisor then
 ends the running command's whole process group (SIGTERM, then SIGKILL a second
@@ -2571,9 +2603,29 @@ already (a browser retry gets the first send's answer), and every file passes
 the upload checks (`inbound_attachments.check_inbound_attachment_bytes`; all
 files are checked before any is saved). Saved uploads go to `state/uploads`
 under the checked conversation's own key, and their records take that
-conversation's owner. Nothing deletes upload records except removing their
-owner, so a file saved for a refused send would stay as a stray, and in another
-person's conversation it would count as theirs.
+conversation's owner. A file saved for a refused send would otherwise stay as
+a stray until the cleanup below, and in another person's conversation it would
+count as theirs.
+
+The gateway deletes uploads older than the internal website's
+`attachments.retention_days` (90 by default, 0 keeps them) when it starts and
+every six hours after (`assistant_gateway/upload_retention.py`). Its database
+query selects only paths under `state/uploads`; the same attachment table
+also holds outgoing copies in `scratch/sent/`, whose records stay available
+under their separate scratch retention. It deletes the old upload records
+first, oldest first and in batches, then their files, so a
+failure leaves a file without a record, never a record without its file. Then
+it deletes every file in `state/uploads` older than the cutoff, which also
+removes files left without a record, and the folders left empty. It shares the
+link-safe folder walk with the scratch cleanup (`old_file_cleanup.py`). The
+gateway is the only writer of `state/uploads`; agents work on their own copies.
+Administrators change both retention numbers in Settings → Team → File
+Retention (`assistant_gateway/file_retention.py`). That is a `runtime_settings`
+change in the gateway's own controls, so `PersonChangeCheck` decides who may.
+The save changes only those two fields of `instance_config.yaml`, keeps a
+backup as the configuration editor does, and is refused when the file changed
+meanwhile. Upload retention applies from the next cleanup; scratch retention
+applies after a restart, because the manager reads its settings when it starts.
 
 A person can answer one earlier chat message with the channel's reply feature.
 That message often belongs to another conversation than the one the chat
@@ -3040,7 +3092,29 @@ credentials, the public origin, the website listener) in memory
 PostgreSQL address is applied by the storage resolvers
 (`TEAM_BUNDLED_POSTGRES_ADDRESS`). Writers load the file as stored
 (`load_saved`), change only their own fields and save, so no deployment detail
-or stale in-memory value is ever written back. The bundle used to run every
+or stale in-memory value is ever written back. Every instance-config writer
+uses `config_file_updates.replace_config_file`: it holds the shared
+`file_locking.exclusive_file_lock` while checking the source revision, making
+any backup and replacing the file atomically. Loaded models retain the hash
+of the exact bytes parsed. A stale model refuses to save; a new model creates
+an absent file unless its caller supplies the destination revision for an
+intentional replacement. This covers retention, manager-route and diagnostic
+changes, the configuration editor, runtime settings plans, schema upgrades,
+onboarding and team transfer. Editor saves and restores require the revision
+returned by GET; an older open editor must reload. Approved runtime plans
+still require their exact source digest, and a failed receipt can restore a
+backup only while the applied revision is still current. The separate lock
+file survives atomic replacement and excludes threads and processes; lock
+failure refuses the write. External hand edits cannot participate in an
+advisory lock, so stop runtime writers before editing the file directly.
+Onboarding keeps the destination revision read before reconciliation, even
+when validation builds a fresh model. Bootstrap renders controls and reads
+source files first, then accepts the checked settings write before changing
+control files, merging the environment or handing over credentials. A stale
+configuration therefore changes none of those auxiliary files. Later transfer
+batches likewise save checked settings before refreshing model defaults.
+
+The bundle used to run every
 process from a copy written at container start; settings saved while the
 runtime ran then waited for a container restart. For the same reason the
 launcher, on each in-app restart, recomputes the environment variables it
@@ -3070,6 +3144,39 @@ runs `env_secrets.py check-container-env`, which refuses a container
 environment that sets both `<NAME>` and `<NAME>_FILE`. That check covers the
 container's own environment only, because the environments the launchers build
 may hold a `team.env` value next to its file form on purpose.
+
+Maintained images keep only compiled `.pyc` files
+(`docker/strip_python_sources.sh`), so no program may be started by its `.py`
+path. The container entrypoint finds its programs with `python_program_path`,
+the Python launchers (`docker/run_bundle.py`, `docker/launch_headless.py`)
+with `docker.python_entrypoints.resolve_python_entrypoint`, and the code
+sandbox its helper in `custom_tools.code_sandbox`; each falls back to the
+`.pyc`. The strip script's `required_entrypoints` lists every such program and
+stops the build when one has no compiled file, and
+`tests/test_docker_python_entrypoints.py` builds a stripped tree with that
+script and checks that the launchers name programs only through the resolver
+and that each one is listed. The build is where a packaging mistake has to
+fail: one launcher call that named its `.py` file only logged a warning at
+start-up, and nobody noticed it for several releases.
+
+Before any agent creates a JetStream consumer, the launcher runs the read-only
+consumer report (`run_nats_consumer_preflight`,
+`scripts/reconcile_nats_consumers.py`). A report that finishes exits 0 and logs
+its own findings, such as consumer usage near the account's limit; a report
+that cannot run is one error, `event=nats_consumer_preflight_not_run`, with a
+`reason`, so the two never look alike. Neither stops start-up: the report only
+informs, it neither changes nor protects anything, and agents report their own
+NATS errors. Making it a start-up gate would let a slow or briefly unreachable
+NATS server, or an external server that refuses consumer listing, stop the
+whole team. Because start-up waits for it, the report's first connection fails
+fast: nats-py retries a failed first connection about 60 times, two seconds
+apart, even with `allow_reconnect=False`, so the report sets
+`max_reconnect_attempts=1` (two tries per server; 0 would mean retry forever)
+and records the server's own error from `error_cb`, since nats-py then raises
+only a generic `NoServersError`. The launcher's 30-second limit stays as the
+backstop for a server that accepts connections and stops answering. Long-running
+services keep nats-py's retries, so they wait for a NATS server that is still
+starting.
 
 The Docker bundle can supervise NATS, optional PostgreSQL, the manager, startup
 specialists, gateway, website, activity collector, secure broker, and execution

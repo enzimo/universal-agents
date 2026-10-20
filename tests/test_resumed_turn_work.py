@@ -94,7 +94,7 @@ async def test_real_interrupt_resume_checks_waits_and_saves_work_before_dispatch
     info = manager.get_task_info("run_1")
     session = StrandsInterruptedTurnSession(
         task_id="run_1", strands_agent=sdk, invoke_kwargs={"structured_output_model": decision_model},
-        full_prompt="", msg_content=info.task, msg_header=info.header, msg_meta=info.meta,
+        callback_handler=lambda **_: None, full_prompt="", msg_content=info.task, msg_header=info.header, msg_meta=info.meta,
         created_at="2026-10-20T00:00:00Z", interrupts=[],
     )
     dispatched = []

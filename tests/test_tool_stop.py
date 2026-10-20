@@ -272,17 +272,13 @@ def test_a_shell_call_that_starts_after_the_stop_runs_nothing(work_dir: Path) ->
 # --- what production hands tools -------------------------------------------
 
 
-def test_a_tool_finds_its_turn_stop_in_both_shapes_strands_uses() -> None:
-    """Strands nests the turn's invocation_state when the call has extra keywords (every turn)."""
+def test_a_tool_finds_its_turn_stop_at_the_top_level_of_its_invocation_state() -> None:
+    """A turn calls Strands only with declared keywords, so nothing nests its values."""
 
     stop = ToolStop(agent_id="agent", task_id="task")
-    flat = SimpleNamespace(invocation_state={TOOL_STOP_STATE_KEY: stop, "agent": object()})
-    nested = SimpleNamespace(
-        invocation_state={"callback_handler": print, "agent": object(), "invocation_state": {TOOL_STOP_STATE_KEY: stop}}
-    )
-    assert tool_stop_for(flat) is stop
-    assert tool_stop_for(nested) is stop
+    nested = SimpleNamespace(invocation_state={"invocation_state": {TOOL_STOP_STATE_KEY: stop}})
     assert tool_stop_for(tool_context(stop)) is stop
+    assert tool_stop_for(nested) is None
 
 
 # --- processes a command leaves behind -------------------------------------

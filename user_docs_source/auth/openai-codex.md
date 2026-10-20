@@ -231,7 +231,7 @@ From the host:
 Inside a running container:
 
 ```bash
-docker exec ua python assistant_cli.py openai-codex-status --config /data/instance_config.yaml
+docker exec ua python -m assistant_cli openai-codex-status --config /data/instance_config.yaml
 ```
 
 ## Common Problems

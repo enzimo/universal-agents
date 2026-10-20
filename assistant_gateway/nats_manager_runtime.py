@@ -135,6 +135,26 @@ class NatsGatewayManagerRuntime:
     def connected(self) -> bool:
         return self._connected
 
+    async def prepare_topology(self) -> tuple[str, ...]:
+        """Create or update the team's streams with these settings, then disconnect.
+
+        The headless launcher runs this before it starts any service
+        (``docker.launch_headless.prepare_message_streams``): the manager and
+        the agents only check that the streams exist, once, when they
+        connect (``custom_transport.nats_topology``), so the streams must
+        exist before they start. ``connect`` repeats the same setup, which
+        then finds nothing to change. Returns the stream names, or an empty
+        tuple without connecting when JetStream is off (there are no streams).
+        """
+
+        if self._connected:
+            raise RuntimeError("The gateway's streams are set up before it connects.")
+        if not self.settings.jetstream_enabled:
+            return ()
+        await self._adapter.connect(reconcile_topology=True)
+        await self._adapter.close()
+        return self._adapter.stream_names()
+
     async def connect(
         self,
         *,

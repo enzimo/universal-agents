@@ -1200,6 +1200,11 @@ class InteractiveAppDefaultValues:
         "Maximum Web Chat attachment size in bytes.",
         onboarding_overridable=False,
     )
+    internal_website_attachment_retention_days: DefaultValue[int] = default_value(
+        90,
+        "Days the gateway keeps a file people upload in any chat app (state/uploads and its record) before its cleanup deletes it; 0 keeps them.",
+        onboarding_overridable=False,
+    )
     internal_website_attachment_allowed_kinds: DefaultValue[tuple[str, ...]] = (
         default_value(
             ("image", "document", "audio", "video"),
@@ -1423,7 +1428,7 @@ class ToolPolicyDefaultValues:
     """Defaults for tool_policy (data folders moved into the access store, decision D16)."""
 
     scratch_retention_days: DefaultValue[int] = default_value(
-        14,
+        21,
         "Days a file stays in a scratch/ folder (people's and agents') before maintenance deletes it; 0 keeps them.",
         onboarding_overridable=False,
     )

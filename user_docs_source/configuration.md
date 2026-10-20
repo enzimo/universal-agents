@@ -245,12 +245,37 @@ empty, and never follows links:
 
 ```yaml
 tool_policy:
-  scratch_retention_days: 14   # 0 keeps scratch files
+  scratch_retention_days: 21   # 0 keeps scratch files
 ```
 
 The same key is accepted in `instance_config.yaml`. The maintenance run's
 report includes how many files it removed. Web Chat shows an attachment whose
-copy was removed as no longer available.
+copy was removed as no longer available. Administrators can also change the
+number in **Settings → Team → File Retention**; the manager reads it when it
+starts, so a change there applies after the next restart.
+
+### Upload retention
+
+Files people send in any chat app are kept in `state/uploads`, with a record
+in the gateway's database. The gateway deletes uploads older than
+`retention_days` when it starts and every six hours after, together with
+their records and the folders left empty, and never follows links. Agents
+copy an upload into their task's folder to work on it, and those copies are
+not affected.
+
+```yaml
+interactive_apps:
+  plugins:
+    builtin.internal_website:
+      settings:
+        attachments:
+          retention_days: 90   # about three months; 0 keeps uploads
+```
+
+Administrators can also change the number in **Settings → Team → File
+Retention**; the next cleanup uses it, without a restart. Everyone signed in
+sees the current numbers there. Once an upload is deleted, opening it from an
+older chat message says the attachment was not found.
 
 A person's folder is named after their user id: generated ids such as
 `usr_3f9a1b2c4d5e` are used as they are, and other ids become a readable name
@@ -362,6 +387,8 @@ It owns durable non-secret settings such as:
 - The instance root, from which every folder is derived.
 - Tool settings that are not access, such as
   `tool_policy.scratch_retention_days`.
+- How long chat uploads are kept (`attachments.retention_days` of the internal
+  website; see [Upload retention](#upload-retention)).
 - LLM and embedding defaults.
 - Activity collector bind/base URL settings.
 - Voice settings.
@@ -392,6 +419,13 @@ saved file. It keeps the variables you set yourself (environment, `team.env`,
 Docker secrets): such a variable, for example `LLM_MODEL_ID`, keeps overriding
 the saved setting until you remove it. The Docker bundle adds its own NATS and
 PostgreSQL details in memory and never writes them to the file.
+
+Concurrent settings saves never overwrite a file changed since they read it.
+If a save or backup restore asks you to reload, the newer settings were kept;
+reload and reapply your edit. Open configuration editors from an earlier
+version must reload before saving. Stop runtime writers before hand-editing
+`instance_config.yaml` outside the browser, since external editors do not
+share the application's file lock.
 
 Model overrides need no restart. A change explicitly targeting TeamLead's own
 type applies to it immediately. Changes to another type or the workspace default

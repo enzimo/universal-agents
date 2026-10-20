@@ -139,6 +139,7 @@ async def test_input_interrupt_needs_an_external_requester_route(reply_route) ->
         ),
         strands_agent=object(),
         invoke_kwargs={},
+        callback_handler=lambda **_: None,
         full_prompt="prompt",
     )
 
@@ -167,6 +168,7 @@ def test_new_turn_rotates_away_from_live_interrupted_strands_agent() -> None:
         task_id="task_waiting",
         strands_agent=interrupted_agent,
         invoke_kwargs={},
+        callback_handler=lambda **_: None,
         full_prompt="prompt",
         msg_content=Task(
             task_type=MessageMetaType.REQUEST,
@@ -220,6 +222,7 @@ async def test_stop_cancellation_discards_live_interrupt_session(monkeypatch) ->
         task_id=task_id,
         strands_agent=interrupted_agent,
         invoke_kwargs={},
+        callback_handler=lambda **_: None,
         full_prompt="prompt",
         msg_content=task_info.task,
         msg_header=task_info.header,
@@ -412,6 +415,7 @@ def test_interrupt_response_blocks_fill_missing_interrupt_ids_from_live_session(
         task_id="task_123",
         strands_agent=object(),
         invoke_kwargs={},
+        callback_handler=lambda **_: None,
         full_prompt="prompt",
         msg_content=Task(
             task_type=MessageMetaType.REQUEST, problem_statement="do work"

@@ -2,6 +2,9 @@
 
 The gateway owns instance topology; the standalone team lead owns generic
 launch topology. Connecting workers never alter shared retention or subjects.
+Participants check once and never wait, so the headless launcher runs the
+gateway's setup before it starts any service
+(``docker.launch_headless.prepare_message_streams``).
 """
 
 from __future__ import annotations

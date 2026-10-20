@@ -470,7 +470,7 @@ def test_build_docker_image_script_passes_database_version_overrides(tmp_path: P
             "POSTGRES_VERSION": "18.4-1.pgdg13+1",
             "PGVECTOR_PACKAGE_VERSION": "0.8.5-1.pgdg13+1",
             "SQLITE_VERSION": "3.46.1-7+deb13u1",
-            "NATS_SERVER_VERSION": "v2.14.1",
+            "NATS_SERVER_VERSION": "v2.15.1",
         },
         check=True,
         capture_output=True,
@@ -482,7 +482,7 @@ def test_build_docker_image_script_passes_database_version_overrides(tmp_path: P
     assert "POSTGRES_VERSION=18.4-1.pgdg13+1" in args
     assert "PGVECTOR_PACKAGE_VERSION=0.8.5-1.pgdg13+1" in args
     assert "SQLITE_VERSION=3.46.1-7+deb13u1" in args
-    assert "NATS_SERVER_VERSION=v2.14.1" in args
+    assert "NATS_SERVER_VERSION=v2.15.1" in args
 
 
 def test_build_docker_image_script_passes_sealbox_build_args(tmp_path: Path) -> None:
@@ -803,8 +803,8 @@ def test_dockerfiles_make_nats_server_optional() -> None:
 
     assert "ARG INSTALL_NATS=true" in dockerfile
     assert "ARG INSTALL_NATS=true" in bundle_dockerfile
-    assert "ARG NATS_SERVER_VERSION=v2.14.1" in dockerfile
-    assert "ARG NATS_SERVER_VERSION=v2.14.1" in bundle_dockerfile
+    assert "ARG NATS_SERVER_VERSION=v2.15.1" in dockerfile
+    assert "ARG NATS_SERVER_VERSION=v2.15.1" in bundle_dockerfile
     assert "ENV TEAM_BUNDLE_INSTALL_NATS=${INSTALL_NATS}" in bundle_dockerfile
     for content in (dockerfile, bundle_dockerfile):
         assert 'if [ "${INSTALL_NATS}" = "true" ]' in content

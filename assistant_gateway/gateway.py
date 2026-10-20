@@ -11,6 +11,9 @@ from access_control.identity import ISSUER_GATEWAY, ContextSigner
 from assistant_gateway.access_commands import GatewayAccessCommands
 from assistant_gateway.account_sharing import GatewayAccountSharing
 from assistant_gateway.status_page import StatusPage
+from assistant_gateway.file_retention import GatewayFileRetention
+from assistant_gateway.inbound_attachments import resolve_inbound_attachment_cache_dir
+from assistant_gateway.upload_retention import UploadRetention
 from assistant_gateway.application.knowledge_pages import GatewayKnowledgePages
 from assistant_gateway.access_inbox import (
     GatewayAccessInbox,
@@ -459,6 +462,26 @@ def _access_maintenance_tasks(
     return tasks
 
 
+def _file_retention(
+    config: GatewayInstanceConfig, *, records: DeliveryRepository, person_changes: PersonChangeCheck
+) -> tuple[UploadRetention, GatewayFileRetention]:
+    """The chat upload cleanup and the Settings > Team > File Retention service it follows.
+
+    Uploads older than their retention are deleted at start and every few hours
+    (``upload_retention``); administrators change the days, and scratch
+    retention, in Settings (``file_retention``).
+    """
+
+    uploads = UploadRetention(
+        records=records,
+        uploads_dir=resolve_inbound_attachment_cache_dir(config),
+        retention_days=config.interactive_apps.internal_website.attachments.retention_days,
+    )
+    return uploads, GatewayFileRetention(
+        config_path=config.config_path, person_changes=person_changes, uploads=uploads
+    )
+
+
 async def _report_stale_blocks(access_inbox: GatewayAccessInbox, team_id: str) -> None:
     """Tell administrators once about each block on an operation the catalog no longer has."""
 
@@ -893,6 +916,9 @@ class UserGateway:
             access_requests=lambda: self.access_inbox.requests(),
         )
         self.procedures = GatewayInstalledProcedures(config, person_changes=person_changes, signed_in=signed_in)
+        self.upload_retention, self.file_retention = _file_retention(
+            config, records=self.delivery_repository, person_changes=person_changes
+        )
         # Access reviews and notices (Phase 4 access model); its loop runs
         # with authorization on (_access_maintenance_tasks).
         self.access_inbox = build_gateway_access_inbox(
@@ -1245,6 +1271,7 @@ class UserGateway:
                 enabled=config.agent.knowledge.enabled,
             ),
             accounts=self.account_sharing,
+            file_retention=self.file_retention,
         )
         self._activity_source = (
             activity_source or HttpGatewayActivitySource.from_gateway_config(config)
@@ -1302,6 +1329,10 @@ class UserGateway:
                 asyncio.create_task(
                     self._manager_client.manager_liveness_loop(self._stop_event),
                     name="gateway_manager_liveness_loop",
+                ),
+                asyncio.create_task(
+                    self.upload_retention.run(self._stop_event),
+                    name="gateway_upload_retention_loop",
                 ),
             ]
             self._background_tasks.extend(

@@ -349,7 +349,7 @@ agent:
 
     # Reactive handling after a provider rejects the active transcript as too large.
     reactive_overflow:
-      max_total_recovery_attempts: 3            # Shared ceiling for inner reductions and outer provider reinvocations.
+      max_total_recovery_attempts: 3            # Separate ceilings for reductions within each call and fresh provider calls within a turn.
       min_reduction_tokens: 1                   # Minimum measured message-token reduction required before retrying.
 
     # Built-in filters for noisy historical tool output.
@@ -660,7 +660,7 @@ authorization:                                  # Access checks: agents and the 
 # Folders outside the instance (data folders) are registered by an administrator with
 # /access folders add <name> <path> or assistant_cli access folders add, not here.
 tool_policy:                                    # Tool settings that are not access; access is given with grants.
-  scratch_retention_days: 14                    # Days a file stays in a scratch/ folder (each person's scratch/, which also holds the copies of files sent to them, and agents/scratch/) before the maintenance run deletes it; 0 keeps them.
+  scratch_retention_days: 21                    # Days a file stays in a scratch/ folder (each person's scratch/, which also holds the copies of files sent to them, and agents/scratch/) before the maintenance run deletes it; 0 keeps them. Administrators can also change it in Settings > Team; it applies after a restart.
 
 # Credential-owning secure tool broker / OpenShell integration. The broker always runs:
 # every credentialed tool call (web research, GitHub, Google, Hugging Face, X, MCP servers) goes through it.
@@ -903,6 +903,7 @@ interactive_apps:
         attachments:                            # Built-in Web Chat attachment settings.
           enabled: true                         # Allow uploads, pasted images, and attachment rendering in Web Chat.
           max_file_bytes: 31457280              # Maximum accepted Web Chat attachment size in bytes.
+          retention_days: 90                    # Days the gateway keeps a file people send in any chat app (state/uploads and its record) before deleting it; 0 keeps them. Administrators can also change it in Settings > Team.
           allowed_kinds:                            # Attachment kinds accepted by Web Chat.
           - image
           - document

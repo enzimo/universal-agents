@@ -9,6 +9,7 @@ from typing import Any, Dict, Mapping, Optional, cast
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from config_backup_retention import prune_config_backups
+from config_file_updates import config_revision, replace_config_file
 from storage.backends import (
     STORAGE_BACKEND_POSTGRES,
     STORAGE_BACKEND_POSTGRESQL_ALIAS,
@@ -874,7 +875,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "voice.connect_timeout_seconds": "Voice HTTP connect timeout in seconds.",
     "voice.request_timeout_seconds": "Voice HTTP request timeout in seconds.",
     "tool_policy": "Tool settings that are not access (access is given with grants).",
-    "tool_policy.scratch_retention_days": "Days a file stays in a scratch/ folder (people's and agents/, including copies of files sent to people) before the internal-improvement maintenance run deletes it; 0 keeps them.",
+    "tool_policy.scratch_retention_days": "Days a file stays in a scratch/ folder (people's and agents/, including copies of files sent to people) before the internal-improvement maintenance run deletes it; 0 keeps them. Administrators can also change it in Settings > Team; it applies after a restart.",
     "authorization": "Access checks: agents and people need grants for the tools they use.",
     "authorization.enabled": "Check every agent tool call and broker request against grants; false runs every tool without requests while the sandbox, broker and protected folders still apply.",
     "authorization.cedar_binary_path": "Optional path or command name of the ua-cedar-authorizer access evaluator; null finds it.",
@@ -1047,6 +1048,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "interactive_apps.plugins.builtin.internal_website.settings.attachments": "Built-in Web Chat attachment settings.",
     "interactive_apps.plugins.builtin.internal_website.settings.attachments.enabled": "Allow uploads, pasted images, and attachment rendering in Web Chat.",
     "interactive_apps.plugins.builtin.internal_website.settings.attachments.max_file_bytes": "Maximum accepted Web Chat attachment size in bytes.",
+    "interactive_apps.plugins.builtin.internal_website.settings.attachments.retention_days": "Days the gateway keeps a file people send in any chat app (state/uploads and its record) before deleting it; 0 keeps them. Administrators can also change it in Settings > Team.",
     "interactive_apps.plugins.builtin.internal_website.settings.attachments.allowed_kinds": "Attachment kinds accepted by Web Chat.",
     "interactive_apps.plugins.builtin.internal_website.settings.attachments.nats_object_bucket": "NATS Object Store bucket for team-lead-coordinated remote copies.",
     "interactive_apps.plugins.builtin.internal_website.settings.attachments.nats_object_ttl_seconds": "Retention seconds for NATS Object Store attachment copies.",
@@ -1304,6 +1306,10 @@ class InstanceConfigFileError(ValueError):
 
 
 def _read_instance_config_yaml(config_path: Path) -> Dict[str, Any]:
+    return _parse_instance_config_yaml(config_path.read_bytes(), config_path)
+
+
+def _parse_instance_config_yaml(content: bytes, config_path: Path) -> Dict[str, Any]:
     """Parse instance_config.yaml, reporting a broken file by line and column.
 
     Hand edits (for example pasting the theme settings Web Chat copies)
@@ -1312,8 +1318,7 @@ def _read_instance_config_yaml(config_path: Path) -> Dict[str, Any]:
     """
 
     try:
-        with config_path.open("r", encoding="utf-8") as handle:
-            data = yaml.safe_load(handle) or {}
+        data = yaml.safe_load(content.decode("utf-8")) or {}
     except yaml.YAMLError as exc:
         mark = getattr(exc, "problem_mark", None)
         place = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
@@ -1512,7 +1517,8 @@ def migrate_instance_config_file(
     create_backup: bool = True,
 ) -> InstanceConfigMigrationResult:
     config_path = Path(path).expanduser().resolve()
-    raw = _read_instance_config_yaml(config_path)
+    previous = config_path.read_bytes()
+    raw = _parse_instance_config_yaml(previous, config_path)
     original_version = _detect_instance_config_version(raw)
     migrated, applied_steps = _migrate_instance_config_dict(
         raw, source_path=config_path
@@ -1524,10 +1530,14 @@ def migrate_instance_config_file(
         backup_path = config_path.with_name(
             f"{config_path.name}.bak.v{original_version}"
         )
-        backup_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
     persisted = _strip_persisted_instance_config_secrets(migrated)
-    config_path.write_text(dump_instance_config_yaml(persisted), encoding="utf-8")
+    replace_config_file(
+        config_path,
+        dump_instance_config_yaml(persisted).encode("utf-8"),
+        expected_revision=config_revision(previous),
+        backup_path=backup_path,
+    )
     if backup_path is not None:
         prune_config_backups(
             config_path,
@@ -1844,6 +1854,7 @@ class LaunchSettings(BaseModel):
 
 class GatewayInstanceConfig(BaseModel):
     _config_path: Optional[Path] = PrivateAttr(default=None)
+    _source_revision: str | None = PrivateAttr(default=None)
 
     schema_version: int = INSTANCE_CONFIG_SCHEMA_VERSION
     instance_name: str
@@ -2348,11 +2359,33 @@ class GatewayInstanceConfig(BaseModel):
             _drop_incidental_config_nulls(sanitized)
         )
 
-    def save(self, path: Optional[str | Path] = None) -> Path:
+    @property
+    def source_revision(self) -> str | None:
+        """Revision of the exact bytes loaded or last saved, for checked replacement plans."""
+
+        return self._source_revision
+
+    def save(
+        self,
+        path: Optional[str | Path] = None,
+        *,
+        expected_revision: str | None = None,
+        backup_path: Path | None = None,
+    ) -> Path:
+        """Save atomically, refusing to overwrite a change made since this model was loaded.
+
+        A fresh model or a copy saved to another path creates a new file only.
+        Intentional replacements pass the destination's previously read revision.
+        """
+
         config_path = Path(path).expanduser().resolve() if path else self.config_path
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(
-            dump_instance_config_yaml(self.to_yaml_dict()), encoding="utf-8"
+        if expected_revision is None and config_path == self._config_path:
+            expected_revision = self._source_revision
+        self._source_revision = replace_config_file(
+            config_path,
+            dump_instance_config_yaml(self.to_yaml_dict()).encode("utf-8"),
+            expected_revision=expected_revision,
+            backup_path=backup_path,
         )
         self._config_path = config_path
         return config_path
@@ -2360,10 +2393,12 @@ class GatewayInstanceConfig(BaseModel):
     @classmethod
     def load(cls, path: str | Path) -> "GatewayInstanceConfig":
         config_path = Path(path).expanduser().resolve()
-        data = _read_instance_config_yaml(config_path)
+        content = config_path.read_bytes()
+        data = _parse_instance_config_yaml(content, config_path)
         migrated, _ = _migrate_instance_config_dict(data, source_path=config_path)
         config = cls.model_validate(migrated)
         config._config_path = config_path
+        config._source_revision = config_revision(content)
         return config
 
     @classmethod

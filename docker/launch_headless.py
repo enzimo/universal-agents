@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+from contextlib import ExitStack
 from dataclasses import dataclass
+from enum import StrEnum
 import functools
 import json
 import logging
@@ -78,6 +81,9 @@ from runtime_settings.security import (
 )
 from runtime_settings.services import reject_removed_web_service_env_vars
 from assistant_gateway.config import resolve_activity_collector_runtime_base_url
+from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
+from custom_transport.nats_topology import NatsTopologyMismatch
+from nats.errors import Error as NatsError
 from default_values import (
     EMBEDDING_DEFAULTS,
     STORAGE_DEFAULTS,
@@ -390,6 +396,53 @@ def prepare_manager_database(config: GatewayInstanceConfig) -> Path | None:
     path = resolve_manager_db_path(config)
     prepare_sqlite_database(str(path), logger=LOGGER)
     return path
+
+
+class MessageStreamConfigurationError(ValueError):
+    """The effective gateway configuration is invalid before connecting to NATS."""
+
+
+# What setting up the message streams can fail with: NATS client and JetStream
+# errors, connection errors, invalid effective configuration, and settings the
+# broker did not take. Other failures propagate after managed services stop.
+MESSAGE_STREAM_PREPARE_ERRORS = (NatsError, OSError, MessageStreamConfigurationError, NatsTopologyMismatch)
+
+
+def prepare_message_streams(config_path: Path, gateway_env: Mapping[str, str]) -> tuple[str, ...]:
+    """Create or update the team's message streams before any service starts.
+
+    The gateway owns the team's JetStream streams and creates or updates them
+    when it connects. The manager, the startup agents and every worker only
+    check, once, that the streams exist with the expected settings
+    (``custom_transport.nats_topology``), and the launcher starts them all
+    at the same moment. Whenever the streams were missing or out of date (a
+    new team, an upgrade that adds or changes a stream, and with
+    ``transport.storage: memory`` every start of the container's own NATS
+    server), a manager whose check came before the gateway's setup stopped
+    with "Stream ... is missing" and every service stopped with it; slow
+    storage delays the gateway enough to make that order likely. So the
+    launcher runs the gateway's own setup, with the gateway's configuration
+    and environment, before it starts any service; the gateway repeats it
+    when it connects and finds nothing to change. Nothing waits or polls.
+    Returns the stream names, or an empty tuple when JetStream is off.
+    """
+
+    try:
+        gateway_config = GatewayInstanceConfig.load_for_process(config_path, env=gateway_env)
+    except ValueError as exc:
+        raise MessageStreamConfigurationError(str(exc)) from exc
+    runtime = NatsGatewayManagerRuntime.from_gateway_config(gateway_config)
+    started = time.monotonic()
+    names = asyncio.run(runtime.prepare_topology())
+    if not names:
+        return names
+    LOGGER.info(
+        "Set up the team's message streams before starting the services. "
+        "event=nats_streams_prepared streams=%s seconds=%.2f",
+        ",".join(names),
+        time.monotonic() - started,
+    )
+    return names
 
 
 def build_instance_env_defaults(
@@ -716,43 +769,76 @@ def with_website_base_url(env: Mapping[str, str], *, serves_docs: bool) -> dict[
     return result
 
 
+CONSUMER_CHECK_TIMEOUT_SECONDS = 30
+
+
+class ConsumerCheckNotRunReason(StrEnum):
+    """Why the consumer check gave no result (``event=nats_consumer_preflight_not_run``)."""
+
+    PROGRAM_MISSING = "program_missing"
+    START_FAILED = "start_failed"
+    TIMED_OUT = "timed_out"
+    EXITED_WITH_ERROR = "exited_with_error"
+
+
 def run_nats_consumer_preflight(
     *,
     config_path: Path,
     env: Mapping[str, str],
 ) -> None:
-    """Run the read-only consumer audit before any agent creates a consumer.
+    """Run the read-only consumer check before any agent creates a consumer.
 
+    The check (``scripts/reconcile_nats_consumers.py``) exits 0 whenever it
+    finishes its scan. What it finds, such as consumer usage near the account's
+    limit, it logs itself, and start-up continues. Any other result means the
+    check could not run: that is logged once at error level with its reason,
+    separately from the check's own findings. Start-up continues then too,
+    because the check only reports; it never changes or protects anything.
+
+    Images keep only compiled files, so the program is found through
+    ``resolve_python_entrypoint`` like every other program the launcher starts.
     The check needs only the NATS and storage credentials
     (docker/secret_env_vars.yaml, process ``consumer_check``).
     """
 
     try:
+        program = resolve_python_entrypoint(
+            REPO_ROOT / "scripts" / "reconcile_nats_consumers.py"
+        )
+    except FileNotFoundError as exc:
+        _log_consumer_check_not_run(ConsumerCheckNotRunReason.PROGRAM_MISSING, str(exc))
+        return
+    try:
         result = subprocess.run(
-            [
-                sys.executable,
-                str(REPO_ROOT / "scripts" / "reconcile_nats_consumers.py"),
-                "--config",
-                str(config_path),
-            ],
+            [sys.executable, str(program), "--config", str(config_path)],
             cwd=REPO_ROOT,
             env=environment_for(PROCESS_CONSUMER_CHECK, env),
             check=False,
-            timeout=30,
+            timeout=CONSUMER_CHECK_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        LOGGER.warning(
-            "JetStream consumer preflight could not complete; agent startup will continue. "
-            "event=nats_consumer_preflight_unavailable error=%s",
-            exc,
+    except subprocess.TimeoutExpired:
+        _log_consumer_check_not_run(
+            ConsumerCheckNotRunReason.TIMED_OUT,
+            f"no result after {CONSUMER_CHECK_TIMEOUT_SECONDS} seconds",
         )
         return
+    except OSError as exc:
+        _log_consumer_check_not_run(ConsumerCheckNotRunReason.START_FAILED, str(exc))
+        return
     if result.returncode != 0:
-        LOGGER.warning(
-            "JetStream consumer preflight failed; agent startup will continue. "
-            "event=nats_consumer_preflight_failed returncode=%s",
-            result.returncode,
+        _log_consumer_check_not_run(
+            ConsumerCheckNotRunReason.EXITED_WITH_ERROR,
+            f"the check stopped with status {result.returncode}; its log above gives the cause",
         )
+
+
+def _log_consumer_check_not_run(reason: ConsumerCheckNotRunReason, detail: str) -> None:
+    LOGGER.error(
+        "The JetStream consumer check could not run; agents start without it. "
+        "event=nats_consumer_preflight_not_run reason=%s detail=%s",
+        reason,
+        detail,
+    )
 
 
 BROKER_TOKEN_ENV = "SECURE_TOOL_BROKER_TOKEN"
@@ -2396,12 +2482,60 @@ def run_supervised(
         terminate_startup_agents()
         if manager is not None:
             terminate_process(manager, "manager")
-        if before_external_shutdown is not None:
-            before_external_shutdown()
-        for name, process in reversed(external_processes):
-            terminate_process(process, name)
+        stop_external_processes(external_processes, before_external_shutdown)
 
     return exit_code if exit_name is not None else 0
+
+
+def stop_external_processes(
+    external_processes: tuple[tuple[str, subprocess.Popen[bytes]], ...],
+    before_external_shutdown: Callable[[], None] | None,
+) -> None:
+    """Attempt every service stop, even when sandbox cleanup or another stop fails."""
+
+    with ExitStack() as cleanup:
+        for name, process in external_processes:
+            cleanup.callback(terminate_process, process, name)
+        if before_external_shutdown is not None:
+            before_external_shutdown()
+
+
+def prepare_message_streams_before_services(
+    config_path: Path,
+    gateway_env: Mapping[str, str],
+    *,
+    external_processes: tuple[tuple[str, subprocess.Popen[bytes]], ...],
+    before_external_shutdown: Callable[[], None] | None,
+) -> bool:
+    """Own managed services until stream preparation hands them to the supervisor.
+
+    Loading the gateway's effective settings can fail before it reaches NATS.
+    Every failure, including interruption, must stop the services already
+    started. Only expected configuration and NATS errors become a refusal;
+    unexpected failures keep their original traceback after cleanup.
+    """
+
+    try:
+        prepare_message_streams(config_path, gateway_env)
+    except BaseException as exc:
+        try:
+            stop_external_processes(external_processes, before_external_shutdown)
+        except BaseException:
+            LOGGER.exception(
+                "Managed service cleanup failed after message stream preparation stopped. "
+                "event=nats_streams_prepare_cleanup_failed preparation_error_type=%s",
+                type(exc).__name__,
+            )
+        if not isinstance(exc, MESSAGE_STREAM_PREPARE_ERRORS):
+            raise
+        LOGGER.error(
+            "Headless launch refused: the team's message streams could not be set up before the services start. "
+            "event=nats_streams_prepare_failed error_type=%s error=%s",
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    return True
 
 
 def main() -> int:
@@ -2619,6 +2753,14 @@ def main() -> int:
         cleanup_openshell_sandbox(managed_openshell_sandbox, env=inherited_env)
 
     finish_import = build_finish_import_task(config, config_path, inherited_env)
+    # Last step before any service starts, so every check finds the streams.
+    if not prepare_message_streams_before_services(
+        config_path,
+        gateway_env,
+        external_processes=external_processes,
+        before_external_shutdown=cleanup_managed_openshell,
+    ):
+        return 2
 
     return run_supervised(
         manager_command=manager_command,

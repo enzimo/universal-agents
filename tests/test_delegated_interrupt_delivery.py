@@ -83,6 +83,7 @@ async def test_parent_refuses_a_worker_input_request_and_the_worker_fails_its_ta
         msg_meta=meta,
         strands_agent=object(),
         invoke_kwargs={},
+        callback_handler=lambda **_: None,
         full_prompt="",
     )
     sent = worker.team_comms.send_message.await_args.kwargs

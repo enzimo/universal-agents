@@ -39,7 +39,7 @@ def reactive_overflow_config(config: Mapping[str, Any] | None) -> dict[str, Any]
 
 
 def max_total_recovery_attempts(config: Mapping[str, Any] | None) -> int:
-    """Resolve the request-wide ceiling shared by inner and outer recovery."""
+    """Resolve the ceiling on context-recovery attempts (claim_context_recovery_attempt)."""
 
     value = reactive_overflow_config(config).get(
         "max_total_recovery_attempts",
@@ -77,18 +77,25 @@ def invocation_request_state(
 
 
 def claim_context_recovery_attempt(
-    invocation_state: MutableMapping[str, Any],
+    budget_state: MutableMapping[str, Any],
     *,
     max_attempts: int,
     phase: str,
 ) -> ContextRecoveryAttempt:
-    """Claim one bounded attempt for this request and recovery phase."""
+    """Claim one bounded attempt for a recovery phase from ``budget_state``.
 
-    request_state = invocation_request_state(invocation_state)
-    recovery_state = request_state.get(CONTEXT_RECOVERY_STATE_KEY)
+    The budget lives where its retries happen. Reductions inside one Strands
+    call (filtered_tool_result_context) count in that call's
+    ``request_state``, which Strands keeps across the call's own retries and
+    starts fresh for every call. A turn's fresh reinvocations count in the
+    turn's own state (``sdk.strands.turn._TurnState.context_retry_budget``),
+    which outlives each call. The two counts are separate.
+    """
+
+    recovery_state = budget_state.get(CONTEXT_RECOVERY_STATE_KEY)
     if not isinstance(recovery_state, MutableMapping):
         recovery_state = {}
-        request_state[CONTEXT_RECOVERY_STATE_KEY] = recovery_state
+        budget_state[CONTEXT_RECOVERY_STATE_KEY] = recovery_state
 
     try:
         completed_attempts = max(0, int(recovery_state.get("attempts") or 0))
@@ -122,7 +129,7 @@ def claim_context_recovery_attempt(
 
 
 def decide_provider_context_retry(
-    invocation_state: MutableMapping[str, Any],
+    budget_state: MutableMapping[str, Any],
     *,
     recovery_enabled: bool,
     is_context_overflow: bool,
@@ -153,7 +160,7 @@ def decide_provider_context_retry(
         )
 
     attempt = claim_context_recovery_attempt(
-        invocation_state,
+        budget_state,
         max_attempts=max_total_attempts,
         phase="provider_reinvoke",
     )

@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from collections import deque
-from dataclasses import fields
+from dataclasses import fields, replace
 from types import SimpleNamespace
 
 import pytest
@@ -44,7 +44,11 @@ def unexpected(name):
     return fail
 
 
-def build_turn_owner(*, invoke, guidance, committed, cleared, task_operations=None):
+def build_turn_owner(
+    *, invoke, guidance, committed, cleared, task_operations=None, model=None, settings_overrides=None
+):
+    """A real LLMTurnExecutor whose model is ``invoke`` (or a real Strands ``model``)."""
+
     decision = StructuredAgentTurnDecision(
         actions=[
             TaskResponseAction(
@@ -120,6 +124,7 @@ def build_turn_owner(*, invoke, guidance, committed, cleared, task_operations=No
         otel_enabled=False,
         otel_enable_traces=False,
     )
+    settings = replace(settings, **(settings_overrides or {}))
     context = SimpleNamespace(
         assemble=lambda request: AssembledContext(
             sections=[],
@@ -131,7 +136,7 @@ def build_turn_owner(*, invoke, guidance, committed, cleared, task_operations=No
         estimate_tokens=lambda text: len(text) // 4,
         post_invocation=lambda **kwargs: None,
     )
-    model = SimpleNamespace(invoke_async=invoke, messages=[])
+    model = model if model is not None else SimpleNamespace(invoke_async=invoke, messages=[])
     return LLMTurnExecutor(
         settings=lambda: settings,
         model=lambda: model,

@@ -233,19 +233,19 @@ async def test_provider_context_retry_is_suppressed_after_tool_activity() -> Non
         _max_provider_context_retry_attempts=lambda: 1,
     )
     tool_call_limit_handler = SimpleNamespace(tool_sequence=[{"tool": "mutating_tool"}])
-    invocation_state: dict[str, object] = {}
+    budget_state: dict[str, object] = {}
 
     with pytest.raises(RuntimeError) as raised:
         await turn_executor_for(agent)._resolve_provider_context_retry(
             task_id="task_1",
             error=error,
-            invocation_state=invocation_state,
+            budget_state=budget_state,
             provider_retry_attempt=0,
             tool_call_limit_handler=tool_call_limit_handler,
         )
 
     assert raised.value is error
-    assert invocation_state == {}
+    assert budget_state == {}
     details = task_manager.append_history_entry.call_args.kwargs["details"]
     assert details["suppression_reason"] == "tool_activity_started"
 

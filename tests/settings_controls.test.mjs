@@ -80,6 +80,9 @@ async function answerTeam(f) {
   }
   await answer(f.requests, "/api/web-chat/procedures/proposals", jsonResponse({ proposals: [] }));
   await answer(f.requests, "/api/web-chat/procedures/installed", jsonResponse({ definitions: [] }));
+  // Team > File Retention (file_retention_controls.mjs) is read with the rest of the tab.
+  await answer(f.requests, "/api/web-chat/file-retention",
+    jsonResponse({ upload_days: 90, scratch_days: 21, max_days: 3650, can_change: false }));
 }
 
 test("Settings finds every element it needs in chat.html, and the Permissions tab is gone", () => {

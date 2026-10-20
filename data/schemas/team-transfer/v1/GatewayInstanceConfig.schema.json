@@ -4089,7 +4089,7 @@
       "description": "Tool settings that are not access (access is given with grants).",
       "properties": {
         "scratch_retention_days": {
-          "default": 14,
+          "default": 21,
           "minimum": 0,
           "title": "Scratch Retention Days",
           "type": "integer"

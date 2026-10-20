@@ -729,9 +729,9 @@ def test_capability_attachments_and_tool_groups_are_gone() -> None:
 @pytest.mark.parametrize(
     ("relative_path", "class_name", "method_budget", "statement_budget"),
     (
-        # Held guidance has a required retry loop even when optional services
-        # are off. Composition gains one statement; the method limit stays six.
-        ("assistant_gateway/gateway.py", "UserGateway", 6, 126),
+        # Compose held-guidance retries and file retention in the host; their
+        # services own the behavior. The host's method limit stays six.
+        ("assistant_gateway/gateway.py", "UserGateway", 6, 127),
         (
             "assistant_gateway/application/runtime_application.py",
             "GatewayRuntimeApplication",

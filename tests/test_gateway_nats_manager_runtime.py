@@ -164,6 +164,25 @@ async def test_nats_manager_runtime_closes_partial_connection_on_subscribe_failu
 
 
 @pytest.mark.asyncio
+async def test_stream_setup_before_the_gateway_starts_sets_up_and_disconnects(tmp_path) -> None:
+    adapter = _CaptureNatsAdapter()
+    adapter.stream_names = lambda: ("TEAM_TEST_WORK",)  # type: ignore[attr-defined]
+    runtime = NatsGatewayManagerRuntime.from_gateway_config(
+        _config(tmp_path),
+        adapter=adapter,  # type: ignore[arg-type]
+    )
+
+    assert await runtime.prepare_topology() == ("TEAM_TEST_WORK",)
+    assert (adapter.connect_count, adapter.close_count) == (1, 1)
+    assert adapter.route_subscription is None and not adapter.subject_subscriptions
+    assert runtime.connected is False
+
+    await runtime.connect(on_response=_discard_async, on_operational=_discard_async, on_presence=_discard_async)
+    with pytest.raises(RuntimeError, match="before it connects"):
+        await runtime.prepare_topology()
+
+
+@pytest.mark.asyncio
 async def test_nats_manager_runtime_does_not_ack_failed_application_handling(
     tmp_path,
 ) -> None:
