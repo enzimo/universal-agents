@@ -62,6 +62,57 @@ from docker.nats_service import (  # noqa: E402
 LOGGER = logging.getLogger("reconcile_nats_consumers")
 DEFAULT_CONFIG_PATH = Path("/data/instance_config.yaml")
 
+# This is a one-shot report, and the launcher waits for it before agents
+# start, so an unreachable server must fail it within seconds. nats-py retries
+# a failed first connection inside connect() even with allow_reconnect=False:
+# it tries each server until that server has failed more than
+# max_reconnect_attempts times, reconnect_time_wait seconds apart (by default
+# 60 times, 2 seconds apart). Zero or less means "retry forever", so 1 is the
+# smallest limit: two tries per server, one second apart. connect_timeout
+# bounds each try when a server does not answer at all.
+FIRST_CONNECT_RETRIES = 1
+FIRST_CONNECT_RETRY_WAIT_SECONDS = 1
+CONNECT_TIMEOUT_SECONDS = 2
+
+
+def _describe_error(exc: BaseException) -> str:
+    text = str(exc)
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+async def _connect(nats_module: Any, connection_kwargs: dict[str, Any]) -> Any:
+    """Connect once, failing fast with the server's own error.
+
+    When every server has failed, nats-py raises a generic NoServersError and
+    hands the real cause (refused connection, timeout, rejected login) only to
+    ``error_cb``. The callback records it for the failure message and logs it
+    in one line instead of nats-py's traceback for every try.
+    """
+
+    nats_errors: list[BaseException] = []
+
+    async def log_nats_error(exc: Exception) -> None:
+        nats_errors.append(exc)
+        LOGGER.warning(
+            "NATS reported an error. event=nats_consumer_reconciliation_nats_error error=%s",
+            _describe_error(exc),
+        )
+
+    try:
+        return await nats_module.connect(
+            **connection_kwargs,
+            error_cb=log_nats_error,
+            allow_reconnect=False,
+            max_reconnect_attempts=FIRST_CONNECT_RETRIES,
+            reconnect_time_wait=FIRST_CONNECT_RETRY_WAIT_SECONDS,
+            connect_timeout=CONNECT_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        cause = nats_errors[-1] if nats_errors else exc
+        raise RuntimeError(
+            f"Could not connect to NATS: {_describe_error(cause)}"
+        ) from exc
+
 
 def resolve_reconciliation_team_id(
     config: Any,
@@ -113,10 +164,9 @@ async def reconcile_nats_consumers(
     except ImportError as exc:
         raise RuntimeError("nats-py is required to reconcile consumers.") from exc
 
-    connection_kwargs = {
+    connection_kwargs: dict[str, Any] = {
         "servers": servers,
         "name": config.get("transport.nats_name") or "ua-consumer-reconciler",
-        "allow_reconnect": False,
     }
     if config.get("transport.nats_user"):
         connection_kwargs["user"] = config.get("transport.nats_user")
@@ -125,7 +175,7 @@ async def reconcile_nats_consumers(
     if config.get("transport.credentials_file"):
         connection_kwargs["user_credentials"] = config.get("transport.credentials_file")
 
-    connection = await nats.connect(**connection_kwargs)
+    connection = await _connect(nats, connection_kwargs)
     try:
         mapper = NatsSubjectMapper(
             team_id=team_id,
@@ -256,12 +306,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 stable_agent_ids=tuple(args.stable_agent_id),
             )
         )
-    except Exception:
+    except Exception as exc:
         LOGGER.exception(
             "NATS consumer reconciliation failed. "
-            "event=nats_consumer_reconciliation_failed config_path=%s apply=%s",
+            "event=nats_consumer_reconciliation_failed config_path=%s apply=%s error=%s",
             Path(args.config).expanduser(),
             bool(args.apply),
+            _describe_error(exc),
         )
         return 1
     finally:
