@@ -1138,6 +1138,14 @@ If heartbeat is disabled or the launcher is missing, ask whether the user wants
 to enable heartbeat and restart the runtime, or create a normal scheduled job
 instead. Do not silently create heartbeat items that will not fire.
 
+To change an item, pass the `version` that `list_heartbeat_items` (or the reply
+of the last change) returned as `expected_version` to `update_heartbeat_item`,
+`remove_heartbeat_item`, `enable_heartbeat_item` or `disable_heartbeat_item`. A
+`changed_since_read` refusal means another request changed the item since you
+listed it and nothing was changed: list it again, check that your change still
+fits, and repeat it with the new version. Runs and conversation resets do not
+change the version.
+
 ## Internal Maintenance Schedule
 
 `InternalImprovementAgent` startup ensures one manager-owned maintenance

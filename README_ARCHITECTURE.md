@@ -2756,6 +2756,25 @@ running first. The executor uses two
 private Strands names, guarded by `tests/test_changes_first_executor.py` on the
 locked SDK version.
 
+A heartbeat item changes in one write transaction on its stored row
+(`storage/heartbeat_repository.py`: `BEGIN IMMEDIATE` in SQLite, the row locked
+with `SELECT ... FOR UPDATE` in PostgreSQL). An update sets only the fields it
+was given on the row it reads there. Until 2026-10-20 an update read the item
+on one connection and wrote title, instruction, target agent type and
+Objective from that read on another, so two updates of different fields at the
+same time lost one of them. The heartbeat tools return each item's `version`
+(`heartbeat_item_version`, a digest of its title, instruction, target agent
+type and Objective) from `list_heartbeat_items` and `add_heartbeat_item` and
+every change, and `update_heartbeat_item`, `remove_heartbeat_item`,
+`enable_heartbeat_item` and `disable_heartbeat_item` require it as
+`expected_version`. The store checks it in the same transaction and refuses a
+change from an older read with `changed_since_read` (a failed tool result);
+the agent lists the item again. Runs (their start, success and failure times),
+conversation resets and turning the item on or off write the same row but are
+not in the version, so they never refuse an agent's change; an Objective's
+lifecycle change switches its linked items as trusted code, without a version.
+The version is computed, not stored, so the stored item is unchanged.
+
 Knowledge curation changes follow this rule too, including publishing or
 rejecting contributions and resolving notes: these change the page's knowledge
 state even when they leave its body alone. `apply_change` always runs among

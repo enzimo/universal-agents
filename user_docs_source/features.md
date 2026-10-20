@@ -1162,6 +1162,12 @@ The configured default delivery target is used for proactive messages such as
 scheduled reminders and heartbeat updates. You can ask in plain English for
 simple reminders, recurring checks, and pause/resume changes.
 
+If two of your requests change the same heartbeat item at the same time, both
+changes are kept. A change Team Architect decided on from an older look at the
+item (for example turning off an item whose instruction another request just
+rewrote) is not made: it looks at the item again and decides on what it says
+now.
+
 If an enabled job remains overdue and unclaimed for two minutes, the runtime
 queues a review for the TeamLead, including the schedule ID and required agent
 type or exact worker. This covers jobs whose last worker has exited. The review

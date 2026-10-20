@@ -95,21 +95,25 @@ def test_heartbeat_item_tools_manage_canonical_items(tmp_path: Path):
     listed = json.loads(list_heartbeat_items())
     assert listed["returned"] == 1
     assert listed["items"][0]["heartbeat_item_id"] == heartbeat_item_id
+    assert listed["items"][0]["version"] == created["version"]
 
     updated = json.loads(
         update_heartbeat_item(
-            heartbeat_item_id, instruction="Check alerts and anomalies"
+            heartbeat_item_id, created["version"], instruction="Check alerts and anomalies"
         )
     )
     assert updated["instruction"] == "Check alerts and anomalies"
+    assert updated["version"] != created["version"]
 
-    disabled = json.loads(disable_heartbeat_item(heartbeat_item_id))
+    disabled = json.loads(disable_heartbeat_item(heartbeat_item_id, updated["version"]))
     assert disabled["enabled"] is False
+    # Turning it off is not something the version covers.
+    assert disabled["version"] == updated["version"]
 
-    enabled = json.loads(enable_heartbeat_item(heartbeat_item_id))
+    enabled = json.loads(enable_heartbeat_item(heartbeat_item_id, updated["version"]))
     assert enabled["enabled"] is True
 
-    removed = json.loads(remove_heartbeat_item(heartbeat_item_id))
+    removed = json.loads(remove_heartbeat_item(heartbeat_item_id, updated["version"]))
     assert removed["removed"] is True
     assert store.list_items("hb_source_test") == []
 

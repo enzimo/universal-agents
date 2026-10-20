@@ -1,4 +1,19 @@
-"""Backend-neutral repository boundary for canonical heartbeat persistence."""
+"""Backend-neutral repository boundary for canonical heartbeat persistence.
+
+How a heartbeat item changes: ``update_item``, ``set_item_enabled`` and
+``remove_item`` each run in one write transaction (``BEGIN IMMEDIATE`` in
+SQLite, the row locked with ``FOR UPDATE`` in PostgreSQL). ``update_item``
+reads the stored row and sets only the fields it was given. When the writer
+names the version it read (``heartbeat_item_version``), the change is refused
+with ``changed_since_read`` if the stored item no longer has it.
+
+Why: an update used to read the item on one connection and then write title,
+instruction, target agent type and Objective from that read on another, so two
+updates of different fields at the same time lost one of them. Runs and
+conversation resets write their own columns of the same row (run times, the
+conversation id), so the version leaves those out and they never refuse an
+agent's change.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +24,13 @@ from storage.sql_dialect import SQLITE, POSTGRES, SqlDialect
 import logging
 import sqlite3
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Optional, Protocol
+from dataclasses import dataclass, fields
+from typing import Any, Optional, Protocol
 
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
+
+from custom_messages.enums import ChangeRefusal
+from storage.change_ledger import ChangeRefused
 
 from .config import StorageSettings
 from .postgres_connection import (
@@ -51,6 +69,78 @@ class HeartbeatItemRecord:
     last_success_at: Optional[str]
     last_failure_at: Optional[str]
     source_key: Optional[str] = None
+
+
+# What a heartbeat item's version covers: what an agent decides on and edits
+# (``heartbeat_item_version``). An agent's update, removal, enabling or
+# disabling names the version it read and is refused with ``changed_since_read``
+# when these changed since.
+HEARTBEAT_ITEM_VERSION_FIELDS = ("heartbeat_item_id", "title", "instruction", "target_agent_type", "objective_id")
+# What the version leaves out: what runs, conversation resets and switching
+# record on the same row, and where the item comes from. Every field is in
+# exactly one of the two lists (tests/test_heartbeat_item_versions.py).
+HEARTBEAT_ITEM_BOOKKEEPING_FIELDS = (
+    "source_id",
+    "conversation_id",
+    "enabled",
+    "created_at",
+    "updated_at",
+    "last_run_at",
+    "last_success_at",
+    "last_failure_at",
+    "source_key",
+)
+_ITEM_COLUMNS = ", ".join(field.name for field in fields(HeartbeatItemRecord))
+
+
+def heartbeat_item_version(item: HeartbeatItemRecord) -> str:
+    """The version an agent reads with a heartbeat item and names when it changes it.
+
+    A digest of ``HEARTBEAT_ITEM_VERSION_FIELDS``, never a timestamp: runs and
+    conversation resets change ``updated_at`` but not the version.
+    """
+
+    from custom_messages.contracts.common_v1 import contract_sha256
+
+    return contract_sha256({name: getattr(item, name) for name in HEARTBEAT_ITEM_VERSION_FIELDS})
+
+
+def _item_from_row(row: Any) -> HeartbeatItemRecord:
+    return HeartbeatItemRecord(
+        heartbeat_item_id=row["heartbeat_item_id"],
+        source_id=row["source_id"],
+        title=row["title"],
+        instruction=row["instruction"],
+        conversation_id=row["conversation_id"],
+        target_agent_type=row["target_agent_type"],
+        objective_id=row["objective_id"],
+        enabled=bool(row["enabled"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        last_run_at=row["last_run_at"],
+        last_success_at=row["last_success_at"],
+        last_failure_at=row["last_failure_at"],
+        source_key=row["source_key"],
+    )
+
+
+def _require_version(item: HeartbeatItemRecord, expected_version: Optional[str], logger: logging.Logger) -> None:
+    """Refuse a change made from an older read of the item (``expected_version`` None: a trusted writer)."""
+
+    if expected_version is None or heartbeat_item_version(item) == expected_version:
+        return
+    logger.info(
+        "Refused a heartbeat item change made from an older read. "
+        "event=heartbeat_item_change_refused heartbeat_item_id=%s reason=%s",
+        item.heartbeat_item_id,
+        ChangeRefusal.CHANGED_SINCE_READ.value,
+    )
+    raise ChangeRefused(
+        ChangeRefusal.CHANGED_SINCE_READ,
+        f"Heartbeat item {item.heartbeat_item_id} changed since you read it, so nothing was changed. "
+        "List it again, check that your change still fits, and pass its new version.",
+        {"heartbeat_item_id": item.heartbeat_item_id},
+    )
 
 
 class HeartbeatRepository(Protocol):
@@ -92,18 +182,21 @@ class HeartbeatRepository(Protocol):
         self,
         heartbeat_item_id: str,
         *,
-        title: str,
-        instruction: str,
+        title: Optional[str],
+        instruction: Optional[str],
         target_agent_type: Optional[str],
         objective_id: Optional[str],
         updated_at: str,
-    ) -> bool: ...
+        expected_version: Optional[str] = None,
+    ) -> Optional[HeartbeatItemRecord]: ...
 
-    def set_item_enabled(self, heartbeat_item_id: str, enabled: bool, *, updated_at: str) -> bool: ...
+    def set_item_enabled(
+        self, heartbeat_item_id: str, enabled: bool, *, updated_at: str, expected_version: Optional[str] = None
+    ) -> bool: ...
 
     def set_item_conversation(self, heartbeat_item_id: str, conversation_id: str, *, updated_at: str) -> bool: ...
 
-    def remove_item(self, heartbeat_item_id: str) -> bool: ...
+    def remove_item(self, heartbeat_item_id: str, *, expected_version: Optional[str] = None) -> bool: ...
 
     def mark_item_run_started(self, heartbeat_item_id: str, *, timestamp: str) -> None: ...
 
@@ -188,17 +281,10 @@ class _RelationalHeartbeatRepository(ABC):
                     """
                 )
                 if backend_name == "Postgres":
-                    column_row = conn.execute(
-                        """
-                        SELECT column_name
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'heartbeat_items'
-                          AND column_name = 'objective_id'
-                        """
-                    ).fetchone()
-                    if not column_row:
-                        conn.execute("ALTER TABLE heartbeat_items ADD COLUMN objective_id TEXT")
+                    # Not a lookup in information_schema for 'public': an
+                    # instance in its own schema found no column there and
+                    # failed to add the one it had.
+                    conn.execute("ALTER TABLE heartbeat_items ADD COLUMN IF NOT EXISTS objective_id TEXT")
                 else:
                     columns = {
                         row[1]
@@ -270,25 +356,7 @@ class _RelationalHeartbeatRepository(ABC):
         query += " ORDER BY updated_at DESC, heartbeat_item_id ASC"
         with self._connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
-        return [
-            HeartbeatItemRecord(
-                heartbeat_item_id=row["heartbeat_item_id"],
-                source_id=row["source_id"],
-                title=row["title"],
-                instruction=row["instruction"],
-                conversation_id=row["conversation_id"],
-                target_agent_type=row["target_agent_type"],
-                objective_id=row["objective_id"],
-                enabled=bool(row["enabled"]),
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-                last_run_at=row["last_run_at"],
-                last_success_at=row["last_success_at"],
-                last_failure_at=row["last_failure_at"],
-                source_key=row["source_key"],
-            )
-            for row in rows
-        ]
+        return [_item_from_row(row) for row in rows]
 
     def get_item(self, heartbeat_item_id: str) -> Optional[HeartbeatItemRecord]:
         with self._connect() as conn:
@@ -304,22 +372,23 @@ class _RelationalHeartbeatRepository(ABC):
             ).fetchone()
         if not row:
             return None
-        return HeartbeatItemRecord(
-            heartbeat_item_id=row["heartbeat_item_id"],
-            source_id=row["source_id"],
-            title=row["title"],
-            instruction=row["instruction"],
-            conversation_id=row["conversation_id"],
-            target_agent_type=row["target_agent_type"],
-            objective_id=row["objective_id"],
-            enabled=bool(row["enabled"]),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            last_run_at=row["last_run_at"],
-            last_success_at=row["last_success_at"],
-            last_failure_at=row["last_failure_at"],
-            source_key=row["source_key"],
-        )
+        return _item_from_row(row)
+
+    def _begin_with_item(self, conn: Any, heartbeat_item_id: str) -> Optional[HeartbeatItemRecord]:
+        """Begin the write transaction (``begin_write``) and read the stored item, locked against other writers."""
+
+        conn.begin_write()
+        return self._locked_item(conn, heartbeat_item_id)
+
+    def _locked_item(self, conn: Any, heartbeat_item_id: str) -> Optional[HeartbeatItemRecord]:
+        """The stored item inside a begun write transaction; PostgreSQL locks its row until commit."""
+
+        lock = " FOR UPDATE" if self._dialect is POSTGRES else ""
+        row = conn.execute(
+            f"SELECT {_ITEM_COLUMNS} FROM heartbeat_items WHERE heartbeat_item_id = {self._dialect.bind}{lock}",
+            (heartbeat_item_id,),
+        ).fetchone()
+        return _item_from_row(row) if row else None
 
     def get_item_by_source_key(self, source_id: str, source_key: str) -> Optional[HeartbeatItemRecord]:
         normalized = str(source_key or "").strip()
@@ -381,26 +450,49 @@ class _RelationalHeartbeatRepository(ABC):
         self,
         heartbeat_item_id: str,
         *,
-        title: str,
-        instruction: str,
+        title: Optional[str],
+        instruction: Optional[str],
         target_agent_type: Optional[str],
         objective_id: Optional[str],
         updated_at: str,
-    ) -> bool:
+        expected_version: Optional[str] = None,
+    ) -> Optional[HeartbeatItemRecord]:
+        """Set the given fields (None leaves one as stored) in one write transaction; None when the item is gone."""
+
+        given = {
+            "title": title,
+            "instruction": instruction,
+            "target_agent_type": target_agent_type,
+            "objective_id": objective_id,
+        }
         with self._connect() as conn:
-            cursor = conn.execute(
+            item = self._begin_with_item(conn, heartbeat_item_id)
+            if item is None:
+                return None
+            _require_version(item, expected_version, self._logger)
+            for name, value in given.items():
+                if value is not None:
+                    setattr(item, name, value)
+            item.updated_at = updated_at
+            conn.execute(
                 f"""
                 UPDATE heartbeat_items
                 SET title = {self._dialect.bind}, instruction = {self._dialect.bind}, target_agent_type = {self._dialect.bind}, objective_id = {self._dialect.bind}, updated_at = {self._dialect.bind}
                 WHERE heartbeat_item_id = {self._dialect.bind}
                 """,
-                (title, instruction, target_agent_type, objective_id, updated_at, heartbeat_item_id),
+                (item.title, item.instruction, item.target_agent_type, item.objective_id, updated_at, heartbeat_item_id),
             )
             conn.commit()
-        return cursor.rowcount > 0
+        return item
 
-    def set_item_enabled(self, heartbeat_item_id: str, enabled: bool, *, updated_at: str) -> bool:
+    def set_item_enabled(
+        self, heartbeat_item_id: str, enabled: bool, *, updated_at: str, expected_version: Optional[str] = None
+    ) -> bool:
         with self._connect() as conn:
+            item = self._begin_with_item(conn, heartbeat_item_id)
+            if item is None:
+                return False
+            _require_version(item, expected_version, self._logger)
             cursor = conn.execute(
                 f"""
                 UPDATE heartbeat_items
@@ -425,8 +517,12 @@ class _RelationalHeartbeatRepository(ABC):
             conn.commit()
         return cursor.rowcount > 0
 
-    def remove_item(self, heartbeat_item_id: str) -> bool:
+    def remove_item(self, heartbeat_item_id: str, *, expected_version: Optional[str] = None) -> bool:
         with self._connect() as conn:
+            item = self._begin_with_item(conn, heartbeat_item_id)
+            if item is None:
+                return False
+            _require_version(item, expected_version, self._logger)
             cursor = conn.execute(
                 f"DELETE FROM heartbeat_items WHERE heartbeat_item_id = {self._dialect.bind}",
                 (heartbeat_item_id,),
