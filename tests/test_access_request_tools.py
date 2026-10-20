@@ -237,6 +237,7 @@ async def test_an_access_interrupt_waits_here_and_a_decision_resumes_the_task(st
         msg_meta=info.meta,
         strands_agent=object(),
         invoke_kwargs={},
+        callback_handler=lambda **_: None,
         full_prompt="",
     )
 
@@ -444,7 +445,7 @@ async def _waiting_on_request(storage, tmp_path):
     info = worker.task_manager.get_task_info(task_id)
     await send_interrupt_request_for_result(
         worker, result=SimpleNamespace(interrupts=[raised.value.interrupt]), task=info.task,
-        msg_header=info.header, msg_meta=info.meta, strands_agent=object(), invoke_kwargs={}, full_prompt="",
+        msg_header=info.header, msg_meta=info.meta, strands_agent=object(), invoke_kwargs={}, callback_handler=lambda **_: None, full_prompt="",
     )
     return worker, context.raised[0]["access_request_id"], task_id
 

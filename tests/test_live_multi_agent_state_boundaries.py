@@ -112,10 +112,14 @@ class FakeStrandsAgent:
         self.messages = []
         self.invocations: list[str] = []
         self.invoke_kwargs: list[dict] = []
+        # Like a Strands agent: the turn makes its handler this agent's own for each call.
+        self.callback_handler = None
+        self.callback_handlers: list[object] = []
 
     async def invoke_async(self, prompt: str, **_: object) -> FakeAgentResult:
         self.invocations.append(prompt)
         self.invoke_kwargs.append(dict(_))
+        self.callback_handlers.append(self.callback_handler)
         if not self._responses:
             raise AssertionError(
                 "FakeStrandsAgent received more invocations than expected."
@@ -139,7 +143,7 @@ class ToolCallbackFakeStrandsAgent(FakeStrandsAgent):
         self.tool_uses = list(tool_uses)
 
     async def invoke_async(self, prompt: str, **kwargs: object) -> FakeAgentResult:
-        callback_handler = kwargs.get("callback_handler")
+        callback_handler = self.callback_handler
         if callable(callback_handler):
             for tool_use in self.tool_uses:
                 callback_handler(current_tool_use=tool_use)
@@ -781,7 +785,7 @@ async def test_live_manager_wires_runtime_guardrails_and_context_debug_dump_plug
                 assert final_envelope.msg_content.answer == "runtime plugins live ok"
                 assert manager_llm.invoke_kwargs
                 callback_handlers = _find_callback_instances(
-                    manager_llm.invoke_kwargs[0]["callback_handler"],
+                    manager_llm.callback_handlers[0],
                     ToolCallLimitCallbackHandler,
                 )
                 assert len(callback_handlers) == 1

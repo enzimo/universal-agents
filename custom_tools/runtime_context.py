@@ -8,7 +8,7 @@ remote runtime installs its own local context and ACP-backed service adapters.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
@@ -49,23 +49,6 @@ def bind_tool_call_task(task_id: str | None) -> Iterator[None]:
         yield
     finally:
         _tool_call_task.reset(token)
-
-
-def caller_invocation_state(invocation_state: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    """The invocation_state a turn passed to Strands, as Strands hands it to tools and hooks.
-
-    Strands passes the caller's dict on as it is, unless the invocation also
-    got extra keyword arguments. Then (its deprecated ``**kwargs`` path in
-    ``Agent.stream_async``) tools and hooks get
-    ``{**kwargs, "invocation_state": <the caller's dict>}``, with the caller's
-    values one level down. Every turn passes ``callback_handler`` that way
-    (custom_agents.sdk.strands.turn), so read the caller's values through
-    this, never from the top level alone.
-    """
-
-    state = invocation_state or {}
-    nested = state.get("invocation_state")
-    return nested if isinstance(nested, Mapping) else state
 
 
 def active_task_context(

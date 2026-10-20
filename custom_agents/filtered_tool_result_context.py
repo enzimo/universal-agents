@@ -150,7 +150,7 @@ class FilteredToolResultConversationManager(ConversationManager):
     def reduce_context(self, agent: Any, e: Exception | None = None, **kwargs: Any) -> None:
         invocation_state = kwargs.get("invocation_state") or self._active_invocation_state.get() or {}
         attempt = claim_context_recovery_attempt(
-            invocation_state,
+            invocation_request_state(invocation_state),
             max_attempts=max_total_recovery_attempts(self.config),
             phase="inner_reduce",
         )

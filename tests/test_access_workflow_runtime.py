@@ -204,7 +204,7 @@ async def test_the_task_resumes_only_after_every_request_of_the_batch_is_decided
     info = manager.get_task_info("task-lead")
     await task_steering_runtime.send_interrupt_request_for_result(
         lead, result=SimpleNamespace(interrupts=[raised.interrupt]), task=info.task, msg_header=info.header,
-        msg_meta=info.meta, strands_agent=object(), invoke_kwargs={}, full_prompt="",
+        msg_meta=info.meta, strands_agent=object(), invoke_kwargs={}, callback_handler=lambda **_: None, full_prompt="",
     )
     blocker = get_human_interaction_blocker(manager, "task-lead")
     first, second = call.reasons[0]["access_request_ids"]
@@ -239,7 +239,7 @@ async def test_after_a_restart_the_task_resumes_from_a_directive_once_the_batch_
     info = manager.get_task_info("task-lead")
     await task_steering_runtime.send_interrupt_request_for_result(
         lead, result=SimpleNamespace(interrupts=[raised.interrupt]), task=info.task, msg_header=info.header,
-        msg_meta=info.meta, strands_agent=object(), invoke_kwargs={}, full_prompt="",
+        msg_meta=info.meta, strands_agent=object(), invoke_kwargs={}, callback_handler=lambda **_: None, full_prompt="",
     )
     lead._interrupted_turn_sessions.clear()  # the paused turn is gone after a restart
     first, second = call.reasons[0]["access_request_ids"]
