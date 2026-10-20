@@ -920,6 +920,17 @@ def create_strands_agent(config: dict):
         agent_kwargs["id"] = config["id"]
 
     agent = UniversalAgent(**agent_kwargs)
+    # Request lifecycle is saved with task state. This one operator value
+    # controls only the ledger's cross-request and closed-request checks.
+    conflict_checks = bool(config.get("request_conflict_checks", AGENT_DEFAULTS.request_conflict_checks.value))
+    agent._request_conflict_checks = conflict_checks
+    (_logger.info if conflict_checks else _logger.warning)(
+        "Checks between a person's separate requests are %s for this agent. event=request_conflict_checks "
+        "enabled=%s agent_type=%s",
+        "on" if conflict_checks else "turned off (agent.request_conflict_checks: false)",
+        conflict_checks,
+        config.get("named_agent_type"),
+    )
 
     # NOTE: Callers must call set_agent_ref(agent) in their own execution context
     # (main thread or spawned thread) so tools have access to the correct agent.

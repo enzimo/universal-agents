@@ -52,6 +52,7 @@ from storage.knowledge_repository import (
     KNOWLEDGE_RECEIPTS_PERSON_COLUMN,
     KNOWLEDGE_RECEIPTS_TABLE,
 )
+from storage.change_ledger import CHANGE_LEDGER_TABLE, CHANGE_PERSON_COLUMN, CHANGE_REQUESTS_TABLE
 from storage.config import StorageSettings
 from storage.pinned_memory_repository import USERMEM_BANK
 from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
@@ -285,6 +286,10 @@ class PersonDepartureRepository:
             _RecordSet("after_action_report_review_batches", "person_id", person),
             _RecordSet("objective_work_profile_proposals", "owner_canonical_user_id", person),
             _RecordSet("objective_work_installed_profiles", "owner_canonical_user_id", person),
+            # Which of their requests changed which record (storage.change_ledger):
+            # ids and positions only, with the same lifetime as their task records.
+            _RecordSet(CHANGE_REQUESTS_TABLE, CHANGE_PERSON_COLUMN, person),
+            _RecordSet(CHANGE_LEDGER_TABLE, CHANGE_PERSON_COLUMN, person),
         ]
         if objectives:
             sets += [

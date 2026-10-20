@@ -601,6 +601,11 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "agent.subtask_status_probe_timeout_seconds": "Per-probe timeout for delegated-subtask status checks.",
     "agent.restart_executing_task_grace_seconds": "Restart grace for interrupted executing snapshots before failing fast.",
     "agent.same_role_runtime_takeover_enabled": "Same-role replacement agents may claim stale runtime snapshots.",
+    "agent.request_conflict_checks": (
+        "Refuse a request's change to a record another of the person's requests changed while it ran, and any "
+        "change from a stopped or ended request; false keeps only \"changed since you read it\" checks. Agents "
+        "cannot change it."
+    ),
     "agent.max_tool_calls_per_task": "Cumulative tool calls across one ordinary local task-processing invocation, not per model turn. Accepted Objective work profiles use their own session total. Set null or <=0 to disable.",
     "agent.max_tool_result_tokens_per_call": "Per-tool-result token safety cap. Oversized results are offloaded to artifacts.",
     "agent.runtime_budget_policy": "Policy for recoverable runtime budget/overload pauses.",

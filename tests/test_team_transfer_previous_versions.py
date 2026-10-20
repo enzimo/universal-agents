@@ -139,7 +139,7 @@ def test_an_unsupported_export_is_refused_before_anything_is_written(
     source_sections, expected_problem = {
         "0.8.5": (
             (SettingsAsV085(), PeopleSection(), AccessAsV085()),
-            "This file's settings section is version 3, but this version of Universal Agents reads versions 4 and 5.",
+            "This file's settings section is version 3, but this version of Universal Agents reads versions 5 and 6.",
         ),
         "0.9.0": (
             (SettingsSection(), PeopleSection(), AccessSection(), KnowledgeAsV090()),

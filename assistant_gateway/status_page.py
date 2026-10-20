@@ -22,8 +22,8 @@ Sources, each producing ``StatusFindingV1`` items:
   model of their own yet (a warning: their requests do not run), and the
   people whose work goes to their own model provider (a note: conversations
   leave through an address the team did not configure);
-- the gateway's own configuration (authorization off is a deliberate choice,
-  shown as a note).
+- the gateway's own configuration (authorization off, and checks between a
+  person's separate requests off, are deliberate choices, shown as notes).
 
 A source that cannot be asked is listed in ``unavailable_sources`` and, for
 the broker, shown as a problem: silence must not look like health.
@@ -270,21 +270,35 @@ class StatusPage:
         return [stopped_receiver_finding(receiver, source="Gateway") for receiver in self._stopped_receivers()]
 
     def _configuration_findings(self) -> list[StatusFindingV1]:
-        if self._config.authorization.enabled:
-            return []
-        return [
-            StatusFindingV1(
-                finding_id="authorization_off",
-                severity=StatusSeverity.NOTE,
-                title="Access checks are turned off",
-                summary=(
-                    "Agents use every tool without access requests; the sandbox, the broker and protected folders "
-                    "still apply. Changes are applied with a person's agreement in chat instead of an Inbox approval."
-                ),
-                action="Turn them on with authorization.enabled: true in instance_config.yaml, then restart.",
-                source=GATEWAY_SOURCE,
-            )
-        ]
+        findings = [] if self._config.authorization.enabled else [_AUTHORIZATION_OFF]
+        if not self._config.agent.request_conflict_checks:
+            findings.append(_REQUEST_CONFLICT_CHECKS_OFF)
+        return findings
+
+
+_AUTHORIZATION_OFF = StatusFindingV1(
+    finding_id="authorization_off",
+    severity=StatusSeverity.NOTE,
+    title="Access checks are turned off",
+    summary=(
+        "Agents use every tool without access requests; the sandbox, the broker and protected folders "
+        "still apply. Changes are applied with a person's agreement in chat instead of an Inbox approval."
+    ),
+    action="Turn them on with authorization.enabled: true in instance_config.yaml, then restart.",
+    source=GATEWAY_SOURCE,
+)
+_REQUEST_CONFLICT_CHECKS_OFF = StatusFindingV1(
+    finding_id="request_conflict_checks_off",
+    severity=StatusSeverity.NOTE,
+    title="Checks between a person's separate requests are turned off",
+    summary=(
+        "When two of a person's requests change the same record, such as a personal knowledge page, the later "
+        "change is saved over the earlier one instead of being refused. Changes made from a record that is out "
+        "of date are still refused."
+    ),
+    action="Turn them on with agent.request_conflict_checks: true in instance_config.yaml, then restart.",
+    source=GATEWAY_SOURCE,
+)
 
 
 def person_settings_findings(people: Iterable[TeamPersonV1], settings: Iterable[PersonSettingsV1]) -> list[StatusFindingV1]:

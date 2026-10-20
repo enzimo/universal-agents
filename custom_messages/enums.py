@@ -377,3 +377,45 @@ class ControlType(StrEnum):
     NOOP                    = "NO OP"
     STATUS_REQUEST_BASIC    = "status_request_basic"
     STATUS_REQUEST_FULL     = "status_request_full"
+
+
+class ChangeRecordKind(StrEnum):
+    """Kinds of stored record whose changes run before a model step's other calls.
+
+    Two of a person's requests can run at once, so one request may change a
+    record another request is changing. Every tool operation that changes one
+    of these records names its kind in the tool catalog (``record_kind`` and
+    ``record_kinds`` in ``ua_definitions/access/tools/functions.yaml``). The
+    tool executor (``custom_agents.sdk.strands.changes_first``) runs those calls
+    first, one at a time, and stops the step at the first one that does not go
+    through.
+    """
+
+    MEMORY_FACT = "memory_fact"
+    KNOWLEDGE_PAGE = "knowledge_page"
+    SCHEDULE = "schedule"
+    OBJECTIVE = "objective"
+    HEARTBEAT_ITEM = "heartbeat_item"
+    FILE = "file"
+    # Applying an exact staged plan can change several kinds of record. Its
+    # approval must finish before other calls act on the proposed change.
+    STAGED_CHANGE = "staged_change"
+
+
+class ChangeRefusal(StrEnum):
+    """Why a store refused a change to a record another request may also change.
+
+    Named once here; stores and tools report these as the reason of a refused
+    change (``storage.change_ledger``).
+    """
+
+    # The record changed since the writer read it (the version it passed is old).
+    CHANGED_SINCE_READ = "changed_since_read"
+    # Another of the person's requests changed the record while this request ran.
+    CHANGE_CONFLICT = "change_conflict"
+    # The writing request was stopped or has ended.
+    REQUEST_CLOSED = "request_closed"
+    # Settling alone is not allowed, or the record is escalated: a person decides.
+    NEEDS_PERSON_DECISION = "needs_person_decision"
+    # Another write to the same file or credential is in progress.
+    RECORD_BUSY = "record_busy"

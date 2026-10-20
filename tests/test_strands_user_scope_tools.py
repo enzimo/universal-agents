@@ -12,6 +12,7 @@ from custom_messages.contracts.routing_v1 import GatewayContext
 from custom_tools.providers.context_memory import compact_conversation_context
 from custom_tools.providers.memory import memory, topic_tags
 from custom_tools.runtime_context import set_agent_ref
+from custom_tools.tool_results import result_text
 from storage.config import resolve_storage_settings
 from storage.pinned_memory_repository import SqlitePinnedMemoryRepository
 from tests.broker_access_support import context_signer
@@ -84,8 +85,10 @@ def test_no_memory_input_names_another_person() -> None:
 def test_usermem_without_a_registered_person_is_refused(tmp_path: Path) -> None:
     set_agent_ref(_FakeAgent(tmp_path / "memory.db", ""))
 
-    payload = json.loads(memory(action="list", bank="usermem"))
+    result = memory(action="list", bank="usermem")
+    payload = json.loads(result_text(result))
 
+    assert result["status"] == "error"
     assert payload["ok"] is False
     assert payload["error_code"] == "canonical_user_required"
 

@@ -51,9 +51,9 @@ def test_history_write_does_not_write_other_task_payloads(manager, monkeypatch):
     write = repo._write_task_records
     written = []
 
-    def observe(conn, owner, records, *, replace_all):
+    def observe(conn, owner, records, *, replace_all, team_id):
         written.append((records, replace_all))
-        return write(conn, owner, records, replace_all=replace_all)
+        return write(conn, owner, records, replace_all=replace_all, team_id=team_id)
 
     monkeypatch.setattr(repo, "_write_task_records", observe)
     manager.append_history_entry("small", "one new event")

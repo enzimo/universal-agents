@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +30,7 @@ from custom_messages.contracts.access_v2 import AccessRequestV1, AccessReviewCho
 from custom_tools.providers.changes import apply_change
 from custom_tools.runtime_context import set_agent_ref
 from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
+from tests.tool_result_support import tool_json
 
 ROOT = Path(__file__).resolve().parents[1]
 CEDAR_BINARY = ROOT / "target" / "debug" / "ua-cedar-authorizer"
@@ -152,11 +152,11 @@ def run_apply_change(
 ) -> dict[str, Any]:
     """Call apply_change as the agent (raises InterruptException when it pauses)."""
 
-    def call_tool() -> str:
+    def call_tool() -> str | dict[str, Any]:
         set_agent_ref(agent)
         return asyncio.run(apply_change._tool_func(change_id, reason, call or ToolCall(), confirmed=confirmed))
 
-    return json.loads(contextvars.copy_context().run(call_tool))
+    return tool_json(contextvars.copy_context().run(call_tool))
 
 
 def stored_request(agent: Any, call: ToolCall) -> AccessRequestV1:

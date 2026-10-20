@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from custom_messages.enums import ChangeRefusal
 from knowledge_base.vocabulary import (
     ActorKind,
     ChangeKind,
@@ -23,7 +24,11 @@ class KnowledgeActor:
     ``work_person_id`` is the person the work serves, from the verified signed
     context (agents) or the signed-in session (people); empty for system work.
     ``work_id`` is the person's request (signed context id), so limits count
-    all agents working on one request together.
+    all agents working on one request together. ``request_id`` is the same id
+    only when the context is a person's request the gateway signed: such a
+    write is checked against the person's other requests
+    (``storage.change_ledger``); scheduled work, people and the system leave it
+    empty.
     """
 
     kind: ActorKind
@@ -34,6 +39,10 @@ class KnowledgeActor:
     work_person_id: str = ""
     task_id: str = ""
     work_id: str = ""
+    request_id: str = ""
+    # The operator's switch (agent.request_conflict_checks): False records the
+    # write without checking it against the person's other requests.
+    conflict_checks: bool = True
 
     @property
     def is_agent(self) -> bool:
@@ -288,7 +297,8 @@ class KnowledgeError(Exception):
 # Stable refusal codes.
 CODE_INVALID = "invalid_input"
 CODE_NOT_FOUND = "not_found"
-CODE_CONFLICT = "revision_conflict"
+# The page changed since the writer read it (the shared name, custom_messages.enums.ChangeRefusal).
+CODE_CONFLICT = ChangeRefusal.CHANGED_SINCE_READ.value
 CODE_EXISTS = "page_exists"
 CODE_SENSITIVE = "sensitive_content"
 CODE_REVIEW_REQUIRED = "review_required"

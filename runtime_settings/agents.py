@@ -88,6 +88,10 @@ class AgentRuntimeDefaultsSettings(BaseModel):
     restart_executing_task_grace_seconds: Optional[float] = (
         AGENT_DEFAULTS.restart_executing_task_grace_seconds.value
     )
+    # The operator's switch for checks between a person's separate requests
+    # (storage.change_ledger). Not in the per-type overrides: one value for
+    # every agent, and agents cannot stage it (OPERATOR_ONLY_RUNTIME_SETTINGS).
+    request_conflict_checks: bool = AGENT_DEFAULTS.request_conflict_checks.value
     same_role_runtime_takeover_enabled: bool = (
         AGENT_DEFAULTS.same_role_runtime_takeover_enabled.value
     )

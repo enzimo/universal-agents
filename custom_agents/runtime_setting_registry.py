@@ -1012,4 +1012,8 @@ OPERATOR_ONLY_RUNTIME_SETTINGS: dict[str, str] = {
     "agent.instance_root": "The instance root decides where control files, databases and agent folders live and is operator-owned.",
     "agent.tool_allowlist": "Tool attachment policy is operator/user-authorized, not lead-managed.",
     "agent.tool_blocklist": "Tool attachment policy is operator/user-authorized, not lead-managed.",
+    "agent.request_conflict_checks": (
+        "Checks between a person's separate requests protect their records from one request overwriting "
+        "another's change; only the operator turns them off."
+    ),
 }

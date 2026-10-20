@@ -11,8 +11,10 @@ from custom_agents.heartbeat_store import (
     HeartbeatItemRecord,
     HeartbeatStore,
 )
+from custom_agents.change_followups import after_saved_change
 from custom_messages.enums import TaskHistorySource
 from custom_tools.provider_contract import ToolProvider
+from custom_tools.tool_results import failed
 from custom_tools.runtime_context import (
     get_agent_ref,
 )
@@ -202,20 +204,20 @@ def add_heartbeat_item(
     source_id: str = "",
     target_agent_type: str = "",
     objective_id: str = "",
-) -> str:
+) -> str | dict[str, Any]:
     """Add a canonical heartbeat item with its own durable conversation thread."""
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     if not instruction.strip():
-        return json.dumps({"error": "instruction is required"})
+        return failed({"error": "instruction is required"})
     try:
         resolved_source_id = _resolve_heartbeat_source_id(agent, source_id)
         resolved_objective_id, objective_refusal = _objective_to_link(
             agent, objective_id, agent.task_manager.current_task_id or ""
         )
         if objective_refusal:
-            return json.dumps({"error": objective_refusal})
+            return failed({"error": objective_refusal})
         store = _heartbeat_store(agent)
         store.ensure_source(
             source_id=resolved_source_id, title=f"Heartbeat:{resolved_source_id}"
@@ -240,7 +242,11 @@ def add_heartbeat_item(
                 reason="Heartbeat item created from objective-linked task context.",
             )
         )
-        runtime_state = _heartbeat_runtime_state(agent, resolved_source_id)
+        runtime_state = {}
+        with after_saved_change(
+            payload, record_id=item.heartbeat_item_id, step="checking the heartbeat launcher", logger=logger
+        ):
+            runtime_state = _heartbeat_runtime_state(agent, resolved_source_id)
         payload.update(
             {
                 "heartbeat_runtime": runtime_state,
@@ -261,7 +267,7 @@ def add_heartbeat_item(
             )
         return json.dumps(payload)
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 @tool
@@ -272,21 +278,21 @@ def update_heartbeat_item(
     instruction: str = "",
     target_agent_type: str = "",
     objective_id: str = "",
-) -> str:
+) -> str | dict[str, Any]:
     """Update title, instruction, or target agent type for a heartbeat item."""
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     try:
         store = _heartbeat_store(agent)
         existing = store.get_item(heartbeat_item_id)
         if existing is None or not _heartbeat_item_in_view(agent, existing, action=PRIVATE_UPDATE):
-            return json.dumps({"error": f"Heartbeat item not found: {heartbeat_item_id}"})
+            return failed({"error": f"Heartbeat item not found: {heartbeat_item_id}"})
         resolved_objective_id, objective_refusal = (
             _objective_to_link(agent, objective_id, "") if objective_id.strip() else (None, None)
         )
         if objective_refusal:
-            return json.dumps({"error": objective_refusal})
+            return failed({"error": objective_refusal})
         item = store.update_item(
             heartbeat_item_id,
             title=title if title else None,
@@ -295,7 +301,7 @@ def update_heartbeat_item(
             objective_id=resolved_objective_id,
         )
         if item is None:
-            return json.dumps(
+            return failed(
                 {"error": f"Heartbeat item not found: {heartbeat_item_id}"}
             )
         payload = _heartbeat_item_payload(item)
@@ -312,66 +318,67 @@ def update_heartbeat_item(
         )
         return json.dumps(payload)
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 @tool
-def remove_heartbeat_item(heartbeat_item_id: str) -> str:
+def remove_heartbeat_item(heartbeat_item_id: str) -> str | dict[str, Any]:
     """Remove a heartbeat item permanently."""
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     try:
         store = _heartbeat_store(agent)
         existing = store.get_item(heartbeat_item_id)
         if existing is None or not _heartbeat_item_in_view(agent, existing, action=PRIVATE_UPDATE):
-            return json.dumps({"heartbeat_item_id": heartbeat_item_id, "removed": False})
+            return failed({"heartbeat_item_id": heartbeat_item_id, "removed": False})
         removed = store.remove_item(heartbeat_item_id)
-        return json.dumps({"heartbeat_item_id": heartbeat_item_id, "removed": removed})
+        payload = {"heartbeat_item_id": heartbeat_item_id, "removed": removed}
+        return json.dumps(payload) if removed else failed(payload)
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 @tool
-def enable_heartbeat_item(heartbeat_item_id: str) -> str:
+def enable_heartbeat_item(heartbeat_item_id: str) -> str | dict[str, Any]:
     """Enable a heartbeat item."""
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     try:
         store = _heartbeat_store(agent)
         existing = store.get_item(heartbeat_item_id)
         if existing is None or not _heartbeat_item_in_view(agent, existing, action=PRIVATE_UPDATE):
-            return json.dumps({"error": f"Heartbeat item not found: {heartbeat_item_id}"})
+            return failed({"error": f"Heartbeat item not found: {heartbeat_item_id}"})
         item = store.set_item_enabled(heartbeat_item_id, True)
         if item is None:
-            return json.dumps(
+            return failed(
                 {"error": f"Heartbeat item not found: {heartbeat_item_id}"}
             )
         return json.dumps(_heartbeat_item_payload(item))
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 @tool
-def disable_heartbeat_item(heartbeat_item_id: str) -> str:
+def disable_heartbeat_item(heartbeat_item_id: str) -> str | dict[str, Any]:
     """Disable a heartbeat item."""
     agent = get_agent_ref()
     if agent is None:
-        return json.dumps({"error": "Agent reference not set"})
+        return failed({"error": "Agent reference not set"})
     try:
         store = _heartbeat_store(agent)
         existing = store.get_item(heartbeat_item_id)
         if existing is None or not _heartbeat_item_in_view(agent, existing, action=PRIVATE_UPDATE):
-            return json.dumps({"error": f"Heartbeat item not found: {heartbeat_item_id}"})
+            return failed({"error": f"Heartbeat item not found: {heartbeat_item_id}"})
         item = store.set_item_enabled(heartbeat_item_id, False)
         if item is None:
-            return json.dumps(
+            return failed(
                 {"error": f"Heartbeat item not found: {heartbeat_item_id}"}
             )
         return json.dumps(_heartbeat_item_payload(item))
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return failed({"error": str(exc)})
 
 
 @tool
