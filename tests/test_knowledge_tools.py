@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,7 @@ from custom_tools.providers.knowledge import (
 )
 from custom_tools.runtime_context import set_agent_ref
 from storage.config import resolve_storage_settings
+from storage.change_ledger import ChangeRequestStore
 from storage.knowledge_repository import create_knowledge_repository
 from storage.pinned_memory_repository import SqlitePinnedMemoryRepository
 from tests.broker_access_support import context_signer
@@ -38,17 +40,17 @@ class _TaskManager:
     def __init__(self, *, signed_for: str | None, claimed: str) -> None:
         self._signed_for = signed_for
         self._claimed = claimed
-
-    def get_task_info(self, task_id: str):
-        signed = (
+        self.signed = (
             context_signer().issue(team_id=TEAM, person_id=self._signed_for, person_roles=("member",))
             if self._signed_for
             else None
         )
+
+    def get_task_info(self, task_id: str):
         return SimpleNamespace(
             meta=SimpleNamespace(
                 gateway_context=GatewayContext(
-                    source="test", user_id=self._claimed, canonical_user_id=self._claimed, task_context=signed
+                    source="test", user_id=self._claimed, canonical_user_id=self._claimed, task_context=self.signed
                 )
             )
         )
@@ -69,6 +71,11 @@ class _Agent:
         self.task_manager = _TaskManager(signed_for=signed_for, claimed=claimed or (signed_for or ""))
         self.task_manager.storage_settings = settings
         self.task_manager._db_path = str(db_path)
+        if self.task_manager.signed is not None:
+            context = self.task_manager.signed.context
+            ChangeRequestStore(settings).open(
+                team_id=TEAM, request_id=context.context_id, person_id=context.person_id, now=datetime.now(timezone.utc),
+            )
 
 
 def _call(agent, tool, **kwargs) -> dict:

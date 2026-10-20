@@ -834,13 +834,22 @@ and the request tells the person, who can repeat it in a new message.
   nothing (`request_closed`). This covers a worker still running after its
   request ended.
 - **Request rows.** Each request's start position and state are recorded
-  when the agent receiving the person's message admits it
-  (`custom_agents/change_requests_runtime.py`), and closed when that first
-  task ends. A request without a row, such as one started before an
-  upgrade, starts at its first change, with a warning.
+  in the task snapshot transaction (`storage/runtime_state_repository.py`):
+  admission opens it and the first task's terminal save closes it. Either
+  both writes commit or neither does, including during recovery; no later
+  callback can lose a lifecycle change. Saving a root's cancellation marker
+  also closes its request in that transaction, because restart recovery drops
+  cancelled tasks before saving another terminal snapshot. A request without a durable
+  admission is refused rather than assigned a new start at its first write.
+  The original gateway signature and team are checked again for this
+  historical attribution, even after expiry; unverified metadata never
+  opens or closes a request, and a failed identity check aborts the task save.
 - **Storage.** The check and the ledger entry share the store's write
-  transaction, after its own lock. The shared counter row is updated last,
-  bounded by `lock_timeout` in PostgreSQL.
+  transaction, after its own lock. PostgreSQL holds a lock on the request
+  row through the write, so closure waits for an already checked change
+  and later writes see the closed state. SQLite's `BEGIN IMMEDIATE` provides
+  the same exclusion. The shared counter row is updated last, bounded by
+  `lock_timeout` in PostgreSQL.
 - **Retention.** Entries and closed request rows older than seven days are
   pruned when a request closes. They are deleted with a removed person's
   task records and never travel in a team transfer.

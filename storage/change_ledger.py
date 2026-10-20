@@ -43,9 +43,11 @@ Rule (b), for a writer that is a person's request:
   neither stopped by rule (b) nor counted against a request; the store's
   version check still applies to them.
 
-A request whose row is missing at its first covered write (it started before
-this ledger existed) gets one then, starting at that moment, with a warning
-(``change_ledger_request_row_created_late``).
+Request admission and closure share the task snapshot's write transaction.
+A missing request row therefore cannot establish a safe start position and
+is refused. PostgreSQL writers lock the request row until their change
+commits, so closure waits for an already checked write and later writes see
+the closed state.
 
 Ledger rows never leave the instance: the team transfer does not carry them.
 """
@@ -58,7 +60,9 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
-from custom_messages.enums import ChangeRecordKind, ChangeRefusal
+from access_control.identity import ContextVerifier, ISSUER_GATEWAY, IdentityRejected
+from custom_messages.contracts.runtime_snapshot_v3 import TaskSnapshotRecord
+from custom_messages.enums import ChangeRecordKind, ChangeRefusal, ProgressState
 from storage.config import StorageSettings
 from storage.postgres_connection import (
     CHANGE_LEDGER_SCHEMA_LOCK_KEY,
@@ -225,6 +229,7 @@ def close_request(
 
     if state is RequestState.OPEN:
         raise ValueError("A request is closed as stopped or ended.")
+    _set_lock_timeout(conn, dialect)
     p = dialect.bind
     conn.execute(
         f"""
@@ -247,6 +252,86 @@ def close_request(
     )
 
 
+def record_task_request_state(
+    conn: Any,
+    dialect: SqlDialect,
+    *,
+    team_id: str | None,
+    task: TaskSnapshotRecord,
+    now: datetime,
+) -> None:
+    """Save a root request's lifecycle with its task, never in a later callback.
+
+    The stored owner was verified at admission. Recheck the original signature
+    and team before attributing the request id, including when the context has
+    since expired. This reads historical identity only and grants no authority.
+    A failed lifecycle write aborts the task save, so recovery cannot expose a
+    queued or terminal task whose request state was lost.
+    """
+
+    if not team_id or task.task.parent_task_id or not task.owner_person_id:
+        return
+    gateway = task.meta.gateway_context
+    signed = gateway.task_context if gateway is not None else None
+    if gateway is not None and signed is not None and gateway.schedule_run is not None:
+        raise IdentityRejected("A task cannot carry both a signed context and a scheduled run identity.")
+    if signed is None:
+        return
+    try:
+        context = ContextVerifier.from_env().verify(signed, team_id=team_id, check_expiry=False)
+    except (IdentityRejected, ValueError):
+        logger.warning(
+            "Ignored unverified request identity while saving a task. "
+            "event=change_ledger_task_identity_rejected task_id=%s team_id=%s",
+            task.task_id, team_id,
+        )
+        raise
+    if context.issuer != ISSUER_GATEWAY:
+        return
+    if context.person_id != task.owner_person_id:
+        logger.warning(
+            "Ignored request identity that does not match the admitted task owner. "
+            "event=change_ledger_task_owner_mismatch task_id=%s team_id=%s",
+            task.task_id, team_id,
+        )
+        raise IdentityRejected("The request identity does not match the task's admitted owner.")
+    terminal = task.state in {
+        ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.CANCELLED, ProgressState.ABANDONED,
+    }
+    if terminal:
+        state = RequestState.STOPPED if task.state is ProgressState.CANCELLED else RequestState.ENDED
+        close_request(
+            conn, dialect, team_id=team_id, request_id=context.context_id,
+            person_id=task.owner_person_id, now=now, state=state,
+        )
+        prune(conn, dialect, team_id=team_id, before=now - LEDGER_RETENTION)
+    else:
+        open_request(conn, dialect, team_id=team_id, request_id=context.context_id, person_id=task.owner_person_id, now=now)
+
+
+def require_same_request_identity(previous: TaskSnapshotRecord, current: TaskSnapshotRecord) -> None:
+    """An admitted root cannot lose or replace the identity its ledger records.
+
+    The previous snapshot is the trusted admission record. Removing its signed
+    context, changing its owner or turning it into a child must abort the save,
+    rather than persisting a terminal task without closing its real request.
+    """
+
+    gateway = previous.meta.gateway_context
+    original = gateway.task_context if gateway is not None else None
+    if previous.task.parent_task_id or not previous.owner_person_id or original is None:
+        return
+    if original.context.issuer != ISSUER_GATEWAY:
+        return
+    current_gateway = current.meta.gateway_context
+    if (
+        current.owner_person_id != previous.owner_person_id or current.task.parent_task_id
+        or current_gateway is None or current_gateway.task_context != original
+        or current_gateway.schedule_run is not None
+    ):
+        raise IdentityRejected("An admitted request task cannot change or remove its original signed identity.")
+
+
 def check_change(
     conn: Any,
     dialect: SqlDialect,
@@ -266,7 +351,7 @@ def check_change(
 
     if writer.kind is not ChangeWriterKind.REQUEST:
         return
-    start, state = _request_row(conn, dialect, team_id=team_id, writer=writer, now=now)
+    start, state = _request_row(conn, dialect, team_id=team_id, writer=writer)
     if state is not RequestState.OPEN:
         logger.info(
             "Refused a change from a request that is no longer running. event=change_ledger_request_closed "
@@ -373,6 +458,23 @@ def prune(conn: Any, dialect: SqlDialect, *, team_id: str, before: datetime) -> 
     """Delete ledger entries and closed request rows older than ``before`` (``LEDGER_RETENTION``)."""
 
     p = dialect.bind
+    if dialect is POSTGRES:
+        # A terminal save already holds its own request row. Never wait for
+        # another save's row while pruning: two closures could otherwise each
+        # delete the other's old row and deadlock. Busy rows remain for a later
+        # cleanup; retention is independent of lifecycle correctness.
+        conn.execute(
+            f"DELETE FROM change_ledger WHERE (team_id, position) IN "
+            f"(SELECT team_id, position FROM change_ledger WHERE team_id={p} AND changed_at_utc < {p} "
+            "FOR UPDATE SKIP LOCKED)", (team_id, before.isoformat()),
+        )
+        conn.execute(
+            f"DELETE FROM change_requests WHERE (team_id, request_id) IN "
+            f"(SELECT team_id, request_id FROM change_requests WHERE team_id={p} AND state <> {p} "
+            f"AND closed_at_utc < {p} FOR UPDATE SKIP LOCKED)",
+            (team_id, RequestState.OPEN.value, before.isoformat()),
+        )
+        return
     conn.execute(f"DELETE FROM change_ledger WHERE team_id={p} AND changed_at_utc < {p}", (team_id, before.isoformat()))
     conn.execute(
         f"DELETE FROM change_requests WHERE team_id={p} AND state <> {p} AND closed_at_utc < {p}",
@@ -420,9 +522,7 @@ class ChangeRequestStore:
 
 
 def _next_position(conn: Any, dialect: SqlDialect, team_id: str) -> int:
-    if dialect is POSTGRES:
-        # SET cannot take a bind parameter; the value is a constant.
-        conn.execute(f"SET LOCAL lock_timeout = '{int(LEDGER_LOCK_TIMEOUT_MS)}ms'")
+    _set_lock_timeout(conn, dialect)
     p = dialect.bind
     row = conn.execute(
         f"""
@@ -435,26 +535,36 @@ def _next_position(conn: Any, dialect: SqlDialect, team_id: str) -> int:
     return int(row[0])
 
 
+def _set_lock_timeout(conn: Any, dialect: SqlDialect) -> None:
+    if dialect is POSTGRES:
+        # SET cannot take a bind parameter; the value is a constant.
+        conn.execute(f"SET LOCAL lock_timeout = '{int(LEDGER_LOCK_TIMEOUT_MS)}ms'")
+
+
 def _request_row(
-    conn: Any, dialect: SqlDialect, *, team_id: str, writer: ChangeWriter, now: datetime
+    conn: Any, dialect: SqlDialect, *, team_id: str, writer: ChangeWriter
 ) -> tuple[int, RequestState]:
+    # Lock before checking, held until the store's write commits. Request
+    # closure updates this same row and cannot commit in the middle of a write.
+    # SQLite's BEGIN IMMEDIATE already provides the corresponding exclusion.
+    lock = " FOR UPDATE" if dialect is POSTGRES else ""
+    _set_lock_timeout(conn, dialect)
     p = dialect.bind
     row = conn.execute(
-        f"SELECT start_position, state FROM change_requests WHERE team_id={p} AND request_id={p}",
+        f"SELECT start_position, state FROM change_requests WHERE team_id={p} AND request_id={p}{lock}",
         (team_id, writer.request_id),
     ).fetchone()
     if row is not None:
         return int(row[0]), RequestState(str(row[1]))
-    start = open_request(
-        conn, dialect, team_id=team_id, request_id=writer.request_id, person_id=writer.person_id, now=now
-    )
     logger.warning(
-        "A request had no ledger row at its first change; it starts now. event=change_ledger_request_row_created_late "
-        "request_id=%s start_position=%s",
-        writer.request_id,
-        start,
+        "Refused a change from a request with no durable admission. "
+        "event=change_ledger_request_not_admitted request_id=%s", writer.request_id,
     )
-    return start, RequestState.OPEN
+    raise ChangeRefused(
+        ChangeRefusal.REQUEST_CLOSED,
+        "This request has no recorded admission, so its change was not made. Repeat the request in a new message.",
+        {"request_state": "not_admitted"},
+    )
 
 
 __all__ = [
@@ -478,4 +588,6 @@ __all__ = [
     "open_request",
     "prune",
     "record_change",
+    "record_task_request_state",
+    "require_same_request_identity",
 ]
