@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import ExitStack
 from dataclasses import dataclass
 from enum import StrEnum
 import functools
@@ -397,9 +398,14 @@ def prepare_manager_database(config: GatewayInstanceConfig) -> Path | None:
     return path
 
 
+class MessageStreamConfigurationError(ValueError):
+    """The effective gateway configuration is invalid before connecting to NATS."""
+
+
 # What setting up the message streams can fail with: NATS client and JetStream
-# errors, connection errors, and settings the broker did not take.
-MESSAGE_STREAM_PREPARE_ERRORS = (NatsError, OSError, NatsTopologyMismatch)
+# errors, connection errors, invalid effective configuration, and settings the
+# broker did not take. Other failures propagate after managed services stop.
+MESSAGE_STREAM_PREPARE_ERRORS = (NatsError, OSError, MessageStreamConfigurationError, NatsTopologyMismatch)
 
 
 def prepare_message_streams(config_path: Path, gateway_env: Mapping[str, str]) -> tuple[str, ...]:
@@ -421,7 +427,10 @@ def prepare_message_streams(config_path: Path, gateway_env: Mapping[str, str]) -
     Returns the stream names, or an empty tuple when JetStream is off.
     """
 
-    gateway_config = GatewayInstanceConfig.load_for_process(config_path, env=gateway_env)
+    try:
+        gateway_config = GatewayInstanceConfig.load_for_process(config_path, env=gateway_env)
+    except ValueError as exc:
+        raise MessageStreamConfigurationError(str(exc)) from exc
     runtime = NatsGatewayManagerRuntime.from_gateway_config(gateway_config)
     started = time.monotonic()
     names = asyncio.run(runtime.prepare_topology())
@@ -2482,12 +2491,51 @@ def stop_external_processes(
     external_processes: tuple[tuple[str, subprocess.Popen[bytes]], ...],
     before_external_shutdown: Callable[[], None] | None,
 ) -> None:
-    """Stop NATS, Sealbox and the OpenShell gateway last, after their cleanup step."""
+    """Attempt every service stop, even when sandbox cleanup or another stop fails."""
 
-    if before_external_shutdown is not None:
-        before_external_shutdown()
-    for name, process in reversed(external_processes):
-        terminate_process(process, name)
+    with ExitStack() as cleanup:
+        for name, process in external_processes:
+            cleanup.callback(terminate_process, process, name)
+        if before_external_shutdown is not None:
+            before_external_shutdown()
+
+
+def prepare_message_streams_before_services(
+    config_path: Path,
+    gateway_env: Mapping[str, str],
+    *,
+    external_processes: tuple[tuple[str, subprocess.Popen[bytes]], ...],
+    before_external_shutdown: Callable[[], None] | None,
+) -> bool:
+    """Own managed services until stream preparation hands them to the supervisor.
+
+    Loading the gateway's effective settings can fail before it reaches NATS.
+    Every failure, including interruption, must stop the services already
+    started. Only expected configuration and NATS errors become a refusal;
+    unexpected failures keep their original traceback after cleanup.
+    """
+
+    try:
+        prepare_message_streams(config_path, gateway_env)
+    except BaseException as exc:
+        try:
+            stop_external_processes(external_processes, before_external_shutdown)
+        except BaseException:
+            LOGGER.exception(
+                "Managed service cleanup failed after message stream preparation stopped. "
+                "event=nats_streams_prepare_cleanup_failed preparation_error_type=%s",
+                type(exc).__name__,
+            )
+        if not isinstance(exc, MESSAGE_STREAM_PREPARE_ERRORS):
+            raise
+        LOGGER.error(
+            "Headless launch refused: the team's message streams could not be set up before the services start. "
+            "event=nats_streams_prepare_failed error_type=%s error=%s",
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    return True
 
 
 def main() -> int:
@@ -2706,16 +2754,12 @@ def main() -> int:
 
     finish_import = build_finish_import_task(config, config_path, inherited_env)
     # Last step before any service starts, so every check finds the streams.
-    try:
-        prepare_message_streams(config_path, gateway_env)
-    except MESSAGE_STREAM_PREPARE_ERRORS as exc:
-        LOGGER.error(
-            "Headless launch refused: the team's message streams could not be set up before the services start. "
-            "event=nats_streams_prepare_failed error_type=%s error=%s",
-            type(exc).__name__,
-            exc,
-        )
-        stop_external_processes(external_processes, cleanup_managed_openshell)
+    if not prepare_message_streams_before_services(
+        config_path,
+        gateway_env,
+        external_processes=external_processes,
+        before_external_shutdown=cleanup_managed_openshell,
+    ):
         return 2
 
     return run_supervised(

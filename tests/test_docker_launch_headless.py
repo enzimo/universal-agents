@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 import os
 from pathlib import Path
@@ -2026,6 +2027,113 @@ def test_launch_refuses_to_start_and_stops_nats_when_the_streams_cannot_be_set_u
         assert lh.main() == 2
     assert stopped == ["nats"]
     assert "event=nats_streams_prepare_failed error_type=NoServersError" in caplog.text
+
+
+@pytest.mark.parametrize("setting", ["NATS_MAX_DELIVER", "INTERNAL_WEBSITE_BIND_PORT"])
+def test_invalid_team_env_settings_stop_managed_processes_before_any_service_starts(
+    tmp_path: Path, monkeypatch, caplog, setting: str
+) -> None:
+    import docker.launch_headless as lh
+
+    monkeypatch.delenv(setting, raising=False)
+    config_path = _prepare_launch(
+        tmp_path, monkeypatch, team_id="team_test", env={"TEAM_LOCAL_NATS_ENABLED": "true"}
+    )
+    env_path = tmp_path / "team.env"
+    env_path.write_text(f"{setting}=invalid\n", encoding="utf-8")
+    config = GatewayInstanceConfig.load_saved(config_path)
+    config.launch.env_file_path = str(env_path)
+    config.save(config_path)
+    # The first load has no team.env yet. Preparation must use the effective
+    # environment and clean up the services that have started in between.
+    GatewayInstanceConfig.load_for_process(config_path)
+    processes: list[subprocess.Popen[bytes]] = []
+    events: list[str] = []
+    sandbox = object()
+
+    def start_process() -> subprocess.Popen[bytes]:
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        processes.append(process)
+        return process
+
+    terminate = lh.terminate_process
+
+    def stop_process(process, name):
+        events.append(name)
+        terminate(process, name)
+
+    def cleanup_sandbox(value, *, env):
+        assert value is sandbox
+        events.append("sandbox")
+
+    monkeypatch.setattr(lh, "start_local_nats", lambda **_kwargs: start_process())
+    monkeypatch.setattr(
+        lh, "ensure_managed_sealbox_service", lambda *_args, **_kwargs: SimpleNamespace(process=start_process())
+    )
+    monkeypatch.setattr(
+        lh, "ensure_openshell_gateway", lambda *_args, **_kwargs: SimpleNamespace(process=start_process())
+    )
+    monkeypatch.setattr(lh, "ensure_openshell_sandbox", lambda *_args, **_kwargs: sandbox)
+    monkeypatch.setattr(lh, "cleanup_openshell_sandbox", cleanup_sandbox)
+    monkeypatch.setattr(lh, "terminate_process", stop_process)
+    monkeypatch.setattr(lh, "run_supervised", lambda **_kwargs: pytest.fail("no service may start"))
+
+    try:
+        with caplog.at_level("ERROR", logger="docker.launch_headless"):
+            assert lh.main() == 2
+        assert len(processes) == 3
+        assert all(process.poll() is not None for process in processes)
+        assert events == ["sandbox", "Sealbox service", "OpenShell gateway", "nats"]
+        assert "event=nats_streams_prepare_failed error_type=MessageStreamConfigurationError" in caplog.text
+        assert "invalid literal for int()" in caplog.text
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+
+
+@pytest.mark.parametrize(
+    ("failure", "cleanup_failure"),
+    [
+        (RuntimeError("unexpected setup failure"), None),
+        (ValueError("unexpected topology failure"), None),
+        (KeyboardInterrupt(), "sandbox"),
+        (asyncio.CancelledError(), "Sealbox service"),
+    ],
+)
+def test_preparation_preserves_unexpected_failures_and_interrupts_after_attempting_every_cleanup(
+    tmp_path: Path, monkeypatch, caplog, failure: BaseException, cleanup_failure: str | None
+) -> None:
+    import docker.launch_headless as lh
+
+    events: list[str] = []
+
+    def prepare(_path, _env):
+        raise failure
+
+    def step(name: str):
+        events.append(name)
+        if name == cleanup_failure:
+            raise RuntimeError("fixture cleanup failure")
+
+    monkeypatch.setattr(lh, "prepare_message_streams", prepare)
+    monkeypatch.setattr(lh, "terminate_process", lambda _process, name: step(name))
+    processes = tuple((name, object()) for name in ("nats", "OpenShell gateway", "Sealbox service"))
+
+    with caplog.at_level("ERROR", logger="docker.launch_headless"):
+        with pytest.raises(type(failure)) as raised:
+            lh.prepare_message_streams_before_services(
+                tmp_path / "instance_config.yaml",
+                {},
+                external_processes=processes,
+                before_external_shutdown=lambda: step("sandbox"),
+            )
+
+    assert raised.value is failure
+    assert events == ["sandbox", "Sealbox service", "OpenShell gateway", "nats"]
+    assert "event=nats_streams_prepare_failed" not in caplog.text
+    assert ("event=nats_streams_prepare_cleanup_failed" in caplog.text) == (cleanup_failure is not None)
 
 
 @pytest.mark.live

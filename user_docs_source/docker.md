@@ -284,6 +284,12 @@ TEAM_..._WORK is missing; start the topology owner first", and every service
 stopped with it. If the streams cannot be set up, for example because NATS
 cannot be reached or refuses a change to an existing stream, the container
 refuses to start and logs `event=nats_streams_prepare_failed` with the error.
+Invalid effective settings, including a malformed override in `team.env`,
+also refuse startup with that event. A failure or interruption during this
+step stops the NATS, Sealbox and OpenShell services the launcher started, so
+a corrected launch can start them again. If cleanup itself fails, the log
+also reports `event=nats_streams_prepare_cleanup_failed`; every service stop
+is still attempted and the original preparation error is preserved.
 When NATS cannot be reached, that refusal comes after the NATS client's own
 retries, about two minutes.
 

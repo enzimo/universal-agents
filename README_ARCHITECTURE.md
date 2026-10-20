@@ -959,6 +959,15 @@ finds nothing to change. Nothing waits or polls: a participant that still finds
 no streams (for example after they were removed from NATS while the runtime
 ran) fails at once with "start the topology owner first", and a setup the
 broker refuses stops the launch with `event=nats_streams_prepare_failed`.
+This preparation owns the already-started NATS, Sealbox and OpenShell
+services until the supervisor takes over. Loading the effective gateway
+configuration also reads `team.env` overrides that the launcher's initial
+configuration load has not seen. Invalid overrides therefore refuse startup
+with the same event and stop those services. Interruption or an unexpected
+failure also cleans them up before propagating; every stop is attempted even
+if sandbox cleanup or another stop fails. Cleanup failures are logged as
+`event=nats_streams_prepare_cleanup_failed` without replacing the original
+preparation failure.
 In-app restarts keep the streams they started with, because transport settings
 are operator-owned and change only with a new launch.
 
