@@ -286,13 +286,15 @@ tools:
       knowledge_activity_report: read
       knowledge_problems: read
       list_open_knowledge_notes: read
-      publish_contribution: write
-      reject_contribution: write
-      resolve_knowledge_note: write
-      freeze_knowledge_page: write
-      unfreeze_knowledge_page: write
-      merge_knowledge_pages: write
-      revert_knowledge_page: write
+      # Notes and contributions are part of a page's knowledge state, just
+      # like knowledge_add_note and pending knowledge_write changes above.
+      publish_contribution: {level: write, record_kind: knowledge_page}
+      reject_contribution: {level: write, record_kind: knowledge_page}
+      resolve_knowledge_note: {level: write, record_kind: knowledge_page}
+      freeze_knowledge_page: {level: write, record_kind: knowledge_page}
+      unfreeze_knowledge_page: {level: write, record_kind: knowledge_page}
+      merge_knowledge_pages: {level: write, record_kind: knowledge_page}
+      revert_knowledge_page: {level: write, record_kind: knowledge_page}
 
   - tool_id: fn:heartbeat
     provider: heartbeat
@@ -645,14 +647,17 @@ tools:
     changes:
       model_choice: write
 
-  # Asking a person to approve a staged change is not the change itself.
+  # apply_change both waits for approval and applies the exact plan. In
+  # particular, system schedule tools only stage their changes; this is the
+  # call that changes their records. Every plan application runs first so a
+  # pause or refusal cannot be followed by calls that assume it succeeded.
   - tool_id: fn:changes
     provider: changes
     display_name: Approving staged changes
     description: Apply a staged change after a person approves it (or with agreement when authorization is off).
     tool_sets: [team_lead_runtime]
     functions:
-      apply_change: write
+      apply_change: {level: write, record_kind: staged_change}
 
   # Code runs in the sandbox, reaching only the folders its agent and person
   # may use (custom_agents.code_access). The network comes from fn:internet.

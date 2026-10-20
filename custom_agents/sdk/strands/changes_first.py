@@ -3,10 +3,10 @@
 Why: a model often sends several tool calls in one step, and Strands runs them
 side by side (``ConcurrentToolExecutor``). The model chose those calls
 assuming each change goes through. When a change to a stored record fails (a
-memory fact, a personal knowledge page, a schedule, an Objective, a heartbeat
-item or a file), running the step's other calls anyway acts on a premise that
-is no longer true: a reply sent, a schedule switched on, or a file written
-next to a change that was refused. As a person's separate requests start to
+memory fact, a knowledge page, a schedule, an Objective, a heartbeat item,
+a file or an exact staged plan), running the step's other calls anyway acts
+on a premise that is no longer true: a reply sent, a schedule switched on,
+or a file written next to a change that was refused. As a person's separate requests start to
 overlap, a refused change becomes an ordinary outcome, so a step has to stop
 at it.
 
