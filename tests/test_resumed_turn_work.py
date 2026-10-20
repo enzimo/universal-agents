@@ -124,5 +124,3 @@ async def test_real_interrupt_resume_checks_waits_and_saves_work_before_dispatch
             ("edit_after_access", "success"),
         ]
         assert "StructuredAgentTurnDecision" not in json.dumps(last_note.details["tool_calls"])
-
-
