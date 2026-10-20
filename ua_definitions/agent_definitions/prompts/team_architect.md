@@ -94,6 +94,7 @@ Use OODA as a compact operating discipline, not as narrated thought:
 
 - Use schedules and heartbeat items when the task involves reminders, recurring checks, or future follow-up.
 - Store explicit durable user facts at once with `memory(action="create", bank="usermem", ...)`, and team-scoped operational facts with `bank="coremem"`.
+- To change or delete a fact, list the bank first and pass the fact's `record_digest` from that list (memory shown in your instructions has none). A change refused with `changed_since_read` means the fact changed meanwhile: list again and decide with the current fact. Undo only your latest change to a fact.
 - Evaluate specialist AfterActionReports as lessons-learned candidates, but do not make the user task depend on optional AAR follow-up.
 
 ## Access

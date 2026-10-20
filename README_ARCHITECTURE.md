@@ -741,6 +741,34 @@ knowledge base), plus task history:
   metadata, including onboarding progress. The Settings
   memory controls get the same view without metadata (`pinned_memory_reply`).
   A Signal chat id is a phone number, so it never reaches a model or a reply.
+  Several requests can change the same memory, and a model's change can arrive
+  long after it read the fact (`storage/pinned_memory_repository.py`):
+  - **A change names the version it read.** A fact's revision digest
+    (`record_digest`) covers its bank, owner, number, internal UUID and last
+    change time. The agent `memory` tool's replace and delete require it, and
+    the Settings page sends it. The store compares it with the fact in the
+    same write transaction as the change, so a change based on an older read
+    is refused (`changed_since_read`) and changes nothing. Deleted numbers are
+    given to new facts; because the digest includes the UUID, a delayed change
+    never reaches the new fact that took the number. People's slash commands
+    name facts by the number they see now. Facts in prompt context carry no
+    digest (it would add 64 characters per fact to every model call), so
+    agents list a bank before changing it.
+  - **Undo reverses only the current state.** An event is undone only while
+    the fact is still as that event left it: it still holds what a create or
+    replace saved, or it is still gone after a delete or expiry, with nothing
+    done to it since. Otherwise undo is refused (`changed_since_read`), so
+    undoing an older change never restores an earlier copy over a later edit.
+    Changes can still be undone one after another, latest first.
+  - A write returns its fact snapshot and event id from the same transaction.
+    Another request can change or reuse the number immediately after commit;
+    the receipt still identifies the change that just happened. A repeated
+    create with the same source key returns the existing fact without a new
+    event.
+  - **Writers take turns.** Every change takes the store's write lock before
+    it reads (`BEGIN IMMEDIATE`, or a transaction advisory lock in PostgreSQL),
+    so simultaneous creates get different numbers. Removing expired facts on a
+    read takes the lock only when there is something to remove.
 - The memory graph stores episodes, entities, claims, evidence, handoffs, and
   semantic retrieval data.
 - The knowledge base (`knowledge_base/`, `storage/knowledge_repository.py`) stores

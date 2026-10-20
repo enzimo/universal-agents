@@ -1,9 +1,18 @@
-"""Shared runtime helpers for first-class coremem/usermem management."""
+"""Shared runtime helpers for first-class coremem/usermem management.
+
+``PinnedMemoryService`` is the one path for memory commands from agent tools,
+people (slash commands and the Settings page, through the manager) and trusted
+imports. A replace or delete that names the fact version it was based on
+(``expected_record_digest``) is checked by the repository inside its write
+transaction (``storage.pinned_memory_repository``). Agent tools must name it:
+a model may act on a fact it read many steps, or a restart, earlier, while
+another request changed or replaced the fact, so the version it read is the
+only safe target. People's own commands name a fact by the number they see.
+"""
 
 from __future__ import annotations
 
 import json
-import hmac
 import logging
 import re
 import shlex
@@ -17,7 +26,6 @@ from default_values import AGENT_DEFAULTS
 
 from custom_agents.memory_plugins.config import bank_agent_write_tools_enabled, normalize_memory_config
 from custom_agents.pinned_memory_metadata import public_pinned_memory_metadata
-from custom_messages.contracts.common_v1 import contract_sha256
 from custom_messages.contracts.control_v1 import (
     PINNED_MEMORY_SORT_NEWEST,
     PinnedMemoryCommandResultPayload,
@@ -26,14 +34,20 @@ from custom_messages.contracts.control_v1 import (
 from storage.pinned_memory_repository import (
     COREMEM_BANK,
     USERMEM_BANK,
-    PinnedMemoryConflictError,
     PinnedMemoryFactRow,
     PinnedMemoryRepository,
+    pinned_memory_record_digest,
+    pinned_memory_record_digest_values,
 )
 from time_presentation import format_user_timestamp
 
 
 PINNED_MEMORY_BANKS = {COREMEM_BANK, USERMEM_BANK}
+# The command origin of agents' memory tools: they need agent write access to
+# the bank, and their replace and delete must name the fact version they read.
+AGENT_TOOL_COMMAND_ORIGIN = "agent_tool"
+# The changes that must name a version when an agent tool sends them.
+_VERSIONED_ACTIONS = ("replace", "delete")
 SORT_ALIASES = {
     PINNED_MEMORY_SORT_NEWEST: PINNED_MEMORY_SORT_NEWEST,
     "id": "memory_id",
@@ -245,7 +259,7 @@ class PinnedMemoryService:
             parse_memory_timestamp(invalid_after_utc, timezone_name=tz_name) if invalid_after_utc else None
         )
         if bank == COREMEM_BANK:
-            row = self.repository.create_coremem(
+            write = self.repository.create_coremem(
                 team_id=scope["team_id"],
                 fact_text=fact_text,
                 capacity=self.coremem_capacity,
@@ -258,7 +272,7 @@ class PinnedMemoryService:
                 source_key=source_key,
             )
         else:
-            row = self.repository.create_usermem(
+            write = self.repository.create_usermem(
                 canonical_user_id=scope["canonical_user_id"],
                 fact_text=fact_text,
                 capacity=self.usermem_capacity,
@@ -270,8 +284,7 @@ class PinnedMemoryService:
                 actor=context.actor.payload(),
                 source_key=source_key,
             )
-        event = self._latest_event(bank=bank, scope=scope, memory_id=row.memory_id, event_type="create")
-        return self._result_with_fact(bank=bank, action="create", scope=scope, row=row, event_id=event.event_id if event else None)
+        return self._result_with_fact(bank=bank, action="create", scope=scope, row=write.fact, event_id=write.event_id)
 
     def replace(
         self,
@@ -289,12 +302,7 @@ class PinnedMemoryService:
     ) -> dict[str, Any]:
         self._ensure_write_allowed(bank=bank, action="replace")
         scope = self._resolve_scope(bank, context)
-        expected_updated_at_utc = self._expected_updated_at_utc(
-            bank=bank,
-            scope=scope,
-            memory_id=memory_id,
-            expected_record_digest=expected_record_digest,
-        )
+        expected_version = self._expected_version(bank=bank, action="replace", digest=expected_record_digest)
         tz_name = _resolve_timezone(timezone_name or context.request_timezone)
         parsed_valid_from_utc = parse_memory_timestamp(valid_from_utc, timezone_name=tz_name) if valid_from_utc else None
         parsed_invalid_after_utc = (
@@ -302,7 +310,7 @@ class PinnedMemoryService:
         )
         clear_invalid_after_utc = invalid_after_utc is not None and parsed_invalid_after_utc is None
         if bank == COREMEM_BANK:
-            row = self.repository.replace_coremem(
+            write = self.repository.replace_coremem(
                 team_id=scope["team_id"],
                 memory_id=memory_id,
                 fact_text=fact_text,
@@ -313,10 +321,10 @@ class PinnedMemoryService:
                 metadata=self._normalize_metadata(bank, metadata) if metadata is not None else None,
                 source=context.source.payload(),
                 actor=context.actor.payload(),
-                expected_updated_at_utc=expected_updated_at_utc,
+                expected_record_digest=expected_version,
             )
         else:
-            row = self.repository.replace_usermem(
+            write = self.repository.replace_usermem(
                 canonical_user_id=scope["canonical_user_id"],
                 memory_id=memory_id,
                 fact_text=fact_text,
@@ -327,12 +335,11 @@ class PinnedMemoryService:
                 metadata=self._normalize_metadata(bank, metadata) if metadata is not None else None,
                 source=context.source.payload(),
                 actor=context.actor.payload(),
-                expected_updated_at_utc=expected_updated_at_utc,
+                expected_record_digest=expected_version,
             )
-        if row is None:
+        if write is None:
             raise ValueError(f"{bank} #{memory_id} was not found.")
-        event = self._latest_event(bank=bank, scope=scope, memory_id=row.memory_id, event_type="replace")
-        return self._result_with_fact(bank=bank, action="replace", scope=scope, row=row, event_id=event.event_id if event else None)
+        return self._result_with_fact(bank=bank, action="replace", scope=scope, row=write.fact, event_id=write.event_id)
 
     def delete(
         self,
@@ -344,38 +351,32 @@ class PinnedMemoryService:
     ) -> dict[str, Any]:
         self._ensure_write_allowed(bank=bank, action="delete")
         scope = self._resolve_scope(bank, context)
-        expected_updated_at_utc = self._expected_updated_at_utc(
-            bank=bank,
-            scope=scope,
-            memory_id=memory_id,
-            expected_record_digest=expected_record_digest,
-        )
+        expected_version = self._expected_version(bank=bank, action="delete", digest=expected_record_digest)
         if bank == COREMEM_BANK:
-            deleted = self.repository.delete_coremem(
+            write = self.repository.delete_coremem(
                 team_id=scope["team_id"],
                 memory_id=memory_id,
                 source=context.source.payload(),
                 actor=context.actor.payload(),
-                expected_updated_at_utc=expected_updated_at_utc,
+                expected_record_digest=expected_version,
             )
         else:
-            deleted = self.repository.delete_usermem(
+            write = self.repository.delete_usermem(
                 canonical_user_id=scope["canonical_user_id"],
                 memory_id=memory_id,
                 source=context.source.payload(),
                 actor=context.actor.payload(),
-                expected_updated_at_utc=expected_updated_at_utc,
+                expected_record_digest=expected_version,
             )
-        if not deleted:
+        if write is None:
             raise ValueError(f"{bank} #{memory_id} was not found.")
-        event = self._latest_event(bank=bank, scope=scope, memory_id=memory_id, event_type="delete")
         return {
             "ok": True,
             "bank": bank,
             "action": "delete",
             "scope": scope,
             "memory_id": memory_id,
-            "event_id": event.event_id if event else None,
+            "event_id": write.event_id,
             "deleted": True,
             "message": f"{_bank_label(bank)} deleted: {bank} #{memory_id}",
         }
@@ -422,7 +423,7 @@ class PinnedMemoryService:
         return bank_capacity(self.config, USERMEM_BANK)
 
     def _ensure_write_allowed(self, *, bank: str, action: str) -> None:
-        if self.command_origin != "agent_tool":
+        if self.command_origin != AGENT_TOOL_COMMAND_ORIGIN:
             return
         if bank_agent_write_tools_enabled(self.config, bank):
             return
@@ -436,15 +437,6 @@ class PinnedMemoryService:
 
     def _normalize_metadata(self, bank: str, value: Optional[dict[str, Any]]) -> dict[str, Any]:
         return normalize_bank_metadata(self.config, bank, value)
-
-    def _latest_event(self, *, bank: str, scope: dict[str, str], memory_id: int, event_type: str):
-        return self.repository.get_latest_event(
-            bank=bank,
-            team_id=scope.get("team_id", ""),
-            canonical_user_id=scope.get("canonical_user_id", ""),
-            memory_id=memory_id,
-            event_type=event_type,
-        )
 
     @staticmethod
     def _result_with_fact(
@@ -483,36 +475,20 @@ class PinnedMemoryService:
             return self.repository.list_coremem(team_id=scope["team_id"], sort=sort)
         return self.repository.list_usermem(canonical_user_id=scope["canonical_user_id"], sort=sort)
 
-    def _expected_updated_at_utc(
-        self,
-        *,
-        bank: str,
-        scope: dict[str, str],
-        memory_id: int,
-        expected_record_digest: Optional[str],
-    ) -> Optional[str]:
-        digest = str(expected_record_digest or "").strip()
-        if not digest:
-            return None
-        row = next(
-            (
-                candidate
-                for candidate in self._list_rows(
-                    bank=bank,
-                    scope=scope,
-                    sort="memory_id",
-                )
-                if candidate.memory_id == int(memory_id)
-            ),
-            None,
-        )
-        if row is None:
-            raise ValueError(f"{bank} #{memory_id} was not found.")
-        if not hmac.compare_digest(pinned_memory_record_digest(row), digest):
-            raise PinnedMemoryConflictError(
-                f"{bank} #{memory_id} changed after it was loaded. Refresh and try again."
+    def _expected_version(self, *, bank: str, action: str, digest: Optional[str]) -> Optional[str]:
+        """The fact version a replace or delete is based on, which the repository checks in its write.
+
+        Agent tools must name one (module docstring). Checking it here with a
+        fresh read would not do: the repository compares it with the fact
+        inside the same write transaction that changes it.
+        """
+
+        version = str(digest or "").strip() or None
+        if version is None and self.command_origin == AGENT_TOOL_COMMAND_ORIGIN and action in _VERSIONED_ACTIONS:
+            raise ValueError(
+                f"{bank} {action} needs the record_digest of the fact as you read it; list {bank} to get it."
             )
-        return row.updated_at_utc
+        return version
 
 
 _CAPACITY_SETTING = {COREMEM_BANK: "max_facts_per_team", USERMEM_BANK: "max_facts_per_user"}
@@ -823,25 +799,6 @@ def pinned_memory_reply(result: dict[str, Any]) -> PinnedMemoryCommandResultPayl
 REPLY_FACT_FIELDS = tuple(PinnedMemoryFactPayload.model_fields)
 
 
-def pinned_memory_record_digest(row: PinnedMemoryFactRow) -> str:
-    """Bind a browser mutation to one exact active memory revision."""
-
-    return _pinned_memory_record_digest_values(asdict(row))
-
-
-def _pinned_memory_record_digest_values(row: dict[str, Any]) -> str:
-    return contract_sha256(
-        {
-            "bank": row.get("bank"),
-            "team_id": row.get("team_id"),
-            "canonical_user_id": row.get("canonical_user_id"),
-            "memory_id": row.get("memory_id"),
-            "fact_uuid": row.get("fact_uuid"),
-            "updated_at_utc": row.get("updated_at_utc"),
-        }
-    )
-
-
 def public_pinned_memory_fact_from_dict(row: dict[str, Any]) -> dict[str, Any]:
     """``public_pinned_memory_fact`` for a stored row the repository returned as a dict."""
 
@@ -858,7 +815,7 @@ def public_pinned_memory_fact_from_dict(row: dict[str, Any]) -> dict[str, Any]:
         source_key=row.get("source_key"),
         created_at_utc=row["created_at_utc"],
         updated_at_utc=row["updated_at_utc"],
-        record_digest=_pinned_memory_record_digest_values(row),
+        record_digest=pinned_memory_record_digest_values(row),
     )
 
 

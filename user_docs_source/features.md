@@ -114,6 +114,12 @@ and `/coremem list` the team's; `/help` lists their add, replace and delete
 forms, and the same rules apply as in Settings. You can also just ask the
 assistant "What do you remember about me?" or "Forget that".
 
+The assistant changes or deletes a memory only as it last read it. If the
+memory changed in the meantime, for example from another chat or in Settings,
+the assistant's change is refused and nothing changes; the assistant reads
+the memory again before it decides. In the same way, undoing a change works
+only while it is the memory's latest change.
+
 ### Knowledge base
 
 Agents keep a shared knowledge base: pages of how-tos, decisions, lessons and
