@@ -561,6 +561,9 @@ def test_a_failed_heartbeat_handover_stays_stopped_until_retry_and_restore_keeps
     worker.team_id = TEAM
     worker.is_team_lead = False
     worker.named_agent_type = "WebResearchAgent"
+    # UniversalAgent's generic admission harness resets the manager's team.
+    # Both sides must name the team that signed this scheduled run.
+    worker.task_manager.set_owner_identity(worker.id, worker.name, TEAM, worker.named_agent_type)
     worker._conversation_store = agent._conversation_store
     worker.paused = True
 

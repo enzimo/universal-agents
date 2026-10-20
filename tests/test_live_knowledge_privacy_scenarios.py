@@ -144,6 +144,7 @@ from model_providers.endpoints import (
     well_known_endpoint,
 )
 from storage.config import resolve_storage_settings
+from storage.change_ledger import ChangeRequestStore
 from storage.knowledge_repository import create_knowledge_repository
 from storage.pinned_memory_repository import SqlitePinnedMemoryRepository
 from tests.broker_access_support import context_signer
@@ -660,6 +661,13 @@ class StandIn:
                 user_id=person_id,
                 canonical_user_id=person_id,
                 task_context=signed,
+            )
+            # This model harness does not run task admission. Persist the
+            # request's admission before seeding pages or invoking its tools,
+            # as the real task snapshot transaction does in the runtime.
+            ChangeRequestStore(storage).open(
+                team_id=TEAM, request_id=signed.context.context_id,
+                person_id=person_id, now=datetime.now(timezone.utc),
             )
         self.meta = MessageMeta(
             conversation_id=f"conv_{self.id}", gateway_context=gateway_context
