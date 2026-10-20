@@ -39,7 +39,8 @@ def _save(config_path: Path, team: str, *, own_type: str | None = None, own: str
     data["llm"]["litellm_api_base"] = team
     if own_type:
         data.setdefault("agent_types", {}).setdefault(own_type, {})["llm"] = {"litellm_api_base": own}
-    GatewayInstanceConfig.model_validate(data).save(config_path)
+    # Revalidation creates a fresh model; retain the revision this fixture read.
+    GatewayInstanceConfig.model_validate(data).save(config_path, expected_revision=config.source_revision)
 
 
 def _agent(config_path: Path, *, agent_type: str = "GeneralAssistant", fail: bool = False) -> SimpleNamespace:
