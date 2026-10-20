@@ -402,6 +402,38 @@ schedule that runs often can still be paused. Before, saves replaced whole rows 
 which could bring back a deleted schedule, undo a pause, or make a run happen
 twice.
 
+The agent schedule tools bind their changes to the same digest
+(`custom_agents.schedule_changes`). `list_scheduled_jobs`, `create_scheduled_job`
+and every change that went through return each schedule's `record_digest`;
+`update_scheduled_job`, `pause_scheduled_job`, `resume_scheduled_job`,
+`disable_scheduled_job` and `remove_scheduled_job` require it back as
+`expected_record_digest`. The change is built only while the stored schedule
+still has that digest, and the store checks it again in its write transaction.
+A model that read a schedule before another request changed it gets
+`changed_since_read` (`custom_messages.enums.ChangeRefusal`) and reads it again,
+instead of overwriting the newer change; a change to a schedule the runtime
+manages is then refused before it is staged, and approvals keep their own
+digests and exact permits. Claims, the remaining count, a repeating schedule's
+next run time and the run notes are not in the digest, so scheduler runs never
+make a read stale. Before 2026-10-20 a tool change started from the schedule as
+it was when the call ran, and only a change racing that call was refused.
+
+A model's `schedule_message` turn action only creates a schedule. Its payload
+has no schedule id: the runtime names the new schedule before the turn-action
+outbox saves the action, and the outbox creates it with
+`ScheduleStore.add(create_only=True)`, which never changes a stored schedule
+(`schedule_installation.create_schedule_from_turn_action`). Running the saved action
+again after a restart finds its own schedule and creates no second one. Before,
+the action took a schedule id and replaced the stored schedule with that id,
+owner included, so one person's request (a worker's as well as the lead's)
+could overwrite another person's schedule. Existing schedules change only
+through the schedule tools above. Trusted installers keep the replace path: the
+gateway and InternalImprovementAgent send `ScheduledMessage` messages whose
+`install_mode` decides what happens to a stored schedule
+(`scheduled_runtime.handle_scheduled_message`), and runtime code (Objective work
+schedules, retries after provider limits, after-action review schedules, team
+transfer imports) calls the store directly.
+
 The comparison includes a one-time reminder's due time and the run-note policy,
 so a stale reschedule or notification edit is refused too. Explicitly moving a
 repeating run requires its next time to remain unchanged since the read; other

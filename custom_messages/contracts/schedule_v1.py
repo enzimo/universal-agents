@@ -287,6 +287,12 @@ class ScheduleTaskMemory(BaseModel):
     )
 
 
+def new_schedule_id() -> str:
+    """The id of a new schedule. Trusted code names every new schedule; a model never does."""
+
+    return new_id("sched")
+
+
 class ScheduledMessage(BaseModel):
     """
     A scheduled message that fires on this agent at a specified time, once or on a recurring basis.
@@ -313,7 +319,7 @@ class ScheduledMessage(BaseModel):
     """
 
     schedule_id: str = Field(
-        default_factory=lambda: new_id("sched"),
+        default_factory=new_schedule_id,
         description="Unique identifier for this schedule.",
     )
     message_class: Literal["ScheduledMessage"] = Field(

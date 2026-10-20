@@ -43,9 +43,7 @@ from custom_agents.memory_review_runtime import (
     memory_review_schedule_kind,
     memory_review_notification_instruction,
 )
-from custom_agents.schedule_conversation_context import (
-    ensure_dedicated_schedule_conversation,
-)
+from custom_agents.schedule_installation import prepare_install
 from custom_agents.stuck_schedules import report_stuck_schedules
 from custom_agents.stuck_tasks import report_stuck_tasks
 from custom_agents.liveness_observation import MAX_SCHEDULER_SLEEP_SECONDS, observe_liveness
@@ -61,8 +59,6 @@ from custom_agents.schedule_store import (
     ScheduleClaimScope,
     compute_next_fire_at,
     owner_canonical_user_id_for_schedule,
-    prepare_schedule_for_add,
-    schedule_claim_scope_for_agent,
     schedule_stopped_reason,
 )
 from custom_agents.schedule_management import (
@@ -499,60 +495,6 @@ async def _coalesce_scheduled_fire_if_active(
     return True
 
 
-async def _preserve_inbound_routing(
-    agent: Any,
-    schedule_msg: ScheduledMessage,
-    msg_header: Optional[MessageHeader],
-    msg_meta: Optional[MessageMeta],
-) -> None:
-    """Keep the inbound header and metadata when the schedule omitted its own (recorded as a repair)."""
-
-    repair_recorder = getattr(agent, "_record_runtime_repair_anomaly", None)
-    related_task_id = getattr(schedule_msg.payload, "task_id", None) or getattr(
-        schedule_msg.payload, "parent_task_id", None
-    )
-    if schedule_msg.payload_header is None and msg_header is not None:
-        agent._logger.warning(
-            f"[{agent.id}] ScheduledMessage {schedule_msg.schedule_id} omitted payload_header; "
-            "preserving the inbound header at runtime."
-        )
-        if repair_recorder is not None:
-            await repair_recorder(
-                "scheduled_message_payload_header_preserved",
-                "ScheduledMessage omitted payload_header; runtime preserved the inbound header.",
-                related_task_id=related_task_id,
-                details={
-                    "schedule_id": schedule_msg.schedule_id,
-                    "schedule_name": schedule_msg.schedule_name,
-                    "payload_type": type(schedule_msg.payload).__name__,
-                    "from_agent_id": msg_header.from_agent_id,
-                    "response_routing_key": msg_header.response_routing_key,
-                },
-            )
-        schedule_msg.payload_header = msg_header.model_copy(deep=True)
-    if schedule_msg.payload_meta is None and msg_meta is not None:
-        agent._logger.warning(
-            f"[{agent.id}] ScheduledMessage {schedule_msg.schedule_id} omitted payload_meta; "
-            "preserving the inbound metadata at runtime."
-        )
-        if repair_recorder is not None:
-            await repair_recorder(
-                "scheduled_message_payload_meta_preserved",
-                "ScheduledMessage omitted payload_meta; runtime preserved the inbound metadata.",
-                related_task_id=related_task_id,
-                details={
-                    "schedule_id": schedule_msg.schedule_id,
-                    "schedule_name": schedule_msg.schedule_name,
-                    "payload_type": type(schedule_msg.payload).__name__,
-                    "correlation_id": getattr(msg_meta, "msg_correlation_id", None),
-                    "conversation_id": getattr(msg_meta, "conversation_id", None),
-                },
-            )
-        normalized_meta = msg_meta.model_copy(deep=True)
-        normalized_meta.requester_type = RequesterType.TIMER_REQUESTER
-        schedule_msg.payload_meta = normalized_meta
-
-
 async def _store_ensure(agent: Any, schedule_msg: ScheduledMessage, claim_scope: ScheduleClaimScope) -> None:
     """Insert the schedule only when absent; a stored one keeps all of its state."""
 
@@ -624,6 +566,13 @@ async def handle_scheduled_message(
     msg_header: Optional[MessageHeader] = None,
     msg_meta: Optional[MessageMeta] = None,
 ) -> None:
+    """Install a schedule another runtime process sent (the gateway, InternalImprovementAgent).
+
+    Its ``install_mode`` decides what happens to a stored schedule with the
+    same id. A model's ``schedule_message`` action never comes here; it only
+    creates (``schedule_installation.create_schedule_from_turn_action``).
+    """
+
     if msg.install_mode == "refresh":
         # Only the person and session of an existing runtime-managed schedule
         # change; nothing is installed (custom_agents.schedule_context_refresh).
@@ -631,30 +580,14 @@ async def handle_scheduled_message(
             partial(refresh_schedule_gateway_context, agent), msg.model_copy(deep=True)
         )
         return
-    schedule_msg = msg.model_copy(deep=True)
-    if is_internal_improvement_schedule_name(schedule_msg.schedule_name):
-        schedule_msg = prepare_internal_improvement_schedule_for_manager(
-            agent, schedule_msg
-        )
-        if schedule_msg is None:
+    if is_internal_improvement_schedule_name(msg.schedule_name):
+        # Only TeamArchitect installs this reserved schedule, exactly as
+        # InternalImprovementAgent asks for it (logged when refused).
+        reserved = prepare_internal_improvement_schedule_for_manager(agent, msg)
+        if reserved is None:
             return
-    await _preserve_inbound_routing(agent, schedule_msg, msg_header, msg_meta)
-    schedule_msg, schedule_conversation = ensure_dedicated_schedule_conversation(
-        agent,
-        schedule_msg,
-        source_header=msg_header,
-        source_meta=msg_meta,
-    )
-    if schedule_conversation:
-        agent._logger.info(
-            "[%s] Forked recurring schedule %s into dedicated conversation %s seeded by %s.",
-            agent.id,
-            schedule_msg.schedule_id,
-            schedule_conversation.get("conversation_id"),
-            schedule_conversation.get("seed_task_id"),
-        )
-    claim_scope = schedule_claim_scope_for_agent(agent)
-    prepare_schedule_for_add(schedule_msg, **claim_scope, default_cron_timezone=getattr(agent, "instance_timezone", None))
+        msg = reserved
+    schedule_msg, claim_scope = await prepare_install(agent, msg, msg_header, msg_meta)
     if schedule_msg.install_mode == "ensure":
         await _store_ensure(agent, schedule_msg, claim_scope)
     else:

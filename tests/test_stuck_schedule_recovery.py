@@ -31,6 +31,7 @@ from custom_agents.schedule_execution_digest_upgrade import (
     upgrade_execution_digests,
 )
 from custom_agents.schedule_execution_identity import execution_digest
+from custom_agents.schedule_store import schedule_record_digest
 from custom_agents.schedule_repair_guidance import (
     LAUNCH_LIVENESS_UNKNOWN,
     SCHEDULE_EXECUTION_CHANGED,
@@ -152,7 +153,10 @@ def test_owners_own_edit_moves_the_worker_policy_along(lead, caplog):
     configure(lead)
     store = lead._schedule_store
     request = ScheduleChangeRequestV1(
-        schedule_id="job", action="update", update=ScheduleUpdateV1(instruction="Read the weekly report")
+        schedule_id="job",
+        expected_record_digest=schedule_record_digest(store.get_scheduled_message("job")),
+        action="update",
+        update=ScheduleUpdateV1(instruction="Read the weekly report"),
     )
     with caplog.at_level(logging.INFO):
         prepare_schedule_change(store, request, person_id="owner").commit(None)

@@ -26,7 +26,7 @@ from custom_tools.providers.schedules import disable_scheduled_job, pause_schedu
 from custom_tools.runtime_context import set_agent_ref
 from tests.change_approval_support import needs_cedar, owner, use_signed_contexts
 from tests.test_changes_first_executor import CALLS, DenyCall, ScriptedModel, not_run, read_note, step_results
-from tests.test_system_schedule_changes import _lead, _schedule, _stored
+from tests.test_system_schedule_changes import _lead, _schedule, _stored, _version
 
 
 @pytest.mark.parametrize(
@@ -85,14 +85,17 @@ def test_a_real_system_schedule_approval_skips_calls_that_stay_skipped_on_resume
     _schedule(lead, "hb_sched_team", system=True)
     _schedule(lead, "sched_personal")
     set_agent_ref(lead)
-    staged = json.loads(pause_scheduled_job("hb_sched_team", duration_minutes=30))
+    staged = json.loads(pause_scheduled_job("hb_sched_team", _version(lead, "hb_sched_team"), duration_minutes=30))
     assert staged["status"] == "approval_required"
     agent = Agent(
         model=ScriptedModel(
             [
                 ("read_note", {}),
                 ("apply_change", {"change_id": staged["change_id"], "reason": "Pause for maintenance."}),
-                ("disable_scheduled_job", {"schedule_id": "sched_personal"}),
+                (
+                    "disable_scheduled_job",
+                    {"schedule_id": "sched_personal", "expected_record_digest": _version(lead, "sched_personal")},
+                ),
             ]
         ),
         tools=[read_note, apply_change, disable_scheduled_job],

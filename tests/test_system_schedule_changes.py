@@ -29,7 +29,7 @@ from custom_agents.schedule_management import (
     ScheduleMutationOperation,
     build_schedule_mutation_permit,
 )
-from custom_agents.schedule_store import AdvanceOutcome, ScheduleStore
+from custom_agents.schedule_store import AdvanceOutcome, ScheduleStore, schedule_record_digest
 from custom_messages.contracts.access_v2 import AccessRequestKind, AccessRequestStatus, AccessReviewChoice
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
@@ -124,6 +124,12 @@ def _stored(agent: Any, schedule_id: str) -> ScheduledMessage | None:
     return agent._schedule_store.get_scheduled_message(schedule_id)
 
 
+def _version(agent: Any, schedule_id: str) -> str:
+    """The schedule's record_digest as the agent read it (list_scheduled_jobs)."""
+
+    return schedule_record_digest(_stored(agent, schedule_id))
+
+
 @needs_cedar
 def test_owner_pauses_and_resumes_own_schedule_without_a_permit(tmp_path: Path, caplog) -> None:
     lead = _lead(tmp_path, authorization_enabled=True)
@@ -131,10 +137,10 @@ def test_owner_pauses_and_resumes_own_schedule_without_a_permit(tmp_path: Path, 
     _schedule(lead, "sched_bob", owner=OTHER_PERSON)
 
     with caplog.at_level(logging.INFO):
-        paused = _call(lead, pause_scheduled_job, "sched_own", duration_minutes=30)
-        resumed = _call(lead, resume_scheduled_job, "sched_own")
-        foreign = _call(lead, pause_scheduled_job, "sched_bob", duration_minutes=30)
-        foreign_removal = _call(lead, remove_scheduled_job, "sched_bob")
+        paused = _call(lead, pause_scheduled_job, "sched_own", _version(lead, "sched_own"), duration_minutes=30)
+        resumed = _call(lead, resume_scheduled_job, "sched_own", _version(lead, "sched_own"))
+        foreign = _call(lead, pause_scheduled_job, "sched_bob", _version(lead, "sched_bob"), duration_minutes=30)
+        foreign_removal = _call(lead, remove_scheduled_job, "sched_bob", _version(lead, "sched_bob"))
 
     assert paused["paused"] is True and "status" not in paused
     assert resumed["resumed"] is True
@@ -145,7 +151,7 @@ def test_owner_pauses_and_resumes_own_schedule_without_a_permit(tmp_path: Path, 
     assert _stored(lead, "sched_bob").paused_until is None
     # A change that was not made is a failed result (custom_tools.tool_results).
     set_agent_ref(lead)
-    assert pause_scheduled_job("sched_bob", duration_minutes=30)["status"] == "error"
+    assert pause_scheduled_job("sched_bob", _version(lead, "sched_bob"), duration_minutes=30)["status"] == "error"
     # A person's own schedule needs no permit, so no protected change was permitted.
     assert PERMITTED not in caplog.text
     assert "authority_mode=owner" in caplog.text
@@ -158,7 +164,7 @@ def test_system_schedule_change_waits_for_a_person_then_applies_once(tmp_path: P
     until = (datetime.now(timezone.utc) + timedelta(hours=2)).replace(microsecond=0).isoformat()
 
     set_agent_ref(lead)
-    raw = pause_scheduled_job("hb_sched_team", until_iso=until)
+    raw = pause_scheduled_job("hb_sched_team", _version(lead, "hb_sched_team"), until_iso=until)
     staged = tool_json(raw)
 
     # Staged for a person's approval is not a failure: the tool did what it does.
@@ -205,7 +211,7 @@ def test_a_run_between_staging_and_approval_does_not_make_the_change_stale(tmp_p
 
     lead = _lead(tmp_path, authorization_enabled=True)
     _schedule(lead, "hb_sched_ran", system=True)
-    staged = _call(lead, disable_scheduled_job, "hb_sched_ran")
+    staged = _call(lead, disable_scheduled_job, "hb_sched_ran", _version(lead, "hb_sched_ran"))
     assert staged["status"] == "approval_required"
 
     # The scheduler runs the schedule, which moves its next run time.
@@ -226,7 +232,7 @@ def test_system_schedule_whose_settings_changed_after_staging_is_refused_before_
     lead = _lead(tmp_path, authorization_enabled=True)
     schedule = _schedule(lead, "hb_sched_moved", system=True)
     until = (datetime.now(timezone.utc) + timedelta(hours=2)).replace(microsecond=0).isoformat()
-    staged = _call(lead, pause_scheduled_job, "hb_sched_moved", until_iso=until)
+    staged = _call(lead, pause_scheduled_job, "hb_sched_moved", _version(lead, "hb_sched_moved"), until_iso=until)
     assert staged["status"] == "approval_required"
 
     # Trusted runtime code disables the schedule meanwhile: a real settings change.
@@ -253,10 +259,41 @@ def test_system_schedule_whose_settings_changed_after_staging_is_refused_before_
 
 
 @needs_cedar
+def test_a_system_schedule_change_based_on_an_old_read_is_never_staged(tmp_path: Path) -> None:
+    """A model that read the schedule before its settings changed gets changed_since_read, and no plan."""
+
+    lead = _lead(tmp_path, authorization_enabled=True)
+    schedule = _schedule(lead, "hb_sched_read", system=True)
+    read = _version(lead, "hb_sched_read")
+    disabled = schedule.model_copy(deep=True)
+    disabled.enabled = False
+    permit = build_schedule_mutation_permit(
+        schedule=_stored(lead, "hb_sched_read"),
+        operation=ScheduleMutationOperation.DISABLE,
+        authority_mode=ScheduleMutationAuthorityMode.TRUSTED_RUNTIME,
+        actor_principal_id="runtime",
+        owner_canonical_user_id=PERSON,
+        team_id=TEAM,
+        candidate=disabled,
+    )
+    assert lead._schedule_store.set_enabled("hb_sched_read", False, system_mutation_permit=permit)
+
+    set_agent_ref(lead)
+    raw = resume_scheduled_job("hb_sched_read", read)
+    refused = tool_json(raw)
+
+    assert raw["status"] == "error"
+    assert refused["reason_code"] == "changed_since_read" and "change_id" not in refused
+    plans = tmp_path / "instance" / "runtime" / "system_schedule_change_plans"
+    assert not plans.exists() or not any(plans.iterdir())
+    assert _stored(lead, "hb_sched_read").enabled is False
+
+
+@needs_cedar
 def test_denied_system_schedule_change_is_not_applied(tmp_path: Path) -> None:
     lead = _lead(tmp_path, authorization_enabled=True)
     _schedule(lead, "hb_sched_keep", system=True)
-    staged = _call(lead, remove_scheduled_job, "hb_sched_keep")
+    staged = _call(lead, remove_scheduled_job, "hb_sched_keep", _version(lead, "hb_sched_keep"))
 
     call = ToolCall()
     with pytest.raises(InterruptException):
@@ -276,7 +313,7 @@ def test_authorization_off_applies_system_schedule_change_with_agreement(tmp_pat
     lead = _lead(tmp_path, authorization_enabled=False)
     _schedule(lead, "hb_sched_off", system=True)
 
-    staged = _call(lead, update_scheduled_job, "hb_sched_off", interval_seconds=120)
+    staged = _call(lead, update_scheduled_job, "hb_sched_off", _version(lead, "hb_sched_off"), interval_seconds=120)
     assert staged["status"] == "approval_required"
     assert "confirmed=true" in staged["next_step"]
 
@@ -310,7 +347,7 @@ def test_authorization_off_applies_system_schedule_change_with_agreement(tmp_pat
 def test_system_schedule_plan_belongs_to_the_task_that_staged_it(tmp_path: Path) -> None:
     lead = _lead(tmp_path, authorization_enabled=False)
     _schedule(lead, "hb_sched_task", system=True)
-    staged = _call(lead, resume_scheduled_job, "hb_sched_task")
+    staged = _call(lead, resume_scheduled_job, "hb_sched_task", _version(lead, "hb_sched_task"))
 
     lead.task_manager.current_task_id = "another_task"
     refused = run_apply_change(lead, staged["change_id"], confirmed=True)

@@ -216,7 +216,17 @@ are never changed at once: updating, pausing, resuming, turning off or removing
 one returns `approval_required` with a `change_id`. Explain the exact change, then
 call `apply_change(change_id, reason)`; a person approves it in the Inbox (with
 authorization off, get the person's agreement and pass `confirmed=true`). If the
-schedule changed or ran before approval, the change is refused; stage it again.
+schedule's settings changed before approval, the change is refused; stage it
+again (its regular runs do not count).
+
+Change a schedule only from what you read. Pass its `record_digest` (from
+`list_scheduled_jobs`, `create_scheduled_job` or your last change to it) as
+`expected_record_digest` to `update_scheduled_job`, `pause_scheduled_job`,
+`resume_scheduled_job`, `disable_scheduled_job` or `remove_scheduled_job`.
+`changed_since_read` means someone changed it after you read it, often another
+of the person's requests: read it again, decide again from what it says now,
+and tell the person when their request no longer fits. The `schedule_message`
+action only creates new schedules; it never changes an existing one.
 
 Memory-review timers target MemReviewAgent directly and use the local scheduler.
 Do not forward these scheduled payloads over NATS. Old timers targeting you require

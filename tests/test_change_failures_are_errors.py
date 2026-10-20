@@ -52,6 +52,9 @@ from custom_tools.providers.schedules import (
 )
 from custom_tools.runtime_context import set_agent_ref
 
+# A schedule version as list_scheduled_jobs returns it (record_digest).
+SCHEDULE_VERSION = "0" * 64
+
 CHANGES: list[tuple[Any, dict[str, Any]]] = [
     (memory, {"action": "create", "bank": "coremem", "fact_text": "Ships on Fridays."}),
     (memory, {"action": "replace", "bank": "coremem", "memory_id": 1, "fact_text": "Ships on Mondays."}),
@@ -83,11 +86,11 @@ CHANGES: list[tuple[Any, dict[str, Any]]] = [
     (objective_work_sessions, {"action": "start", "objective_id": "obj_1"}),
     (objective_work_profiles, {"action": "apply", "proposal_id": "p_1", "proposal_digest": "d", "confirmation_summary": "Yes."}),
     (create_scheduled_job, {"instruction": "Check the build.", "interval_seconds": 3600}),
-    (update_scheduled_job, {"schedule_id": "sched_1", "interval_seconds": 60}),
-    (remove_scheduled_job, {"schedule_id": "sched_1"}),
-    (disable_scheduled_job, {"schedule_id": "sched_1"}),
-    (resume_scheduled_job, {"schedule_id": "sched_1"}),
-    (pause_scheduled_job, {"schedule_id": "sched_1", "duration_minutes": 30}),
+    (update_scheduled_job, {"schedule_id": "sched_1", "expected_record_digest": SCHEDULE_VERSION, "interval_seconds": 60}),
+    (remove_scheduled_job, {"schedule_id": "sched_1", "expected_record_digest": SCHEDULE_VERSION}),
+    (disable_scheduled_job, {"schedule_id": "sched_1", "expected_record_digest": SCHEDULE_VERSION}),
+    (resume_scheduled_job, {"schedule_id": "sched_1", "expected_record_digest": SCHEDULE_VERSION}),
+    (pause_scheduled_job, {"schedule_id": "sched_1", "expected_record_digest": SCHEDULE_VERSION, "duration_minutes": 30}),
     (configure_scheduled_worker, {"schedule_id": "sched_1", "target_agent_type": "Worker", "expected_revision": 0}),
 ]
 

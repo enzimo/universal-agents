@@ -18,9 +18,11 @@ runs a schedule). The access hook has already decided the tool call
   and trusted code issues the store's exact permit in the approval's mode
   (``person_approval``, or ``agreement`` with authorization off).
 
-A plan binds the schedule, the operation, the digests, the exact request and
-candidate, and the agent, person and task that staged it; it expires after 24
-hours and applies once (a receipt records it). A schedule whose reviewed state changed
+A plan binds the schedule, the operation, the digests, the exact request
+(with the version of the schedule the model read, ``expected_record_digest``)
+and candidate, and the agent, person and task that staged it; it expires after 24
+hours and applies once (a receipt records it). A change based on an older
+version than the stored one is refused before anything is staged. A schedule whose reviewed state changed
 after staging is refused before review and again when applying, and the agent
 stages the change again. A run that only moved the next run time does not
 count: the approval binds what the person reviewed, and the store permit is
@@ -66,6 +68,7 @@ from custom_agents.schedule_management import (
     build_schedule_mutation_permit,
     effective_system_schedule_kind,
 )
+from custom_agents.schedule_store import ScheduleWriteConflict
 from custom_messages.contracts.access_v2 import ChangeApprovalMode, ChangeProposalV1, summary_line
 from custom_messages.contracts.common_v1 import utc_now
 from custom_messages.contracts.runtime_v1 import (
@@ -359,7 +362,9 @@ class SystemScheduleChangeService:
             )
         except ScheduleNotFound as exc:
             raise PermissionError("The schedule no longer exists. Nothing to change.") from exc
-        except NoScheduleChange as exc:
+        except (NoScheduleChange, ScheduleWriteConflict) as exc:
+            # A schedule that is no longer the version the model read when it
+            # staged the change is a stale plan, as the digest check below says.
             raise PermissionError(_STALE) from exc
 
     def _verify_current(self, plan: SystemScheduleChangePlan) -> None:

@@ -15,7 +15,8 @@ reminder so that it could never finish. Now:
 - ``add`` installs a schedule: it creates the row, or replaces the definition
   of an existing one for installers that hold that authority (gateway
   installs, Objective work schedules). It keeps the claim, and the remaining
-  count unless the repeat count changed.
+  count unless the repeat count changed. With ``create_only`` (a model's
+  ``schedule_message`` action) it only creates and never changes a stored row.
 - ``update`` saves a change made to a copy read earlier. It is refused when
   the schedule is gone or another change reached it meanwhile
   (``ScheduleWriteConflict``), and it keeps the next run time, the remaining
@@ -50,7 +51,7 @@ from custom_agents.schedule_management import (
     schedule_control_state_digest,
     schedule_reviewed_state_digest,
 )
-from custom_messages.enums import ScheduleManagementClass
+from custom_messages.enums import ChangeRefusal, ScheduleManagementClass
 from custom_messages.contracts.routing_v1 import PERSON_GATEWAY_FIELDS
 from default_values import STORAGE_DEFAULTS
 from id_generation import new_id
@@ -64,7 +65,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Why a schedule write was refused (``ScheduleWriteConflict.reason_code``).
-SCHEDULE_CHANGED = "schedule_changed"
+# A schedule that changed since the caller read it uses the shared name for a
+# stale read (``ChangeRefusal``), as other stores do.
+SCHEDULE_CHANGED = ChangeRefusal.CHANGED_SINCE_READ.value
 SCHEDULE_GONE = "schedule_not_found"
 SCHEDULE_OWNER_CHANGED = "schedule_owner_changed"
 
@@ -609,15 +612,32 @@ def _after_run(row: Mapping[str, Any], previous_due: Optional[str], now: datetim
     return _AfterRun(next_fire, remaining, "advanced")
 
 
+def schedule_changed_since_read(schedule_id: str) -> ScheduleWriteConflict:
+    """The refusal for a change based on a version of the schedule that is no longer current."""
+
+    return ScheduleWriteConflict(
+        SCHEDULE_CHANGED,
+        schedule_id,
+        f"Schedule {schedule_id} changed after it was read; nothing was changed. "
+        "Read it again with list_scheduled_jobs and decide again from what it says now.",
+    )
+
+
 def _require_record_digest(current: "ScheduledMessage", expected: Optional[str]) -> None:
-    """A person's change applies only to the schedule they saw listed (``schedule_record_digest``)."""
+    """A change applies only to the version of the schedule the caller read (``schedule_record_digest``).
+
+    People's controls in the gateway and the agent schedule tools pass the
+    version they listed; trusted callers that pass none are not checked.
+    """
 
     if expected and schedule_record_digest(current) != expected:
-        raise ScheduleWriteConflict(
-            SCHEDULE_CHANGED,
-            current.schedule_id,
-            f"Schedule {current.schedule_id} changed after it was listed; nothing was changed.",
-        )
+        raise schedule_changed_since_read(current.schedule_id)
+
+
+# What ``ScheduleStore.add`` did (its return value and log).
+SCHEDULE_INSTALLED = "installed"
+SCHEDULE_REPLACED = "replaced"
+SCHEDULE_KEPT = "kept"  # create_only found a stored schedule with the id and left it as it is
 
 
 # A person set a new run time for a one-time schedule while its run was under way.
@@ -696,7 +716,8 @@ class ScheduleStore:
         ),
         system_mutation_request_binding: Optional[dict[str, Any]] = None,
         deferred_message: DeferredMessageClaim | None = None,
-    ) -> None:
+        create_only: bool = False,
+    ) -> str:
         """Install a schedule: create it, or replace the stored definition of one with its id.
 
         For installers that own the whole definition (a new schedule, the
@@ -706,6 +727,13 @@ class ScheduleStore:
         read earlier goes through ``update`` instead, which never recreates a
         deleted schedule. A stored system-managed schedule needs the exact
         permit, checked in the same transaction as the write.
+
+        ``create_only`` creates the schedule or, when one with the id is
+        stored, leaves it exactly as it is (``SCHEDULE_KEPT``). A model's
+        ``schedule_message`` action uses it: the action may create a schedule
+        but never replace one (``schedule_installation.create_schedule_from_turn_action``).
+        Returns what was done: ``SCHEDULE_INSTALLED``, ``SCHEDULE_REPLACED``
+        or ``SCHEDULE_KEPT``.
         """
 
         prepare_schedule_for_add(
@@ -719,7 +747,9 @@ class ScheduleStore:
         def decide(row: Optional[dict[str, Any]]) -> RowWrite:
             if row is None:
                 remaining = msg.repeat_count if remaining_count_override is _UNSET_REMAINING_COUNT else remaining_count_override
-                return RowWrite(columns=_definition_columns(msg, remaining_count=remaining), insert=True, result="installed")
+                return RowWrite(columns=_definition_columns(msg, remaining_count=remaining), insert=True, result=SCHEDULE_INSTALLED)
+            if create_only:
+                return RowWrite(result=SCHEDULE_KEPT)
             current = _row_message(row, self._logger)
             self._require_replace_authority(
                 current,
@@ -734,7 +764,7 @@ class ScheduleStore:
                 remaining = msg.repeat_count
             else:
                 remaining = row.get("remaining_count")
-            return RowWrite(columns=_definition_columns(msg, remaining_count=remaining), result="replaced")
+            return RowWrite(columns=_definition_columns(msg, remaining_count=remaining), result=SCHEDULE_REPLACED)
 
         try:
             write = self._repository.write_locked(
@@ -745,9 +775,11 @@ class ScheduleStore:
         except Exception as e:
             self._logger.error(f"Failed to add schedule {msg.schedule_id}: {e}")
             raise
+        outcome: str = write.result
         self._logger.info(
-            "Schedule %s %s, next fire at %s", msg.schedule_id, write.result, msg.next_fire_at
+            "Schedule %s %s, next fire at %s", msg.schedule_id, outcome, msg.next_fire_at
         )
+        return outcome
 
     @staticmethod
     def _require_replace_authority(
@@ -817,11 +849,7 @@ class ScheduleStore:
             if schedule_reviewed_state_digest(current) != schedule_reviewed_state_digest(base) or (
                 _next_run_changed(candidate, base) and current.next_fire_at != base.next_fire_at
             ):
-                raise ScheduleWriteConflict(
-                    SCHEDULE_CHANGED,
-                    schedule_id,
-                    f"Schedule {schedule_id} was changed by someone else after it was read; read it again and retry.",
-                )
+                raise schedule_changed_since_read(schedule_id)
             self._require_replace_authority(
                 current,
                 candidate,

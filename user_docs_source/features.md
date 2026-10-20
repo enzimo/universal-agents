@@ -705,8 +705,12 @@ runtime manages, such as the heartbeat launcher or memory-review maintenance,
 it stages the exact change and a team administrator approves it in the Inbox
 before it happens (with authorization off, you agree in the conversation).
 The approval covers only that change to that schedule as it was when staged;
-if the schedule runs or changes first, the agent stages it again. Your own
-reminders change at once, and only you and agents working for you see them.
+if the schedule's settings change first, the agent stages it again (its regular
+runs do not count). Your own reminders change at once, and only you and agents
+working for you see them. An agent changes a schedule only as it last read it:
+if another of your requests changed the schedule meanwhile, nothing is changed
+and the agent reads it again first. See
+[How agents create and change schedules](scheduled-workers.md#how-agents-create-and-change-schedules).
 Pausing or cancelling an Objective does not provide an indirect bypass: its
 lifecycle cascade skips linked system schedules. See
 [Schedules the runtime manages](scheduled-workers.md#schedules-the-runtime-manages).

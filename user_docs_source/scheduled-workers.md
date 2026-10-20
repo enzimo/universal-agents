@@ -661,6 +661,25 @@ their policy is staged and applied only after a person approves the exact change
 (see [Schedules the runtime manages](#schedules-the-runtime-manages)). Other
 protected system timers keep their purpose-specific workflows.
 
+## How agents create and change schedules
+
+- An agent creates a schedule with `create_scheduled_job` or with the
+  `schedule_message` action of its answer. The action only creates a new
+  schedule. It cannot name or replace an existing one, so one person's request
+  can never overwrite another person's schedule this way.
+- To change a schedule, the agent sends back the `record_digest` it last read
+  (from `list_scheduled_jobs`, `create_scheduled_job` or its last change to the
+  schedule) as `expected_record_digest`. This applies to `update_scheduled_job`,
+  `pause_scheduled_job`, `resume_scheduled_job`, `disable_scheduled_job` and
+  `remove_scheduled_job`.
+- If the schedule changed in the meantime, for example because another of your
+  requests edited or paused it, nothing is changed. The agent gets
+  `changed_since_read`, reads the schedule again and decides again from what it
+  says now. A change it bases on an old read can no longer undo a newer one.
+- Regular runs do not count as a change: run notes, claims, the next run time of
+  a repeating schedule and the number of runs left. A one-time reminder's time
+  does count, because only people set it.
+
 ## Schedules the runtime manages
 
 Some schedules belong to the runtime rather than to a person's request: memory

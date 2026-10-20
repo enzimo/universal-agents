@@ -55,7 +55,9 @@ the runtime manages is staged and needs a person's approval (see below).
 
 When creating a schedule with the structured `schedule_message` action, follow
 it with `task_response` confirming the saved schedule, or an action that waits
-for a result. A schedule alone cannot finish the person's current request.
+for a result. A schedule alone cannot finish the person's current request. The
+action only creates a new schedule and takes no schedule id; change an existing
+schedule with the schedule tools (below).
 
 A saved change can succeed with warnings when task history, reporting or a
 scheduler wake fails afterward. Keep the returned schedule or heartbeat id;
@@ -1059,6 +1061,13 @@ access to `fn:schedules`; when a call is refused with `access_denied`, call
 `request_access` with the `tool_id` and `level` it names. Another person's
 schedule is reported as not found.
 
+Every change names the version of the schedule you read: pass the schedule's
+`record_digest` as `expected_record_digest`. `list_scheduled_jobs` shows it for
+each schedule, and `create_scheduled_job` and every change that went through
+return the new one; use that for your next change instead of the old one. Read
+the schedule in this task before changing it, and never invent or reuse a
+digest from another schedule.
+
 - **The person's own schedule** changes at once.
 - **A schedule the runtime manages** (memory review, heartbeat, Objective work
   sessions, other system timers) returns `status="approval_required"` with a
@@ -1066,12 +1075,16 @@ schedule is reported as not found.
   then call `apply_change(change_id, reason)`: a person approves it in the Inbox
   and your call resumes with the result. With authorization off, get the
   person's agreement and pass `confirmed=true`. A refused change ("the schedule
-  changed after this change was staged", for example because it ran) needs a
-  fresh call of the same tool; never retry the old `change_id`.
-- **A change refused with `reason_code` `schedule_changed` or
-  `schedule_not_found`** means someone paused, turned off, changed or deleted
-  the schedule after it was read. Nothing was saved. List it again, tell the
-  person what is different, and repeat the change only if they still want it.
+  changed after this change was staged", because someone changed its settings)
+  needs a fresh read and a fresh call of the same tool; never retry the old
+  `change_id`.
+- **A change refused with `reason_code` `changed_since_read` or
+  `schedule_not_found`** means someone (often another of the person's
+  requests) paused, turned off, changed or deleted the schedule after you read
+  it. Nothing was saved. List it again, decide again from what it says now,
+  tell the person what is different, and repeat the change with the new
+  `record_digest` only if they still want it. A schedule that changed in this
+  way is never staged for approval either.
   A run's own notes and automatic run times do not invalidate unrelated edits.
   When explicitly setting a next run time, a changed run time needs a fresh
   read too. A newer reminder time, schedule kind or notification setting
