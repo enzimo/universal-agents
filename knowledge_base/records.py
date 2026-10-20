@@ -40,6 +40,9 @@ class KnowledgeActor:
     task_id: str = ""
     work_id: str = ""
     request_id: str = ""
+    # The operator's switch (agent.request_conflict_checks): False records the
+    # write without checking it against the person's other requests.
+    conflict_checks: bool = True
 
     @property
     def is_agent(self) -> bool:

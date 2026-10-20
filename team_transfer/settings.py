@@ -89,7 +89,8 @@ class SettingsSection:
     # 3: gateway.users.new_people_use_team_model_keys left the configuration.
     # 4: agent.knowledge (the knowledge base's limits and blocked patterns) joined it.
     # 5: agent.max_concurrent_top_level_tasks was removed; values above 1 never had an effect.
-    schema_version: ClassVar[int] = 5
+    # 6: agent.request_conflict_checks (checks between a person's separate requests) joined it.
+    schema_version: ClassVar[int] = 6
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -666,9 +667,7 @@ __all__ = [
 ]
 
 
-# V5 removes agent.max_concurrent_top_level_tasks. V4 records (v0.9.2 to v0.9.4) keep
-# the same shape, so the step passes them on unchanged: a carried record for
-# the removed setting is then refused and listed by the import
-# (``_kept_by_loader``: "this version has no such setting"), never dropped
-# silently.
-SECTION_UPGRADES[(SettingsSection.name, 4)] = lambda records: records
+# V6 adds agent.request_conflict_checks. V5 records (v0.9.4 to v0.9.6) keep the
+# same shape and carry only values that differ from the defaults, so the step
+# passes them on unchanged and the new setting keeps its default (on).
+SECTION_UPGRADES[(SettingsSection.name, 5)] = lambda records: records

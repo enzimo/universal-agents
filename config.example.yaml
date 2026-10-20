@@ -474,6 +474,7 @@ agent:
   subtask_status_probe_timeout_seconds: 5       # Per-probe timeout for delegated-subtask status checks.
   restart_executing_task_grace_seconds: 900     # Restart grace for interrupted executing snapshots before failing fast.
   same_role_runtime_takeover_enabled: true      # Same-role replacement agents may claim stale runtime snapshots.
+  request_conflict_checks: true                 # Refuse a request's change to a record (a personal knowledge page) another of the person's requests changed while it ran, and any change from a stopped or ended request; false keeps only "changed since you read it" checks. Agents cannot change it.
   deferred_message_warning_threshold: 10        # Warn when deferred inbound delivery backlog reaches this count.
   max_deferred_messages: 100                    # Bound durable deferred admission; excess work remains with NATS for redelivery.
   tool_allowlist: null                          # Optional exact tool-name allowlist. null means no allowlist; [] means no tools. A name that is no tool function is refused.

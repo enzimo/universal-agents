@@ -97,6 +97,7 @@ def knowledge_actor(agent: Any) -> KnowledgeActor:
         task_id=str(task_id or ""),
         work_id=work_id,
         request_id=work_id if is_request else "",
+        conflict_checks=bool(getattr(agent, "_request_conflict_checks", True)),
     )
 
 

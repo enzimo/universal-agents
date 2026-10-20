@@ -239,3 +239,29 @@ def test_workflow_tools_stay_and_only_the_batch_is_hidden_without_authorization(
     assert "request_access_workflow_approvals" in names(True)
     assert "request_access_workflow_approvals" not in names(False)
     assert {"submit_access_workflow", "get_access_workflow"} <= names(False)
+
+
+@pytest.mark.parametrize("configured", [None, False])
+def test_every_agent_gets_the_operators_switch_for_checks_between_requests(tmp_path, caplog, configured) -> None:
+    config = {
+        "team_id": "team_switch",
+        "role": "Manager",
+        "goal": "Run the team.",
+        "backstory": "Coordinates work for the team.",
+        "tools": [],
+        "named_agent_type": "TeamArchitect",
+        "is_team_lead": True,
+        "authorization_config": {"enabled": False},
+        "task_history_db_path": str(tmp_path / "task_history.db"),
+        "storage_sqlite_path": str(tmp_path / "task_history.db"),
+    }
+    if configured is not None:
+        config["request_conflict_checks"] = configured
+    with patch("custom_agents.strands_agent.Agent"), patch(
+        "custom_agents.strands_agent.UniversalAgent._configure_model", return_value=MagicMock()
+    ), caplog.at_level("INFO", logger="custom_agents.strands_team"):
+        agent = create_strands_agent(config)
+
+    expected = configured is None
+    assert agent._request_conflict_checks is expected
+    assert f"event=request_conflict_checks enabled={expected}" in caplog.text

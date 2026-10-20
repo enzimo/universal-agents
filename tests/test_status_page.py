@@ -158,6 +158,19 @@ async def test_authorization_off_is_a_note_after_problems_and_warnings(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_checks_between_a_persons_requests_turned_off_are_a_note(tmp_path) -> None:
+    config = _config(tmp_path)
+    config.agent.request_conflict_checks = False
+
+    report = await _page(config).report()
+
+    off = [finding for finding in report.findings if finding.finding_id == "request_conflict_checks_off"]
+    assert [finding.severity for finding in off] == [StatusSeverity.NOTE]
+    assert "agent.request_conflict_checks: true" in off[0].action
+    assert "request_conflict_checks_off" not in _ids(await _page(_config(tmp_path)).report())
+
+
+@pytest.mark.asyncio
 async def test_administrators_get_one_notice_per_set_of_problems(tmp_path, monkeypatch) -> None:
     from tests.loop_storage_support import record_loop_opens
 

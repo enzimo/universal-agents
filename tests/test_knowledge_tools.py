@@ -99,6 +99,10 @@ def test_a_persons_request_is_named_for_the_change_ledger(tmp_path):
     actor = knowledge_actor(_Agent(tmp_path / "kb.db", signed_for="alice"))
     assert actor.request_id and actor.request_id == actor.work_id
     assert knowledge_actor(_Agent(tmp_path / "kb.db", signed_for=None)).request_id == ""
+    assert actor.conflict_checks is True
+    switched_off = _Agent(tmp_path / "kb.db", signed_for="alice")
+    switched_off._request_conflict_checks = False  # agent.request_conflict_checks: false, set at agent construction
+    assert knowledge_actor(switched_off).conflict_checks is False
 
 
 def test_without_a_signed_context_the_work_is_for_nobody(tmp_path):
