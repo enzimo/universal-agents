@@ -12,7 +12,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Optional
 
 from access_control.sensitive_paths import is_sensitive_path
-from assistant_gateway.ports.repositories import DeliveryRepository
 from custom_messages.contracts.attachments_v1 import AttachmentOrigin, AttachmentStorageRef, UserTaskAttachment
 from id_generation import new_id
 
@@ -176,41 +175,8 @@ def _max_file_bytes(config: Any) -> int:
     return max(1, parsed)
 
 
-def validate_inbound_attachment_metadata(
-    *,
-    filename: str,
-    content_type: str,
-    size_bytes: int,
-    config: Any,
-) -> tuple[str, str]:
-    if size_bytes <= 0:
-        raise AttachmentValidationError(f"{filename} is empty.")
-    if size_bytes > _max_file_bytes(config):
-        raise AttachmentValidationError(f"{filename} exceeds the configured upload limit.")
-    suffix = Path(filename).suffix.lower()
-    if suffix in EXECUTABLE_SUFFIXES:
-        raise AttachmentValidationError(f"{filename} has a blocked executable or script file type.")
-    resolved_content_type = (
-        str(content_type or "").split(";", 1)[0].strip().lower()
-        or mimetypes.guess_type(filename)[0]
-        or "application/octet-stream"
-    )
-    kind = infer_attachment_kind(content_type=resolved_content_type, filename=filename)
-    allowed = _allowed_kinds(getattr(_settings(config), "allowed_kinds", None))
-    if kind not in allowed:
-        raise AttachmentValidationError(f"{filename} has unsupported attachment kind {kind!r}.")
-    return resolved_content_type, kind
-
-
 def _new_attachment_id() -> str:
     return new_id("att")
-
-
-def _attachment_cache_path(*, config: Any, session_key: str, attachment_id: str, filename: str) -> Path:
-    cache_dir = resolve_inbound_attachment_cache_dir(config) / safe_attachment_session_dir_name(session_key)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    suffix = Path(filename).suffix
-    return (cache_dir / f"{attachment_id}{suffix}").resolve()
 
 
 def _expires_at(created_at: datetime, expires_after_seconds: Optional[float]) -> str | None:
@@ -287,6 +253,55 @@ def store_inbound_attachment_bytes(
     )
 
 
+@dataclass(frozen=True)
+class CheckedInboundAttachment:
+    """An upload that passed the checks, with the name, type and kind it is saved under."""
+
+    filename: str
+    content_type: str
+    kind: str
+
+
+def check_inbound_attachment_bytes(
+    *,
+    data: bytes,
+    filename: str,
+    content_type: str = "",
+    policy: InboundAttachmentStoragePolicy,
+) -> CheckedInboundAttachment:
+    """Check an upload against the policy without saving anything.
+
+    Saving checks the same way, first; a channel that receives several files
+    checks them all before saving any, so a refused file leaves none behind.
+    """
+
+    validate_raw_attachment_filename(filename)
+    safe_filename = sanitize_attachment_filename(filename)
+    size_bytes = len(data)
+    if size_bytes > max(1, int(policy.max_file_bytes)):
+        raise AttachmentValidationError(f"{safe_filename} exceeds the configured upload limit.")
+    if size_bytes <= 0:
+        raise AttachmentValidationError(f"{safe_filename} is empty.")
+    if Path(safe_filename).suffix.lower() in EXECUTABLE_SUFFIXES:
+        raise AttachmentValidationError(
+            f"{safe_filename} has a blocked executable or script file type."
+        )
+    resolved_content_type = (
+        str(content_type or "").split(";", 1)[0].strip().lower()
+        or mimetypes.guess_type(safe_filename)[0]
+        or "application/octet-stream"
+    )
+    kind = infer_attachment_kind(content_type=resolved_content_type, filename=safe_filename)
+    allowed_kinds = set(policy.allowed_kinds) or set(DEFAULT_ALLOWED_KINDS)
+    if kind not in allowed_kinds:
+        raise AttachmentValidationError(
+            f"{safe_filename} has unsupported attachment kind {kind!r}."
+        )
+    return CheckedInboundAttachment(
+        filename=safe_filename, content_type=resolved_content_type, kind=kind
+    )
+
+
 def store_inbound_attachment_bytes_with_policy(
     *,
     data: bytes,
@@ -301,229 +316,28 @@ def store_inbound_attachment_bytes_with_policy(
     caption: Optional[str] = None,
 ) -> StoredInboundAttachment:
     del conversation_id, correlation_id
-    validate_raw_attachment_filename(filename)
-    safe_filename = sanitize_attachment_filename(filename)
+    checked = check_inbound_attachment_bytes(
+        data=data, filename=filename, content_type=content_type, policy=policy
+    )
     attachment_id = _new_attachment_id()
     cache_dir = policy.cache_dir.expanduser().resolve()
     session_dir = cache_dir / safe_attachment_session_dir_name(session_key)
     session_dir.mkdir(parents=True, exist_ok=True)
     local_path = (
-        session_dir / f"{attachment_id}{Path(safe_filename).suffix}"
+        session_dir / f"{attachment_id}{Path(checked.filename).suffix}"
     ).resolve()
-    max_file_bytes = max(1, int(policy.max_file_bytes))
-    size_bytes = len(data)
-    if size_bytes > max_file_bytes:
-        raise AttachmentValidationError(f"{safe_filename} exceeds the configured upload limit.")
     local_path.write_bytes(data)
-    try:
-        if size_bytes <= 0:
-            raise AttachmentValidationError(f"{safe_filename} is empty.")
-        suffix = Path(safe_filename).suffix.lower()
-        if suffix in EXECUTABLE_SUFFIXES:
-            raise AttachmentValidationError(
-                f"{safe_filename} has a blocked executable or script file type."
-            )
-        resolved_content_type = (
-            str(content_type or "").split(";", 1)[0].strip().lower()
-            or mimetypes.guess_type(safe_filename)[0]
-            or "application/octet-stream"
-        )
-        kind = infer_attachment_kind(
-            content_type=resolved_content_type, filename=safe_filename
-        )
-        allowed_kinds = set(policy.allowed_kinds) or set(DEFAULT_ALLOWED_KINDS)
-        if kind not in allowed_kinds:
-            raise AttachmentValidationError(
-                f"{safe_filename} has unsupported attachment kind {kind!r}."
-            )
-    except Exception:
-        local_path.unlink(missing_ok=True)
-        raise
     return _stored_attachment(
         attachment_id=attachment_id,
-        filename=safe_filename,
-        content_type=resolved_content_type,
-        kind=kind,
-        size_bytes=size_bytes,
+        filename=checked.filename,
+        content_type=checked.content_type,
+        kind=checked.kind,
+        size_bytes=len(data),
         sha256=hashlib.sha256(data).hexdigest(),
         local_path=local_path,
         origin=origin,
         caption=caption,
         expires_after_seconds=expires_after_seconds,
-    )
-
-
-def store_inbound_attachment_fileobj(
-    *,
-    fileobj: Any,
-    filename: str,
-    content_type: str = "",
-    config: Any,
-    session_key: str,
-    conversation_id: Optional[str],
-    correlation_id: Optional[str] = None,
-    expires_after_seconds: Optional[float] = None,
-    origin: AttachmentOrigin = "other",
-    caption: Optional[str] = None,
-) -> StoredInboundAttachment:
-    validate_raw_attachment_filename(filename)
-    safe_filename = sanitize_attachment_filename(filename)
-    attachment_id = _new_attachment_id()
-    local_path = _attachment_cache_path(
-        config=config,
-        session_key=session_key,
-        attachment_id=attachment_id,
-        filename=safe_filename,
-    )
-    h = hashlib.sha256()
-    size_bytes = 0
-    max_file_bytes = _max_file_bytes(config)
-    try:
-        fileobj.seek(0)
-    except Exception:
-        pass
-    with local_path.open("wb") as handle:
-        while True:
-            chunk = fileobj.read(64 * 1024)
-            if not chunk:
-                break
-            size_bytes += len(chunk)
-            if size_bytes > max_file_bytes:
-                handle.close()
-                local_path.unlink(missing_ok=True)
-                raise AttachmentValidationError(f"{safe_filename} exceeds the configured upload limit.")
-            h.update(chunk)
-            handle.write(chunk)
-    try:
-        resolved_content_type, kind = validate_inbound_attachment_metadata(
-            filename=safe_filename,
-            content_type=content_type,
-            size_bytes=size_bytes,
-            config=config,
-        )
-    except Exception:
-        local_path.unlink(missing_ok=True)
-        raise
-    return _stored_attachment(
-        attachment_id=attachment_id,
-        filename=safe_filename,
-        content_type=resolved_content_type,
-        kind=kind,
-        size_bytes=size_bytes,
-        sha256=h.hexdigest(),
-        local_path=local_path,
-        origin=origin,
-        caption=caption,
-        expires_after_seconds=expires_after_seconds,
-    )
-
-
-def persist_stored_inbound_attachment(
-    repository: DeliveryRepository | None,
-    stored: StoredInboundAttachment,
-    *,
-    session_key: str,
-    conversation_id: Optional[str],
-    correlation_id: Optional[str] = None,
-) -> None:
-    if repository is None:
-        return
-    repository.upsert_attachment(
-        attachment_id=stored.attachment.attachment_id,
-        session_key=session_key,
-        conversation_id=conversation_id,
-        correlation_id=correlation_id,
-        filename=stored.attachment.filename,
-        content_type=stored.attachment.content_type,
-        kind=stored.attachment.kind,
-        size_bytes=stored.attachment.size_bytes,
-        sha256=stored.attachment.sha256,
-        local_path=str(stored.local_path),
-        expires_at=stored.expires_at,
-    )
-
-
-async def store_web_chat_upload_part(
-    *,
-    part: Any,
-    config: Any,
-    session_key: str,
-    conversation_id: Optional[str],
-    correlation_id: Optional[str] = None,
-    expires_after_seconds: Optional[float] = None,
-) -> StoredInboundAttachment:
-    validate_raw_attachment_filename(getattr(part, "filename", None))
-    filename = sanitize_attachment_filename(getattr(part, "filename", None))
-    content_type = str(getattr(part, "headers", {}).get("Content-Type", "") or "")
-    attachment_id = _new_attachment_id()
-    local_path = _attachment_cache_path(
-        config=config,
-        session_key=session_key,
-        attachment_id=attachment_id,
-        filename=filename,
-    )
-    h = hashlib.sha256()
-    size_bytes = 0
-    max_file_bytes = _max_file_bytes(config)
-    with local_path.open("wb") as handle:
-        while True:
-            chunk = await part.read_chunk(size=64 * 1024)
-            if not chunk:
-                break
-            size_bytes += len(chunk)
-            if size_bytes > max_file_bytes:
-                handle.close()
-                local_path.unlink(missing_ok=True)
-                raise AttachmentValidationError(f"{filename} exceeds the configured upload limit.")
-            h.update(chunk)
-            handle.write(chunk)
-    resolved_content_type, kind = validate_inbound_attachment_metadata(
-        filename=filename,
-        content_type=content_type,
-        size_bytes=size_bytes,
-        config=config,
-    )
-    created_at = datetime.now(timezone.utc)
-    attachment = UserTaskAttachment(
-        attachment_id=attachment_id,
-        filename=filename,
-        content_type=resolved_content_type,
-        kind=kind,
-        size_bytes=size_bytes,
-        sha256=h.hexdigest(),
-        created_at=created_at.isoformat(),
-        origin="web_chat",
-        storage_refs=[AttachmentStorageRef(storage_type="local", path=str(local_path))],
-    )
-    return StoredInboundAttachment(
-        attachment=attachment,
-        local_path=local_path,
-        expires_at=_expires_at(created_at, expires_after_seconds),
-    )
-
-
-def store_web_chat_file_field(
-    *,
-    file_field: Any,
-    config: Any,
-    session_key: str,
-    conversation_id: Optional[str],
-    correlation_id: Optional[str] = None,
-    expires_after_seconds: Optional[float] = None,
-) -> StoredInboundAttachment:
-    source = getattr(file_field, "file", None)
-    if source is None:
-        raise AttachmentValidationError(f"{getattr(file_field, 'filename', None) or 'attachment'} did not include file bytes.")
-    return store_inbound_attachment_fileobj(
-        fileobj=source,
-        filename=getattr(file_field, "filename", None),
-        content_type=str(getattr(file_field, "content_type", "") or ""),
-        config=config,
-        session_key=session_key,
-        conversation_id=conversation_id,
-        correlation_id=correlation_id,
-        expires_after_seconds=expires_after_seconds,
-        origin="web_chat",
     )
 
 

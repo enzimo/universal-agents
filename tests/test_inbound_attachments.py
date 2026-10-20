@@ -1,32 +1,22 @@
 from __future__ import annotations
 
-from io import BytesIO
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.inbound_attachments import (
     AttachmentValidationError,
+    InboundAttachmentStoragePolicy,
+    check_inbound_attachment_bytes,
     sanitize_attachment_filename,
-    store_web_chat_file_field,
+    store_inbound_attachment_bytes_with_policy,
 )
 
 
-def _config(tmp_path: Path, *, max_file_bytes: int = 1024) -> GatewayInstanceConfig:
-    config = GatewayInstanceConfig.create(
-        instance_name="attachment-test",
-        instance_root=str(tmp_path / "instance"),
-        team_id="team_test",
-        timezone="UTC",
+def _policy(tmp_path: Path, *, max_file_bytes: int = 10) -> InboundAttachmentStoragePolicy:
+    return InboundAttachmentStoragePolicy(
+        cache_dir=tmp_path / "uploads", max_file_bytes=max_file_bytes
     )
-    config.interactive_apps.internal_website.attachments.max_file_bytes = max_file_bytes
-    return config
-
-
-def _file_field(filename: str, content_type: str, data: bytes) -> SimpleNamespace:
-    return SimpleNamespace(filename=filename, content_type=content_type, file=BytesIO(data))
 
 
 @pytest.mark.parametrize(
@@ -47,20 +37,58 @@ def _file_field(filename: str, content_type: str, data: bytes) -> SimpleNamespac
         ("payload.bin", "application/octet-stream", b"bytes", "unsupported"),
     ],
 )
-def test_store_web_chat_file_field_rejects_invalid_uploads(
+def test_refused_uploads_are_refused_by_the_check_and_never_saved(
     tmp_path: Path,
     filename: str,
     content_type: str,
     data: bytes,
     message: str,
 ) -> None:
+    policy = _policy(tmp_path)
+
     with pytest.raises(AttachmentValidationError, match=message):
-        store_web_chat_file_field(
-            file_field=_file_field(filename, content_type, data),
-            config=_config(tmp_path, max_file_bytes=10),
+        check_inbound_attachment_bytes(
+            data=data, filename=filename, content_type=content_type, policy=policy
+        )
+    with pytest.raises(AttachmentValidationError, match=message):
+        store_inbound_attachment_bytes_with_policy(
+            data=data,
+            filename=filename,
+            content_type=content_type,
+            policy=policy,
             session_key="website:web-chat:browser_1",
             conversation_id=None,
         )
+    # Saving checks first: a refused upload never creates a file or a folder.
+    assert not policy.cache_dir.exists()
+
+
+def test_an_upload_is_saved_under_the_name_type_and_kind_its_check_gives(
+    tmp_path: Path,
+) -> None:
+    policy = _policy(tmp_path, max_file_bytes=1024)
+
+    checked = check_inbound_attachment_bytes(
+        data=b"hello", filename="my<>notes?.txt", policy=policy
+    )
+    assert not policy.cache_dir.exists()
+    stored = store_inbound_attachment_bytes_with_policy(
+        data=b"hello",
+        filename="my<>notes?.txt",
+        policy=policy,
+        session_key="website:web-chat:browser_1",
+        conversation_id=None,
+    )
+
+    attachment = stored.attachment
+    assert (attachment.filename, attachment.content_type, attachment.kind) == (
+        checked.filename,
+        checked.content_type,
+        checked.kind,
+    )
+    assert checked.filename == "my_notes_.txt"
+    assert (checked.content_type, checked.kind) == ("text/plain", "document")
+    assert stored.local_path.read_bytes() == b"hello"
 
 
 def test_sanitize_attachment_filename_blocks_hidden_and_weird_names() -> None:

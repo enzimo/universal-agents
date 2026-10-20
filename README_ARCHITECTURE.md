@@ -2471,6 +2471,16 @@ resolution, session continuity, attachment admission, clarification routing,
 quiet hours, deferred delivery, and receipts. An agent response and a delivered
 user message are separate facts.
 
+Web Chat saves a send's files only after the send passes every check: the
+conversation it names is the sender's, its request id has not been answered
+already (a browser retry gets the first send's answer), and every file passes
+the upload checks (`inbound_attachments.check_inbound_attachment_bytes`; all
+files are checked before any is saved). Saved uploads go to `state/uploads`
+under the checked conversation's own key, and their records take that
+conversation's owner. Nothing deletes upload records except removing their
+owner, so a file saved for a refused send would stay as a stray, and in another
+person's conversation it would count as theirs.
+
 A person can answer one earlier chat message with the channel's reply feature.
 That message often belongs to another conversation than the one the chat
 continues: a recurring schedule's report is filed under the schedule's own
