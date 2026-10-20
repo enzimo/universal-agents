@@ -360,6 +360,7 @@ async def test_turn_ends_a_stalled_model_call_with_the_provider_timeout_message(
     turn.active_task_id, turn.span_attributes = task.task_id, {}
     turn.context_request = turn.assembly = None
     turn.invoke_kwargs = {"invocation_state": {}}
+    turn.callback_handler = lambda **_: None
     turn.runtime_instruction_parts = []
     turn.tool_stop = ToolStop(agent_id="lead", task_id=task.task_id)  # set by _prepare_turn
 

@@ -11,17 +11,15 @@ def test_runtime_guardrails_records_strands_forced_structured_output_retry(caplo
 
     monitor = RuntimeGuardrailsPlugin()
     invocation_state = {
-        "invocation_state": {
-            RuntimeGuardrailsPlugin._TURN_DECISION_CONTEXT_KEY: {
-                "agent_id": "agent_1",
-                "named_agent_type": "ResearchComparisonAgent",
-                "task_id": "task_1",
-                "correlation_id": "corr_1",
-                "conversation_id": "conversation_1",
-                "provider": "litellm",
-                "model_id": "fireworks/minimax-m3",
-                "expected_tool_name": "CompatibleModelAgentTurnDecision",
-            }
+        RuntimeGuardrailsPlugin._TURN_DECISION_CONTEXT_KEY: {
+            "agent_id": "agent_1",
+            "named_agent_type": "ResearchComparisonAgent",
+            "task_id": "task_1",
+            "correlation_id": "corr_1",
+            "conversation_id": "conversation_1",
+            "provider": "litellm",
+            "model_id": "fireworks/minimax-m3",
+            "expected_tool_name": "CompatibleModelAgentTurnDecision",
         },
         "request_state": {},
     }

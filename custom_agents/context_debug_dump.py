@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from custom_agents.context_engine.base import AssembledContext, ContextAssemblyRequest
-from custom_tools.runtime_context import caller_invocation_state
 
 
 DEFAULT_CONTEXT_DUMP_CONFIG: dict[str, Any] = {
@@ -932,7 +931,7 @@ class ContextDebugDumpPlugin:
         if not self.model_call_capture_enabled:
             return
         try:
-            invocation_state = caller_invocation_state(getattr(context, "invocation_state", None))
+            invocation_state = getattr(context, "invocation_state", None) or {}
             invocation_metadata = invocation_state.get(self.INVOCATION_CONTEXT_KEY) or {}
             key = (
                 str(invocation_metadata.get("task_id") or "no_task"),

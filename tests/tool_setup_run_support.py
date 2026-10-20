@@ -111,7 +111,7 @@ async def pause_turn(agent: Any, interrupt: Any, task_id: str = "task-lead") -> 
     info = agent.task_manager.get_task_info(task_id)
     await task_steering_runtime.send_interrupt_request_for_result(
         agent, result=SimpleNamespace(interrupts=[interrupt]), task=info.task, msg_header=info.header,
-        msg_meta=info.meta, strands_agent=object(), invoke_kwargs={}, full_prompt="",
+        msg_meta=info.meta, strands_agent=object(), invoke_kwargs={}, callback_handler=lambda **_: None, full_prompt="",
     )
 
 

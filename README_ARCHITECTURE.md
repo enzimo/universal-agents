@@ -1309,10 +1309,13 @@ owns (`custom_tools/tool_stop.py`). The turn passes it to Strands as the
 invocation's `cancel_signal` and to the tools through `invocation_state`.
 Strands' own `agent.cancel_signal` cannot carry the stop: Strands clears it as
 soon as the invocation ends, and a stopped turn ends before a tool thread looks.
-Every turn also passes `callback_handler` to Strands as an extra keyword, so
-Strands hands tools the turn's `invocation_state` one level down; tools read
-it through `custom_tools.runtime_context.caller_invocation_state`, which
-handles both shapes.
+A turn calls Strands only with the keywords `Agent.invoke_async` declares
+(`custom_agents/sdk/strands/turn_tool_stop.py`). Strands treats any other
+keyword as deprecated and then hands tools and hooks the turn's values one
+level down. The turn's callback handler is therefore the Strands agent's own
+handler for the length of each call, and each call gets a fresh copy of the
+turn's `invocation_state`, so Strands' per-call bookkeeping (`request_state`
+and its cycle ids) never carries from one call of the turn into the next.
 
 A stop sets the signal before it cancels the turn. The process supervisor then
 ends the running command's whole process group (SIGTERM, then SIGKILL a second

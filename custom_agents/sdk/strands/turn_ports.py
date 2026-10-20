@@ -338,6 +338,7 @@ class SendInterruptRequestForResultOperation(Protocol):
         msg_meta: MessageMeta,
         strands_agent: Any,
         invoke_kwargs: Dict[str, Any],
+        callback_handler: Callable[..., None],
         full_prompt: str,
         start_notes: Optional[TurnStartNotes] = ...,
     ) -> TaskSteering: ...

@@ -17,6 +17,27 @@ processes the turn's commands left running in their process groups
 Only then does it pass the outcome on. So everything that waits for the turn
 also waits for its commands, without each stop path waiting on its own. A turn
 that ends normally leaves background processes alone, as before.
+
+The call gets only keywords ``Agent.invoke_async`` declares. Strands treats any
+other keyword as its deprecated ``**kwargs``: it warns, and hands tools and
+hooks ``{**kwargs, "invocation_state": <the turn's dict>}``, with the turn's
+values one level down. So:
+
+- The turn's callback handler is the Strands agent's own handler
+  (``Agent.callback_handler``, the one Strands documents) for the length of the
+  call; the agent's earlier handler is put back afterwards, also when the call
+  fails or is cancelled. Strands reads it when the call starts and calls it at
+  the same points as it called a per-call handler, so a handler that raises
+  (the checkpoint pass's handlers do on purpose) still fails the call inside
+  Strands' own error handling. Reading ``stream_async`` here and calling the
+  handler from this module would move such failures outside it.
+- Each call gets its own copy of the turn's ``invocation_state``, with the
+  turn's ToolStop added. Strands keeps its per-call bookkeeping in the dict it
+  is given (``request_state``, ``agent``, the cycle ids and trace), and a turn
+  passes the same keywords to each of its calls: provider retries, late
+  guidance, the checkpoint pass, a resumed interrupt. Without the copy, one
+  call's stop flag, guardrail counters and context-reduction budget would
+  carry into the next call, and Strands' bookkeeping into the turn's dict.
 """
 
 from __future__ import annotations
@@ -25,6 +46,8 @@ import asyncio
 import logging
 import signal
 import time
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 from custom_tools.tool_stop import (
@@ -53,18 +76,33 @@ CUSTODY_LOST_REASON = "custody_lost"
 TURN_CANCELLED_REASON = "turn_cancelled"
 
 
-def attach_tool_stop(invoke_kwargs: dict[str, Any], tool_stop: ToolStop) -> None:
-    """Give an invocation the turn's ToolStop, replacing any earlier turn's.
+def _invocation_keywords(invoke_kwargs: Mapping[str, Any], tool_stop: ToolStop) -> dict[str, Any]:
+    """The keywords for one Strands call of a turn: its own, the stop, a fresh state.
 
-    ``invocation_state`` is changed in place: the turn reads it again after the
-    call (provider-overflow recovery), and a resumed interrupted turn reuses it.
+    ``invoke_kwargs`` is left as it is; the call's ``invocation_state`` is a new
+    dict holding the turn's values and its ToolStop (module docstring).
     """
 
-    invoke_kwargs["cancel_signal"] = tool_stop.event
-    state = invoke_kwargs.get("invocation_state")
-    if state is None:
-        state = invoke_kwargs["invocation_state"] = {}
+    state = dict(invoke_kwargs.get("invocation_state") or {})
     state[TOOL_STOP_STATE_KEY] = tool_stop
+    return {**invoke_kwargs, "invocation_state": state, "cancel_signal": tool_stop.event}
+
+
+@contextmanager
+def _turn_callback_handler(model: Any, callback_handler: Callable[..., Any]) -> Iterator[None]:
+    """Make ``callback_handler`` the Strands agent's own handler for one call.
+
+    A turn owns its Strands agent for the whole call (AgentExecutionGate), and
+    Strands refuses a second concurrent call on one agent, so no other call
+    sees the turn's handler.
+    """
+
+    previous = getattr(model, "callback_handler", None)
+    model.callback_handler = callback_handler
+    try:
+        yield
+    finally:
+        model.callback_handler = previous
 
 
 async def invoke_with_tool_stop(
@@ -72,14 +110,20 @@ async def invoke_with_tool_stop(
     prompt: Any,
     *,
     tool_stop: ToolStop,
-    invoke_kwargs: dict[str, Any],
+    invoke_kwargs: Mapping[str, Any],
+    callback_handler: Callable[..., Any],
     logger: logging.Logger,
 ) -> Any:
-    """``model.invoke_async(prompt, **invoke_kwargs)``; its commands end before it does."""
+    """``model.invoke_async(prompt, **invoke_kwargs)`` under the turn's stop and callback handler.
 
-    attach_tool_stop(invoke_kwargs, tool_stop)
+    ``invoke_kwargs`` holds only keywords ``Agent.invoke_async`` declares. The
+    call's commands end before it does.
+    """
+
+    call_kwargs = _invocation_keywords(invoke_kwargs, tool_stop)
     try:
-        result = await model.invoke_async(prompt, **invoke_kwargs)
+        with _turn_callback_handler(model, callback_handler):
+            result = await model.invoke_async(prompt, **call_kwargs)
     except asyncio.CancelledError:
         await stop_tool_calls(tool_stop, logger, reason=TURN_CANCELLED_REASON)
         raise
@@ -224,7 +268,6 @@ __all__ = [
     "HANDBACK_REASON",
     "TASK_STOPPED_REASON",
     "TURN_CANCELLED_REASON",
-    "attach_tool_stop",
     "invoke_with_tool_stop",
     "stop_tool_calls",
 ]
