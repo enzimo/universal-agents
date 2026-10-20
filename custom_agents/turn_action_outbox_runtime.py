@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 from functools import partial
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, TypeGuard
+from typing import Any, Dict, Optional
 
 from pydantic import ValidationError
 from default_values import AGENT_DEFAULTS
@@ -1145,7 +1145,7 @@ async def _schedule_turn_action_recovery(
     raise exc
 
 
-def _is_waiting_delegation(content: Any, meta: MessageMeta) -> TypeGuard[Task]:
+def _is_waiting_delegation(content: Any, meta: MessageMeta) -> bool:
     """Source lineage does not imply the sender waits for a report's reply."""
 
     return (
