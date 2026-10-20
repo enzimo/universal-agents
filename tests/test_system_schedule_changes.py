@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +42,7 @@ from custom_tools.providers.schedules import (
     resume_scheduled_job,
     update_scheduled_job,
 )
+from custom_tools.providers.changes import apply_change
 from custom_tools.runtime_context import set_agent_ref
 from tests.change_approval_support import (
     CEDAR_BINARY,
@@ -52,7 +54,7 @@ from tests.change_approval_support import (
     stored_request,
     use_signed_contexts,
 )
-from tests.tool_result_support import tool_json
+from tests.tool_result_support import sdk_tool_result, tool_json
 
 TEAM = "team_sched"
 PERSON = "user_alice"
@@ -263,6 +265,10 @@ def test_denied_system_schedule_change_is_not_applied(tmp_path: Path) -> None:
     denied = run_apply_change(lead, staged["change_id"], call)
 
     assert denied["status"] == "denied"
+    result = asyncio.run(sdk_tool_result(apply_change, {
+        "change_id": staged["change_id"], "reason": "Remove the schedule.",
+    }, context=call))
+    assert result["status"] == "error" and tool_json(result)["status"] == "denied"
     assert _stored(lead, "hb_sched_keep") is not None
 
 
@@ -274,18 +280,31 @@ def test_authorization_off_applies_system_schedule_change_with_agreement(tmp_pat
     assert staged["status"] == "approval_required"
     assert "confirmed=true" in staged["next_step"]
 
-    unconfirmed = run_apply_change(lead, staged["change_id"])
+    unconfirmed_result = asyncio.run(sdk_tool_result(apply_change, {
+        "change_id": staged["change_id"], "reason": "Change the interval.",
+    }, context=ToolCall()))
+    assert unconfirmed_result["status"] == "error"
+    unconfirmed = tool_json(unconfirmed_result)
     assert unconfirmed["status"] == "agreement_required"
     assert _stored(lead, "hb_sched_off").interval_ms == 3_600_000
 
     with caplog.at_level(logging.INFO):
-        applied = run_apply_change(lead, staged["change_id"], confirmed=True)
+        applied_result = asyncio.run(sdk_tool_result(apply_change, {
+            "change_id": staged["change_id"], "reason": "Change the interval.", "confirmed": True,
+        }, context=ToolCall()))
+        assert applied_result["status"] == "success", applied_result
+        applied = tool_json(applied_result)
 
     assert applied["status"] == "applied"
     assert applied["approval"]["mode"] == "agreement"
     assert applied["result"]["updated"] is True
     assert _stored(lead, "hb_sched_off").interval_ms == 120_000
     assert "authority_mode=agreement" in caplog.text
+    replay = asyncio.run(sdk_tool_result(apply_change, {
+        "change_id": staged["change_id"], "reason": "Repeat the interval change.", "confirmed": True,
+    }, context=ToolCall()))
+    assert replay["status"] == "error" and tool_json(replay)["status"] == "refused"
+    assert _stored(lead, "hb_sched_off").interval_ms == 120_000
 
 
 def test_system_schedule_plan_belongs_to_the_task_that_staged_it(tmp_path: Path) -> None:

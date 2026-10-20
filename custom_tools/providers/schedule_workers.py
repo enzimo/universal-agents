@@ -1,17 +1,21 @@
 """Structured schedule automation and access preparation tools."""
 
 import json
+import logging
 from typing import Any
 
 from pydantic import ValidationError
 from strands import tool
 
+from custom_agents.change_followups import after_saved_change
 from custom_messages.contracts.schedule_worker_v1 import (
     ScheduleCapabilityRequirementsV1,
     ScheduleWorkerPolicySpecV1,
 )
 from custom_tools.runtime_context import get_agent_ref
 from custom_tools.tool_results import failed
+
+logger = logging.getLogger(__name__)
 
 # The one requirements_json shape the scheduled-worker tools accept.
 REQUIREMENTS_SHAPE = (
@@ -67,29 +71,41 @@ def install_scheduled_worker_draft(
     store.add(schedule, **claim_scope)
     if not automation:
         return None
-    try:
-        return configure_worker(
-            agent,
-            WorkerConfigurationRequestV1(
-                schedule_id=schedule.schedule_id,
-                target_agent_type=target_agent_type or agent.named_agent_type,
-                expected_revision=0,
-                activate_schedule=True,
-                policy=ScheduleWorkerPolicySpecV1.model_validate_json(
-                    worker_policy_json or "{}"
+    saved = {
+        "schedule_id": schedule.schedule_id,
+        "status": "saved",
+        "next_step": "Inspect this schedule with inspect_scheduled_worker before changing or activating it. Do not create it again.",
+    }
+    with after_saved_change(
+        saved,
+        record_id=schedule.schedule_id,
+        step="configuring the scheduled worker",
+        logger=logger,
+    ):
+        try:
+            return configure_worker(
+                agent,
+                WorkerConfigurationRequestV1(
+                    schedule_id=schedule.schedule_id,
+                    target_agent_type=target_agent_type or agent.named_agent_type,
+                    expected_revision=0,
+                    activate_schedule=True,
+                    policy=ScheduleWorkerPolicySpecV1.model_validate_json(
+                        worker_policy_json or "{}"
+                    ),
+                    capabilities=parse_requirements(requirements_json)
+                    or ScheduleCapabilityRequirementsV1(),
                 ),
-                capabilities=parse_requirements(requirements_json)
-                or ScheduleCapabilityRequirementsV1(),
-            ),
-        )
-    except (ValueError, PermissionError) as exc:
-        return {
-            "schedule_id": schedule.schedule_id,
-            "enabled": False,
-            "status": "draft",
-            "reason": str(exc),
-            "next_step": "Call inspect_scheduled_worker for eligibility and repair steps, then prepare_scheduled_job_access and configure_scheduled_worker. A custom registered type may need adding to agent.schedule_workers.eligible_agent_types through TeamLead runtime settings.",
-        }
+            )
+        except (ValueError, PermissionError) as exc:
+            return {
+                "schedule_id": schedule.schedule_id,
+                "enabled": False,
+                "status": "draft",
+                "reason": str(exc),
+                "next_step": "Call inspect_scheduled_worker for eligibility and repair steps, then prepare_scheduled_job_access and configure_scheduled_worker. A custom registered type may need adding to agent.schedule_workers.eligible_agent_types through TeamLead runtime settings.",
+            }
+    return saved
 
 
 @tool

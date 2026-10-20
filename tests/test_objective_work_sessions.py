@@ -59,7 +59,7 @@ from custom_tools.tool_stop import ToolStop
 from runtime_settings.instance_layout import InstanceLayout
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
-from tests.tool_result_support import tool_json, tool_yaml
+from tests.tool_result_support import sdk_tool_result, tool_json, tool_yaml
 
 
 @pytest.fixture(autouse=True)
@@ -666,9 +666,11 @@ def test_policy_rejects_hidden_auto_activation_and_missing_required_skill(
         load_objective_work_execution_config([str(missing_path)])
 
 
+@pytest.mark.parametrize("wake_fails", [False, True])
 def test_enable_tool_requires_confirmation_and_installs_protected_schedule(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    wake_fails: bool,
 ) -> None:
     manager = _manager(tmp_path, policy=True)
     task, objective = _objective(manager)
@@ -702,15 +704,24 @@ def test_enable_tool_requires_confirmation_and_installs_protected_schedule(
     )
     assert "Explicit user confirmation" in denied["error"]
 
-    enabled = tool_yaml(
-        objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the daily bounded profile.", profile_name="daily", confirmed=True)
-    )
+    if wake_fails:
+        def unavailable():
+            raise RuntimeError("Event loop is closed")
+        agent._scheduler_wake.set = unavailable
+    result = asyncio.run(sdk_tool_result(objective_work_sessions, {
+        "action": "enable", "objective_id": objective.objective_id,
+        "confirmation_summary": "Use the daily bounded profile.", "profile_name": "daily", "confirmed": True,
+    }))
+    assert result["status"] == "success", result
+    enabled = tool_yaml(result)
     schedule = schedule_store.get_scheduled_message(enabled["schedule_id"])
     assert schedule is not None
     assert schedule.management_class == ScheduleManagementClass.SYSTEM
     assert schedule.system_schedule_kind == SystemScheduleKind.OBJECTIVE_WORK_SESSION
     assert schedule.objective_id == objective.objective_id
     assert enabled["required_skills"] == ["long-horizon-plan-execution"]
+    assert bool(enabled.get("warnings")) is wake_fails
+    assert manager.objective_work_coordinator.snapshot(objective.objective_id)["policy"]["status"] == "active"
 
 
 def test_agent_authored_profile_envelope_rejects_excessive_frequency_and_budget(

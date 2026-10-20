@@ -48,6 +48,7 @@ from custom_messages.records.objectives import (
 )
 from custom_tools.action_inputs import actions, input_refusal
 from custom_tools.tool_results import failed
+from custom_agents.change_followups import after_saved_change
 from custom_tools.runtime_context import (
     get_agent_ref,
 )
@@ -211,6 +212,7 @@ def _install_objective_work_schedule(
     current: Any,
     policy: Any,
     owner_canonical_user_id: str,
+    followup_result: dict[str, Any],
 ) -> Any:
     """Install or exactly replace one Objective's protected recurring schedule."""
 
@@ -281,7 +283,8 @@ def _install_objective_work_schedule(
                     rollback_exc,
                 )
         raise
-    wake_scheduler(agent)
+    with after_saved_change(followup_result, record_id=schedule_id, step="waking the scheduler", logger=logger):
+        wake_scheduler(agent)
     return policy
 
 
@@ -425,13 +428,15 @@ def _enable_sessions(
             acceptance_summary=confirmation_summary,
             owner_canonical_user_id=owner,
         )
+        followup_result: dict[str, Any] = {}
         policy = _install_objective_work_schedule(
             agent,
             current=current,
             policy=policy,
             owner_canonical_user_id=owner,
+            followup_result=followup_result,
         )
-        return policy.model_dump_json()
+        return json.dumps({**policy.model_dump(mode="json"), **followup_result})
     except Exception as exc:
         if policy is not None:
             _restore_or_disable_objective_work_policy(
@@ -648,11 +653,13 @@ def _apply_profile_proposal(
             profile_source=ObjectiveWorkProfileSource.ONE_TIME,
             profile_proposal_id=proposal.proposal_id,
         )
+        followup_result: dict[str, Any] = {}
         policy = _install_objective_work_schedule(
             agent,
             current=current,
             policy=policy,
             owner_canonical_user_id=owner,
+            followup_result=followup_result,
         )
         applied = agent.task_manager.operations_runtime.run_sync(
             coordinator.mark_profile_proposal_applied,
@@ -665,6 +672,7 @@ def _apply_profile_proposal(
             {
                 "proposal": applied.model_dump(mode="json"),
                 "policy": policy.model_dump(mode="json"),
+                **followup_result,
             }
         )
     except Exception as exc:

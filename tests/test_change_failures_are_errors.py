@@ -23,6 +23,15 @@ from custom_tools.providers.heartbeat import (
     update_heartbeat_item,
 )
 from custom_tools.providers.knowledge import knowledge_add_note, knowledge_archive, knowledge_write
+from custom_tools.providers.knowledge_curation import (
+    freeze_knowledge_page,
+    merge_knowledge_pages,
+    publish_contribution,
+    reject_contribution,
+    resolve_knowledge_note,
+    revert_knowledge_page,
+    unfreeze_knowledge_page,
+)
 from custom_tools.providers.memory import memory
 from custom_tools.providers.objective_work import objective_work_profiles, objective_work_sessions
 from custom_tools.providers.objectives import (
@@ -51,6 +60,13 @@ CHANGES: list[tuple[Any, dict[str, Any]]] = [
     (knowledge_write, {"page": "personal/notes", "title": "Notes", "body": "Mine."}),
     (knowledge_add_note, {"page": "personal/notes", "note": "Later."}),
     (knowledge_archive, {"page": "personal/notes", "base_revision": 1, "reason": "Done."}),
+    (publish_contribution, {"contribution_id": "contribution_1"}),
+    (reject_contribution, {"contribution_id": "contribution_1", "reason": "Outdated."}),
+    (resolve_knowledge_note, {"note_id": "note_1", "merged": False}),
+    (freeze_knowledge_page, {"page": "team/notes", "minutes": 60}),
+    (unfreeze_knowledge_page, {"page": "team/notes"}),
+    (merge_knowledge_pages, {"source": "team/a", "target": "team/b", "body": "Merged.", "base_revision": 1, "source_revision": 1}),
+    (revert_knowledge_page, {"page": "team/notes", "to_revision": 1, "base_revision": 2, "reason": "Restore."}),
     (add_heartbeat_item, {"instruction": "Check the build."}),
     (update_heartbeat_item, {"heartbeat_item_id": "hb_1", "title": "Build"}),
     (remove_heartbeat_item, {"heartbeat_item_id": "hb_1"}),

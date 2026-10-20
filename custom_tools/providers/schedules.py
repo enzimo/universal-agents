@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from pydantic import ValidationError
 from strands import tool
 
+from custom_agents.change_followups import after_saved_change
 from custom_agents.schedule_changes import (
     REPORT_KEY,
     RESULT_FLAGS,
@@ -187,7 +188,9 @@ def _validation_message(exc: ValidationError) -> str:
     return message.removeprefix("Value error, ")
 
 
-def _run_change(agent: "UniversalAgent", request: ScheduleChangeRequestV1, *, action: str) -> str | dict[str, Any]:
+def _run_change(
+    agent: "UniversalAgent", request: ScheduleChangeRequestV1, *, action: str
+) -> str | dict[str, Any]:
     """Apply (or stage) one change and tell TeamArchitect about an applied one.
 
     A change neither made nor staged for a person's approval (not found, no
@@ -200,17 +203,32 @@ def _run_change(agent: "UniversalAgent", request: ScheduleChangeRequestV1, *, ac
         result = change_schedule(agent, request)
     except (SystemScheduleMutationDenied, ScheduleWriteConflict) as exc:
         return failed(
-            {"schedule_id": request.schedule_id, flag: False, "error": str(exc), "reason_code": exc.reason_code}
+            {
+                "schedule_id": request.schedule_id,
+                flag: False,
+                "error": str(exc),
+                "reason_code": exc.reason_code,
+            }
         )
     report = result.pop(REPORT_KEY, None)
-    if report is not None:
-        if result.get(flag):
+    if result.get(flag):
+        with after_saved_change(
+            result,
+            record_id=request.schedule_id,
+            step="waking the scheduler",
+            logger=logger,
+        ):
             wake_scheduler(agent)
-        result["manager_report"] = (
-            _report_schedule_mutation_to_manager(agent, action=action, schedule_id=request.schedule_id, **report)
-            if result.get(flag)
-            else {"reported": False, "reason": "schedule_not_updated"}
-        )
+        if report is not None:
+            with after_saved_change(
+                result,
+                record_id=request.schedule_id,
+                step="reporting the change to TeamArchitect",
+                logger=logger,
+            ):
+                result["manager_report"] = _report_schedule_mutation_to_manager(
+                    agent, action=action, schedule_id=request.schedule_id, **report
+                )
     if not result.get(flag) and result.get("status") != STATUS_APPROVAL_REQUIRED:
         return failed(result)
     return json.dumps(result, default=str)
@@ -368,7 +386,10 @@ def _report_schedule_mutation_to_manager(
             team_comms.send_message(message=envelope, routing_key=routing_key),
         )
     except Exception as exc:
-        return {"reported": False, "reason": f"send_failed: {exc}"}
+        # The caller keeps the committed change and reports this as a warning.
+        raise RuntimeError(
+            f"Could not send the schedule report to TeamArchitect: {exc}"
+        ) from exc
 
     task_manager = getattr(agent, "task_manager", None)
     if source_task_id and hasattr(task_manager, "append_history_entry"):
@@ -388,7 +409,18 @@ def _report_schedule_mutation_to_manager(
                 },
             )
         except Exception:
-            pass
+            logger.exception(
+                "The schedule report was sent but its history was not saved. "
+                "event=schedule_report_history_failed schedule_id=%s task_id=%s",
+                schedule_id,
+                source_task_id,
+            )
+            return {
+                "reported": True,
+                "routing_key": routing_key,
+                "task_id": report_task.task_id,
+                "warning": "TeamArchitect received the report, but its task history entry could not be saved.",
+            }
     return {
         "reported": True,
         "routing_key": routing_key,
@@ -558,70 +590,89 @@ def create_scheduled_job(
             )
         )
         worker_result = install_scheduled_worker_draft(
-            agent, _schedule_store(agent), scheduled_message,
-            target_agent_type=target_agent_type, worker_policy_json=worker_policy_json,
+            agent,
+            _schedule_store(agent),
+            scheduled_message,
+            target_agent_type=target_agent_type,
+            worker_policy_json=worker_policy_json,
             requirements_json=requirements_json,
         )
-        if worker_result and worker_result.get("status") == "draft":
+        if worker_result and worker_result.get("status") in {"draft", "saved"}:
+            with after_saved_change(
+                worker_result,
+                record_id=schedule_id,
+                step="waking the scheduler",
+                logger=logger,
+            ):
+                wake_scheduler(agent)
             return json.dumps(worker_result)
+        # From here the schedule exists. Failures in these independent
+        # follow-ups must not turn a successful create into a retry.
+        payload = {
+            "schedule_id": scheduled_message.schedule_id,
+            "schedule_name": scheduled_message.schedule_name,
+            "worker": worker_result,
+            "objective_id": scheduled_message.objective_id,
+            "next_fire_at": scheduled_message.next_fire_at,
+            "paused_until": scheduled_message.paused_until,
+            "expires_at_utc": scheduled_message.expires_at_utc,
+            "schedule_memory": scheduled_message.schedule_memory.model_dump(mode="json")
+            if scheduled_message.schedule_memory is not None
+            else None,
+            "conversation_id": getattr(
+                scheduled_message.payload_meta, "conversation_id", None
+            )
+            if scheduled_message.payload_meta
+            else None,
+        }
         if schedule_conversation and hasattr(
             agent.task_manager, "append_history_entry"
         ):
-            agent.task_manager.operations_runtime.run_sync(
-                agent.task_manager.append_history_entry,
-                task_info.task.task_id,
-                (
-                    "Created dedicated conversation "
-                    f"{schedule_conversation.get('conversation_id')} for recurring scheduled job {schedule_id}."
-                ),
-                entry_type=TaskHistoryType.TASK_EVENT,
-                importance=TaskHistoryImportance.NORMAL,
-                agent_name=getattr(agent, "name", None),
-                agent_id=getattr(agent, "id", None),
-                details={
-                    "event": "schedule_conversation_forked",
-                    "schedule_id": schedule_id,
-                    "schedule_conversation_id": schedule_conversation.get(
-                        "conversation_id"
+            with after_saved_change(
+                payload,
+                record_id=schedule_id,
+                step="recording the schedule conversation in task history",
+                logger=logger,
+            ):
+                agent.task_manager.operations_runtime.run_sync(
+                    agent.task_manager.append_history_entry,
+                    task_info.task.task_id,
+                    (
+                        "Created dedicated conversation "
+                        f"{schedule_conversation.get('conversation_id')} for recurring scheduled job {schedule_id}."
                     ),
-                    "schedule_seed_task_id": schedule_conversation.get("seed_task_id"),
-                    "source_conversation_id": schedule_conversation.get(
-                        "source_conversation_id"
-                    ),
-                },
+                    entry_type=TaskHistoryType.TASK_EVENT,
+                    importance=TaskHistoryImportance.NORMAL,
+                    agent_name=getattr(agent, "name", None),
+                    agent_id=getattr(agent, "id", None),
+                    details={
+                        "event": "schedule_conversation_forked",
+                        "schedule_id": schedule_id,
+                        "schedule_conversation_id": schedule_conversation.get(
+                            "conversation_id"
+                        ),
+                        "schedule_seed_task_id": schedule_conversation.get(
+                            "seed_task_id"
+                        ),
+                        "source_conversation_id": schedule_conversation.get(
+                            "source_conversation_id"
+                        ),
+                    },
+                )
+        payload.update(
+            _link_to_objective(
+                agent,
+                "schedule",
+                resolved_objective_id,
+                schedule_id,
+                managed_by_objective=True,
+                user_visible=True,
+                reason="Scheduled job created from objective-linked task context.",
             )
-        objective_link_fields = _link_to_objective(
-            agent,
-            "schedule",
-            resolved_objective_id,
-            schedule_id,
-            managed_by_objective=True,
-            user_visible=True,
-            reason="Scheduled job created from objective-linked task context.",
         )
-        wake_scheduler(agent)
-        return json.dumps(
-            {
-                **objective_link_fields,
-                "schedule_id": scheduled_message.schedule_id,
-                "schedule_name": scheduled_message.schedule_name,
-                "worker": worker_result,
-                "objective_id": scheduled_message.objective_id,
-                "next_fire_at": scheduled_message.next_fire_at,
-                "paused_until": scheduled_message.paused_until,
-                "expires_at_utc": scheduled_message.expires_at_utc,
-                "schedule_memory": scheduled_message.schedule_memory.model_dump(
-                    mode="json"
-                )
-                if scheduled_message.schedule_memory is not None
-                else None,
-                "conversation_id": getattr(
-                    scheduled_message.payload_meta, "conversation_id", None
-                )
-                if scheduled_message.payload_meta
-                else None,
-            }
-        )
+        with after_saved_change(payload, record_id=schedule_id, step="waking the scheduler", logger=logger):
+            wake_scheduler(agent)
+        return json.dumps(payload)
     except Exception as exc:
         return failed({"error": str(exc)})
 

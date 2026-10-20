@@ -21,3 +21,13 @@ def tool_json(result: str | Mapping[str, Any]) -> Any:
 
 def tool_yaml(result: str | Mapping[str, Any]) -> Any:
     return yaml.safe_load(result_text(result))
+
+
+async def sdk_tool_result(tool: Any, inputs: Mapping[str, Any], *, context: Any = None) -> dict[str, Any]:
+    """Invoke the real Strands decorator and return the result the executor reads."""
+
+    tool_use = {"toolUseId": "tooluse_result_test", "name": tool.tool_name, "input": dict(inputs)}
+    async for event in tool.stream(tool_use, {}, _tool_context=context):
+        if event.get("type") == "tool_result":
+            return event["tool_result"]
+    raise AssertionError("The tool did not return a result.")

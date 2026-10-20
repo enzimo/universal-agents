@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.tool_result_support import tool_json
 import yaml
 from strands.models import Model
 from strands.types.exceptions import ContextWindowOverflowException, ModelThrottledException
@@ -265,7 +266,7 @@ def test_with_authorization_on_only_an_administrator_approves_the_raise(lead) ->
         assert not requests.may_decide(asker_as_member, request), "the person who asked cannot approve it"
         requests.decide(request.request_id, PersonPrincipal("admin_1", "test_team", ("owner",)), AccessReviewChoice.APPROVE)
         call.response = {"kind": "access_request_decision", "status": "granted"}
-        applied = json.loads(asyncio.run(apply_change._tool_func(plan["change_id"], "More tools at once", call)))
+        applied = tool_json(asyncio.run(apply_change._tool_func(plan["change_id"], "More tools at once", call)))
     finally:
         _agent_ctx.set(None)
 

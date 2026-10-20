@@ -2468,6 +2468,21 @@ as before. A change that was made stays a success, also with warnings, and so
 does one staged for a person's approval or proposed for review, because the
 tool did what it does.
 
+Knowledge curation uses the same result handler as ordinary knowledge tools,
+so a refused publication, merge, revert or other curator change also fails the
+Strands call. `apply_change` fails when agreement is missing, approval was
+denied, a plan is stale, or the adapter did not apply the change. Its local
+approval interrupt still pauses and resumes the same call.
+
+After a store confirms a change, independent history, reporting, scheduler
+wake and inspection failures cannot change that success into a failed call.
+`custom_agents.change_followups` records each failed follow-up separately as
+`event=change_followup_failed` with the record id and step, and returns an
+explicit warning with the saved result. This prevents an agent from retrying
+a successful create and making a duplicate. Inspect the returned record id
+and address the warning instead. A schedule update that saves an expiration
+in the past succeeds and reports that the expired schedule was removed.
+
 Agent definitions are declarative and list the tools a type works with as tool
 catalog ids or tool set ids (`default_tools`, `custom_agents/default_tools.py`);
 the catalog maps them to reviewed callables (`access_catalog/tool_functions.py`).

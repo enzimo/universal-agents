@@ -629,8 +629,9 @@ def test_objective_changes_that_were_not_saved_are_reported(
     assert still_open == [current.task_id]
 
 
+@pytest.mark.parametrize("link_saved", [False, True])
 def test_a_schedule_or_heartbeat_item_its_objective_could_not_record_stays_with_a_warning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link_saved: bool
 ) -> None:
     manager = _task_manager(tmp_path)
     _add_current_task(manager)
@@ -639,16 +640,28 @@ def test_a_schedule_or_heartbeat_item_its_objective_could_not_record_stays_with_
     created = tool_json(
         create_objective(title="Check daily", desired_outcome="Checked.", why="Asked.", horizon="recurring")
     )
-    _break_objective_saves(monkeypatch, manager)
+    if link_saved:
+        for name in ("link_schedule_to_objective", "link_heartbeat_to_objective"):
+            original = getattr(manager, name)
+
+            def linked_then_unavailable(*args, _original=original, **kwargs):
+                _original(*args, **kwargs)
+                raise sqlite3.OperationalError("database is locked")
+
+            monkeypatch.setattr(manager, name, linked_then_unavailable)
+    else:
+        _break_objective_saves(monkeypatch, manager)
 
     scheduled = tool_json(create_scheduled_job(instruction="Check.", schedule_name="daily", interval_seconds=60))
     assert agent._schedule_store.get_scheduled_message(scheduled["schedule_id"]) is not None
-    assert "could not record it" in scheduled["objective_link_warning"]
+    expected_warning = "could not be confirmed" if link_saved else "could not record it"
+    assert expected_warning in scheduled["objective_link_warning"]
     heartbeat = tool_json(add_heartbeat_item(instruction="Check.", title="Check"))
     assert heartbeat["heartbeat_item_id"]
-    assert "could not record it" in heartbeat["objective_link_warning"]
+    assert expected_warning in heartbeat["objective_link_warning"]
     stored = manager.get_objective(created["objective_id"])
-    assert (stored.schedule_links, stored.heartbeat_links) == ([], [])
+    assert bool(stored.schedule_links) is link_saved
+    assert bool(stored.heartbeat_links) is link_saved
 
 
 def test_a_task_ends_normally_when_its_objective_review_is_not_saved(

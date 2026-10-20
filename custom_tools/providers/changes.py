@@ -43,6 +43,7 @@ from access_control.changes import ChangeAdapter, ChangeApproval
 from access_control.decisions import HandDownRefused
 from access_control.identity import IdentityRejected
 from access_control.requests import AccessRequests
+from custom_agents.change_followups import after_saved_change
 from custom_messages.contracts.access_v2 import (
     AccessRequestStatus,
     AccessRequestV1,
@@ -53,6 +54,7 @@ from custom_messages.contracts.task_v1 import ACCESS_REQUEST_INTERRUPT_KIND
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.providers.access import ACCESS_REQUEST_INTERRUPT_NAME
 from custom_tools.runtime_context import active_task_context, get_agent_ref
+from custom_tools.tool_results import failed
 
 logger = logging.getLogger(__name__)
 
@@ -83,30 +85,26 @@ class _Applied:
     result: dict[str, Any]
 
 
-def _applied(result: dict[str, Any], approval: ChangeApproval) -> str:
-    failed = bool(result.get("error"))
-    return _json(
-        {
-            "status": "failed" if failed else "applied",
-            "approval": approval.record(),
-            "note": approval.note or None,
-            "result": result,
-        }
-    )
+def _applied(result: dict[str, Any], approval: ChangeApproval) -> str | dict[str, Any]:
+    payload = {
+        "status": "failed" if result.get("error") else "applied",
+        "approval": approval.record(),
+        "note": approval.note or None,
+        "result": result,
+    }
+    return failed(payload) if result.get("error") else _json(payload)
 
 
 def _agreement_needed(proposal: ChangeProposalV1) -> dict[str, Any]:
-    return (
-        {
-            "status": "agreement_required",
-            "title": proposal.title,
-            "effect": list(proposal.effect),
-            "message": (
-                "Authorization is off. Explain this change to the person and get their agreement "
-                "in the conversation, then call apply_change again with confirmed=true."
-            ),
-        }
-    )
+    return {
+        "status": "agreement_required",
+        "title": proposal.title,
+        "effect": list(proposal.effect),
+        "message": (
+            "Authorization is off. Explain this change to the person and get their agreement "
+            "in the conversation, then call apply_change again with confirmed=true."
+        ),
+    }
 
 
 def _request_for_change(
@@ -325,7 +323,9 @@ def _decide_and_apply(
 
 
 @tool(context=True)
-async def apply_change(change_id: str, reason: str, tool_context: ToolContext, confirmed: bool = False) -> str:
+async def apply_change(
+    change_id: str, reason: str, tool_context: ToolContext, confirmed: bool = False
+) -> str | dict[str, Any]:
     """Apply a staged change: the change_id a plan tool returned.
 
     With authorization on, a person approves the exact change in the Inbox:
@@ -349,13 +349,21 @@ async def apply_change(change_id: str, reason: str, tool_context: ToolContext, c
     except InterruptException:
         raise
     except refusals as exc:
-        return _json({"status": "refused", "reason": str(exc)})
+        return failed({"status": "refused", "reason": str(exc)})
     if isinstance(outcome, dict):
-        return _json(outcome)
+        # Staging already succeeded in the plan tool. This call did not
+        # apply the change, so later calls chosen on that assumption stop.
+        return failed(outcome)
     result = outcome.result
     follow_up = getattr(outcome.adapter, "after_apply", None)
     if callable(follow_up) and not result.get("error"):
-        result = await follow_up(outcome.agent, result)
+        with after_saved_change(result, record_id=change_id, step="notifying agents after the change", logger=logger):
+            # The adapter already applied the plan. A failed notification or
+            # reload must preserve that receipt, even if it returns an error.
+            followed = await follow_up(outcome.agent, dict(result))
+            if followed.get("error"):
+                raise RuntimeError(str(followed["error"]))
+            result = followed
     return _applied(result, outcome.approval)
 
 

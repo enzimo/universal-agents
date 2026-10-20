@@ -11,6 +11,7 @@ from custom_agents.heartbeat_store import (
     HeartbeatItemRecord,
     HeartbeatStore,
 )
+from custom_agents.change_followups import after_saved_change
 from custom_messages.enums import TaskHistorySource
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.tool_results import failed
@@ -241,7 +242,11 @@ def add_heartbeat_item(
                 reason="Heartbeat item created from objective-linked task context.",
             )
         )
-        runtime_state = _heartbeat_runtime_state(agent, resolved_source_id)
+        runtime_state = {}
+        with after_saved_change(
+            payload, record_id=item.heartbeat_item_id, step="checking the heartbeat launcher", logger=logger
+        ):
+            runtime_state = _heartbeat_runtime_state(agent, resolved_source_id)
         payload.update(
             {
                 "heartbeat_runtime": runtime_state,
