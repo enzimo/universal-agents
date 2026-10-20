@@ -1131,7 +1131,7 @@ signed-in Web Chat session and sends each message as that person.
 
 Agents keep temporary files in `scratch/` of their task folder. When the
 internal-improvement maintenance schedule fires, trusted code in the manager
-deletes files there older than `tool_policy.scratch_retention_days` (14 by
+deletes files there older than `tool_policy.scratch_retention_days` (21 by
 default, 0 turns it off) from every person's and the agents' `scratch/`,
 walking folders without following links, and gives InternalImprovementAgent
 the counts (`custom_agents/scratch_retention.py`). The maintenance run itself
@@ -2508,9 +2508,26 @@ already (a browser retry gets the first send's answer), and every file passes
 the upload checks (`inbound_attachments.check_inbound_attachment_bytes`; all
 files are checked before any is saved). Saved uploads go to `state/uploads`
 under the checked conversation's own key, and their records take that
-conversation's owner. Nothing deletes upload records except removing their
-owner, so a file saved for a refused send would stay as a stray, and in another
-person's conversation it would count as theirs.
+conversation's owner. A file saved for a refused send would otherwise stay as
+a stray until the cleanup below, and in another person's conversation it would
+count as theirs.
+
+The gateway deletes uploads older than the internal website's
+`attachments.retention_days` (90 by default, 0 keeps them) when it starts and
+every six hours after (`assistant_gateway/upload_retention.py`). It deletes
+the old records first, oldest first and in batches, then their files, so a
+failure leaves a file without a record, never a record without its file. Then
+it deletes every file in `state/uploads` older than the cutoff, which also
+removes files left without a record, and the folders left empty. It shares the
+link-safe folder walk with the scratch cleanup (`old_file_cleanup.py`). The
+gateway is the only writer of `state/uploads`; agents work on their own copies.
+Administrators change both retention numbers in Settings → Team → File
+Retention (`assistant_gateway/file_retention.py`). That is a `runtime_settings`
+change in the gateway's own controls, so `PersonChangeCheck` decides who may.
+The save changes only those two fields of `instance_config.yaml`, keeps a
+backup as the configuration editor does, and is refused when the file changed
+meanwhile. Upload retention applies from the next cleanup; scratch retention
+applies after a restart, because the manager reads its settings when it starts.
 
 A person can answer one earlier chat message with the channel's reply feature.
 That message often belongs to another conversation than the one the chat

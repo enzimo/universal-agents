@@ -58,6 +58,7 @@ from assistant_gateway.interactive_apps.website_handlers.diagnostics import (
 )
 from assistant_gateway.interactive_apps.website_handlers.status import WebsiteStatusHandlers
 from assistant_gateway.interactive_apps.website_handlers.accounts import WebsiteAccountsHandlers
+from assistant_gateway.interactive_apps.website_handlers.file_retention import WebsiteFileRetentionHandlers
 from assistant_gateway.interactive_apps.website_handlers.knowledge import WebsiteKnowledgeHandlers
 from assistant_gateway.interactive_apps.website_handlers.procedures import (
     WebsiteProcedureHandlers,
@@ -159,6 +160,7 @@ class InternalWebsiteInteractiveApp(BaseInteractiveApp):
         self.access_map = WebsiteAccessMapHandlers(application=application, operations=signed_in)
         self.status = WebsiteStatusHandlers(application=application, operations=signed_in)
         self.accounts = WebsiteAccountsHandlers(application=application, operations=signed_in)
+        self.file_retention = WebsiteFileRetentionHandlers(application=application, operations=signed_in)
         self.knowledge = WebsiteKnowledgeHandlers(
             application=application,
             operations=operations.WebsiteKnowledgeHandlersOperations(
@@ -565,6 +567,9 @@ class InternalWebsiteInteractiveApp(BaseInteractiveApp):
                     ("GET", "/api/web-chat/status/access", self.status.access),
                     # Settings > Accounts (website_handlers.accounts), read only.
                     ("GET", "/api/web-chat/accounts", self.accounts.view),
+                    # Settings > Team > File Retention (website_handlers.file_retention).
+                    ("GET", "/api/web-chat/file-retention", self.file_retention.view),
+                    ("PUT", "/api/web-chat/file-retention", self.file_retention.save),
                     ("GET", "/api/web-chat/access-map", self.access_map.view),
                     (
                         "GET",

@@ -326,6 +326,10 @@ class DeliveryRepository(Protocol):
 
     def get_attachment(self, attachment_id: str) -> AttachmentRecord | None: ...
 
+    def delete_attachments_created_before(self, cutoff: str, *, limit: int) -> tuple[str, ...]:
+        """Delete up to ``limit`` upload records created before ``cutoff``; their file paths."""
+        ...
+
     def update_attachment_nats_ref(
         self,
         *,

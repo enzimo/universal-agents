@@ -22,6 +22,7 @@ paths = [
     "file_locking.py",
     "id_generation.py",
     "internal_credentials.py",
+    "old_file_cleanup.py",
     "reply_routing_trace.py",
     "strands_main.py",
     "time_presentation.py",

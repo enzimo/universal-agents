@@ -68,7 +68,7 @@ function installedEntry(overrides = {}) {
   };
 }
 
-function fixture({ sessionKey = "session-1" } = {}) {
+function fixture({ sessionKey = "session-1", retention = null } = {}) {
   const env = fakeBrowser();
   const nodes = withElements(env.document, [
     ["settings-team-panel", "section"],
@@ -84,7 +84,7 @@ function fixture({ sessionKey = "session-1" } = {}) {
   const team = createTeamControls({
     panel: nodes["settings-team-panel"], content: nodes["settings-team-content"],
     proceduresContainer: nodes["settings-procedures"], status: nodes["settings-team-status"],
-    refreshButton: nodes["settings-team-refresh"], client, getSessionKey: () => key, teamActivity,
+    refreshButton: nodes["settings-team-refresh"], client, getSessionKey: () => key, teamActivity, retention,
     browser: env.browser, formatTime, now: () => Date.parse("2026-09-25T15:00:30Z"),
   });
   return { ...env, ...nodes, team, client, teamActivity, content: nodes["settings-team-content"], procedures: nodes["settings-procedures"],
@@ -438,4 +438,18 @@ test("a refused session confirmation is shown like a refused read", async () => 
   assert.equal(status.hidden, false);
   assert.equal(status.textContent, "The gateway is restarting. Try again shortly.");
   assert.equal(f.requests.filter(request => request.path.startsWith("/api/web-chat/procedures")).length, 0);
+});
+
+test("File Retention is read with each refresh and cleared at sign-out", async () => {
+  const calls = [];
+  const retention = {
+    load() { calls.push("load"); return Promise.resolve(); },
+    resetStatus() { calls.push("resetStatus"); },
+    clear() { calls.push("clear"); },
+  };
+  const f = fixture({ retention });
+  await activated(f);
+  assert.deepEqual(calls, ["load"]);
+  f.team.clear();
+  assert.deepEqual(calls, ["load", "clear", "resetStatus"]);
 });

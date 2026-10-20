@@ -1728,6 +1728,86 @@ async def test_web_chat_shell_protects_permission_ui_from_framing_and_caching(
     assert re.search(r'src="/chat_delivery\.js\?v=[0-9a-f]{16}"', markup)
 
 
+class _RetentionChanges:
+    """Who may change file retention: the person check's answer, switchable by the test."""
+
+    def __init__(self) -> None:
+        self.allowed: set[str] = set()
+
+    def may_change(self, person_id, kind) -> bool:
+        return person_id in self.allowed
+
+
+@pytest.mark.asyncio
+async def test_file_retention_is_shown_to_members_and_saved_only_by_those_who_may_change_it(
+    tmp_path: Path,
+) -> None:
+    from assistant_gateway.file_retention import GatewayFileRetention
+    from assistant_gateway.upload_retention import UploadRetention
+
+    config = _config(tmp_path)
+    config.gateway.users.enabled = True
+    config.interactive_apps.internal_website.web_chat_enabled = True
+    store = GatewayStateStore(str(tmp_path / "gateway.db"))
+    store.identity_repository.create_gateway_user(
+        canonical_user_id="user_alpha", display_name="Alice", timezone="UTC"
+    )
+    gateway = _UserTokenStatefulFakeGateway(store)
+    app = InternalWebsiteInteractiveApp(config, gateway=gateway, bridge=SimpleNamespace())
+    changes = _RetentionChanges()
+    uploads = UploadRetention(records=store, uploads_dir=config.layout.uploads_dir, retention_days=90)
+    gateway.file_retention = GatewayFileRetention(
+        config_path=config.config_path, person_changes=changes, uploads=uploads
+    )
+    saved_settings = config.layout.instance_config_path
+
+    async with TestClient(TestServer(app.build_app())) as client:
+        auth_response = await client.post("/api/web-chat/auth", json={"token": "ua_user_token"})
+        auth_payload = await auth_response.json()
+        read_headers = {"Cookie": f"ua_web_chat_session={auth_response.cookies['ua_web_chat_session'].value}"}
+        write_headers = {
+            **read_headers,
+            "Origin": str(client.make_url("/")).rstrip("/"),
+            "Sec-Fetch-Site": "same-origin",
+            "X-UA-Permission-CSRF": auth_payload["permission_csrf_token"],
+        }
+        member_view = await (await client.get("/api/web-chat/file-retention", headers=read_headers)).json()
+        before = saved_settings.read_bytes()
+        refused = await client.put(
+            "/api/web-chat/file-retention", headers=write_headers, json={"upload_days": 30, "scratch_days": 7}
+        )
+        refused_payload = await refused.json()
+        after_refusal = saved_settings.read_bytes()
+
+        changes.allowed.add("user_alpha")
+        missing_csrf = await client.put(
+            "/api/web-chat/file-retention", headers=read_headers, json={"upload_days": 30, "scratch_days": 7}
+        )
+        invalid = await client.put(
+            "/api/web-chat/file-retention", headers=write_headers, json={"upload_days": -1, "scratch_days": 7}
+        )
+        saved = await client.put(
+            "/api/web-chat/file-retention", headers=write_headers, json={"upload_days": 30, "scratch_days": 7}
+        )
+        saved_payload = await saved.json()
+        admin_view = await (await client.get("/api/web-chat/file-retention", headers=read_headers)).json()
+
+    assert member_view == {"status": "ok", "upload_days": 90, "scratch_days": 21, "max_days": 3650, "can_change": False}
+    assert refused.status == 403
+    assert refused_payload["error"] == "Only team administrators can change how long files are kept."
+    assert after_refusal == before
+    assert missing_csrf.status == 403
+    assert invalid.status == 400
+    assert saved.status == 200
+    assert (saved_payload["upload_days"], saved_payload["scratch_days"]) == (30, 7)
+    assert admin_view["can_change"] is True
+    assert (admin_view["upload_days"], admin_view["scratch_days"]) == (30, 7)
+    reloaded = type(config).load_saved(config.config_path)
+    assert reloaded.interactive_apps.internal_website.attachments.retention_days == 30
+    assert reloaded.tool_policy.scratch_retention_days == 7
+    assert uploads.retention_days == 30
+
+
 @pytest.mark.asyncio
 async def test_web_chat_appearance_is_validated_and_persisted_for_signed_in_user(
     tmp_path: Path,
