@@ -54,7 +54,7 @@ SKIPPED_OUTSIDE_UPLOADS = "outside_uploads_folder"
 class UploadRecords(Protocol):
     """The gateway database's upload records (``storage.gateway_state_repository``)."""
 
-    def delete_attachments_created_before(self, cutoff: str, *, limit: int) -> tuple[str, ...]: ...
+    def delete_uploads_created_before(self, cutoff: str, *, uploads_dir: str, limit: int) -> tuple[str, ...]: ...
 
 
 @dataclass(kw_only=True)
@@ -99,7 +99,7 @@ def prune_uploads(
 
 def _remove_old_records(records: UploadRecords, root: Path, cutoff: str, result: UploadPruneResult) -> None:
     while True:
-        paths = records.delete_attachments_created_before(cutoff, limit=RECORD_BATCH)
+        paths = records.delete_uploads_created_before(cutoff, uploads_dir=str(root), limit=RECORD_BATCH)
         result.records_removed += len(paths)
         for path in paths:
             if path:

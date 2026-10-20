@@ -29,6 +29,7 @@ from pydantic import (
 from typing_extensions import NotRequired, TypedDict
 
 from config_backup_retention import prune_config_backups
+from config_file_updates import ConfigFileConflict, replace_config_file
 from access_control.changes import ChangeApproval
 from custom_agents.access_runtime import acting_agent, runtime_access
 from custom_agents.agent_profile_service import AgentProfileService
@@ -1319,12 +1320,17 @@ class RuntimeSettingsService:
             f"{source_path.name}.bak.runtime-settings.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
         )
         backup_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_bytes(backup_path, previous_bytes)
+        if target != SettingPersistenceTarget.INSTANCE_CONFIG:
+            atomic_write_bytes(backup_path, previous_bytes)
 
+        written_revision: str | None = None
         try:
             extras: dict[str, Any] = {}
             if target == SettingPersistenceTarget.INSTANCE_CONFIG:
-                self._apply_instance_config(config, plan.changes, source_path)
+                written_revision = self._apply_instance_config(
+                    plan.changes, source_path, expected_revision=snapshot.sha256, backup_path=backup_path
+                )
+                previous_bytes = backup_path.read_bytes()
                 extras.update(self._apply_live_context_dump(plan.changes))
                 if preflight is not None:
                     extras["preflight"] = preflight
@@ -1352,11 +1358,25 @@ class RuntimeSettingsService:
                 "backup_path": str(backup_path),
                 "previous_existed": snapshot.existed,
                 "previous_sha256": sha256_bytes(previous_bytes),
-                "sha256": sha256_bytes(current_bytes),
+                "sha256": written_revision or sha256_bytes(current_bytes),
                 **extras,
             }
         except Exception:
-            if snapshot.existed:
+            if target == SettingPersistenceTarget.INSTANCE_CONFIG:
+                if written_revision is not None:
+                    try:
+                        replace_config_file(
+                            source_path,
+                            previous_bytes if snapshot.existed else None,
+                            expected_revision=written_revision,
+                        )
+                    except ConfigFileConflict:
+                        logger.warning(
+                            "A failed settings change could not be undone because another writer saved later. "
+                            "The later settings were kept. event=runtime_settings_rollback_conflict path=%s",
+                            source_path,
+                        )
+            elif snapshot.existed:
                 atomic_write_bytes(source_path, previous_bytes)
             else:
                 source_path.unlink(missing_ok=True)
@@ -1397,14 +1417,22 @@ class RuntimeSettingsService:
 
     def _apply_instance_config(
         self,
-        config: Any,
         changes: list[RuntimeSettingPlanChange],
         source_path: Path,
-    ) -> None:
-        from assistant_gateway.config import dump_instance_config_yaml
+        *,
+        expected_revision: str,
+        backup_path: Path,
+    ) -> str:
+        from assistant_gateway.config import GatewayInstanceConfig
 
+        # Build from the same saved file whose approved revision the write
+        # checks. The earlier model may predate a concurrent settings writer.
+        config = GatewayInstanceConfig.load(source_path)
         validated = self._instance_config_candidate(config, changes)
-        atomic_write_bytes(source_path, dump_instance_config_yaml(validated.to_yaml_dict()).encode("utf-8"))
+        validated.save(source_path, expected_revision=expected_revision, backup_path=backup_path)
+        revision: str | None = validated.source_revision
+        assert revision is not None
+        return revision
 
     def _instance_config_candidate(
         self,
@@ -1628,7 +1656,15 @@ class RuntimeSettingsService:
     def _undo_unrecorded(self, result: Mapping[str, Any]) -> None:
         """Put back a change whose receipt could not be written: the file, and a model's running tool cap with it."""
 
-        self._restore_backup(result)
+        try:
+            self._restore_backup(result)
+        except ConfigFileConflict:
+            logger.warning(
+                "A failed settings receipt could not be undone because another writer saved later. "
+                "The later settings were kept. event=runtime_settings_rollback_conflict path=%s",
+                result["saved_path"],
+            )
+            return
         if result["persistence_target"] == SettingPersistenceTarget.MODEL_CAPABILITY.value:
             from custom_agents.model_tool_limit import use_saved_caps
 
@@ -1638,6 +1674,13 @@ class RuntimeSettingsService:
     def _restore_backup(result: Mapping[str, Any]) -> None:
         target_path = Path(str(result["saved_path"]))
         backup_path = Path(str(result["backup_path"]))
+        if result["persistence_target"] == SettingPersistenceTarget.INSTANCE_CONFIG.value:
+            replace_config_file(
+                target_path,
+                backup_path.read_bytes() if bool(result.get("previous_existed")) else None,
+                expected_revision=str(result["sha256"]),
+            )
+            return
         if bool(result.get("previous_existed")):
             atomic_write_bytes(target_path, backup_path.read_bytes())
         else:

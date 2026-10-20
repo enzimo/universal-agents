@@ -19,6 +19,7 @@
   var statusLine = document.getElementById("config-editor-status");
   var preferredArrowColumn = null;
   var restartRequested = false;
+  var configRevision = null;
 
   function showStatus(message, isError) {
     statusLine.textContent = message || "";
@@ -499,6 +500,7 @@
   }
 
   function applyConfigPayload(payload) {
+    configRevision = payload.revision;
     setEditorVisible(true);
     pathLabel.textContent = payload.path || "";
     yamlEditor.value = payload.content || "";
@@ -534,8 +536,9 @@
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
-      body: JSON.stringify({ content: yamlEditor.value }),
+      body: JSON.stringify({ content: yamlEditor.value, revision: configRevision }),
     }).then(parseResponse).then(function (payload) {
+      configRevision = payload.revision;
       renderBackups(payload.backups || []);
       showStatus("Saved. Backup created: " + (payload.backup && payload.backup.name ? payload.backup.name : "yes"), false);
     }).catch(function (error) {
@@ -556,7 +559,9 @@
     showStatus("Restoring backup...", false);
     window.fetch("/api/config-editor/backups/" + encodeURIComponent(backupName) + "/restore", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
+      body: JSON.stringify({ revision: configRevision }),
     }).then(parseResponse).then(function () {
       return loadConfig();
     }).then(function () {

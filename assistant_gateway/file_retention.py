@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 
 from assistant_gateway.application.file_retention_page import (
     ADMINISTRATORS_ONLY_TEXT,
@@ -36,10 +37,10 @@ from assistant_gateway.application.file_retention_page import (
     checked_days,
 )
 from assistant_gateway.application.ports import GatewayPersonChangeCheck
-from assistant_gateway.config import GatewayInstanceConfig, dump_instance_config_yaml
+from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.upload_retention import UploadRetention
 from config_backup_retention import prune_config_backups
-from custom_agents.governance.authorized_operations import atomic_write_bytes
+from config_file_updates import ConfigFileConflict
 from custom_agents.runtime_settings_service import RUNTIME_SETTINGS_CHANGE_KIND
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,9 @@ class GatewayFileRetention:
         self._config_path = config_path
         self._person_changes = person_changes
         self._uploads = uploads
+        # The file CAS protects other writers. This lock also keeps this
+        # gateway's live value in the same order as its successful saves.
+        self._save_lock = Lock()
 
     def page(self, *, person_id: str) -> FileRetentionPage:
         return FileRetentionPage(
@@ -68,26 +72,26 @@ class GatewayFileRetention:
     def save(self, *, person_id: str, upload_days: object, scratch_days: object) -> FileRetention:
         """Save both numbers; raises ``FileRetentionRefused``, ``FileRetentionInvalid`` or ``FileRetentionConflict``."""
 
+        with self._save_lock:
+            return self._save(person_id=person_id, upload_days=upload_days, scratch_days=scratch_days)
+
+    def _save(self, *, person_id: str, upload_days: object, scratch_days: object) -> FileRetention:
         if not self._person_changes.may_change(person_id, RUNTIME_SETTINGS_CHANGE_KIND):
             raise FileRetentionRefused(ADMINISTRATORS_ONLY_TEXT)
         wanted = FileRetention(
             upload_days=checked_days(upload_days, what="chat uploads"),
             scratch_days=checked_days(scratch_days, what="scratch files"),
         )
-        # Read the bytes before loading them: a change after this read is
-        # caught by the comparison just before writing.
-        path = GatewayInstanceConfig.load_saved(self._config_path).config_path
-        previous = path.read_bytes()
-        config = GatewayInstanceConfig.load(path)
+        config = GatewayInstanceConfig.load_saved(self._config_path)
+        path = config.config_path
         before = _retention(config)
         config.interactive_apps.internal_website.attachments.retention_days = wanted.upload_days
         config.tool_policy.scratch_retention_days = wanted.scratch_days
-        content = dump_instance_config_yaml(config.to_yaml_dict()).encode("utf-8")
-        if path.read_bytes() != previous:
-            raise FileRetentionConflict(CHANGED_MEANWHILE_TEXT)
         backup = path.with_name(f"{path.name}.bak.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}")
-        atomic_write_bytes(backup, previous)
-        atomic_write_bytes(path, content)
+        try:
+            config.save(backup_path=backup)
+        except ConfigFileConflict as exc:
+            raise FileRetentionConflict(CHANGED_MEANWHILE_TEXT) from exc
         prune_config_backups(path, event_logger=logger, preserve_paths=(backup,))
         self._uploads.retention_days = wanted.upload_days
         logger.info(

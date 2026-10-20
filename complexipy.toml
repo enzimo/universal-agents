@@ -20,6 +20,7 @@ paths = [
     "default_values.py",
     "env_secrets.py",
     "file_locking.py",
+    "config_file_updates.py",
     "id_generation.py",
     "internal_credentials.py",
     "old_file_cleanup.py",

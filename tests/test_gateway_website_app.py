@@ -4340,6 +4340,7 @@ async def test_internal_website_config_editor_auth_save_restore_download_and_res
         config_response = await client.get(
             "/api/config-editor/config", headers=session_headers
         )
+        config_payload = await config_response.json()
         invalid_save_response = await client.put(
             "/api/config-editor/config",
             headers=session_headers,
@@ -4348,16 +4349,30 @@ async def test_internal_website_config_editor_auth_save_restore_download_and_res
         save_response = await client.put(
             "/api/config-editor/config",
             headers=session_headers,
-            json={"content": updated_content},
+            json={"content": updated_content, "revision": config_payload["revision"]},
         )
         download_response = await client.get(
             "/api/config-editor/download", headers=session_headers
         )
         save_payload = await save_response.json()
         backup_name = save_payload["backup"]["name"]
+        stale_save = await client.put(
+            "/api/config-editor/config", headers=session_headers,
+            json={"content": original_content, "revision": config_payload["revision"]},
+        )
+        missing_revision = await client.put(
+            "/api/config-editor/config", headers=session_headers, json={"content": original_content},
+        )
+        stale_restore = await client.post(
+            f"/api/config-editor/backups/{backup_name}/restore", headers=session_headers,
+            json={"revision": config_payload["revision"]},
+        )
+        assert stale_save.status == missing_revision.status == stale_restore.status == 409
+        assert config_path.read_text(encoding="utf-8") == updated_content
         restore_response = await client.post(
             f"/api/config-editor/backups/{backup_name}/restore",
             headers=session_headers,
+            json={"revision": save_payload["revision"]},
         )
         restart_response = await client.post(
             "/api/config-editor/restart", headers=session_headers
@@ -4465,10 +4480,11 @@ async def test_internal_website_config_editor_targets_the_saved_instance_config_
         config_response = await client.get(
             "/api/config-editor/config", headers=session_headers
         )
+        config_payload = await config_response.json()
         save_response = await client.put(
             "/api/config-editor/config",
             headers=session_headers,
-            json={"content": updated_content},
+            json={"content": updated_content, "revision": config_payload["revision"]},
         )
         download_response = await client.get(
             "/api/config-editor/download", headers=session_headers

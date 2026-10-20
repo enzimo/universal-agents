@@ -358,7 +358,7 @@ class GatewayStateRepository(
 
     def get_attachment(self, attachment_id: str) -> Optional[AttachmentRecord]: ...
 
-    def delete_attachments_created_before(self, cutoff: str, *, limit: int) -> tuple[str, ...]: ...
+    def delete_uploads_created_before(self, cutoff: str, *, uploads_dir: str, limit: int) -> tuple[str, ...]: ...
 
     def update_attachment_nats_ref(
         self,
@@ -2531,8 +2531,13 @@ class _RelationalGatewayStateRepository:
             return None
         return AttachmentRecord(**dict(row))
 
-    def delete_attachments_created_before(self, cutoff: str, *, limit: int) -> tuple[str, ...]:
+    def delete_uploads_created_before(self, cutoff: str, *, uploads_dir: str, limit: int) -> tuple[str, ...]:
         """Delete up to ``limit`` upload records created before ``cutoff``, oldest first.
+
+        The same table holds outgoing files in people's scratch folders.
+        Match the uploads folder before deletion, with a trailing slash to
+        exclude sibling folders. A literal substring comparison treats SQL
+        wildcard characters in folder names as ordinary characters.
 
         Returns their files' paths for the caller to remove (the upload
         cleanup, ``assistant_gateway.upload_retention``): the record goes first,
@@ -2541,6 +2546,7 @@ class _RelationalGatewayStateRepository:
         """
 
         bind = self._dialect.bind
+        prefix = uploads_dir.rstrip("/") + "/"
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
@@ -2548,12 +2554,13 @@ class _RelationalGatewayStateRepository:
                 WHERE attachment_id IN (
                     SELECT attachment_id FROM gateway_attachments
                     WHERE created_at < {bind}
+                      AND substr(local_path, 1, {bind}) = {bind}
                     ORDER BY created_at
                     LIMIT {bind}
                 )
                 RETURNING local_path
                 """,
-                (cutoff, int(limit)),
+                (cutoff, len(prefix), prefix, int(limit)),
             ).fetchall()
             conn.commit()
         return tuple(str(row[0] or "") for row in rows)

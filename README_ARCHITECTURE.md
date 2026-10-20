@@ -2514,8 +2514,11 @@ count as theirs.
 
 The gateway deletes uploads older than the internal website's
 `attachments.retention_days` (90 by default, 0 keeps them) when it starts and
-every six hours after (`assistant_gateway/upload_retention.py`). It deletes
-the old records first, oldest first and in batches, then their files, so a
+every six hours after (`assistant_gateway/upload_retention.py`). Its database
+query selects only paths under `state/uploads`; the same attachment table
+also holds outgoing copies in `scratch/sent/`, whose records stay available
+under their separate scratch retention. It deletes the old upload records
+first, oldest first and in batches, then their files, so a
 failure leaves a file without a record, never a record without its file. Then
 it deletes every file in `state/uploads` older than the cutoff, which also
 removes files left without a record, and the folders left empty. It shares the
@@ -2994,7 +2997,23 @@ credentials, the public origin, the website listener) in memory
 PostgreSQL address is applied by the storage resolvers
 (`TEAM_BUNDLED_POSTGRES_ADDRESS`). Writers load the file as stored
 (`load_saved`), change only their own fields and save, so no deployment detail
-or stale in-memory value is ever written back. The bundle used to run every
+or stale in-memory value is ever written back. Every instance-config writer
+uses `config_file_updates.replace_config_file`: it holds the shared
+`file_locking.exclusive_file_lock` while checking the source revision, making
+any backup and replacing the file atomically. Loaded models retain the hash
+of the exact bytes parsed. A stale model refuses to save; a new model creates
+an absent file unless its caller supplies the destination revision for an
+intentional replacement. This covers retention, manager-route and diagnostic
+changes, the configuration editor, runtime settings plans, schema upgrades,
+onboarding and team transfer. Editor saves and restores require the revision
+returned by GET; an older open editor must reload. Approved runtime plans
+still require their exact source digest, and a failed receipt can restore a
+backup only while the applied revision is still current. The separate lock
+file survives atomic replacement and excludes threads and processes; lock
+failure refuses the write. External hand edits cannot participate in an
+advisory lock, so stop runtime writers before editing the file directly.
+
+The bundle used to run every
 process from a copy written at container start; settings saved while the
 runtime ran then waited for a container restart. For the same reason the
 launcher, on each in-app restart, recomputes the environment variables it

@@ -42,6 +42,7 @@ from runtime_settings.security import SecurityLayerSettings, normalize_security_
 from runtime_settings.voice import VoiceSettings
 from runtime_settings.workspace import WorkspaceSettings
 from config_loader import load_config
+from config_file_updates import config_revision
 from default_values import (
     AGENT_DEFAULTS,
     EMBEDDING_DEFAULTS,
@@ -905,6 +906,8 @@ def write_onboarded_instance(
     config = create_onboarded_config(answers=answers, template=template, options=options)
     config_path = config.config_path
     existing_config_found = config_path.exists()
+    previous = config_path.read_bytes() if existing_config_found else None
+    expected_config_revision = config_revision(previous)
     before_config = read_yaml_mapping(config_path)
     if config.launch.secrets_from_environment:
         return _write_instance_with_environment_secrets(
@@ -913,11 +916,13 @@ def write_onboarded_instance(
             options=options,
             existing_config_found=existing_config_found,
             before_config=before_config,
+            expected_config_revision=expected_config_revision,
         )
     env_path = Path(config.launch.env_file_path or default_launch_env_file(config.instance_root)).expanduser().resolve()
     before_env = parse_env_file(env_path)
     created_paths = _bootstrap_onboarded_instance(
-        config, answers, source_env_file_path=options.source_env_file_path
+        config, answers, source_env_file_path=options.source_env_file_path,
+        expected_config_revision=expected_config_revision,
     )
     _merge_user_secret_env(env_path, answers)
     if options.generate_internal_credentials:
@@ -962,6 +967,7 @@ def _write_instance_with_environment_secrets(
     options: OnboardingWriteOptions,
     existing_config_found: bool,
     before_config: Mapping[str, Any],
+    expected_config_revision: str | None,
 ) -> OnboardingWriteResult:
     """Write an instance whose secrets come only from the environment.
 
@@ -982,7 +988,9 @@ def _write_instance_with_environment_secrets(
             "event=onboarding_source_env_ignored instance_name=%s",
             config.instance_name,
         )
-    created_paths = _bootstrap_onboarded_instance(config, answers, source_env_file_path=None)
+    created_paths = _bootstrap_onboarded_instance(
+        config, answers, source_env_file_path=None, expected_config_revision=expected_config_revision
+    )
     _append_new_paths(created_paths, ensure_instance_sealbox_material(config))
     env = environment_secret_values()
     seed_default_gateway_user(config, env=env)
@@ -1020,10 +1028,12 @@ def _bootstrap_onboarded_instance(
     answers: Mapping[str, Any],
     *,
     source_env_file_path: Optional[str],
+    expected_config_revision: str | None,
 ) -> list[Path]:
     created_paths = bootstrap_instance(
         config,
         source_env_file_path=source_env_file_path,
+        expected_config_revision=expected_config_revision,
         assistant_purpose=str(answers.get("assistant_purpose") or "").strip() or None,
         assistant_response_style=str(answers.get("assistant_response_style") or "").strip() or None,
         assistant_autonomy=str(answers.get("assistant_autonomy") or "").strip() or None,

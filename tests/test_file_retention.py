@@ -8,8 +8,10 @@ was asked about.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -23,6 +25,7 @@ from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.file_retention import GatewayFileRetention
 from assistant_gateway.upload_retention import UploadRetention
 from custom_agents.runtime_settings_service import RUNTIME_SETTINGS_CHANGE_KIND
+from config_file_updates import ConfigFileConflict
 
 
 class _PersonChanges:
@@ -36,7 +39,7 @@ class _PersonChanges:
 
 
 class _NoRecords:
-    def delete_attachments_created_before(self, cutoff: str, *, limit: int) -> tuple[str, ...]:
+    def delete_uploads_created_before(self, cutoff: str, *, uploads_dir: str, limit: int) -> tuple[str, ...]:
         return ()
 
 
@@ -154,3 +157,89 @@ def test_a_settings_change_made_meanwhile_is_never_overwritten(
     assert path.read_text(encoding="utf-8").endswith("# changed by another settings writer\n")
     assert _backups(config) == []
     assert service._uploads.retention_days == 90
+
+
+def test_a_writer_racing_the_retention_backup_must_reload_before_it_can_save(tmp_path, monkeypatch) -> None:
+    """The former gap between comparing and replacing is protected across writers."""
+
+    import config_file_updates
+
+    service, config, _ = _service(tmp_path, allowed=True)
+    other = _saved(config)
+    other.instance_name = "another writer"
+    at_backup = Event()
+    continue_save = Event()
+    second_started = Event()
+    second_done = Event()
+    real_write = config_file_updates.atomic_write_bytes
+
+    def pause_at_backup(path, content):
+        if ".bak." in path.name:
+            at_backup.set()
+            assert continue_save.wait(timeout=10)
+        real_write(path, content)
+
+    def save_other():
+        second_started.set()
+        try:
+            other.save()
+        finally:
+            second_done.set()
+
+    monkeypatch.setattr(config_file_updates, "atomic_write_bytes", pause_at_backup)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(service.save, person_id="usr_admin", upload_days=30, scratch_days=7)
+        try:
+            assert at_backup.wait(timeout=10)
+            second = pool.submit(save_other)
+            assert second_started.wait(timeout=10)
+            assert not second_done.wait(timeout=0.05), "the other writer must wait for the checked replacement"
+        finally:
+            continue_save.set()
+        assert first.result(timeout=10) == FileRetention(upload_days=30, scratch_days=7)
+        with pytest.raises(ConfigFileConflict):
+            second.result(timeout=10)
+    after = _saved(config)
+    assert after.instance_name == "retention-test"
+    assert after.interactive_apps.internal_website.attachments.retention_days == 30
+    # The refused writer can deliberately reapply its one change after reload.
+    after.instance_name = "another writer"
+    after.save()
+    assert _saved(config).interactive_apps.internal_website.attachments.retention_days == 30
+
+
+def test_concurrent_retention_saves_keep_disk_and_live_values_in_the_same_order(tmp_path, monkeypatch) -> None:
+    service, config, _ = _service(tmp_path, allowed=True)
+    first_written = Event()
+    finish_first = Event()
+    second_started = Event()
+    second_done = Event()
+    real_save = GatewayInstanceConfig.save
+
+    def save_then_pause(self, *args, **kwargs):
+        saved = real_save(self, *args, **kwargs)
+        if self.interactive_apps.internal_website.attachments.retention_days == 30:
+            first_written.set()
+            assert finish_first.wait(timeout=10)
+        return saved
+
+    def save_second():
+        second_started.set()
+        try:
+            return service.save(person_id="usr_admin", upload_days=60, scratch_days=9)
+        finally:
+            second_done.set()
+
+    monkeypatch.setattr(GatewayInstanceConfig, "save", save_then_pause)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(service.save, person_id="usr_admin", upload_days=30, scratch_days=7)
+        try:
+            assert first_written.wait(timeout=10)
+            second = pool.submit(save_second)
+            assert second_started.wait(timeout=10)
+            assert not second_done.wait(timeout=0.05)
+        finally:
+            finish_first.set()
+        first.result(timeout=10)
+        second.result(timeout=10)
+    assert service._uploads.retention_days == _saved(config).interactive_apps.internal_website.attachments.retention_days == 60

@@ -420,6 +420,13 @@ Docker secrets): such a variable, for example `LLM_MODEL_ID`, keeps overriding
 the saved setting until you remove it. The Docker bundle adds its own NATS and
 PostgreSQL details in memory and never writes them to the file.
 
+Concurrent settings saves never overwrite a file changed since they read it.
+If a save or backup restore asks you to reload, the newer settings were kept;
+reload and reapply your edit. Open configuration editors from an earlier
+version must reload before saving. Stop runtime writers before hand-editing
+`instance_config.yaml` outside the browser, since external editors do not
+share the application's file lock.
+
 Model overrides need no restart. A change explicitly targeting TeamLead's own
 type applies to it immediately. Changes to another type or the workspace default
 reach affected running agents at their next turn, including TeamLead when it

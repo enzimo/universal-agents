@@ -9,6 +9,7 @@ schema).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -25,7 +26,16 @@ from assistant_gateway.inbound_attachments import (
 )
 from assistant_gateway.store import GatewayStateStore
 from assistant_gateway.upload_retention import UploadRetention, prune_uploads
+from assistant_gateway.application.gateway_application import GatewayApplicationResponse
+from custom_messages.contracts.delivery_v1 import UserNotificationAttachment
 from tests.knowledge_support import BACKENDS, knowledge_storage
+from tests.test_gateway_transcript import (
+    CONVERSATION as TRANSCRIPT_CONVERSATION,
+    SESSION as TRANSCRIPT_SESSION,
+    _create_web_session,
+    _route,
+    _service,
+)
 
 NOW = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
 CONVERSATION = "website:web-chat:thread_a"
@@ -133,20 +143,80 @@ def test_zero_days_keeps_every_upload(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "event=upload_prune_disabled" in caplog.text
 
 
-def test_a_record_naming_a_file_outside_the_uploads_folder_never_deletes_that_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+def test_records_and_files_outside_the_uploads_folder_are_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     uploads_dir = tmp_path / "uploads"
     store = GatewayStateStore(str(tmp_path / "gateway.db"))
     outside = _upload(store, tmp_path / "elsewhere", monkeypatch, session_key=CONVERSATION, name="outside", age_days=200)
-    caplog.set_level(logging.INFO)
 
     result = prune_uploads(records=store, uploads_dir=uploads_dir, retention_days=90, now=NOW)
 
-    assert (result.records_removed, result.files_removed, result.skipped) == (1, 0, 1)
-    assert store.get_attachment(outside.attachment.attachment_id) is None
+    assert (result.records_removed, result.files_removed, result.skipped) == (0, 0, 0)
+    assert store.get_attachment(outside.attachment.attachment_id) is not None
     assert outside.local_path.exists()
-    assert "event=upload_prune_skipped reason=outside_uploads_folder" in caplog.text
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_upload_cleanup_preserves_the_transcript_record_for_a_file_sent_by_an_agent(
+    backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retained scratch copy must remain downloadable from its original chat."""
+
+    uploads_dir = tmp_path / "state" / "uploads"
+    with _store(backend, tmp_path) as settings:
+        store = GatewayStateStore(str(tmp_path / "gateway.db"), storage_settings=settings)
+        _create_web_session(store)
+        service = _service(store)
+        session = store.session_repository.get_session(TRANSCRIPT_SESSION)
+        accepted = service.accept_user_message(
+            session=session, route=_route(), conversation_id=TRANSCRIPT_CONVERSATION,
+            text="Give me a report", attachments=(),
+        )
+        sent = _aged_file(tmp_path / "workspaces" / "users" / "user_alpha" / "scratch" / "sent" / "report.txt", 100)
+        response = GatewayApplicationResponse(
+            text="Your report", conversation_id=TRANSCRIPT_CONVERSATION, correlation_id="corr_reply",
+            attachments=(UserNotificationAttachment(
+                path=str(sent), filename=sent.name, content_type="text/plain", kind="document",
+                sha256=hashlib.sha256(sent.read_bytes()).hexdigest(),
+            ),),
+        )
+        with monkeypatch.context() as old_clock:
+            old_clock.setattr(gateway_state_repository, "utc_now_iso", lambda: (NOW - timedelta(days=100)).isoformat())
+            projected = service.append_gateway_response(
+                session=session, route=_route(), response=response, reply_to=accepted
+            )
+        attachment_id = projected.attachment_references[0].attachment_id
+        old_upload = _upload(store, uploads_dir, monkeypatch, session_key=CONVERSATION, name="old", age_days=100)
+
+        result = prune_uploads(records=store, uploads_dir=uploads_dir, retention_days=90, now=NOW)
+
+        assert (result.records_removed, result.files_removed, result.skipped) == (1, 1, 0)
+        assert store.get_attachment(old_upload.attachment.attachment_id) is None
+        record = store.get_attachment(attachment_id)
+        assert record is not None
+        assert Path(record.local_path).read_bytes() == b"left behind"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_upload_folder_matching_is_literal_and_excludes_siblings(
+    backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    uploads_dir = tmp_path / "uploads_%"
+    with _store(backend, tmp_path) as settings:
+        store = GatewayStateStore(str(tmp_path / "gateway.db"), storage_settings=settings)
+        inbound = _upload(store, uploads_dir, monkeypatch, session_key=CONVERSATION, name="inbound", age_days=100)
+        others = [
+            _upload(store, folder, monkeypatch, session_key=CONVERSATION, name="outside", age_days=200)
+            for folder in (tmp_path / "uploads_%_sibling", tmp_path / "uploads_xy")
+        ]
+
+        result = prune_uploads(records=store, uploads_dir=uploads_dir, retention_days=90, now=NOW)
+
+        assert (result.records_removed, result.files_removed) == (1, 1)
+        assert store.get_attachment(inbound.attachment.attachment_id) is None
+        assert all(store.get_attachment(item.attachment.attachment_id) is not None for item in others)
+        assert all(item.local_path.exists() for item in others)
 
 
 def test_links_in_the_uploads_folder_are_never_followed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -192,7 +262,7 @@ class _RecordingRecords:
         self.cutoffs: list[datetime] = []
         self.fail = fail
 
-    def delete_attachments_created_before(self, cutoff: str, *, limit: int) -> tuple[str, ...]:
+    def delete_uploads_created_before(self, cutoff: str, *, uploads_dir: str, limit: int) -> tuple[str, ...]:
         if self.fail:
             raise RuntimeError("database unavailable")
         self.cutoffs.append(datetime.fromisoformat(cutoff))

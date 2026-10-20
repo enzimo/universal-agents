@@ -511,6 +511,7 @@ def bootstrap_instance(
     assistant_purpose: str | None = None,
     assistant_response_style: str | None = None,
     assistant_autonomy: str | None = None,
+    expected_config_revision: str | None = None,
 ) -> list[Path]:
     created_paths: list[Path] = []
     root = config.instance_root_path
@@ -543,7 +544,7 @@ def bootstrap_instance(
         created_paths.append(destination)
         created_paths.extend(_hand_over_env_file_keys(config, held_back))
 
-    config_path = config.save()
+    config_path = config.save(expected_revision=expected_config_revision)
     if config_path not in created_paths:
         created_paths.append(config_path)
     hint_path = _write_instance_root_hint(config)

@@ -185,11 +185,14 @@ class _ResponsesServer:
 
     def __init__(self) -> None:
         self.mode = "complete"
+        self.first_event_delay = 0.0
+        self.ping_sent = asyncio.Event()
         self.client_closed = asyncio.Event()
         self.stopping = asyncio.Event()
         self.base_url = ""
 
     async def handle(self, request: web.Request) -> web.StreamResponse:
+        await asyncio.sleep(self.first_event_delay)
         response = web.StreamResponse(headers={"content-type": "text/event-stream"})
         await response.prepare(request)
         await response.write(_sse("response.created", 1, response=_RESPONSE))
@@ -213,6 +216,8 @@ class _ResponsesServer:
                     await response.write(b": ping\n\n")
                 elif self.mode == "event_ping":
                     await response.write(b'event: ping\ndata: {"type": "ping"}\n\n')
+                if self.mode in {"comment_ping", "event_ping"}:
+                    self.ping_sent.set()
         except (ConnectionResetError, asyncio.CancelledError):
             self.client_closed.set()
             raise
@@ -252,22 +257,38 @@ _USER = [{"role": "user", "content": [{"text": "Set up Gmail drafts."}]}]
 @pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["comment_ping", "event_ping"])
+@pytest.mark.parametrize("first_event_delay", [0.0, 0.75], ids=["ready", "slow-first-event"])
 async def test_keepalive_pings_no_longer_keep_a_stalled_responses_call_open(
-    responses_server, mode
+    responses_server, mode, first_event_delay
 ):
     responses_server.mode = mode
+    responses_server.first_event_delay = first_event_delay
     model = _litellm_responses_model(responses_server.base_url)
-    events: list[dict] = []
-    started = time.monotonic()
+    # The short idle limit tests a stalled response after reasoning arrived.
+    # Cold client setup and initial response parsing can take longer than it.
+    # Keep the real adapter and key binding, but start this phase's watchdog
+    # after that setup. The other integrations below exercise model.stream's
+    # factory-installed wrapper for complete responses and read timeouts.
+    stream = model.stream.__wrapped__(_USER)
+    try:
+        async with asyncio.timeout(10):
+            while True:
+                event = await anext(stream)
+                if "reasoningContent" in str(event):
+                    break
+            await responses_server.ping_sent.wait()
+            with pytest.raises(ModelStreamTimeoutError) as raised:
+                await _collect(watch_model_stream(
+                    stream,
+                    ModelStreamLimits(idle_timeout_seconds=0.5, call_timeout_seconds=5.0),
+                    model_id="gpt-5.5",
+                ))
 
-    with pytest.raises(ModelStreamTimeoutError) as raised:
-        async for event in model.stream(_USER):
-            events.append(event)
-
-    assert raised.value.limit == "idle"
-    assert time.monotonic() - started < 3.0
-    assert any("reasoningContent" in str(event) for event in events)
-    await asyncio.wait_for(responses_server.client_closed.wait(), 3)
+            assert raised.value.limit == "idle"
+            assert raised.value.limit_seconds == 0.5
+            await asyncio.wait_for(responses_server.client_closed.wait(), 3)
+    finally:
+        await stream.aclose()
 
 
 @pytest.mark.integration
