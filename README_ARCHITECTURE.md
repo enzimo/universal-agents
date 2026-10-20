@@ -2418,10 +2418,32 @@ question to a person uses the preserved gateway reply route. Steering that
 names a task applies only to that task. Accepted guidance and duplicate keys
 are saved with its history, and guidance survives a restart until the model
 turn records its decision.
-An explicitly addressed receiver answers `STALE` for a missing task so the
-gateway can submit the person's message as new work. A schedule action must
+An explicitly addressed receiver answers `STALE` for a missing task. The gateway
+holds guidance for that request until the lead admits its task, and retries
+with the same idempotency key. Guidance never becomes another root request.
+A schedule action must
 be followed by a final response or a waiting action; saving a timer does not
 finish its originating request.
+
+Each gateway thread runs one interactive request at a time. The gateway saves
+the request's task id at admission and keeps its running state independently
+of response waits. A timeout, gateway restart or credential form therefore
+does not make a later message new work. The later message is saved as guidance
+for that request before publication. A final reply ends the running state,
+including when quiet hours delay showing the reply. Held guidance that its
+request finishes before accepting is reported as unused. A publication failure
+whose outcome is uncertain leaves the request active; starting another chat
+remains an explicit action by the person.
+
+Agent questions are stored by `task_query_id` in `gateway_questions`, with their
+own request and task identities. Several questions in one chat wait in order,
+and the person sees one at a time. An answer names the question selected before
+the send, and a conditional status update refuses a second answer. A newer
+question from the same task replaces that task's previous open question. An
+answer, expiry or final task reply makes room for the next question. Closed
+questions remain recorded so redelivery cannot reopen them. The obsolete
+one-question-per-session table is removed; questions open in that older format
+end at upgrade and their tasks reach their normal waiting limits.
 
 Delivery receipts use the durable team-lead route, so they can wait for a
 replacement lead before discovery completes. Repeated publication of one
@@ -2501,6 +2523,22 @@ messages, proactive notifications, and generated sites. It owns canonical user
 resolution, session continuity, attachment admission, clarification routing,
 quiet hours, deferred delivery, and receipts. An agent response and a delivered
 user message are separate facts.
+
+Each chat (channel, account, chat and thread) has one current session
+(`gateway_channel_sessions`), where the person's next message goes. Only the
+person's own chat traffic changes it: a chat's first message, `/new`,
+`/switch_session`, and a message that names a session
+(`GatewaySessionService`, `upsert_session`). Saving a session for any other
+reason does not mean the person is using it, so those writes use
+`upsert_session_without_switching_chat` and never move the chat. A reply
+records its task on the session it was asked in, which may no longer be
+current: the person can start another session while a request runs, because
+Telegram handles several updates at once. A team import writes every session
+it carries, in key order, and an older session that a schedule still delivers
+through can sort after the person's current one. When every session save also
+made its session current, both put the person's next message into an old
+session. Scheduled deliveries do not read the current session; they use the
+session saved with the schedule.
 
 Web Chat saves a send's files only after the send passes every check: the
 conversation it names is the sender's, its request id has not been answered
@@ -3083,9 +3121,14 @@ inspect | review | import | import-credentials | finish-import`; guide:
 - **Fresh first batch, same ids.** Import creates the instance (the same first
   steps as onboarding, `assistant_gateway.instance_secrets`) and keeps team,
   person, schedule and grant ids. Person schedules are signed again with the
-  new gateway key. Later batches require its receipt and the exact same signed
+  new gateway key. Chat sessions keep their keys, and each chat continues in
+  the session that was current when the team was exported: the import saves
+  sessions without switching chats and then gives each chat that has no
+  current session its exported one (`team_transfer.schedule_writers`).
+  Later batches require its receipt and the exact same signed
   export. Imported identities are skipped and existing destination records
-  kept. Account links match by team, owner and tool, since a newer link has a
+  kept; a chat that already has a current session keeps it, and the plan
+  lists the imported session that was current in the export. Account links match by team, owner and tool, since a newer link has a
   new ID; a file holding two for one tool and owner (from a store before the
   one-active-link index) has the older refused with the newer named. All
   active destination chat bindings, including removed people's, participate in

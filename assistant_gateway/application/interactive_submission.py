@@ -1,4 +1,11 @@
-"""Interactive user message submission application."""
+"""Interactive user message submission application.
+
+A thread (one session conversation) runs one request at a time. A message in
+a thread whose request still runs is guidance for that request
+(``thread_guidance``); otherwise it starts the thread's next request. Which
+request runs is read from durable request state, never from whether a reply
+wait happens to be open.
+"""
 
 from __future__ import annotations
 
@@ -8,10 +15,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from assistant_gateway.application.credential_workflow import (
-    REQUEST_STATUS_WAITING_FOR_CREDENTIAL,
-    REQUEST_STATUS_WAITING_FOR_CREDENTIAL_RESULT,
-)
 from assistant_gateway.application.local_responses import (
     GatewayLocalResponseFactory,
 )
@@ -25,7 +28,6 @@ from assistant_gateway.application.request_context import (
 from assistant_gateway.application.request_service import GatewayRequestService
 from assistant_gateway.application.response_coordinator import (
     GatewayResponseCoordinator,
-    GatewayTaskSteeringRequest,
     QueryHandler,
 )
 from assistant_gateway.application.response_models import GatewayResponse
@@ -37,6 +39,7 @@ from assistant_gateway.application.task_progress import (
     GatewayTaskProgressRequest,
     GatewayTaskProgressService,
 )
+from assistant_gateway.application.thread_guidance import GatewayThreadGuidance
 from assistant_gateway.application.transcript_service import (
     GatewayTranscriptService,
     TranscriptRequestRecord,
@@ -44,21 +47,22 @@ from assistant_gateway.application.transcript_service import (
 )
 from assistant_gateway.domain.transcript import GatewayTranscriptMessage
 from assistant_gateway.domain.sessions import SessionRecord
-from assistant_gateway.domain.request_state import RequestRecord
+from assistant_gateway.domain.request_state import (
+    GUIDANCE_STATUS_HELD,
+    REQUEST_KIND_INTERACTIVE,
+    REQUEST_KIND_TASK_STEERING,
+    RUN_STATE_RUNNING,
+    RequestRecord,
+    ThreadRequestRunning,
+)
 from assistant_gateway.inbound_attachments import attachment_debug_summary
 from assistant_gateway.ports.repositories import SessionRepository
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.replied_message_v1 import RepliedMessage
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.contracts.task_v1 import Task, TaskSteering
-from custom_messages.enums import (
-    MessageMetaType,
-    RequesterType,
-    TaskSteeringStatus,
-    TaskSteeringStatusCode,
-    TaskSteeringType,
-)
+from custom_messages.contracts.task_v1 import Task
+from custom_messages.enums import MessageMetaType, RequesterType
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,20 @@ class GatewayInteractiveSubmissionRequest:
     replied_message: RepliedMessage | None = None
 
 
+@dataclass(frozen=True)
+class _ThreadMessage:
+    """One message after its session, conversation and requester are resolved."""
+
+    request: GatewayInteractiveSubmissionRequest
+    session: SessionRecord
+    route: GatewayRequestRoute
+    conversation_id: str | None
+    # The conversation's previous task, which a new request follows up on.
+    followup_to_task_id: str | None
+    requester_display_name: str
+    request_timezone: str
+
+
 @runtime_checkable
 class GatewayPersonalSetupGate(Protocol):
     """A new person's first-time setup (``assistant_gateway.personal_setup``)."""
@@ -105,6 +123,7 @@ class GatewayInteractiveSubmissionService:
         requests: GatewayRequestService,
         manager: GatewayManagerClient,
         responses: GatewayResponseCoordinator,
+        guidance: GatewayThreadGuidance,
         progress: GatewayTaskProgressService,
         local_responses: GatewayLocalResponseFactory,
         id_generator: GatewayIdGenerator,
@@ -120,6 +139,7 @@ class GatewayInteractiveSubmissionService:
         self._requests = requests
         self._manager = manager
         self._responses = responses
+        self._guidance = guidance
         self._progress = progress
         self._local_responses = local_responses
         self._id_generator = id_generator
@@ -202,27 +222,7 @@ class GatewayInteractiveSubmissionService:
             held = await self._personal_setup.before_request(presentation.canonical_user_id, session=session)
             if held is not None:
                 return self._local_responses.create(text=held)
-        active_task_id, active_correlation_id = await self._responses.resolve_target(
-            session_key=session.session_key,
-            conversation_id=conversation_id,
-        )
-        active_request = (
-            self._requests.get(active_correlation_id) if active_correlation_id else None
-        )
-        if self._should_steer(active_correlation_id, active_request):
-            return await self._submit_steering(
-                request=request,
-                session=session,
-                route=resolved_route,
-                conversation_id=conversation_id,
-                active_task_id=active_task_id,
-                active_correlation_id=active_correlation_id,
-                active_request=active_request,
-                fallback_followup_to_task_id=followup_to_task_id,
-                requester_display_name=presentation.display_name,
-                request_timezone=presentation.timezone,
-            )
-        return await self._submit_new_request(
+        thread = _ThreadMessage(
             request=request,
             session=session,
             route=resolved_route,
@@ -231,179 +231,133 @@ class GatewayInteractiveSubmissionService:
             requester_display_name=presentation.display_name,
             request_timezone=presentation.timezone,
         )
-
-    async def _submit_steering(
-        self,
-        *,
-        request: GatewayInteractiveSubmissionRequest,
-        session: SessionRecord,
-        route: GatewayRequestRoute,
-        conversation_id: str | None,
-        active_task_id: str | None,
-        active_correlation_id: str,
-        active_request: RequestRecord | None,
-        fallback_followup_to_task_id: str | None,
-        requester_display_name: str,
-        request_timezone: str,
-    ) -> GatewayResponse:
-        steering_type = (
-            TaskSteeringType.INTERRUPT_RESPONSE
-            if active_request is not None
-            and active_request.status == "waiting_for_steering"
-            else TaskSteeringType.PROACTIVE_GUIDANCE
+        running = self._requests.running_request(
+            session_key=session.session_key, conversation_id=conversation_id
         )
+        if running is not None:
+            return await self._submit_guidance(thread, running=running)
+        try:
+            return await self._submit_new_request(thread)
+        except ThreadRequestRunning:
+            # Another message in this thread started a request a moment ago;
+            # this one is guidance for it.
+            running = self._requests.running_request(
+                session_key=session.session_key, conversation_id=conversation_id
+            )
+            if running is None:
+                raise
+            self._logger.info(
+                "Gateway sent a message to the request another message just started in its thread. "
+                "event=gateway_thread_request_raced running_correlation_id=%s session_key=%s",
+                running.correlation_id,
+                session.session_key,
+            )
+            return await self._submit_guidance(thread, running=running)
+
+    async def _submit_guidance(
+        self,
+        thread: _ThreadMessage,
+        *,
+        running: RequestRecord,
+    ) -> GatewayResponse:
+        """Save the message as guidance for the running request, then send it."""
+
+        request = thread.request
         correlation_id = self._id_generator.new_correlation_id()
+        held = self._guidance.held_record(
+            correlation_id=correlation_id,
+            running=running,
+            text=request.text,
+            attachments=request.attachments,
+            replied_message=request.replied_message,
+        )
         accepted = self._accept_user_message(
             request=request,
-            session=session,
-            route=route,
-            conversation_id=conversation_id,
+            session=thread.session,
+            route=thread.route,
+            conversation_id=thread.conversation_id,
             request_record=TranscriptRequestRecord(
                 correlation_id=correlation_id,
-                request_kind="task_steering",
+                request_kind=REQUEST_KIND_TASK_STEERING,
                 request_text=request.text,
-                followup_to_task_id=active_task_id,
-                status="submitted",
+                followup_to_task_id=running.active_task_id,
+                status=GUIDANCE_STATUS_HELD,
+                held_guidance=held,
             ),
         )
         if accepted is not None and accepted.correlation_id != correlation_id:
             return self._response_for_concurrent_retry(
-                session=session,
-                route=route,
+                session=thread.session,
+                route=thread.route,
                 accepted=accepted,
             )
-        expected_manager_id = self._manager.manager_id
-        response = await self._responses.send_task_steering(
-            GatewayTaskSteeringRequest(
-                text=request.text,
-                session_key=session.session_key,
-                conversation_id=conversation_id,
-                requester_display_name=requester_display_name,
-                request_timezone=request_timezone,
-                target_task_id=active_task_id,
-                target_correlation_id=active_correlation_id,
-                steering_type=steering_type,
-                attachments=request.attachments,
-                replied_message=request.replied_message,
+        if accepted is None:
+            self._requests.record_guidance(
                 correlation_id=correlation_id,
-                request_already_recorded=accepted is not None,
-                gateway_context=self._request_context.build_gateway_context(
-                    session_key=session.session_key,
-                    delivery_mode="interactive",
-                    route=route,
-                    manager_agent_id=self._manager.manager_id,
-                ),
-            )
-        )
-        if self._is_stale_steering_target(
-            response,
-            expected_manager_id=expected_manager_id,
-        ):
-            self._requests.update_status(active_correlation_id, "stale")
-            self._requests.record(
-                correlation_id=correlation_id,
-                session_key=session.session_key,
-                request_kind="interactive",
+                session_key=thread.session.session_key,
+                conversation_id=thread.conversation_id,
                 request_text=request.text,
-                conversation_id=conversation_id,
-                followup_to_task_id=fallback_followup_to_task_id,
-                status="pending",
+                target=running,
+                held=held,
             )
-            self._logger.warning(
-                "Gateway recovered user input from a stale task-steering target as "
-                "a new interactive request. "
-                "event=gateway_stale_task_steering_readmitted "
-                "correlation_id=%s stale_correlation_id=%s stale_task_id=%s "
-                "conversation_id=%s session_key=%s",
-                correlation_id,
-                active_correlation_id,
-                active_task_id or "-",
-                conversation_id or "-",
-                session.session_key,
-            )
-            response = await self._submit_new_task(
-                request=request,
-                session=session,
-                route=route,
-                conversation_id=conversation_id,
-                followup_to_task_id=fallback_followup_to_task_id,
-                requester_display_name=requester_display_name,
-                request_timezone=request_timezone,
-                correlation_id=correlation_id,
-                request_already_recorded=True,
-            )
+        response = await self._guidance.deliver(correlation_id)
         return self._append_response(
-            session=session,
-            route=route,
+            session=thread.session,
+            route=thread.route,
             response=response,
             accepted=accepted,
         )
 
-    @staticmethod
-    def _is_stale_steering_target(
-        response: GatewayResponse,
-        *,
-        expected_manager_id: str | None,
-    ) -> bool:
-        envelope = response.raw_envelope
-        content = envelope.msg_content if envelope is not None else None
-        return bool(
-            expected_manager_id
-            and envelope is not None
-            and envelope.msg_header.from_agent_id == expected_manager_id
-            and isinstance(content, TaskSteering)
-            and content.status == TaskSteeringStatus.STALE
-            and content.status_code
-            in {
-                TaskSteeringStatusCode.TARGET_TASK_NOT_FOUND,
-                TaskSteeringStatusCode.TARGET_TASK_TERMINAL,
-            }
-        )
+    async def _submit_new_request(self, thread: _ThreadMessage) -> GatewayResponse:
+        """Admit the thread's next request with its task id, then publish it.
 
-    async def _submit_new_request(
-        self,
-        *,
-        request: GatewayInteractiveSubmissionRequest,
-        session: SessionRecord,
-        route: GatewayRequestRoute,
-        conversation_id: str | None,
-        followup_to_task_id: str | None,
-        requester_display_name: str,
-        request_timezone: str,
-    ) -> GatewayResponse:
+        Raises ``ThreadRequestRunning`` before anything is saved when another
+        request already runs in the thread.
+        """
+
+        request = thread.request
         correlation_id = self._id_generator.new_correlation_id()
+        task = Task(
+            task_type=MessageMetaType.REQUEST,
+            problem_statement=request.text.strip(),
+            attachments=list(request.attachments),
+            replied_message=request.replied_message,
+        )
         accepted = self._accept_user_message(
             request=request,
-            session=session,
-            route=route,
-            conversation_id=conversation_id,
+            session=thread.session,
+            route=thread.route,
+            conversation_id=thread.conversation_id,
             request_record=TranscriptRequestRecord(
                 correlation_id=correlation_id,
-                request_kind="interactive",
+                request_kind=REQUEST_KIND_INTERACTIVE,
                 request_text=request.text,
-                followup_to_task_id=followup_to_task_id,
+                followup_to_task_id=thread.followup_to_task_id,
+                active_task_id=task.task_id,
+                run_state=RUN_STATE_RUNNING,
             ),
         )
         if accepted is not None and accepted.correlation_id != correlation_id:
             return self._response_for_concurrent_retry(
-                session=session,
-                route=route,
+                session=thread.session,
+                route=thread.route,
                 accepted=accepted,
             )
-        response = await self._submit_new_task(
-            request=request,
-            session=session,
-            route=route,
-            conversation_id=conversation_id,
-            followup_to_task_id=followup_to_task_id,
-            requester_display_name=requester_display_name,
-            request_timezone=request_timezone,
-            correlation_id=correlation_id,
-            request_already_recorded=accepted is not None,
-        )
+        if accepted is None:
+            self._requests.record(
+                correlation_id=correlation_id,
+                session_key=thread.session.session_key,
+                request_kind=REQUEST_KIND_INTERACTIVE,
+                request_text=request.text,
+                conversation_id=thread.conversation_id,
+                followup_to_task_id=thread.followup_to_task_id,
+                active_task_id=task.task_id,
+                run_state=RUN_STATE_RUNNING,
+            )
+        response = await self._submit_new_task(thread, task=task, correlation_id=correlation_id)
         return self._append_response(
-            session=session,
-            route=route,
+            session=thread.session,
+            route=thread.route,
             response=response,
             accepted=accepted,
         )
@@ -513,54 +467,24 @@ class GatewayInteractiveSubmissionService:
             )
         return conversation_id, conversation.last_task_id
 
-    def _should_steer(
-        self,
-        active_correlation_id: str | None,
-        active_request: RequestRecord | None,
-    ) -> bool:
-        if not active_correlation_id:
-            return False
-        status = str(getattr(active_request, "status", "") or "")
-        if status in {
-            REQUEST_STATUS_WAITING_FOR_CREDENTIAL,
-            REQUEST_STATUS_WAITING_FOR_CREDENTIAL_RESULT,
-        }:
-            # Broker workflows wait independently. A later chat message is a new
-            # conversation turn; only the typed broker result resumes the old task.
-            return False
-        return self._manager.has_pending_response(active_correlation_id) or status == "waiting_for_steering"
-
     async def _submit_new_task(
         self,
+        thread: _ThreadMessage,
         *,
-        request: GatewayInteractiveSubmissionRequest,
-        session: SessionRecord,
-        route: GatewayRequestRoute,
-        conversation_id: str | None,
-        followup_to_task_id: str | None,
-        requester_display_name: str,
-        request_timezone: str,
+        task: Task,
         correlation_id: str,
-        request_already_recorded: bool,
     ) -> GatewayResponse:
+        request = thread.request
+        session = thread.session
         manager_id = self._manager.manager_id
         async with self._manager.response_channel(correlation_id):
-            if not request_already_recorded:
-                self._requests.record(
-                    correlation_id=correlation_id,
-                    session_key=session.session_key,
-                    request_kind="interactive",
-                    request_text=request.text,
-                    conversation_id=conversation_id,
-                    followup_to_task_id=followup_to_task_id,
-                )
             self._log_resolved_request(
                 request=request,
                 session=session,
-                conversation_id=conversation_id,
+                conversation_id=thread.conversation_id,
                 correlation_id=correlation_id,
                 manager_id=manager_id,
-                followup_to_task_id=followup_to_task_id,
+                followup_to_task_id=thread.followup_to_task_id,
             )
             if manager_id is None:
                 self._logger.warning(
@@ -569,9 +493,11 @@ class GatewayInteractiveSubmissionService:
                     "event=gateway_user_request_no_manager_route correlation_id=%s "
                     "conversation_id=%s session_key=%s",
                     correlation_id,
-                    conversation_id,
+                    thread.conversation_id,
                     session.session_key,
                 )
+                # Never sent, so the thread does not run it.
+                self._requests.finish(correlation_id)
                 await self._responses.queue_manager_unavailable(correlation_id)
                 return await self._responses.await_terminal_response(
                     correlation_id=correlation_id,
@@ -579,24 +505,19 @@ class GatewayInteractiveSubmissionService:
                     query_handler=request.query_handler,
                 )
             envelope = MessageEnvelope(
-                msg_content=Task(
-                    task_type=MessageMetaType.REQUEST,
-                    problem_statement=request.text.strip(),
-                    attachments=list(request.attachments),
-                    replied_message=request.replied_message,
-                ),
+                msg_content=task,
                 msg_meta=MessageMeta(
-                    from_agent_name=requester_display_name,
+                    from_agent_name=thread.requester_display_name,
                     msg_correlation_id=correlation_id,
-                    conversation_id=conversation_id,
-                    followup_to_task_id=followup_to_task_id,
-                    request_timezone=request_timezone,
+                    conversation_id=thread.conversation_id,
+                    followup_to_task_id=thread.followup_to_task_id,
+                    request_timezone=thread.request_timezone,
                     requester_type=RequesterType.USER_REQUESTER,
                     is_response_requested=True,
                     gateway_context=self._request_context.build_gateway_context(
                         session_key=session.session_key,
                         delivery_mode="interactive",
-                        route=route,
+                        route=thread.route,
                         manager_agent_id=manager_id,
                     ),
                 ),
@@ -609,23 +530,24 @@ class GatewayInteractiveSubmissionService:
             )
             self._logger.info(
                 "Gateway publishing interactive user request. "
-                "event=gateway_user_request_publish correlation_id=%s "
+                "event=gateway_user_request_publish correlation_id=%s task_id=%s "
                 "conversation_id=%s session_key=%s manager_id=%s routing_key=%s "
                 "attachment_count=%d",
                 correlation_id,
-                conversation_id,
+                task.task_id,
+                thread.conversation_id,
                 session.session_key,
                 manager_id,
                 manager_id,
                 len(request.attachments),
             )
-            await self._manager.publish_durable(envelope, routing_key=manager_id)
+            await self._publish_request(envelope, routing_key=manager_id, correlation_id=correlation_id)
             self._logger.info(
                 "Gateway published interactive user request. "
                 "event=gateway_user_request_published correlation_id=%s "
                 "conversation_id=%s session_key=%s manager_id=%s",
                 correlation_id,
-                conversation_id,
+                thread.conversation_id,
                 session.session_key,
                 manager_id,
             )
@@ -634,6 +556,27 @@ class GatewayInteractiveSubmissionService:
                 session_key=session.session_key,
                 query_handler=request.query_handler,
             )
+
+    async def _publish_request(
+        self,
+        envelope: MessageEnvelope,
+        *,
+        routing_key: str,
+        correlation_id: str,
+    ) -> None:
+        try:
+            await self._manager.publish_durable(envelope, routing_key=routing_key)
+        except Exception:
+            # A missing publication acknowledgment does not prove the broker
+            # refused the request. Keep its identity while it may be running,
+            # so a later message cannot start overlapping work in this thread.
+            self._logger.exception(
+                "Gateway could not confirm publication; the request remains active. "
+                "event=gateway_user_request_publish_failed correlation_id=%s routing_key=%s",
+                correlation_id,
+                routing_key,
+            )
+            raise
 
     def _log_admission_rejection(
         self,

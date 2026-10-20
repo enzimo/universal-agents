@@ -771,12 +771,12 @@ def _manager_status_envelope(
 
 
 def _set_pending_query_created_at(
-    db_path: Path, *, session_key: str, created_at: str
+    db_path: Path, *, task_query_id: str, created_at: str
 ) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute(
-            "UPDATE gateway_pending_queries SET created_at = ? WHERE session_key = ?",
-            (created_at, session_key),
+            "UPDATE gateway_questions SET created_at = ? WHERE task_query_id = ?",
+            (created_at, task_query_id),
         )
         conn.commit()
 
@@ -1316,7 +1316,7 @@ def test_gateway_state_store_persists_session_and_deliveries(tmp_path: Path):
 def test_gateway_state_store_expires_pending_queries(tmp_path: Path):
     db_path = tmp_path / "gateway_state.db"
     store = GatewayStateStore(str(db_path))
-    store.upsert_pending_query(
+    store.add_pending_query(
         session_key="session_1",
         correlation_id="corr_1",
         task_query_id="task_query_1",
@@ -1326,7 +1326,7 @@ def test_gateway_state_store_expires_pending_queries(tmp_path: Path):
     )
     _set_pending_query_created_at(
         db_path,
-        session_key="session_1",
+        task_query_id="task_query_1",
         created_at=(datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
     )
 
@@ -1335,13 +1335,13 @@ def test_gateway_state_store_expires_pending_queries(tmp_path: Path):
     )
 
     assert expired == 1
-    assert store.get_pending_query("session_1") is None
+    assert store.list_open_pending_queries("session_1") == []
 
 
 def test_gateway_startup_expires_old_pending_queries(tmp_path: Path):
     db_path = tmp_path / "gateway_state.db"
     store = GatewayStateStore(str(db_path))
-    store.upsert_pending_query(
+    store.add_pending_query(
         session_key="session_1",
         correlation_id="corr_1",
         task_query_id="task_query_1",
@@ -1351,7 +1351,7 @@ def test_gateway_startup_expires_old_pending_queries(tmp_path: Path):
     )
     _set_pending_query_created_at(
         db_path,
-        session_key="session_1",
+        task_query_id="task_query_1",
         created_at=(datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat(),
     )
     config = GatewayInstanceConfig.create(
@@ -1367,7 +1367,7 @@ def test_gateway_startup_expires_old_pending_queries(tmp_path: Path):
 
     gateway._clarification_core.expire_stale_on_startup()
 
-    assert store.get_pending_query("session_1") is None
+    assert store.list_open_pending_queries("session_1") == []
 
 
 @pytest.mark.asyncio
@@ -1375,7 +1375,7 @@ async def test_gateway_clears_pending_query_when_manager_reports_parent_missing(
     tmp_path: Path,
 ):
     store = GatewayStateStore(str(tmp_path / "gateway_state.db"))
-    store.upsert_pending_query(
+    store.add_pending_query(
         session_key="session_1",
         correlation_id="corr_1",
         task_query_id="task_query_1",
@@ -1419,8 +1419,8 @@ async def test_gateway_clears_pending_query_when_manager_reports_parent_missing(
 
     gateway._manager_client.publish_operational = fake_publish  # type: ignore[method-assign]
 
-    assert await gateway._clarification_core.resolve_pending_query("session_1") is None
-    assert store.get_pending_query("session_1") is None
+    assert await gateway._clarification_core.resolve_waiting_question("session_1") is None
+    assert store.list_open_pending_queries("session_1") == []
 
 
 @pytest.mark.asyncio
@@ -1428,7 +1428,7 @@ async def test_gateway_preserves_pending_query_when_manager_reports_parent_activ
     tmp_path: Path,
 ):
     store = GatewayStateStore(str(tmp_path / "gateway_state.db"))
-    store.upsert_pending_query(
+    store.add_pending_query(
         session_key="session_1",
         correlation_id="corr_1",
         task_query_id="task_query_1",
@@ -1472,7 +1472,7 @@ async def test_gateway_preserves_pending_query_when_manager_reports_parent_activ
 
     gateway._manager_client.publish_operational = fake_publish  # type: ignore[method-assign]
 
-    pending_query = await gateway._clarification_core.resolve_pending_query("session_1")
+    pending_query = await gateway._clarification_core.resolve_waiting_question("session_1")
 
     assert pending_query is not None
     assert pending_query.task_query_id == "task_query_1"
@@ -5068,7 +5068,7 @@ async def test_gateway_pending_task_query_preserves_structured_payload(
         session_key=session_key,
         query_handler=None,
     )
-    pending = gateway.state_store.get_pending_query(session_key)
+    pending = gateway.state_store.get_pending_query(query.task_query_id)
 
     assert response.message_type == "task_query"
     assert "1. Approve (recommended) [approve]" in response.text
@@ -5095,7 +5095,10 @@ async def test_late_pause_query_retains_reply_target_after_gateway_restart(
 
     def receive(event):
         # A user can answer as soon as the channel displays the prompt.
-        assert store.get_pending_query(event.session_key) is not None
+        assert [
+            question.was_shown
+            for question in store.list_open_pending_queries(event.session_key)
+        ] == [True]
         delivered.append(event)
 
     gateway = UserGateway(
@@ -5139,9 +5142,9 @@ async def test_late_pause_query_retains_reply_target_after_gateway_restart(
         )
     )
     assert len(delivered) == 1
-    pending = store.get_pending_query(session.session_key)
+    pending = store.get_pending_query(query.task_query_id)
     assert pending is not None
-    assert pending.task_query_id == query.task_query_id
+    assert pending.session_key == session.session_key
 
     assert pending.query_payload_json == query.model_dump_json()
 
@@ -5183,7 +5186,8 @@ async def test_late_pause_query_retains_reply_target_after_gateway_restart(
     )
     assert responses[0].text == "Review finished"
     assert len(transport.durable) == 1
-    assert restarted.state_store.get_pending_query(session.session_key) is None
+    assert restarted.state_store.list_open_pending_queries(session.session_key) == []
+    assert restarted.state_store.get_pending_query(query.task_query_id).status == "answered"
 
 
 @pytest.mark.asyncio
@@ -5207,7 +5211,7 @@ async def test_query_reply_consumed_only_after_publication(
         manager_transport=_CaptureGatewayManagerTransport(on_durable=publish),
     )
     session = gateway.application.start_new_session()
-    store.upsert_pending_query(
+    store.add_pending_query(
         session_key=session.session_key,
         correlation_id="corr_answer",
         task_query_id="question",
@@ -5215,6 +5219,7 @@ async def test_query_reply_consumed_only_after_publication(
         conversation_id=session.conversation_id,
         query_text="Continue?",
     )
+    store.mark_pending_query_shown("question")
     monkeypatch.setattr(
         gateway._response_coordinator,
         "await_terminal_response",
@@ -5223,9 +5228,13 @@ async def test_query_reply_consumed_only_after_publication(
     with pytest.raises(RuntimeError if publish_fails else TimeoutError):
         await gateway.application.reply_to_pending_query(
             session_key=session.session_key,
+            task_query_id="question",
             response_text="1",
         )
-    assert (store.get_pending_query(session.session_key) is not None) == publish_fails
+    # An answer that could not be sent leaves the question open for another.
+    assert store.get_pending_query("question").status == (
+        "open" if publish_fails else "answered"
+    )
 
 
 @pytest.mark.asyncio
@@ -5257,7 +5266,7 @@ async def test_answering_query_preserves_next_question(tmp_path: Path) -> None:
         manager_transport=_CaptureGatewayManagerTransport(on_durable=ask_again),
     )
     session = gateway.application.start_new_session()
-    store.upsert_pending_query(
+    store.add_pending_query(
         session_key=session.session_key,
         correlation_id="corr_repeated_pause",
         task_query_id="previous_question",
@@ -5265,14 +5274,17 @@ async def test_answering_query_preserves_next_question(tmp_path: Path) -> None:
         conversation_id=session.conversation_id,
         query_text="Continue?",
     )
+    store.mark_pending_query_shown("previous_question")
     response = await gateway.application.reply_to_pending_query(
         session_key=session.session_key,
+        task_query_id="previous_question",
         response_text="1",
     )
     assert response.message_type == "task_query"
-    pending = store.get_pending_query(session.session_key)
-    assert pending is not None
+    assert response.text == "Continue again?"
+    [pending] = store.list_open_pending_queries(session.session_key)
     assert pending.task_query_id == query.task_query_id
+    assert pending.was_shown
 
 
 def test_gateway_new_session_tracks_channel_and_active_binding(tmp_path: Path):

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -8,11 +7,6 @@ import pytest
 from assistant_gateway.application.delivery_service import GatewayDeliveryService
 from assistant_gateway.application.request_service import GatewayRequestService
 from assistant_gateway.store import GatewayStateStore
-
-
-class _FixedClock:
-    def now_utc(self) -> datetime:
-        return datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
 
 
 def _services(
@@ -26,7 +20,6 @@ def _services(
     requests = GatewayRequestService(
         repository=store.request_repository,
         unit_of_work_factory=store,
-        clock=_FixedClock(),
     )
     deliveries = GatewayDeliveryService(
         repository=store.delivery_repository,
@@ -66,7 +59,7 @@ def test_request_service_rolls_back_status_when_lineage_write_fails(
 
     monkeypatch.setattr(
         store._repository,  # noqa: SLF001 - storage failure injection
-        "upsert_session",
+        "upsert_session_without_switching_chat",
         fail_session_write,
     )
 

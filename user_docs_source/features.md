@@ -27,6 +27,26 @@ there, within your own authority. `/webchat?view=access` opens it directly, and
 `/webchat?view=access#agent=<type>` opens it at one agent type. See
 [The Access page](permissions.md#the-access-page).
 
+### Messages while your request is running
+
+A message in a busy chat gives guidance to the request already running there.
+This also applies after a reply wait times out, after the gateway restarts,
+and while a credential form is open. The gateway saves the guidance before
+sending it. If the team lead has not started that request yet or cannot confirm
+receipt, the message stays held for the same request. You receive a notice if
+the request finishes before accepting it.
+
+Use **New Chat** or `/new` to start separate work. Once a request finishes,
+your next message in its chat starts another request.
+
+If several tasks ask questions in one chat, the questions wait in order.
+You see one question at a time, and your plain reply answers that question.
+The next appears after the previous answer, expiry or task completion. A
+second send for an already answered question is refused.
+
+When upgrading from a version that kept only one question per chat, finish
+open questions first. Those older pending questions are not carried forward.
+
 ### Inspect and clear tasks across agents
 
 Open **Settings → Tasks** in Web Chat to see your current, queued and waiting

@@ -21,7 +21,11 @@ from assistant_gateway.domain.identity import (
     GatewayUserWebInviteRecord,
     GatewayUserWebTokenRecord,
 )
-from assistant_gateway.domain.request_state import PendingQueryRecord, RequestRecord
+from assistant_gateway.domain.request_state import (
+    PendingQueryAdded,
+    PendingQueryRecord,
+    RequestRecord,
+)
 from assistant_gateway.domain.sessions import (
     SessionConversationListRecord,
     SessionConversationRecord,
@@ -420,6 +424,8 @@ class GatewayStateStore:
         followup_to_task_id: Optional[str],
         status: str = "pending",
         owner_canonical_user_id: Optional[str] = None,
+        active_task_id: Optional[str] = None,
+        run_state: Optional[str] = None,
     ) -> None:
         self._repository.record_request(
             correlation_id=correlation_id,
@@ -430,6 +436,8 @@ class GatewayStateStore:
             followup_to_task_id=followup_to_task_id,
             status=status,
             owner_canonical_user_id=owner_canonical_user_id,
+            active_task_id=active_task_id,
+            run_state=run_state,
         )
 
     def get_request(self, correlation_id: str) -> Optional[RequestRecord]:
@@ -539,7 +547,7 @@ class GatewayStateStore:
             nats_object_name=nats_object_name,
         )
 
-    def upsert_pending_query(
+    def add_pending_query(
         self,
         *,
         session_key: str,
@@ -549,10 +557,9 @@ class GatewayStateStore:
         conversation_id: Optional[str],
         query_text: str,
         query_payload_json: Optional[str] = None,
-        status: str = "pending",
         owner_canonical_user_id: Optional[str] = None,
-    ) -> None:
-        self._repository.upsert_pending_query(
+    ) -> PendingQueryAdded:
+        return self._repository.add_pending_query(
             session_key=session_key,
             correlation_id=correlation_id,
             task_query_id=task_query_id,
@@ -560,24 +567,33 @@ class GatewayStateStore:
             conversation_id=conversation_id,
             query_text=query_text,
             query_payload_json=query_payload_json,
-            status=status,
             owner_canonical_user_id=owner_canonical_user_id,
         )
 
-    def get_pending_query(self, session_key: str) -> Optional[PendingQueryRecord]:
-        return self._repository.get_pending_query(session_key)
+    def get_pending_query(self, task_query_id: str) -> Optional[PendingQueryRecord]:
+        return self._repository.get_pending_query(task_query_id)
 
-    def clear_pending_query(
-        self, session_key: str, *, status: str = "completed"
-    ) -> None:
-        self._repository.clear_pending_query(session_key, status=status)
+    def list_open_pending_queries(self, session_key: str) -> list[PendingQueryRecord]:
+        return self._repository.list_open_pending_queries(session_key)
 
-    def expire_pending_queries(
-        self, *, cutoff_iso: str, status: str = "expired"
-    ) -> int:
-        return self._repository.expire_pending_queries(
-            cutoff_iso=cutoff_iso, status=status
+    def mark_pending_query_shown(self, task_query_id: str) -> bool:
+        return self._repository.mark_pending_query_shown(task_query_id)
+
+    def close_pending_query(self, task_query_id: str, *, status: str) -> bool:
+        return self._repository.close_pending_query(task_query_id, status=status)
+
+    def reopen_answered_pending_query(self, task_query_id: str) -> bool:
+        return self._repository.reopen_answered_pending_query(task_query_id)
+
+    def close_open_pending_queries_for_task(
+        self, *, correlation_id: str, parent_task_id: str, status: str
+    ) -> list[PendingQueryRecord]:
+        return self._repository.close_open_pending_queries_for_task(
+            correlation_id=correlation_id, parent_task_id=parent_task_id, status=status
         )
+
+    def expire_pending_queries(self, *, cutoff_iso: str) -> int:
+        return self._repository.expire_pending_queries(cutoff_iso=cutoff_iso)
 
     def upsert_scheduled_target(
         self,

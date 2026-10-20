@@ -343,7 +343,13 @@ async def _send_steering_status_response(
             to_routing_path=routing_key,
             response_routing_key=None,
             agent_signature="",
-            idempotency_key=response.idempotency_key,
+            # A retry can change NOT_FOUND to ACCEPTED after the task is
+            # admitted. Deduplicate repeated outcomes without suppressing a
+            # later outcome on the durable response stream.
+            idempotency_key=(
+                f"{response.idempotency_key or response.steering_id}:status:"
+                f"{status.value}:{status_code.value if status_code else 'none'}"
+            ),
         ),
         msg_meta=MessageMeta(
             from_agent_name=agent.name,

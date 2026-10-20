@@ -122,9 +122,9 @@ async def test_late_and_repeated_pause_replies_over_nats(tmp_path):
 
             for index in range(2):
                 replied_message = RepliedMessage(author="assistant", text=f"Earlier scheduled report {index}")
-                pending = gateway.state_store.get_pending_query(session.session_key)
-                assert pending is not None
+                [pending] = gateway.state_store.list_open_pending_queries(session.session_key)
                 assert pending.task_query_id == query.task_query_id
+                assert pending.was_shown
                 answer = asyncio.create_task(
                     ChannelBridge(gateway.application).handle_inbound(
                         ChannelInboundMessage(
@@ -169,6 +169,155 @@ async def test_late_and_repeated_pause_replies_over_nats(tmp_path):
                     if not answer.done():
                         answer.cancel()
                         await asyncio.gather(answer, return_exceptions=True)
-            assert gateway.state_store.get_pending_query(session.session_key) is None
+            assert gateway.state_store.list_open_pending_queries(session.session_key) == []
+        finally:
+            await gateway._manager_client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.live
+@pytest.mark.nats
+async def test_two_questions_in_one_chat_are_answered_in_order_over_nats(tmp_path):
+    """Two requests ask in one chat; a restart keeps both; each answer reaches its own."""
+
+    from assistant_gateway.application.pending_questions import QUESTION_WAITS_IN_LINE_TEXT
+
+    team_id = new_id("query_test")
+    config = GatewayInstanceConfig.create(
+        instance_name=team_id,
+        instance_root=str(tmp_path / "instance"),
+        team_id=team_id,
+        timezone="UTC",
+        manager_agent_id=new_id("manager"),
+    )
+    config.transport = resolve_live_transport_settings()
+    config.delivery.quiet_hours.enabled = False
+    delivered = asyncio.Queue()
+
+    def make_gateway():
+        return UserGateway(
+            config,
+            output_sink=None,
+            event_sink=delivered.put_nowait,
+            state_store=GatewayStateStore(str(tmp_path / "gateway.db")),
+        )
+
+    gateway = make_gateway()
+    session = gateway.application.start_new_session()
+
+    def meta(correlation_id):
+        return MessageMeta(
+            msg_correlation_id=correlation_id,
+            conversation_id=session.conversation_id,
+            requester_type=RequesterType.USER_REQUESTER,
+            gateway_context=GatewayContext(
+                session_key=session.session_key,
+                delivery_mode="interactive",
+                canonical_user_id=config.user.canonical_user_id,
+            ),
+        )
+
+    def envelope(content, response_meta):
+        return MessageEnvelope(
+            msg_content=content,
+            msg_meta=response_meta,
+            msg_header=MessageHeader(
+                from_agent_id=config.manager.manager_agent_id,
+                to_routing_path=config.manager.response_queue_name,
+            ),
+        )
+
+    report = TaskQuery(
+        query_type=MessageMetaType.REQUEST,
+        parent_task_id=new_id("task"),
+        message="Which folder holds the report?",
+    )
+    trip = TaskQuery(
+        query_type=MessageMetaType.REQUEST,
+        parent_task_id=new_id("task"),
+        message="Which week should the trip be?",
+    )
+    asks = {report.task_query_id: (new_id("correlation"), report), trip.task_query_id: (new_id("correlation"), trip)}
+
+    async with LiveNatsClient(team_id, transport=config.transport) as manager:
+        replies = await manager.subscribe_route(config.manager.manager_agent_id)
+
+        async def answer_status(delivery):
+            request = delivery.envelope.msg_content
+            if not isinstance(request, TaskStatus) or request.status_type != MessageMetaType.REQUEST:
+                return
+            await manager.publish(
+                config.manager.response_queue_name,
+                envelope(
+                    request.model_copy(
+                        update={"status_type": MessageMetaType.RESPONSE, "is_known_task": True}
+                    ),
+                    delivery.envelope.msg_meta,
+                ),
+            )
+
+        await manager.adapter.subscribe_subject(
+            name="queue-parent-status",
+            subject=manager.mapper.operational_subject(),
+            handler=answer_status,
+            logical_route="status",
+            delivery=SubscriptionDelivery.CORE,
+        )
+        await gateway._manager_client.connect()
+        try:
+            for correlation_id, question in asks.values():
+                # Both requests' response waits already ended.
+                await manager.publish(
+                    config.manager.response_queue_name, envelope(question, meta(correlation_id))
+                )
+            shown = [(await asyncio.wait_for(delivered.get(), timeout=10)).text for _ in range(2)]
+            assert shown == [report.message, QUESTION_WAITS_IN_LINE_TEXT]
+
+            await gateway._manager_client.close()
+            gateway = make_gateway()
+            await gateway._manager_client.connect()
+
+            for text, expected in (("The shared reports folder", report), ("The second week of June", trip)):
+                answer = asyncio.create_task(
+                    ChannelBridge(gateway.application).handle_inbound(
+                        ChannelInboundMessage(
+                            channel_name="telegram",
+                            user_id="100200300",
+                            chat_id="100200300",
+                            session_key=session.session_key,
+                            text=text,
+                        )
+                    )
+                )
+                try:
+                    reply = await replies.get(timeout=10)
+                    correlation_id, _ = asks[expected.task_query_id]
+                    assert reply.msg_content.query_type == MessageMetaType.RESPONSE
+                    assert reply.msg_content.task_query_id == expected.task_query_id
+                    assert reply.msg_content.message == text
+                    assert reply.msg_meta.msg_correlation_id == correlation_id
+                    if expected is report:
+                        # The next question is shown once the first is answered.
+                        next_shown = await asyncio.wait_for(delivered.get(), timeout=10)
+                        assert next_shown.text == trip.message
+                    await manager.publish(
+                        config.manager.response_queue_name,
+                        envelope(
+                            Task(
+                                task_id=expected.parent_task_id,
+                                task_type=MessageMetaType.RESPONSE,
+                                answer=TaskAnswer(answer=f"Done: {text}"),
+                            ),
+                            meta(correlation_id),
+                        ),
+                    )
+                    result = await asyncio.wait_for(answer, timeout=10)
+                    assert result[0].text == f"Done: {text}"
+                finally:
+                    if not answer.done():
+                        answer.cancel()
+                        await asyncio.gather(answer, return_exceptions=True)
+            assert gateway.state_store.list_open_pending_queries(session.session_key) == []
         finally:
             await gateway._manager_client.close()

@@ -51,8 +51,13 @@ class GatewayDeliveryService:
         session_key: str,
         conversation_id: str | None,
         last_task_id: str | None,
+        finishes_request: bool = False,
     ) -> None:
-        """Atomically record immediate delivery and conversation lineage."""
+        """Atomically record immediate delivery and conversation lineage.
+
+        ``finishes_request``: this delivery is the request's final reply, so
+        its thread no longer runs it.
+        """
 
         with self._unit_of_work_factory.delivery_unit_of_work() as unit_of_work:
             if correlation_id:
@@ -60,6 +65,8 @@ class GatewayDeliveryService:
                     correlation_id,
                     "delivered",
                 )
+                if finishes_request:
+                    unit_of_work.request.finish_request(correlation_id)
             if conversation_id:
                 unit_of_work.session.register_conversation_session(
                     session_key=session_key,
@@ -80,8 +87,13 @@ class GatewayDeliveryService:
         conversation_id: str | None,
         last_task_id: str | None,
         owner_canonical_user_id: str | None = None,
+        finishes_request: bool = False,
     ) -> str:
-        """Atomically enqueue a delivery and update related request state."""
+        """Atomically enqueue a delivery and update related request state.
+
+        A final reply held for quiet hours still ends its request now
+        (``finishes_request``): the work is done, only showing it waits.
+        """
 
         with self._unit_of_work_factory.delivery_unit_of_work() as unit_of_work:
             delivery_id = unit_of_work.delivery.add_deferred_delivery(
@@ -98,6 +110,8 @@ class GatewayDeliveryService:
                     correlation_id,
                     "deferred",
                 )
+                if finishes_request:
+                    unit_of_work.request.finish_request(correlation_id)
             if conversation_id:
                 unit_of_work.session.register_conversation_session(
                     session_key=session_key,

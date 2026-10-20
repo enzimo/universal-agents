@@ -1,4 +1,8 @@
-"""Pending clarification lifecycle and manager reply application."""
+"""Answering agent questions to people, and the questions' validity checks.
+
+Which question a chat shows, and their order, belong to
+``assistant_gateway.application.pending_questions``.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,17 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from assistant_gateway.application.local_responses import GatewayLocalResponseFactory
 from assistant_gateway.application.manager_client import GatewayManagerClient
+from assistant_gateway.application.pending_questions import (
+    ALREADY_ANSWERED_TEXT,
+    NO_LONGER_WAITING_TEXT,
+    NOTE_MESSAGE_TYPE,
+    QUESTION_MESSAGE_TYPE,
+    QUESTION_WAITING_INTRO_TEXT,
+    GatewayPendingQuestions,
+    stored_task_query,
+)
 from assistant_gateway.application.ports import GatewayIdGenerator
 from assistant_gateway.application.request_context import (
     GatewayRequestContextService,
@@ -23,7 +37,10 @@ from assistant_gateway.application.session_service import (
     GatewaySessionRoute,
     GatewaySessionService,
 )
-from assistant_gateway.domain.request_state import PendingQueryRecord
+from assistant_gateway.domain.request_state import (
+    PendingQueryRecord,
+    PendingQueryStatus,
+)
 from assistant_gateway.ports.repositories import SessionRepository
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.replied_message_v1 import RepliedMessage
@@ -36,9 +53,13 @@ from custom_messages.contracts.task_v1 import (
 from custom_messages.enums import MessageMetaType, RequesterType
 
 
+# Shown after a refused answer when the next question is shown in its reply.
+NEXT_QUESTION_INTRO_TEXT = "This question is waiting for your answer:"
+
+
 @dataclass(frozen=True)
 class GatewayClarificationSettings:
-    """Stable configuration for pending-query validation and replies."""
+    """Stable configuration for question validity checks and answers."""
 
     instance_name: str
     response_route: str
@@ -46,29 +67,8 @@ class GatewayClarificationSettings:
     request_timezone: str
     default_session_key: str
     default_owner_canonical_user_id: str
-    pending_timeout_seconds: float | None
     parent_probe_timeout_seconds: float
     manager_unavailable_text: str
-
-
-def restore_task_query(
-    payload_json: str | None,
-    fallback: TaskQuery,
-    *,
-    logger: logging.Logger | None = None,
-) -> TaskQuery:
-    """Restore a persisted structured query, using its trusted fallback."""
-
-    if not payload_json:
-        return fallback
-    try:
-        return TaskQuery.model_validate_json(payload_json)
-    except Exception:
-        (logger or logging.getLogger(__name__)).warning(
-            "Failed to restore structured TaskQuery payload from pending query state.",
-            exc_info=True,
-        )
-        return fallback
 
 
 def _choice_maps(
@@ -133,13 +133,14 @@ def selected_choice_ids_from_text(
 
 
 class GatewayClarificationCore:
-    """Own pending-query validity and manager reply publication."""
+    """Check that a chat's question still waits, and publish answers."""
 
     def __init__(
         self,
         *,
         settings: GatewayClarificationSettings,
         requests: GatewayRequestService,
+        questions: GatewayPendingQuestions,
         sessions: GatewaySessionService,
         session_repository: SessionRepository,
         request_context: GatewayRequestContextService,
@@ -149,6 +150,7 @@ class GatewayClarificationCore:
     ) -> None:
         self._settings = settings
         self._requests = requests
+        self._questions = questions
         self._sessions = sessions
         self._session_repository = session_repository
         self._request_context = request_context
@@ -157,50 +159,34 @@ class GatewayClarificationCore:
         self._logger = logger or logging.getLogger(__name__)
 
     def expire_stale_on_startup(self) -> int:
-        expired_count = self._requests.expire_stale_pending_queries(
-            timeout_seconds=self._settings.pending_timeout_seconds
-        )
-        if expired_count and self._settings.pending_timeout_seconds is not None:
+        expired_count = self._questions.expire_stale()
+        if expired_count:
             self._logger.warning(
-                "Gateway expired %s pending TaskQuery record(s) older than %.0fs "
-                "during startup.",
+                "Gateway expired %s waiting question(s) past the question timeout "
+                "during startup. event=gateway_questions_expired_on_startup",
                 expired_count,
-                self._settings.pending_timeout_seconds,
             )
         return expired_count
 
-    async def resolve_pending_query(
+    async def resolve_waiting_question(
         self,
         session_key: str,
     ) -> PendingQueryRecord | None:
-        pending_query = self._requests.get_pending_query(session_key)
-        if pending_query is None:
-            return None
-        if self._requests.pending_query_is_expired(
-            pending_query,
-            timeout_seconds=self._settings.pending_timeout_seconds,
-        ):
-            self._requests.clear_pending_query(session_key, status="expired")
-            self._logger.warning(
-                "Gateway cleared expired pending TaskQuery %s for session %s.",
-                pending_query.task_query_id,
-                session_key,
-            )
-            return None
-        if not await self._parent_is_active(pending_query):
-            self._requests.clear_pending_query(
-                session_key,
-                status="stale_parent_missing",
-            )
-            self._logger.warning(
-                "Gateway cleared pending TaskQuery %s for session %s because "
-                "parent task %s is no longer active.",
-                pending_query.task_query_id,
-                session_key,
-                pending_query.parent_task_id,
-            )
-            return None
-        return pending_query
+        """The chat's first open question that still waits; ends stale ones.
+
+        A question past the timeout, or whose task the lead no longer knows,
+        is ended, and the next one in line is checked in its place.
+        """
+
+        while (question := self._questions.current(session_key)) is not None:
+            if self._questions.is_expired(question):
+                self._questions.close(question, status=PendingQueryStatus.EXPIRED)
+                continue
+            if not await self._parent_is_active(question):
+                self._questions.close(question, status=PendingQueryStatus.REQUEST_ENDED)
+                continue
+            return question
+        return None
 
     async def _parent_is_active(self, pending_query: PendingQueryRecord) -> bool:
         parent_task_id = pending_query.parent_task_id
@@ -354,68 +340,129 @@ class GatewayClarificationCore:
 
 
 class GatewayClarificationApplication:
-    """Reply to one valid pending query and await its terminal response."""
+    """Answer the question a chat shows, named by its id, then show the next."""
 
     def __init__(
         self,
         *,
         core: GatewayClarificationCore,
-        requests: GatewayRequestService,
+        questions: GatewayPendingQuestions,
         manager: GatewayManagerClient,
         responses: GatewayResponseCoordinator,
+        local_responses: GatewayLocalResponseFactory,
+        logger: logging.Logger | None = None,
     ) -> None:
         self._core = core
-        self._requests = requests
+        self._questions = questions
         self._manager = manager
         self._responses = responses
+        self._local_responses = local_responses
+        self._logger = logger or logging.getLogger(__name__)
 
-    async def has_pending_query(self, session_key: str) -> bool:
-        return await self._core.resolve_pending_query(session_key) is not None
+    async def waiting_question_id(self, session_key: str) -> str | None:
+        """The question a message in this chat answers, if one waits.
+
+        Callers pass the id back to ``reply``, so the answer goes to the
+        question this check found even if another message answers it first.
+        """
+
+        question = await self._core.resolve_waiting_question(session_key)
+        return question.task_query_id if question is not None else None
 
     async def reply(
         self,
         *,
         session_key: str,
+        task_query_id: str,
         response_text: str,
         replied_message: RepliedMessage | None = None,
     ) -> GatewayResponse:
-        pending_query = await self._core.resolve_pending_query(session_key)
-        if pending_query is None:
-            raise ValueError(f"No pending query for session_key={session_key}")
+        question = self._questions.get(task_query_id)
+        if question is None or question.session_key != session_key:
+            raise ValueError(
+                f"No question {task_query_id} waits in session_key={session_key}"
+            )
+        if not question.is_open:
+            return self._not_sent(question)
+        if not question.was_shown:
+            # The person has not seen this question (its turn came while they
+            # wrote), so their message cannot be its answer.
+            self._questions.mark_shown(question)
+            return self._show(question, intro=QUESTION_WAITING_INTRO_TEXT)
 
-        correlation_id = pending_query.correlation_id
-        async with self._manager.response_channel(correlation_id):
-            if self._manager.manager_id is None:
+        correlation_id = question.correlation_id
+        if self._manager.manager_id is None:
+            # Nothing is sent, so the question stays open for a later answer.
+            async with self._manager.response_channel(correlation_id):
                 await self._responses.queue_manager_unavailable(correlation_id)
-                response = await self._responses.await_terminal_response(
+                return await self._responses.await_terminal_response(
                     correlation_id=correlation_id,
                     session_key=session_key,
                     query_handler=None,
                 )
-                self._requests.clear_pending_query(session_key)
-                return response
-            await self._core.reply_to_task_query(
-                restore_task_query(
-                    pending_query.query_payload_json,
-                    TaskQuery(
-                        task_query_id=pending_query.task_query_id,
-                        query_type=MessageMetaType.REQUEST,
-                        message=pending_query.query_text,
-                        parent_task_id=pending_query.parent_task_id,
-                    ),
-                ),
-                correlation_id=correlation_id,
-                response_text=response_text,
-                session_key=session_key,
-                conversation_id=pending_query.conversation_id,
-                replied_message=replied_message,
+        if not self._questions.claim_answer(task_query_id):
+            # Another message answered it, or it ended, since the check.
+            return self._not_sent(self._questions.get(task_query_id) or question)
+        async with self._manager.response_channel(correlation_id):
+            try:
+                await self._core.reply_to_task_query(
+                    stored_task_query(question),
+                    correlation_id=correlation_id,
+                    response_text=response_text,
+                    session_key=session_key,
+                    conversation_id=question.conversation_id,
+                    replied_message=replied_message,
+                )
+            except Exception:
+                self._questions.release_answer(question)
+                raise
+            self._logger.info(
+                "Sent a person's answer to its question. event=gateway_question_answered "
+                "task_query_id=%s parent_task_id=%s correlation_id=%s session_key=%s",
+                task_query_id,
+                question.parent_task_id,
+                correlation_id,
+                session_key,
             )
-            # Publication consumes this answer. Waiting may persist a new question,
-            # or time out while the manager continues; neither permits replaying it.
-            self._requests.clear_pending_query(session_key)
-            response = await self._responses.await_terminal_response(
+            # Publication consumed this answer. Waiting may store a new
+            # question, or time out while the lead continues; neither permits
+            # sending the answer again.
+            await self._questions.show_next(session_key)
+            return await self._responses.await_terminal_response(
                 correlation_id=correlation_id,
                 session_key=session_key,
                 query_handler=None,
             )
-            return response
+
+    def _not_sent(self, question: PendingQueryRecord) -> GatewayResponse:
+        """Refuse a message for a question that is no longer open.
+
+        When the chat's next question has not been shown yet, the refusal
+        shows it, so the person sees what their next reply answers.
+        """
+
+        reason = (
+            ALREADY_ANSWERED_TEXT
+            if question.status == PendingQueryStatus.ANSWERED
+            else NO_LONGER_WAITING_TEXT
+        )
+        following = self._questions.current(question.session_key)
+        if (
+            following is not None
+            and not following.was_shown
+            and self._questions.mark_shown(following)
+        ):
+            return self._show(following, intro=f"{reason}\n\n{NEXT_QUESTION_INTRO_TEXT}")
+        return self._local_responses.create(
+            text=reason,
+            message_type=NOTE_MESSAGE_TYPE,
+            conversation_id=question.conversation_id,
+        )
+
+    def _show(self, question: PendingQueryRecord, *, intro: str) -> GatewayResponse:
+        return self._local_responses.create(
+            text=f"{intro}\n\n{question.query_text}",
+            message_type=QUESTION_MESSAGE_TYPE,
+            correlation_id=question.correlation_id,
+            conversation_id=question.conversation_id,
+        )

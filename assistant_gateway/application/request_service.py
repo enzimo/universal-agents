@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
 
-from assistant_gateway.application.ports import GatewayClock
-from assistant_gateway.domain.request_state import PendingQueryRecord, RequestRecord
+from assistant_gateway.domain.request_state import (
+    GUIDANCE_STATUS_HELD,
+    REQUEST_KIND_TASK_STEERING,
+    HeldGuidanceRecord,
+    RequestRecord,
+)
 from assistant_gateway.ports.repositories import (
     RequestRepository,
     RequestUnitOfWorkFactory,
@@ -29,19 +32,17 @@ TERMINAL_REQUEST_STATUSES = frozenset(
 
 
 class GatewayRequestService:
-    """Own request persistence, status transitions, and pending-query state."""
+    """Own request persistence and status transitions."""
 
     def __init__(
         self,
         *,
         repository: RequestRepository,
         unit_of_work_factory: RequestUnitOfWorkFactory,
-        clock: GatewayClock,
         logger: logging.Logger | None = None,
     ) -> None:
         self._repository = repository
         self._unit_of_work_factory = unit_of_work_factory
-        self._clock = clock
         self._logger = logger or logging.getLogger(__name__)
 
     def record(
@@ -55,7 +56,11 @@ class GatewayRequestService:
         followup_to_task_id: str | None,
         status: str = "pending",
         owner_canonical_user_id: str | None = None,
+        active_task_id: str | None = None,
+        run_state: str | None = None,
     ) -> None:
+        """Record a request row; ``run_state="running"`` may raise ``ThreadRequestRunning``."""
+
         self._repository.record_request(
             correlation_id=correlation_id,
             session_key=session_key,
@@ -65,6 +70,8 @@ class GatewayRequestService:
             followup_to_task_id=followup_to_task_id,
             status=status,
             owner_canonical_user_id=owner_canonical_user_id,
+            active_task_id=active_task_id,
+            run_state=run_state,
         )
 
     def get(self, correlation_id: str) -> RequestRecord | None:
@@ -120,97 +127,59 @@ class GatewayRequestService:
                 keys.add(request.session_key)
         return frozenset(keys)
 
-    def find_open_request(
+    def running_request(
         self,
         *,
         session_key: str,
         conversation_id: str | None,
-        limit: int = 20,
     ) -> RequestRecord | None:
-        for request in self.list_for_session(session_key, limit=limit):
-            if (
-                conversation_id is not None
-                and request.conversation_id != conversation_id
-            ):
-                continue
-            if request.status in TERMINAL_REQUEST_STATUSES:
-                continue
-            return request
-        return None
+        """The request this thread runs now, read from durable state only."""
 
-    def expire_stale_pending_queries(
-        self,
-        *,
-        timeout_seconds: float | None,
-    ) -> int:
-        if timeout_seconds is None:
-            return 0
-        cutoff = self._clock.now_utc() - timedelta(seconds=timeout_seconds)
-        return self._repository.expire_pending_queries(cutoff_iso=cutoff.isoformat())
-
-    def pending_query_is_expired(
-        self,
-        pending_query: PendingQueryRecord,
-        *,
-        timeout_seconds: float | None,
-    ) -> bool:
-        if timeout_seconds is None:
-            return False
-        try:
-            created_at = self._parse_timestamp(pending_query.created_at)
-        except ValueError:
-            self._logger.warning(
-                "Gateway request service treating pending query as expired. "
-                "event=gateway_pending_query_invalid_created_at "
-                "task_query_id=%s session_key=%s created_at=%r",
-                pending_query.task_query_id,
-                pending_query.session_key,
-                pending_query.created_at,
-            )
-            return True
-        return self._clock.now_utc() - created_at > timedelta(seconds=timeout_seconds)
-
-    def get_pending_query(
-        self,
-        session_key: str,
-    ) -> PendingQueryRecord | None:
-        return self._repository.get_pending_query(session_key)
-
-    def upsert_pending_query(
-        self,
-        *,
-        session_key: str,
-        correlation_id: str,
-        task_query_id: str,
-        parent_task_id: str | None,
-        conversation_id: str | None,
-        query_text: str,
-        query_payload_json: str | None = None,
-        status: str = "pending",
-        owner_canonical_user_id: str | None = None,
-    ) -> None:
-        self._repository.upsert_pending_query(
+        return self._repository.get_running_request(
             session_key=session_key,
-            correlation_id=correlation_id,
-            task_query_id=task_query_id,
-            parent_task_id=parent_task_id,
             conversation_id=conversation_id,
-            query_text=query_text,
-            query_payload_json=query_payload_json,
-            status=status,
-            owner_canonical_user_id=owner_canonical_user_id,
         )
 
-    def clear_pending_query(
+    def finish(self, correlation_id: str) -> bool:
+        """The thread's request ended; False when it was not running (repeat or other row)."""
+
+        return self._repository.finish_request(correlation_id)
+
+    def record_guidance(
         self,
-        session_key: str,
         *,
-        status: str = "completed",
+        correlation_id: str,
+        session_key: str,
+        conversation_id: str | None,
+        request_text: str,
+        target: RequestRecord,
+        held: HeldGuidanceRecord,
     ) -> None:
-        self._repository.clear_pending_query(
-            session_key,
-            status=status,
-        )
+        """Record a guidance message and hold it for its request, in one transaction."""
+
+        with self._unit_of_work_factory.request_unit_of_work() as unit_of_work:
+            unit_of_work.request.record_request(
+                correlation_id=correlation_id,
+                session_key=session_key,
+                request_kind=REQUEST_KIND_TASK_STEERING,
+                request_text=request_text,
+                conversation_id=conversation_id,
+                followup_to_task_id=target.active_task_id,
+                status=GUIDANCE_STATUS_HELD,
+            )
+            unit_of_work.request.hold_guidance(held)
+            unit_of_work.commit()
+
+    def held_guidance(self) -> list[HeldGuidanceRecord]:
+        return self._repository.list_held_guidance()
+
+    def get_held_guidance(self, correlation_id: str) -> HeldGuidanceRecord | None:
+        return self._repository.get_held_guidance(correlation_id)
+
+    def release_guidance(self, correlation_id: str, *, status: str) -> bool:
+        """Stop holding guidance with its outcome; only the first caller gets True."""
+
+        return self._repository.release_held_guidance(correlation_id, status=status)
 
     def transition_with_session_lineage(
         self,
@@ -221,8 +190,14 @@ class GatewayRequestService:
         conversation_id: str | None,
         last_task_id: str | None,
         manager_agent_id: str | None,
+        finishes_request: bool = False,
     ) -> None:
-        """Atomically update request state and its session task lineage."""
+        """Atomically update request state and its session task lineage.
+
+        The reply belongs to the session the request was asked in, which is
+        not always the current chat session. Save lineage without changing
+        the selected session. A final reply also ends the running request.
+        """
 
         with self._unit_of_work_factory.request_unit_of_work() as unit_of_work:
             if last_task_id:
@@ -236,17 +211,12 @@ class GatewayRequestService:
                     correlation_id,
                     status,
                 )
-            unit_of_work.session.upsert_session(
+            unit_of_work.session.upsert_session_without_switching_chat(
                 session_key=session_key,
                 conversation_id=conversation_id,
                 last_task_id=last_task_id,
                 manager_agent_id=manager_agent_id,
             )
+            if finishes_request:
+                unit_of_work.request.finish_request(correlation_id)
             unit_of_work.commit()
-
-    @staticmethod
-    def _parse_timestamp(raw_timestamp: str) -> datetime:
-        timestamp = datetime.fromisoformat(raw_timestamp)
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
-        return timestamp

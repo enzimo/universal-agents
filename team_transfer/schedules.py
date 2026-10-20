@@ -37,7 +37,14 @@ What travels, and why:
   sessions carried schedules and delivery targets use, and each imported
   person's current session per chat, with their names and chat routes but no
   conversation: the session's conversation and last task are history and stay
-  behind. Whether a session is its chat's current one travels too.
+  behind. Whether a session is its chat's current one travels too
+  (``channel_current``), because that is where the person's next message
+  goes. Sessions are written in key order and an older session a schedule
+  uses can sort after the current one, so the writer saves every session
+  without switching its chat (``upsert_session_without_switching_chat``) and
+  then gives the chat its exported current session. A chat that already has a
+  current session (a later batch, after people used the new instance) keeps
+  it; the plan lists the session that was current in the export.
 - **Delivery targets** (``gateway_scheduled_targets``). Their conversation id
   is kept: it is the id the schedule's own runs use (saved in the schedule's
   task meta), so replies of the first run after the move still find their
@@ -500,6 +507,8 @@ class _Known:
     default_cron_timezone: str
     accepted: set[str] = field(default_factory=set)
     schedules: dict[str, "ScheduledMessage"] = field(default_factory=dict)
+    # A later batch: the session each chat of the target already continues in (``SessionRouteV1.chat``).
+    current_chats: dict[tuple[str, str, str, str], str] = field(default_factory=dict)
 
     @classmethod
     def build(cls, context: ImportContext) -> "_Known":
@@ -534,6 +543,10 @@ class _Known:
             if record.kind is ScheduleRecordKind.SCHEDULE:
                 schedule = ScheduledMessage.model_validate(record.schedule.document)
                 known.schedules[schedule.schedule_id] = schedule
+            elif record.kind is ScheduleRecordKind.SESSION:
+                session: SessionRouteV1 = record.payload
+                if session.channel_current and session.chat:
+                    known.current_chats[session.chat] = session.session_key
         return known
 
     def person_problem(self, person_id: Optional[str]) -> str:
@@ -555,10 +568,16 @@ def _attention(reasons: list[str]) -> _Outcome:
 
 
 def _plan_session(record: ScheduleTransferRecordV2, known: _Known) -> _Outcome:
-    problem = known.person_problem(
-        record.session.owner_person_id if record.session else None
-    )
-    return _refused(problem) if problem else _IMPORT
+    session: SessionRouteV1 = record.payload
+    problem = known.person_problem(session.owner_person_id)
+    if problem:
+        return _refused(problem)
+    current = known.current_chats.get(session.chat) if session.channel_current and session.chat else None
+    if current and current != session.session_key:
+        return _attention(
+            [f"it was its chat's current session, but the chat already continues in {current} here, which stays current"]
+        )
+    return _IMPORT
 
 
 def _schedule_problem(schedule: "ScheduledMessage", known: _Known) -> str:

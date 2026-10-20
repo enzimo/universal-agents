@@ -31,7 +31,7 @@ GATEWAY_OWNER_TABLES: tuple[str, ...] = (
     "gateway_requests",
     "gateway_deliveries",
     "gateway_attachments",
-    "gateway_pending_queries",
+    "gateway_questions",
     "gateway_scheduled_targets",
 )
 
