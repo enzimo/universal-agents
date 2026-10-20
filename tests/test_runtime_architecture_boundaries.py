@@ -815,18 +815,20 @@ def test_work_is_pulled_and_only_the_transport_adapter_subscribes() -> None:
     assert offenders == []
 
 
-# Who may write a whole Objective record. ``save_objective`` overwrites the
-# stored record, so every change goes through
-# ``ObjectiveCoordinator.change_objective`` (load, change and save in one task
-# operation). The team import writes into a stopped instance.
+# Who may write Objective records. A new record is inserted (creation and the
+# team import into a fresh instance); every change to a stored record goes
+# through ``ObjectiveCoordinator.change_objective``, which has the store apply
+# it to the stored row in one write transaction, so no copy read earlier is
+# ever written back over a newer change.
 OBJECTIVE_RECORD_WRITERS = {
     "storage/objective_repository.py",
     "custom_agents/task_manager_objectives.py",
     "team_transfer/objectives.py",
 }
+_OBJECTIVE_WRITES = {"insert_objective", "_insert_objective", "_commit_change"}
 
 
-def test_only_the_objective_coordinator_saves_objective_records() -> None:
+def test_only_the_objective_coordinator_writes_objective_records() -> None:
     offenders: list[str] = []
     for path in _production_python_files():
         relative = path.relative_to(REPO_ROOT).as_posix()
@@ -834,10 +836,10 @@ def test_only_the_objective_coordinator_saves_objective_records() -> None:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Attribute)
-                and node.attr in {"save_objective", "_save_objective", "_save_objective_logged"}
-            ):
+            if not isinstance(node, ast.Attribute):
+                continue
+            through_store = node.attr == "change_objective" and ast.unparse(node.value).endswith("objective_repository")
+            if node.attr in _OBJECTIVE_WRITES or through_store:
                 offenders.append(f"{relative}:{node.lineno} {node.attr}")
     assert offenders == []
 

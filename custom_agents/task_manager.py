@@ -861,6 +861,7 @@ class TaskManager(
         task_id: Optional[str] = None,
         plan_id: Optional[str] = None,
         user_visible: bool = True,
+        expected_version: Optional[str] = None,
     ) -> Optional[ObjectiveRecord]:
         return self.objective_coordinator.update_objective_progress(
             objective_id,
@@ -870,6 +871,7 @@ class TaskManager(
             task_id=task_id,
             plan_id=plan_id,
             user_visible=user_visible,
+            expected_version=expected_version,
         )
 
     def update_objective_status(
@@ -884,6 +886,7 @@ class TaskManager(
         plan_id: Optional[str] = None,
         user_visible: bool = True,
         deletion_operation_id: Optional[str] = None,
+        expected_version: Optional[str] = None,
     ) -> Optional[ObjectiveRecord]:
         return self.objective_coordinator.update_objective_status(
             objective_id,
@@ -895,6 +898,7 @@ class TaskManager(
             plan_id=plan_id,
             user_visible=user_visible,
             deletion_operation_id=deletion_operation_id,
+            expected_version=expected_version,
         )
 
     def review_objective_after_task_terminal(

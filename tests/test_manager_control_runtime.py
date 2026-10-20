@@ -1234,14 +1234,18 @@ async def test_objective_deletion_that_was_not_saved_is_not_reported_done(
     )
     assert objective is not None
     # The deletion starts (DELETING is saved), but its final save fails.
-    save = task_manager.objective_repository.save_objective
+    real_change = task_manager.objective_repository.change_objective
 
-    def fail_when_deleted(record) -> None:
-        if record.status == ObjectiveStatus.DELETED and (not fail_on_metadata or record.deleted_at is not None):
-            raise sqlite3.OperationalError("disk I/O error")
-        save(record)
+    def fail_when_deleted(objective_id, *, change, **kwargs):
+        def change_then_fail(record) -> bool:
+            changed = change(record)
+            if record.status == ObjectiveStatus.DELETED and (not fail_on_metadata or record.deleted_at is not None):
+                raise sqlite3.OperationalError("disk I/O error")
+            return changed
 
-    monkeypatch.setattr(task_manager.objective_repository, "save_objective", fail_when_deleted)
+        return real_change(objective_id, change=change_then_fail, **kwargs)
+
+    monkeypatch.setattr(task_manager.objective_repository, "change_objective", fail_when_deleted)
     comms = _CaptureComms()
     schedule_store = ScheduleStore(storage_settings=config.manager_storage_settings)
     agent = SimpleNamespace(
@@ -1278,7 +1282,7 @@ async def test_objective_deletion_that_was_not_saved_is_not_reported_done(
 
     # A failed completion stays retryable, including when the write containing
     # its completion metadata fails after earlier deletion steps succeeded.
-    monkeypatch.setattr(task_manager.objective_repository, "save_objective", save)
+    monkeypatch.setattr(task_manager.objective_repository, "change_objective", real_change)
     retry = response.model_copy(
         update={
             "command_type": MessageMetaType.REQUEST,

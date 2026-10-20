@@ -151,7 +151,7 @@ def test_existing_private_heartbeat_link_is_checked_before_mutation(_people_and_
     _act_as(manager, tasks["b"])
     assert tool_json(list_heartbeat_items())["items"] == []
     kwargs = {"instruction": "B's replacement."} if operation is update_heartbeat_item else {}
-    refused = tool_json(operation(item["heartbeat_item_id"], **kwargs))
+    refused = tool_json(operation(item["heartbeat_item_id"], item["version"], **kwargs))
     if operation is remove_heartbeat_item:
         assert refused["removed"] is False
     else:
@@ -162,7 +162,7 @@ def test_existing_private_heartbeat_link_is_checked_before_mutation(_people_and_
     assert saved.enabled
     assert saved.objective_id == made["a"].objective_id
     # Naming a permitted replacement must not authorize changing the stored link.
-    relink = tool_json(update_heartbeat_item(item["heartbeat_item_id"], objective_id=made["b"].objective_id))
+    relink = tool_json(update_heartbeat_item(item["heartbeat_item_id"], item["version"], objective_id=made["b"].objective_id))
     assert "not found" in relink["error"]
 
 
@@ -172,9 +172,9 @@ def test_team_heartbeat_is_readable_but_only_administrators_change_it(_people_an
     item = tool_json(add_heartbeat_item(instruction="Team check.", objective_id=made["team"].objective_id))
     _act_as(manager, tasks["a"])
     assert tool_json(list_heartbeat_items())["returned"] == 1
-    assert "error" in tool_json(disable_heartbeat_item(item["heartbeat_item_id"]))
+    assert "error" in tool_json(disable_heartbeat_item(item["heartbeat_item_id"], item["version"]))
     _act_as(manager, tasks["admin"])
-    assert tool_json(disable_heartbeat_item(item["heartbeat_item_id"]))["enabled"] is False
+    assert tool_json(disable_heartbeat_item(item["heartbeat_item_id"], item["version"]))["enabled"] is False
 
 
 @pytest.mark.parametrize("objective_key,owner_key,allowed,signature", [

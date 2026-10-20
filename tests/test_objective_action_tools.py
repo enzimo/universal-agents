@@ -29,7 +29,16 @@ storage = access_storage  # the shared fixture: a manager database and verify ke
 @pytest.mark.parametrize(
     ("tool", "inputs", "message"),
     [
-        (objectives, {"action": "update_status"}, "objectives(action='update_status') needs status."),
+        (
+            objectives,
+            {"action": "update_status"},
+            "objectives(action='update_status') needs expected_version, status.",
+        ),
+        (
+            objectives,
+            {"action": "update_progress", "progress_summary": "x"},
+            "objectives(action='update_progress') needs expected_version.",
+        ),
         (objectives, {"action": "list", "progress_summary": "x"}, "objectives(action='list') does not take progress_summary."),
         (objective_work_sessions, {"action": "suggest"}, "objective_work_sessions(action='suggest') needs objective_id."),
         (
@@ -63,7 +72,7 @@ def test_each_action_runs_the_function_it_replaced_with_its_old_defaults(monkeyp
         monkeypatch.setattr(work_provider, name, recorder(name))
 
     objectives(action="list")
-    objectives(action="update_progress", progress_summary="Half done.", user_visible=False)
+    objectives(action="update_progress", expected_version="v1", progress_summary="Half done.", user_visible=False)
     objective_work_profiles(action="list", include_proposals=False)
     objective_work_profiles(action="list")
     objective_work_sessions(action="suggest", objective_id="obj_1")
@@ -73,7 +82,7 @@ def test_each_action_runs_the_function_it_replaced_with_its_old_defaults(monkeyp
         ("_list_objectives", (), {"limit": 20, "statuses": "", "horizons": "", "include_closed": False}),
         (
             "_update_progress",
-            (),
+            ("v1",),
             {
                 "objective_id": "", "task_id": "", "plan_id": "", "progress_summary": "Half done.",
                 "current_focus": "", "criterion_updates_json": "", "user_visible": False,

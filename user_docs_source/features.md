@@ -114,6 +114,12 @@ and `/coremem list` the team's; `/help` lists their add, replace and delete
 forms, and the same rules apply as in Settings. You can also just ask the
 assistant "What do you remember about me?" or "Forget that".
 
+The assistant changes or deletes a memory only as it last read it. If the
+memory changed in the meantime, for example from another chat or in Settings,
+the assistant's change is refused and nothing changes; the assistant reads
+the memory again before it decides. In the same way, undoing a change works
+only while it is the memory's latest change.
+
 ### Knowledge base
 
 Agents keep a shared knowledge base: pages of how-tos, decisions, lessons and
@@ -705,8 +711,12 @@ runtime manages, such as the heartbeat launcher or memory-review maintenance,
 it stages the exact change and a team administrator approves it in the Inbox
 before it happens (with authorization off, you agree in the conversation).
 The approval covers only that change to that schedule as it was when staged;
-if the schedule runs or changes first, the agent stages it again. Your own
-reminders change at once, and only you and agents working for you see them.
+if the schedule's settings change first, the agent stages it again (its regular
+runs do not count). Your own reminders change at once, and only you and agents
+working for you see them. An agent changes a schedule only as it last read it:
+if another of your requests changed the schedule meanwhile, nothing is changed
+and the agent reads it again first. See
+[How agents create and change schedules](scheduled-workers.md#how-agents-create-and-change-schedules).
 Pausing or cancelling an Objective does not provide an indirect bypass: its
 lifecycle cascade skips linked system schedules. See
 [Schedules the runtime manages](scheduled-workers.md#schedules-the-runtime-manages).
@@ -993,6 +1003,15 @@ Architect works for you, it sees your Objectives and the team's Objectives
 never another person's. The team's Objectives change only in work for an
 administrator or in work that runs for no person.
 
+Two of your requests can work on the same Objective at once. When one of them
+changes what the Objective asks for (for example marks a success criterion
+met), Team Architect's other request can't overwrite that change with a
+decision made from what it read earlier: its change is refused, it reads the
+Objective again and decides on what it says now. Recording progress or linking
+work preserves unrelated fields and does not make that version stale. Progress
+text, current focus and lifecycle status follow their own current-state rules;
+the version check does not reject two changes to the same progress field.
+
 Heartbeat items linked to an Objective follow the same ownership rules. A
 shared heartbeat runs for its launcher's person and skips an Objective that
 person cannot change, with a warning in the runtime log. Use a schedule owned
@@ -1157,6 +1176,12 @@ preserve context per chat, topic, thread, or sender.
 The configured default delivery target is used for proactive messages such as
 scheduled reminders and heartbeat updates. You can ask in plain English for
 simple reminders, recurring checks, and pause/resume changes.
+
+If two of your requests change the same heartbeat item at the same time, both
+changes are kept. A change Team Architect decided on from an older look at the
+item (for example turning off an item whose instruction another request just
+rewrote) is not made: it looks at the item again and decides on what it says
+now.
 
 If an enabled job remains overdue and unclaimed for two minutes, the runtime
 queues a review for the TeamLead, including the schedule ID and required agent

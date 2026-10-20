@@ -337,7 +337,8 @@ def enqueue_conversation_window_review_job(
         },
         "turns": [_turn_payload(turn, max_text_chars=max_text_chars) for turn in window["turns"]],
         "instructions": (
-            "Review the conversation window. Create or replace coremem/usermem only for durable facts. "
+            "Review the conversation window. Create or replace coremem/usermem only for durable facts; "
+            "to replace one, list the bank and pass the fact's record_digest. "
             "Use topic_tags with action tag_turn for one or more topic tags per turn when useful, and action "
             "tag_thread for thread-level topics. "
             "Resolve the memory review job when complete."
@@ -552,6 +553,8 @@ def enqueue_pinned_memory_audit_job(
             f"Review active {normalized_bank} facts for validity, overlap, and conflicts. "
             "If a fact is outdated or invalid, use replace/delete tools so the pinned-memory event archive "
             "permanently records the fact text plus valid_from_utc and invalid_after_utc dates. "
+            "Pass each fact's record_digest from these facts; a change refused as changed_since_read means "
+            "the fact changed after this job was made, so list the bank again and review the current fact. "
             "Prompt the user with notify_user when validity cannot be decided safely."
         ),
         "persisted": True,

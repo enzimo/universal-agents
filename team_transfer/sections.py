@@ -18,7 +18,7 @@ before everything).
 One release back (owner's decision 2026-10-05): a version reads its own
 section versions and the ones the previous release exported. For a section
 that changed since that release, ``SECTION_UPGRADES`` maps ``(section,
-previous version)`` to a pure function that turns those records into this
+source version, target version)`` to a pure function that turns those records into this
 version's. Steps are pruned by release, not by section: when a release ships,
 delete every step whose source version is older than what that release
 exports (a section that did not change keeps no step). Anything older, or
@@ -55,10 +55,10 @@ if TYPE_CHECKING:
 SectionRecords = list[dict[str, Any]]
 SectionUpgrade = Callable[[SectionRecords], SectionRecords]
 
-# (section name, version) -> conversion to version + 1. Keep only the steps
+# (section name, source version, target version) -> one explicit conversion. Keep only the steps
 # from the previous release's versions; delete older ones. Empty while no
 # section has changed since the previous release.
-SECTION_UPGRADES: dict[tuple[str, int], SectionUpgrade] = {}
+SECTION_UPGRADES: dict[tuple[str, int, int], SectionUpgrade] = {}
 
 
 class RecordOutcome(StrEnum):
@@ -293,7 +293,7 @@ def upgrade_records(
         raise TransferFileError(problem)
     if stored == version:
         return list(document.records)
-    return SECTION_UPGRADES[(document.section, stored)](list(document.records))
+    return SECTION_UPGRADES[(document.section, stored, version)](list(document.records))
 
 
 def readable_version_problem(
@@ -301,21 +301,21 @@ def readable_version_problem(
 ) -> str:
     """Why this version cannot read ``section`` at ``stored``, or empty when it can.
 
-    It reads ``version`` and, when a conversion step exists, ``version - 1``.
+    It reads ``version`` and the older source versions with explicit conversion
+    steps. A release can change the same section more than once, so a previous
+    release's source version need not be numerically adjacent to this one.
     One message for every section, plain and encrypted, so the operator always
     learns how to continue. Older exports may need several intermediate
     releases; the transfer guide owns the release-specific paths.
     """
 
-    if stored == version or (
-        stored == version - 1 and (section, stored) in SECTION_UPGRADES
-    ):
+    if stored == version or (stored < version and (section, stored, version) in SECTION_UPGRADES):
         return ""
-    readable = (
-        f"versions {version - 1} and {version}"
-        if (section, version - 1) in SECTION_UPGRADES
-        else f"version {version} only"
-    )
+    accepted = sorted({version, *(source for name, source, target in SECTION_UPGRADES
+                                  if name == section and source < version and target == version)})
+    readable = f"version {version} only"
+    if len(accepted) > 1:
+        readable = "versions " + ", ".join(str(source) for source in accepted[:-1]) + f" and {accepted[-1]}"
     found = (
         f"This file's {section} section is version {stored}, but this version of Universal Agents reads "
         f"{readable}."

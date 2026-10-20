@@ -1429,14 +1429,21 @@ def test_the_team_leads_pause_and_resume_follow_the_work_policy(
     manager, task, objective = _policy_objective(tmp_path)
     _tool_agent(manager, task.task_id, monkeypatch)
 
-    paused = tool_json(objectives(action="update_status", status="paused", objective_id=objective.objective_id))
+    version = tool_json(objectives(action="get", objective_id=objective.objective_id))["version"]
+    paused = tool_json(
+        objectives(action="update_status", expected_version=version, status="paused", objective_id=objective.objective_id)
+    )
 
     assert paused["objective"]["status"] == "paused"
     assert "lifecycle_warnings" not in paused
     assert _policy(manager, objective.objective_id).disabled_by_objective_control is True
     assert _event_types(manager, objective.objective_id)[-1] == ObjectiveEventType.WORK_SESSION_POLICY_DISABLED
 
-    resumed = tool_json(objectives(action="update_status", status="active", objective_id=objective.objective_id))
+    # Pausing changed only the status and bookkeeping, so the version the lead read still holds.
+    assert paused["version"] == version
+    resumed = tool_json(
+        objectives(action="update_status", expected_version=version, status="active", objective_id=objective.objective_id)
+    )
 
     assert resumed["objective"]["status"] == "active"
     policy = _policy(manager, objective.objective_id)

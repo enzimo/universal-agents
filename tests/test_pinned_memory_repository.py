@@ -49,19 +49,19 @@ def test_pinned_memory_repository_reuses_deleted_ids_and_enforces_capacity(
         team_id="team_test", fact_text="Fact two", capacity=2
     )
 
-    assert first.memory_id == 1
-    assert second.memory_id == 2
+    assert first.fact.memory_id == 1
+    assert second.fact.memory_id == 2
     with pytest.raises(ValueError, match="capacity is full"):
         repository.create_coremem(
             team_id="team_test", fact_text="Fact three", capacity=2
         )
 
-    assert repository.delete_coremem(team_id="team_test", memory_id=1) is True
+    assert repository.delete_coremem(team_id="team_test", memory_id=1) is not None
     reused = repository.create_coremem(
         team_id="team_test", fact_text="Replacement fact", capacity=2
     )
 
-    assert reused.memory_id == 1
+    assert reused.fact.memory_id == 1
     assert [row.memory_id for row in repository.list_coremem(team_id="team_test")] == [
         1,
         2,
@@ -132,10 +132,10 @@ def test_pinned_memory_repository_source_key_is_idempotent_per_user(
         source_key="onboarding:user_context:v1",
     )
 
-    assert first.memory_id == second.memory_id
-    assert second.fact_text == "Initial onboarding context"
-    assert second.source_key == "onboarding:user_context:v1"
-    assert other_user.source_key == "onboarding:user_context:v1"
+    assert first.fact.memory_id == second.fact.memory_id
+    assert second.fact.fact_text == "Initial onboarding context"
+    assert second.fact.source_key == "onboarding:user_context:v1"
+    assert other_user.fact.source_key == "onboarding:user_context:v1"
     assert len(repository.list_usermem(canonical_user_id="user_123")) == 1
 
 
@@ -159,7 +159,7 @@ def test_pinned_memory_repository_undo_restore_conflicts_when_id_reused(
         team_id="team_test", fact_text="Reused ID fact", capacity=2
     )
 
-    assert reused.memory_id == 1
+    assert reused.fact.memory_id == 1
     with pytest.raises(ValueError, match="already in use"):
         repository.undo_memory_event(delete_event.event_id)
 

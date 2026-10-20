@@ -325,7 +325,7 @@ def test_a_section_one_version_old_is_converted_and_older_or_newer_ones_are_refu
     old = SectionDocumentV1(section="notes", schema_version=1, records=[{"note": "a"}])
     monkeypatch.setitem(
         transfer_sections.SECTION_UPGRADES,
-        ("notes", 1),
+        ("notes", 1, 2),
         lambda records: [{"key": record["note"]} for record in records],
     )
 

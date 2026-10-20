@@ -11,6 +11,13 @@ one path (``custom_agents.system_schedule_changes``): a person's own schedule
 changes at once; a schedule the runtime manages is staged as an exact change
 that a person approves (``apply_change``), and the tool returns
 ``approval_required`` with the ``change_id``.
+
+Every schedule these tools show or change comes with its ``record_digest``,
+the version of the schedule the model read (``schedule_listing_digest``), and
+every change (update, pause, resume, disable, remove) sends it back as
+``expected_record_digest``. A schedule that changed since, for example through
+another of the person's requests, is refused with ``changed_since_read``
+(``custom_agents.schedule_changes``); scheduler runs do not change it.
 """
 
 import json
@@ -23,6 +30,7 @@ from strands import tool
 
 from custom_agents.change_followups import after_saved_change
 from custom_agents.schedule_changes import (
+    RECORD_DIGEST_KEY,
     REPORT_KEY,
     RESULT_FLAGS,
     SCHEDULE_NOT_FOUND,
@@ -54,6 +62,7 @@ from custom_agents.schedule_store import (
     ScheduleStore,
     ScheduleWriteConflict,
     owner_canonical_user_id_for_schedule,
+    schedule_record_digest,
 )
 from custom_agents.system_schedule_changes import STATUS_APPROVAL_REQUIRED, change_schedule
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
@@ -67,6 +76,7 @@ from custom_messages.contracts.schedule_v1 import (
     ScheduledMessage,
     ScheduleMemoryState,
     ScheduleTaskMemory,
+    new_schedule_id,
 )
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import (
@@ -186,6 +196,25 @@ def _validation_message(exc: ValidationError) -> str:
     errors = exc.errors()
     message = str(errors[0].get("msg") if errors else exc)
     return message.removeprefix("Value error, ")
+
+
+def _request_change(agent: "UniversalAgent", *, action: str, tool_name: str, **request: Any) -> str | dict[str, Any]:
+    """Build the change request a tool describes and run it; bad inputs are a failed result."""
+
+    schedule_id = str(request.pop("schedule_id", "") or "").strip()
+    try:
+        change = ScheduleChangeRequestV1(schedule_id=schedule_id, action=action, **request)
+    except ValidationError as exc:
+        return failed({"schedule_id": schedule_id, RESULT_FLAGS[action]: False, "error": _validation_message(exc)})
+    return _run_change(agent, change, action=tool_name)
+
+
+def _add_saved_version(store: ScheduleStore, payload: dict[str, Any], schedule_id: str) -> None:
+    """The created schedule's record_digest, read as saved, for the model's first change to it."""
+
+    with after_saved_change(payload, record_id=schedule_id, step="reading the saved schedule", logger=logger):
+        saved = store.get_scheduled_message(schedule_id)
+        payload[RECORD_DIGEST_KEY] = schedule_record_digest(saved) if saved is not None else None
 
 
 def _run_change(
@@ -478,6 +507,8 @@ def create_scheduled_job(
     """
     Create a new manager-owned ScheduledMessage tied to the current requester/session context.
 
+    The result has the new schedule's `schedule_id` and `record_digest`; a later
+    change to the schedule sends that digest back as `expected_record_digest`.
     Provide either `interval_seconds`, `cron_expression`, or `delay_seconds`.
     A cron expression is read in the person's own time zone ("0 9 * * *" is 9:00
     where they live, across daylight saving changes); pass `cron_timezone`
@@ -514,7 +545,7 @@ def create_scheduled_job(
             }
         )
     try:
-        schedule_id = new_id("sched")
+        schedule_id = new_schedule_id()
         current_task_id = agent.task_manager.current_task_id
         task_info = _get_current_task_info(agent)
         resolved_objective_id, objective_refusal = _objective_to_link(
@@ -598,6 +629,7 @@ def create_scheduled_job(
             requirements_json=requirements_json,
         )
         if worker_result and worker_result.get("status") in {"draft", "saved"}:
+            _add_saved_version(_schedule_store(agent), worker_result, schedule_id)
             with after_saved_change(
                 worker_result,
                 record_id=schedule_id,
@@ -670,6 +702,7 @@ def create_scheduled_job(
                 reason="Scheduled job created from objective-linked task context.",
             )
         )
+        _add_saved_version(_schedule_store(agent), payload, schedule_id)
         with after_saved_change(payload, record_id=schedule_id, step="waking the scheduler", logger=logger):
             wake_scheduler(agent)
         return json.dumps(payload)
@@ -692,6 +725,8 @@ def list_scheduled_jobs(
     using details_offset while detail.sha256 stays unchanged. Inspection never
     changes a schedule. Full instructions, run history and gateway context are
     available only through these exact-schedule detail pages.
+    Each schedule has a `record_digest`, the version you read: pass it as
+    `expected_record_digest` to update, pause, resume, disable or remove it.
     """
     agent = get_agent_ref()
     if agent is None:
@@ -829,6 +864,7 @@ def get_schedule_telemetry(
 @tool
 def update_scheduled_job(
     schedule_id: str,
+    expected_record_digest: str,
     schedule_name: str = "",
     clear_schedule_name: bool = False,
     instruction: str = "",
@@ -851,6 +887,12 @@ def update_scheduled_job(
 ) -> str | dict[str, Any]:
     """
     Modify an existing scheduled job.
+
+    `expected_record_digest` is the schedule's `record_digest` from
+    list_scheduled_jobs or from your last change to it. If the schedule changed
+    since (for example another request changed it), nothing is changed and the
+    result says `changed_since_read`: read it again and decide again from what
+    it says now.
 
     Empty string arguments leave the current value unchanged. `interval_seconds > 0`
     switches the schedule to a fixed interval, while `cron_expression` switches it to
@@ -897,8 +939,14 @@ def update_scheduled_job(
             evidence_required=evidence_required,
             notify_on_failure=parse_schedule_bool(notify_on_failure, field_name="notify_on_failure"),
         )
-        request = ScheduleChangeRequestV1(schedule_id=schedule_id.strip(), action="update", update=update)
-        return _run_change(agent, request, action="update_scheduled_job")
+        return _request_change(
+            agent,
+            action="update",
+            tool_name="update_scheduled_job",
+            schedule_id=schedule_id,
+            expected_record_digest=expected_record_digest,
+            update=update,
+        )
     except ValidationError as exc:
         return failed({"schedule_id": schedule_id, "updated": False, "error": _validation_message(exc)})
     except Exception as exc:
@@ -1027,52 +1075,70 @@ def record_scheduled_run(
 
 
 @tool
-def remove_scheduled_job(schedule_id: str) -> str | dict[str, Any]:
+def remove_scheduled_job(schedule_id: str, expected_record_digest: str) -> str | dict[str, Any]:
     """Remove a scheduled job permanently.
 
     A schedule the runtime manages is not removed at once: the result is
     approval_required with a change_id for apply_change.
+
+    `expected_record_digest` is the schedule's `record_digest` from
+    list_scheduled_jobs or from your last change to it. A schedule that changed
+    since is not changed (`changed_since_read`): read it again and decide again.
     """
     agent = get_agent_ref()
     if agent is None:
         return failed({"error": "Agent reference not set"})
     try:
-        request = ScheduleChangeRequestV1(schedule_id=str(schedule_id or "").strip(), action="remove")
-        return _run_change(agent, request, action="remove_scheduled_job")
+        return _request_change(
+            agent, action="remove", tool_name="remove_scheduled_job",
+            schedule_id=schedule_id, expected_record_digest=expected_record_digest,
+        )
     except Exception as exc:
         return failed({"error": str(exc)})
 
 
 @tool
-def disable_scheduled_job(schedule_id: str) -> str | dict[str, Any]:
+def disable_scheduled_job(schedule_id: str, expected_record_digest: str) -> str | dict[str, Any]:
     """Disable a scheduled job indefinitely until it is resumed/enabled again.
 
     A schedule the runtime manages is not changed at once: the result is
     approval_required with a change_id for apply_change.
+
+    `expected_record_digest` is the schedule's `record_digest` from
+    list_scheduled_jobs or from your last change to it. A schedule that changed
+    since is not changed (`changed_since_read`): read it again and decide again.
     """
     agent = get_agent_ref()
     if agent is None:
         return failed({"error": "Agent reference not set"})
     try:
-        request = ScheduleChangeRequestV1(schedule_id=str(schedule_id or "").strip(), action="disable")
-        return _run_change(agent, request, action="disable_scheduled_job")
+        return _request_change(
+            agent, action="disable", tool_name="disable_scheduled_job",
+            schedule_id=schedule_id, expected_record_digest=expected_record_digest,
+        )
     except Exception as exc:
         return failed({"error": str(exc)})
 
 
 @tool
-def resume_scheduled_job(schedule_id: str) -> str | dict[str, Any]:
+def resume_scheduled_job(schedule_id: str, expected_record_digest: str) -> str | dict[str, Any]:
     """Resume a scheduled job by clearing temporary pause and enabling it.
 
     A schedule the runtime manages is not changed at once: the result is
     approval_required with a change_id for apply_change.
+
+    `expected_record_digest` is the schedule's `record_digest` from
+    list_scheduled_jobs or from your last change to it. A schedule that changed
+    since is not changed (`changed_since_read`): read it again and decide again.
     """
     agent = get_agent_ref()
     if agent is None:
         return failed({"error": "Agent reference not set"})
     try:
-        request = ScheduleChangeRequestV1(schedule_id=str(schedule_id or "").strip(), action="resume")
-        return _run_change(agent, request, action="resume_scheduled_job")
+        return _request_change(
+            agent, action="resume", tool_name="resume_scheduled_job",
+            schedule_id=schedule_id, expected_record_digest=expected_record_digest,
+        )
     except Exception as exc:
         return failed({"error": str(exc)})
 
@@ -1080,6 +1146,7 @@ def resume_scheduled_job(schedule_id: str) -> str | dict[str, Any]:
 @tool
 def pause_scheduled_job(
     schedule_id: str,
+    expected_record_digest: str,
     duration_minutes: int = 0,
     until_iso: str = "",
 ) -> str | dict[str, Any]:
@@ -1087,6 +1154,10 @@ def pause_scheduled_job(
 
     A schedule the runtime manages is not paused at once: the result is
     approval_required with a change_id for apply_change.
+
+    `expected_record_digest` is the schedule's `record_digest` from
+    list_scheduled_jobs or from your last change to it. A schedule that changed
+    since is not changed (`changed_since_read`): read it again and decide again.
     """
     agent = get_agent_ref()
     if agent is None:
@@ -1099,10 +1170,11 @@ def pause_scheduled_job(
             if until_iso.strip()
             else (datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)).isoformat()
         )
-        request = ScheduleChangeRequestV1(
-            schedule_id=str(schedule_id or "").strip(), action="pause", paused_until_utc=paused_until
+        return _request_change(
+            agent, action="pause", tool_name="pause_scheduled_job",
+            schedule_id=schedule_id, expected_record_digest=expected_record_digest,
+            paused_until_utc=paused_until,
         )
-        return _run_change(agent, request, action="pause_scheduled_job")
     except Exception as exc:
         return failed({"error": str(exc)})
 

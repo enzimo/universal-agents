@@ -2540,6 +2540,13 @@
       ],
       "default": null,
       "description": "Known runtime purpose for a system-managed schedule. None on a system schedule means conservatively protected unclassified infrastructure."
+    },
+    "timing_revision": {
+      "default": 0,
+      "description": "Store-owned revision of explicit timing changes; scheduler advances leave it unchanged.",
+      "minimum": 0,
+      "title": "Timing Revision",
+      "type": "integer"
     }
   },
   "required": [

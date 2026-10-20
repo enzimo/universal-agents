@@ -412,6 +412,47 @@ schedule that runs often can still be paused. Before, saves replaced whole rows 
 which could bring back a deleted schedule, undo a pause, or make a run happen
 twice.
 
+The agent schedule tools bind their changes to the same digest
+(`custom_agents.schedule_changes`). `list_scheduled_jobs`, `create_scheduled_job`
+and every change that went through return each schedule's `record_digest`;
+`update_scheduled_job`, `pause_scheduled_job`, `resume_scheduled_job`,
+`disable_scheduled_job` and `remove_scheduled_job` require it back as
+`expected_record_digest`. The change is built only while the stored schedule
+still has that digest, and the store checks it again in its write transaction.
+A model that read a schedule before another request changed it gets
+`changed_since_read` (`custom_messages.enums.ChangeRefusal`) and reads it again,
+instead of overwriting the newer change; a change to a schedule the runtime
+manages is then refused before it is staged, and approvals keep their own
+digests and exact permits. Claims, the remaining count, a repeating schedule's
+next run time and the run notes are not in the digest, so scheduler runs never
+make a read stale. The stored schedule's `timing_revision` increments on an
+explicit timing change and participates in the digest. This lets a delayed
+retime detect another explicit retime without treating a normal scheduler
+advance as an edit. Replacements preserve or increment the stored revision;
+they cannot reset it from an older copy. Before 2026-10-20 a tool change started from the schedule as
+it was when the call ran, and only a change racing that call was refused.
+
+`ScheduleStore.update` returns the exact snapshot saved by its transaction.
+Objective work-session rollback uses that snapshot as its base, including the
+assigned timing revision. It can reverse its own failed reconfiguration while
+keeping later run notes, and still refuses to undo a person's later stop or edit.
+
+A model's `schedule_message` turn action only creates a schedule. Its payload
+has no schedule id: the runtime names the new schedule before the turn-action
+outbox saves the action, and the outbox creates it with
+`ScheduleStore.add(create_only=True)`, which never changes a stored schedule
+(`schedule_installation.create_schedule_from_turn_action`). Running the saved action
+again after a restart finds its own schedule and creates no second one. Before,
+the action took a schedule id and replaced the stored schedule with that id,
+owner included, so one person's request (a worker's as well as the lead's)
+could overwrite another person's schedule. Existing schedules change only
+through the schedule tools above. Trusted installers keep the replace path: the
+gateway and InternalImprovementAgent send `ScheduledMessage` messages whose
+`install_mode` decides what happens to a stored schedule
+(`scheduled_runtime.handle_scheduled_message`), and runtime code (Objective work
+schedules, retries after provider limits, after-action review schedules, team
+transfer imports) calls the store directly.
+
 The comparison includes a one-time reminder's due time and the run-note policy,
 so a stale reschedule or notification edit is refused too. Explicitly moving a
 repeating run requires its next time to remain unchanged since the read; other
@@ -659,17 +700,60 @@ A failed completion therefore leaves the Objective deleting and retryable;
 there is no later metadata write after the record becomes deleted, because
 repeated deletion commands return immediately for a completed deletion.
 
-Every Objective change loads the stored record, changes it and saves it inside
-one operation of the team lead's task operation lane
-(`ObjectiveCoordinator.change_objective` in
-`custom_agents/task_manager_objectives.py`). The store writes whole records, so
-a copy kept from an earlier operation and saved later would erase whatever was
-stored in between. Until 2026-10-17 this happened: a person's pause or resume
-erased the work-session policy's own event every time, and the team lead's
-status tool could erase a progress update or a schedule linked by a parallel
-tool call. A static test keeps every other module from saving Objective
-records, and a lane refuses an operation submitted from inside one of its own
-operations (`NestedTaskOperation`) instead of waiting for itself.
+Every Objective change runs inside one operation of the team lead's task
+operation lane (`ObjectiveCoordinator.change_objective` in
+`custom_agents/task_manager_objectives.py`), and the store applies it to the
+stored row inside one write transaction (`ObjectiveRepository.change_objective`
+in `storage/objective_repository.py`: `BEGIN IMMEDIATE` in SQLite, the row
+locked with `SELECT ... FOR UPDATE` in PostgreSQL). It reads the row, applies
+the change and writes the row back; a new Objective is only inserted, and an
+insert never replaces a stored one. Nothing writes a whole copy read earlier.
+Until 2026-10-17 copies kept across lane operations erased the work-session
+policy's own event on every pause or resume, and a progress update or a
+schedule linked by a parallel tool call. Until 2026-10-20 the store still
+replaced the whole record from whatever copy a writer held: an older copy that
+changed only the desired outcome put back an older title, and a task link
+saved by one team lead process (an old one and its replacement share the
+store) erased the success criterion another had just marked met. A change to a
+deleted Objective finds no row and stays undone.
+
+Two kinds of Objective change differ in what they check:
+
+- **Agent edits** (`objectives(action="update_progress")` and
+  `objectives(action="update_status")`) name the version the agent read
+  (`expected_version`). The version (`objective_version` in
+  `custom_messages/records/objectives.py`) is a digest of the fields an agent
+  decides on: title, desired outcome, why, horizon, priority, completion
+  policy, success criteria (without their timestamps), constraints, non-goals
+  and whether the person must confirm. The store checks it in the write
+  transaction and refuses a change from an older read with
+  `changed_since_read`; the tool returns that as a failed result and the
+  agent reads the Objective again. `get`, `list`, `create_objective` and
+  every change return the current version.
+  Progress text, focus and lifecycle status are outside the version: it does
+  not reject two changes to the same such field. Each change updates only its
+  supplied fields on the stored row, under current lifecycle rules. Agent
+  status changes check a person's deletion inside that write transaction;
+  a deletion that began after the tool read the record cannot be reopened.
+- **Trusted bookkeeping** (a task linked when it arrives or as a subtask, the
+  review when a linked task ends, a continuation task, plans following their
+  tasks, recovery tasks, work-session events, linked schedules and heartbeat
+  items, the link flags a lifecycle change records) merges its fields into
+  the stored row and names no version, so it is never refused and never
+  erases an edit. The version leaves out exactly these fields, the status and
+  what is recorded with it (satisfaction, confirmation, deletion), owners and
+  timestamps; otherwise every linked task change would refuse the team
+  lead's next edit. Every record field is in one of the two lists
+  (`OBJECTIVE_VERSION_FIELDS`, `OBJECTIVE_BOOKKEEPING_FIELDS`), which a test
+  checks.
+
+The version is computed, not stored, so the saved record and the team
+transfer's Objective section are unchanged; it stays the same across restarts
+and custody changes. A person's Runtime controls keep their own check, the
+digest of the whole record the page showed (below). A static test keeps every
+module but the coordinator, the store and the team import from writing
+Objective records, and a lane refuses an operation submitted from inside one
+of its own operations (`NestedTaskOperation`) instead of waiting for itself.
 
 A lifecycle change (`custom_agents/objective_lifecycle.py`) is one such
 operation for both a person's Runtime controls and the team lead's
@@ -751,6 +835,34 @@ knowledge base), plus task history:
   metadata, including onboarding progress. The Settings
   memory controls get the same view without metadata (`pinned_memory_reply`).
   A Signal chat id is a phone number, so it never reaches a model or a reply.
+  Several requests can change the same memory, and a model's change can arrive
+  long after it read the fact (`storage/pinned_memory_repository.py`):
+  - **A change names the version it read.** A fact's revision digest
+    (`record_digest`) covers its bank, owner, number, internal UUID and last
+    change time. The agent `memory` tool's replace and delete require it, and
+    the Settings page sends it. The store compares it with the fact in the
+    same write transaction as the change, so a change based on an older read
+    is refused (`changed_since_read`) and changes nothing. Deleted numbers are
+    given to new facts; because the digest includes the UUID, a delayed change
+    never reaches the new fact that took the number. People's slash commands
+    name facts by the number they see now. Facts in prompt context carry no
+    digest (it would add 64 characters per fact to every model call), so
+    agents list a bank before changing it.
+  - **Undo reverses only the current state.** An event is undone only while
+    the fact is still as that event left it: it still holds what a create or
+    replace saved, or it is still gone after a delete or expiry, with nothing
+    done to it since. Otherwise undo is refused (`changed_since_read`), so
+    undoing an older change never restores an earlier copy over a later edit.
+    Changes can still be undone one after another, latest first.
+  - A write returns its fact snapshot and event id from the same transaction.
+    Another request can change or reuse the number immediately after commit;
+    the receipt still identifies the change that just happened. A repeated
+    create with the same source key returns the existing fact without a new
+    event.
+  - **Writers take turns.** Every change takes the store's write lock before
+    it reads (`BEGIN IMMEDIATE`, or a transaction advisory lock in PostgreSQL),
+    so simultaneous creates get different numbers. Removing expired facts on a
+    read takes the lock only when there is something to remove.
 - The memory graph stores episodes, entities, claims, evidence, handoffs, and
   semantic retrieval data.
 - The knowledge base (`knowledge_base/`, `storage/knowledge_repository.py`) stores
@@ -2787,6 +2899,25 @@ names none (it may say `none`), so a new action cannot change records without
 running first. The executor uses two
 private Strands names, guarded by `tests/test_changes_first_executor.py` on the
 locked SDK version.
+
+A heartbeat item changes in one write transaction on its stored row
+(`storage/heartbeat_repository.py`: `BEGIN IMMEDIATE` in SQLite, the row locked
+with `SELECT ... FOR UPDATE` in PostgreSQL). An update sets only the fields it
+was given on the row it reads there. Until 2026-10-20 an update read the item
+on one connection and wrote title, instruction, target agent type and
+Objective from that read on another, so two updates of different fields at the
+same time lost one of them. The heartbeat tools return each item's `version`
+(`heartbeat_item_version`, a digest of its title, instruction, target agent
+type and Objective) from `list_heartbeat_items` and `add_heartbeat_item` and
+every change, and `update_heartbeat_item`, `remove_heartbeat_item`,
+`enable_heartbeat_item` and `disable_heartbeat_item` require it as
+`expected_version`. The store checks it in the same transaction and refuses a
+change from an older read with `changed_since_read` (a failed tool result);
+the agent lists the item again. Runs (their start, success and failure times),
+conversation resets and turning the item on or off write the same row but are
+not in the version, so they never refuse an agent's change; an Objective's
+lifecycle change switches its linked items as trusted code, without a version.
+The version is computed, not stored, so the stored item is unchanged.
 
 Knowledge curation changes follow this rule too, including publishing or
 rejecting contributions and resolving notes: these change the page's knowledge

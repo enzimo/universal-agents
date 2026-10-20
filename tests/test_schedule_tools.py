@@ -445,17 +445,21 @@ def test_schedule_tools_create_pause_resume_disable_and_remove(tmp_path: Path):
     assert agent.task_manager.history_entries[-1][0] == "task_current"
     assert "Created dedicated conversation" in agent.task_manager.history_entries[-1][1]
 
-    paused = tool_json(call_tool_on_agent_loop(agent, pause_scheduled_job, schedule_id, duration_minutes=30))
+    # Each change sends the version it read and returns the next one.
+    assert listing["schedules"][0]["record_digest"] == created["record_digest"]
+    paused = tool_json(
+        call_tool_on_agent_loop(agent, pause_scheduled_job, schedule_id, created["record_digest"], duration_minutes=30)
+    )
     assert paused["schedule_id"] == schedule_id
     assert paused["paused"] is True
 
-    resumed = tool_json(call_tool_on_agent_loop(agent, resume_scheduled_job, schedule_id))
+    resumed = tool_json(call_tool_on_agent_loop(agent, resume_scheduled_job, schedule_id, paused["record_digest"]))
     assert resumed["resumed"] is True
 
-    disabled = tool_json(call_tool_on_agent_loop(agent, disable_scheduled_job, schedule_id))
+    disabled = tool_json(call_tool_on_agent_loop(agent, disable_scheduled_job, schedule_id, resumed["record_digest"]))
     assert disabled["disabled"] is True
 
-    removed = tool_json(call_tool_on_agent_loop(agent, remove_scheduled_job, schedule_id))
+    removed = tool_json(call_tool_on_agent_loop(agent, remove_scheduled_job, schedule_id, disabled["record_digest"]))
     assert removed["removed"] is True
 
 
@@ -477,7 +481,8 @@ def test_schedule_tools_hide_jobs_owned_by_another_canonical_user(tmp_path: Path
     set_agent_ref(other_agent)
 
     listed = tool_json(list_scheduled_jobs())
-    disabled = tool_json(disable_scheduled_job(schedule_id))
+    # Even with the owner's version, another person's schedule is not found.
+    disabled = tool_json(disable_scheduled_job(schedule_id, created["record_digest"]))
 
     assert listed == {"total": 0, "returned": 0, "offset": 0, "next_offset": None, "schedules": []}
     assert disabled == {
@@ -509,6 +514,7 @@ def test_update_scheduled_job_mutates_fields_and_reports_to_manager(tmp_path: Pa
             agent,
             update_scheduled_job,
             schedule_id,
+            created["record_digest"],
             schedule_name="updated schedule",
             instruction="Updated scheduled instruction.",
             interval_seconds=120,
@@ -568,6 +574,7 @@ def test_update_scheduled_job_mutates_schedule_memory_policy(tmp_path: Path):
             agent,
             update_scheduled_job,
             schedule_id,
+            created["record_digest"],
             notify="never",
             evidence_required="authoritative_source",
             notify_on_failure="true",

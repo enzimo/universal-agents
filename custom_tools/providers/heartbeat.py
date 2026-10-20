@@ -1,4 +1,13 @@
-"""Heartbeat support for the trusted Strands tool surface."""
+"""Heartbeat support for the trusted Strands tool surface.
+
+Versions: listing or adding a heartbeat item returns its ``version``
+(``heartbeat_item_version``: its title, instruction, target agent type and
+Objective). Updating, removing, enabling and disabling an item require it as
+``expected_version``; the store checks it in its write transaction and
+refuses a change from an older read with ``changed_since_read``, so one of a
+person's requests never overwrites what another changed meanwhile. Runs and
+conversation resets do not change the version.
+"""
 
 import json
 import logging
@@ -18,6 +27,8 @@ from custom_tools.tool_results import failed
 from custom_tools.runtime_context import (
     get_agent_ref,
 )
+from storage.change_ledger import ChangeRefused
+from storage.heartbeat_repository import heartbeat_item_version
 from id_generation import (
     HEARTBEAT_SCHEDULE_ID_PREFIX,
     HEARTBEAT_SOURCE_ID_PREFIX,
@@ -52,6 +63,7 @@ def _heartbeat_item_in_view(agent: "UniversalAgent", item: HeartbeatItemRecord, 
 def _heartbeat_item_payload(item: HeartbeatItemRecord) -> dict:
     return {
         "heartbeat_item_id": item.heartbeat_item_id,
+        "version": heartbeat_item_version(item),
         "source_id": item.source_id,
         "title": item.title,
         "instruction": item.instruction,
@@ -65,6 +77,21 @@ def _heartbeat_item_payload(item: HeartbeatItemRecord) -> dict:
         "last_success_at": item.last_success_at,
         "last_failure_at": item.last_failure_at,
     }
+
+
+def _missing_version() -> dict[str, Any]:
+    return failed(
+        {
+            "error": "expected_version is required: pass the version list_heartbeat_items returned for this item.",
+            "error_code": "invalid_input",
+        }
+    )
+
+
+def _refused(refusal: ChangeRefused) -> dict[str, Any]:
+    """A change the store refused (``changed_since_read``), as a failed result."""
+
+    return failed({"error": refusal.message, "error_code": refusal.reason.value, **refusal.details})
 
 
 def _heartbeat_store(agent: "UniversalAgent") -> HeartbeatStore:
@@ -149,7 +176,10 @@ def _heartbeat_runtime_state(agent: "UniversalAgent", source_id: str) -> dict[st
 
 @tool
 def list_heartbeat_items(source_id: str = "", include_disabled: bool = True) -> str:
-    """List canonical heartbeat items for the current source or an explicit source id."""
+    """List canonical heartbeat items for the current source or an explicit source id.
+
+    Each item has a `version`; updating, removing, enabling or disabling it needs that version.
+    """
     agent = get_agent_ref()
     if agent is None:
         return json.dumps({"error": "Agent reference not set"})
@@ -205,7 +235,10 @@ def add_heartbeat_item(
     target_agent_type: str = "",
     objective_id: str = "",
 ) -> str | dict[str, Any]:
-    """Add a canonical heartbeat item with its own durable conversation thread."""
+    """Add a canonical heartbeat item with its own durable conversation thread.
+
+    The reply includes the item's `version`, which changing the item needs.
+    """
     agent = get_agent_ref()
     if agent is None:
         return failed({"error": "Agent reference not set"})
@@ -273,16 +306,32 @@ def add_heartbeat_item(
 @tool
 def update_heartbeat_item(
     heartbeat_item_id: str,
+    expected_version: str,
     *,
     title: str = "",
     instruction: str = "",
     target_agent_type: str = "",
     objective_id: str = "",
 ) -> str | dict[str, Any]:
-    """Update title, instruction, or target agent type for a heartbeat item."""
+    """Update the title, instruction, target agent type or Objective of a heartbeat item.
+
+    Fields left empty stay as they are. If the item changed since you listed
+    it, nothing is changed and the reply has `error_code` `changed_since_read`:
+    list it again, check that your change still fits, and pass the new version.
+
+    Args:
+        heartbeat_item_id: The item to change.
+        expected_version: The item's `version` from `list_heartbeat_items` (or the reply that changed it last).
+        title: The new title.
+        instruction: The new instruction.
+        target_agent_type: The agent type that should run it.
+        objective_id: The Objective to link it to.
+    """
     agent = get_agent_ref()
     if agent is None:
         return failed({"error": "Agent reference not set"})
+    if not expected_version.strip():
+        return _missing_version()
     try:
         store = _heartbeat_store(agent)
         existing = store.get_item(heartbeat_item_id)
@@ -299,6 +348,7 @@ def update_heartbeat_item(
             instruction=instruction if instruction else None,
             target_agent_type=target_agent_type if target_agent_type else None,
             objective_id=resolved_objective_id,
+            expected_version=expected_version.strip(),
         )
         if item is None:
             return failed(
@@ -317,68 +367,95 @@ def update_heartbeat_item(
             )
         )
         return json.dumps(payload)
+    except ChangeRefused as refusal:
+        return _refused(refusal)
     except Exception as exc:
         return failed({"error": str(exc)})
 
 
 @tool
-def remove_heartbeat_item(heartbeat_item_id: str) -> str | dict[str, Any]:
-    """Remove a heartbeat item permanently."""
+def remove_heartbeat_item(heartbeat_item_id: str, expected_version: str) -> str | dict[str, Any]:
+    """Remove a heartbeat item permanently.
+
+    If the item changed since you listed it, it is not removed and the reply
+    has `error_code` `changed_since_read`: list it again and decide on what it
+    says now.
+
+    Args:
+        heartbeat_item_id: The item to remove.
+        expected_version: The item's `version` from `list_heartbeat_items`.
+    """
     agent = get_agent_ref()
     if agent is None:
         return failed({"error": "Agent reference not set"})
+    if not expected_version.strip():
+        return _missing_version()
     try:
         store = _heartbeat_store(agent)
         existing = store.get_item(heartbeat_item_id)
         if existing is None or not _heartbeat_item_in_view(agent, existing, action=PRIVATE_UPDATE):
             return failed({"heartbeat_item_id": heartbeat_item_id, "removed": False})
-        removed = store.remove_item(heartbeat_item_id)
+        removed = store.remove_item(heartbeat_item_id, expected_version=expected_version.strip())
         payload = {"heartbeat_item_id": heartbeat_item_id, "removed": removed}
         return json.dumps(payload) if removed else failed(payload)
+    except ChangeRefused as refusal:
+        return _refused(refusal)
     except Exception as exc:
         return failed({"error": str(exc)})
 
 
-@tool
-def enable_heartbeat_item(heartbeat_item_id: str) -> str | dict[str, Any]:
-    """Enable a heartbeat item."""
+def _switch_item(heartbeat_item_id: str, expected_version: str, enabled: bool) -> str | dict[str, Any]:
+    """Turn an item this task may change on or off, from the version the agent read."""
     agent = get_agent_ref()
     if agent is None:
         return failed({"error": "Agent reference not set"})
+    if not expected_version.strip():
+        return _missing_version()
     try:
         store = _heartbeat_store(agent)
         existing = store.get_item(heartbeat_item_id)
         if existing is None or not _heartbeat_item_in_view(agent, existing, action=PRIVATE_UPDATE):
             return failed({"error": f"Heartbeat item not found: {heartbeat_item_id}"})
-        item = store.set_item_enabled(heartbeat_item_id, True)
+        item = store.set_item_enabled(heartbeat_item_id, enabled, expected_version=expected_version.strip())
         if item is None:
             return failed(
                 {"error": f"Heartbeat item not found: {heartbeat_item_id}"}
             )
         return json.dumps(_heartbeat_item_payload(item))
+    except ChangeRefused as refusal:
+        return _refused(refusal)
     except Exception as exc:
         return failed({"error": str(exc)})
 
 
 @tool
-def disable_heartbeat_item(heartbeat_item_id: str) -> str | dict[str, Any]:
-    """Disable a heartbeat item."""
-    agent = get_agent_ref()
-    if agent is None:
-        return failed({"error": "Agent reference not set"})
-    try:
-        store = _heartbeat_store(agent)
-        existing = store.get_item(heartbeat_item_id)
-        if existing is None or not _heartbeat_item_in_view(agent, existing, action=PRIVATE_UPDATE):
-            return failed({"error": f"Heartbeat item not found: {heartbeat_item_id}"})
-        item = store.set_item_enabled(heartbeat_item_id, False)
-        if item is None:
-            return failed(
-                {"error": f"Heartbeat item not found: {heartbeat_item_id}"}
-            )
-        return json.dumps(_heartbeat_item_payload(item))
-    except Exception as exc:
-        return failed({"error": str(exc)})
+def enable_heartbeat_item(heartbeat_item_id: str, expected_version: str) -> str | dict[str, Any]:
+    """Enable a heartbeat item.
+
+    If the item changed since you listed it, nothing is changed and the reply
+    has `error_code` `changed_since_read`: list it again and decide on what it
+    says now.
+
+    Args:
+        heartbeat_item_id: The item to enable.
+        expected_version: The item's `version` from `list_heartbeat_items`.
+    """
+    return _switch_item(heartbeat_item_id, expected_version, True)
+
+
+@tool
+def disable_heartbeat_item(heartbeat_item_id: str, expected_version: str) -> str | dict[str, Any]:
+    """Disable a heartbeat item.
+
+    If the item changed since you listed it, nothing is changed and the reply
+    has `error_code` `changed_since_read`: list it again and decide on what it
+    says now.
+
+    Args:
+        heartbeat_item_id: The item to disable.
+        expected_version: The item's `version` from `list_heartbeat_items`.
+    """
+    return _switch_item(heartbeat_item_id, expected_version, False)
 
 
 @tool

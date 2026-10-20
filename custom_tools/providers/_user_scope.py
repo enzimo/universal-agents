@@ -10,6 +10,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Optional
 
 from custom_agents.pinned_memory_runtime import (
+    AGENT_TOOL_COMMAND_ORIGIN,
     PinnedMemoryActor,
     PinnedMemoryRequestContext,
     PinnedMemoryService,
@@ -33,7 +34,7 @@ def _pinned_memory_service_for_agent(agent: "UniversalAgent") -> PinnedMemorySer
     return PinnedMemoryService(
         repository,
         config=dict(getattr(agent, "memory_config", {}) or {}),
-        command_origin="agent_tool",
+        command_origin=AGENT_TOOL_COMMAND_ORIGIN,
         logger=getattr(agent, "_logger", None),
     )
 

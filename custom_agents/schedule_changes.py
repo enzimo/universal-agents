@@ -9,11 +9,24 @@ from derived values such as the next run time.
 
 This module finds the schedule, checks that it belongs to the person the task
 works for (``access_control.ownership``, with the person from the task's signed
-context), builds the exact candidate and returns a ``PreparedScheduleChange``
-whose ``commit`` writes it to the schedule store. It never decides authority:
+context) and that it is still the version the model read
+(``expected_record_digest``), builds the exact candidate and returns a
+``PreparedScheduleChange`` whose ``commit`` writes it to the schedule store.
+It never decides authority:
 ``custom_agents.system_schedule_changes`` decides whether the change needs a
 person's approval (schedules the runtime manages) and issues the store's
 permit; the access hook already decided the tool call itself.
+
+The version is the schedule's ``record_digest`` (``schedule_listing_digest``,
+the same one people's controls in the gateway use). The tools return it with
+every schedule they show or change, and every change sends back the one the
+model read. Before 2026-10-20 a change started from the schedule as it was
+when the call ran, so a model that read a schedule, while another of the
+person's requests changed it, overwrote that newer change. The digest leaves
+out what runs change by themselves (a repeating schedule's next run time,
+the run notes, claims and the remaining count), so scheduler runs never make
+a read stale. The check runs when the change is built (so a stale change is
+never staged for approval) and again in the store's write transaction.
 """
 
 from __future__ import annotations
@@ -24,7 +37,7 @@ from typing import Any, Callable, Literal, Optional
 from custom_agents.change_followups import after_saved_change
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from access_control.ownership import (
     PRIVATE_DELETE,
@@ -53,6 +66,8 @@ from custom_agents.schedule_store import (
     compute_next_fire_at,
     fill_cron_timezone,
     owner_canonical_user_id_for_schedule,
+    schedule_changed_since_read,
+    schedule_record_digest,
 )
 from custom_messages.contracts.schedule_v1 import ScheduledMessage, ScheduleTaskMemory
 from custom_messages.contracts.schedule_worker_v1 import (
@@ -85,6 +100,11 @@ RESULT_FLAGS: dict[str, str] = {
 }
 SCHEDULE_NOT_FOUND = "schedule not found"
 REPORT_KEY = "_report"  # before/after snapshots for the tools' manager report; never shown
+# The version of a schedule the tools show (list_scheduled_jobs, every change's
+# result) and every change sends back as expected_record_digest.
+RECORD_DIGEST_KEY = "record_digest"
+_DIGEST_LENGTH = 64
+_HEX_DIGITS = frozenset("0123456789abcdef")
 
 
 class ScheduleNotFound(LookupError):
@@ -151,13 +171,25 @@ class ScheduleUpdateV1(_Request):
 
 
 class ScheduleChangeRequestV1(_Request):
-    """One schedule tool call: which schedule, what to do, and its exact inputs."""
+    """One schedule tool call: which schedule, the version the model read, what to do, and its exact inputs."""
 
     kind: Literal["schedule"] = "schedule"
     schedule_id: str = Field(min_length=1, max_length=240)
+    # The schedule's record_digest when the model read it (module docstring).
+    expected_record_digest: str
     action: ScheduleAction
     update: Optional[ScheduleUpdateV1] = None
     paused_until_utc: Optional[str] = None
+
+    @field_validator("expected_record_digest")
+    @classmethod
+    def _a_listed_version(cls, value: str) -> str:
+        if len(value) != _DIGEST_LENGTH or not set(value) <= _HEX_DIGITS:
+            raise ValueError(
+                "expected_record_digest must be the schedule's record_digest from list_scheduled_jobs "
+                "or from your last change to it."
+            )
+        return value
 
     @model_validator(mode="after")
     def _inputs_match_action(self) -> "ScheduleChangeRequestV1":
@@ -505,15 +537,9 @@ class _Commit:
                 step="reading the saved schedule for its report",
                 logger=logger,
             ):
-                after = (
-                    result["schedule"]
-                    if self.request.action == "update"
-                    else None
-                    if self.request.action == "remove"
-                    else schedule_snapshot(
-                        self.store.get_scheduled_message(schedule_id)
-                    )
-                )
+                if self.request.action not in ("update", "remove"):
+                    _show_saved(result, self.store.get_scheduled_message(schedule_id))
+                after = None if self.request.action == "remove" else result["schedule"]
                 result[REPORT_KEY] = {
                     "before": before,
                     "after": after,
@@ -543,6 +569,8 @@ class _Commit:
         if edit is not None:
             # A policy change to the run notes applies to the notes as stored.
             update_kwargs["memory_edit"] = edit
+        # base is the version the model read (prepare_schedule_change checked
+        # it), so the store's check in its write transaction is that version's.
         self.store.update(
             self.candidate,
             base=self.schedule,
@@ -569,7 +597,7 @@ class _Commit:
         ):
             after = self.store.get_scheduled_message(self.request.schedule_id)
             result["removed_by_expiration"] = after is None
-            result["schedule"] = schedule_snapshot(after)
+            _show_saved(result, after)
             # The update ran with the owner's own request or a person's approval,
             # the authority a worker-policy re-save needs, so the saved policy
             # follows; otherwise the next run would wait for the same confirmation.
@@ -595,6 +623,7 @@ class _Commit:
             operation=ScheduleMutationOperation.PAUSE,
             system_mutation_permit=permit,
             system_mutation_request_binding=self.binding,
+            expected_record_digest=self.request.expected_record_digest,
         )
         return {"paused_until": self.request.paused_until_utc, "paused": bool(paused)}
 
@@ -605,6 +634,7 @@ class _Commit:
             operation=ScheduleMutationOperation.DISABLE,
             system_mutation_permit=permit,
             system_mutation_request_binding=self.binding,
+            expected_record_digest=self.request.expected_record_digest,
         )
         return {"disabled": bool(disabled)}
 
@@ -615,6 +645,7 @@ class _Commit:
             self.request.schedule_id,
             system_mutation_permit=permit,
             system_mutation_request_binding=self.binding,
+            expected_record_digest=self.request.expected_record_digest,
         )
         return {"resumed": bool(resumed)}
 
@@ -623,14 +654,30 @@ class _Commit:
             self.request.schedule_id,
             system_mutation_permit=permit,
             system_mutation_request_binding=self.binding,
+            expected_record_digest=self.request.expected_record_digest,
         )
         return {"removed": bool(removed)}
+
+
+def _show_saved(result: dict[str, Any], saved: Optional[ScheduledMessage]) -> None:
+    """Show the schedule as read after the change, with the version the next change sends back.
+
+    The snapshot and the digest come from the same read, so the model is shown
+    the version it may change next (None when the schedule is gone).
+    """
+
+    result["schedule"] = schedule_snapshot(saved)
+    result[RECORD_DIGEST_KEY] = schedule_record_digest(saved) if saved is not None else None
 
 
 def prepare_schedule_change(
     store: ScheduleStore, request: ScheduleChangeRequestV1, *, person_id: Optional[str]
 ) -> PreparedScheduleChange:
-    """Build the change against the person's schedule as it is now."""
+    """Build the change against the person's schedule as it is now.
+
+    Refused (``ScheduleWriteConflict``, ``changed_since_read``) when the
+    schedule is no longer the version the model read.
+    """
 
     schedule = owned_schedule(
         store,
@@ -638,6 +685,8 @@ def prepare_schedule_change(
         person_id,
         action=PRIVATE_DELETE if request.action == "remove" else PRIVATE_UPDATE,
     )
+    if schedule_record_digest(schedule) != request.expected_record_digest:
+        raise schedule_changed_since_read(request.schedule_id)
     candidate, changes = _candidate(schedule, request, store.default_cron_timezone)
     return PreparedScheduleChange(
         action=request.action,
@@ -654,6 +703,7 @@ __all__ = [
     "CONFIGURE_WORKER_ACTION",
     "NoScheduleChange",
     "PreparedScheduleChange",
+    "RECORD_DIGEST_KEY",
     "REPORT_KEY",
     "RESULT_FLAGS",
     "SCHEDULE_NOT_FOUND",

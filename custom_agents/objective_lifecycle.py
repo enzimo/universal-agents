@@ -8,15 +8,17 @@ only what an earlier control turned off. A person's Runtime controls
 ``objectives(action="update_status")`` tool both use ``apply_objective_lifecycle``,
 so the two behave the same.
 
-Why one operation: ``ObjectiveRepository.save_objective`` writes the whole
-record. These changes used to keep the copy returned by one lane operation,
-switch links outside the lane, and save that copy in a later operation, which
-erased whatever was stored in between: the work policy's own event every time,
-and a progress update or a schedule linked by a parallel tool call when one
-landed in the gap. ``apply_objective_lifecycle`` runs inside one
-``TaskOperationRuntime`` operation, and every Objective write in it loads the
-stored record first (``ObjectiveCoordinator.change_objective``), so each step
-sees the steps before it and nothing else runs in between.
+Why one operation: these changes used to keep the copy returned by one lane
+operation, switch links outside the lane, and save that copy in a later
+operation, which erased whatever was stored in between: the work policy's own
+event every time, and a progress update or a schedule linked by a parallel
+tool call when one landed in the gap. ``apply_objective_lifecycle`` runs
+inside one ``TaskOperationRuntime`` operation, so its steps happen in order
+with nothing else of the team lead in between, and every Objective write in it
+is applied to the stored record inside one store transaction
+(``ObjectiveCoordinator.change_objective``). Only the status write checks the
+version an agent read (``ObjectiveStatusChange.expected_version``); the work
+policy and link records that follow it are the change's own bookkeeping.
 
 Who decides what: the caller has already decided that its person or task may
 change this Objective (``access_control.ownership``) and which statuses it may
@@ -90,7 +92,11 @@ class ObjectiveStatusChange:
     ``policy_person_id`` is the person the change works for, checked against
     the work policy's owner; None for work for no person. A deletion sets
     ``deletion_operation_id`` and ``tolerate_missing_links``: an item that is
-    already gone counts as turned off.
+    already gone counts as turned off. ``expected_version`` is the Objective
+    version an agent read (``objective_version``): the status write is
+    refused with ``changed_since_read`` when the Objective changed since, and
+    then nothing else changes. A person's controls pass none; they check the
+    digest of the page they acted on instead.
     """
 
     status: ObjectiveStatus
@@ -103,6 +109,7 @@ class ObjectiveStatusChange:
     deletion_operation_id: Optional[str] = None
     policy_person_id: Optional[str] = None
     tolerate_missing_links: bool = False
+    expected_version: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -133,9 +140,10 @@ def apply_objective_lifecycle(
     """Set the status, then the work policy, then the links; run inside one task operation.
 
     Returns None when the Objective does not exist. The status is saved
-    first: when that save fails, ``ObjectiveSaveFailed`` is raised and
-    nothing else has changed. Later steps that fail are reported in
-    ``incomplete`` instead.
+    first: when that save fails, ``ObjectiveSaveFailed`` is raised, and when
+    it is refused for an older version, ``ChangeRefused``; either way nothing
+    else has changed. Later steps that fail are reported in ``incomplete``
+    instead.
     """
 
     updated = task_manager.update_objective_status(
@@ -148,6 +156,7 @@ def apply_objective_lifecycle(
         plan_id=change.plan_id,
         user_visible=change.user_visible,
         deletion_operation_id=change.deletion_operation_id,
+        expected_version=change.expected_version,
     )
     if updated is None:
         return None

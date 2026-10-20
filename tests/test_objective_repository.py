@@ -24,7 +24,7 @@ def test_objective_repository_scopes_same_objective_id_by_owner(tmp_path: Path) 
         ("manager_agent", "First manager objective"),
         ("manager_agent_b", "Second manager objective"),
     ]:
-        repo.save_objective(
+        repo.insert_objective(
             ObjectiveRecord(
                 objective_id="objective_id_shared",
                 title=title,
@@ -60,7 +60,7 @@ def test_objective_repository_backfills_and_queries_canonical_user_ownership(
         team_id="team_1",
         owner_named_agent_type="TeamArchitect",
     )
-    repo.save_objective(objective)
+    repo.insert_objective(objective)
     with connect_sqlite(settings.sqlite_path or "") as conn:
         conn.execute(
             "UPDATE objectives SET owner_canonical_user_id=NULL "
@@ -114,7 +114,7 @@ def test_objective_listing_view_shows_the_teams_and_one_persons_objectives(tmp_p
     # Oldest first: another person's Objective is the newest.
     owners = {"objective_a": "usr_a", "objective_team": None, "objective_blank": "", "objective_b": "usr_b"}
     for minute, (objective_id, owner) in enumerate(owners.items()):
-        repo.save_objective(
+        repo.insert_objective(
             ObjectiveRecord(
                 objective_id=objective_id,
                 title=objective_id,

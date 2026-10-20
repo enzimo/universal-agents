@@ -28,10 +28,18 @@ from tests.test_strands_user_scope_tools import _FakeAgent, _signed_task_context
 storage = access_storage  # the shared fixture: a manager database and verify keys
 
 
+MEMORY_CONFIG = {"coremem": {"max_facts_per_team": 10}, "usermem": {"max_facts_per_user": 10}}
+
+
+def _memory_agent(db_path: Path) -> _FakeAgent:
+    agent = _FakeAgent(db_path, "usr_a")
+    agent.memory_config = MEMORY_CONFIG
+    return agent
+
+
 @pytest.fixture
 def agent(tmp_path: Path):
-    agent = _FakeAgent(tmp_path / "memory.db", "usr_a")
-    agent.memory_config = {"coremem": {"max_facts_per_team": 10}, "usermem": {"max_facts_per_user": 10}}
+    agent = _memory_agent(tmp_path / "memory.db")
     store = ConversationStore(str(tmp_path / "conversation.db"), artifacts_dir=tmp_path / "artifacts")
     for conversation_id, owner in (("conv_mine", "usr_a"), ("conv_theirs", "usr_b")):
         store.ensure_thread(
@@ -62,15 +70,21 @@ def test_every_memory_action_works_on_both_banks(agent, bank) -> None:
         [row] = agent._pinned_memory_repository.list_usermem(canonical_user_id="usr_a")
         assert row.fact_text == "Prefers trains."
 
-    replaced = call(memory, action="replace", bank=bank, memory_id=memory_id, fact_text="Prefers night trains.")
+    # A change names the version it is based on: the record_digest of the fact as read.
+    replaced = call(
+        memory, action="replace", bank=bank, memory_id=memory_id, fact_text="Prefers night trains.",
+        record_digest=created["fact"]["record_digest"],
+    )
     listed = call(memory, action="list", bank=bank, sort="newest", start=1, end=5)
     assert replaced["ok"] and [fact["fact_text"] for fact in listed["facts"]] == ["Prefers night trains."]
+    assert listed["facts"][0]["record_digest"] == replaced["fact"]["record_digest"]
 
     undone = call(memory, action="undo", bank=bank, event_id=replaced["event_id"])
     assert undone["ok"], undone
-    assert [fact["fact_text"] for fact in call(memory, action="list", bank=bank)["facts"]] == ["Prefers trains."]
+    [restored] = call(memory, action="list", bank=bank)["facts"]
+    assert restored["fact_text"] == "Prefers trains." and restored["record_digest"] == undone["fact"]["record_digest"]
 
-    deleted = call(memory, action="delete", bank=bank, memory_id=memory_id)
+    deleted = call(memory, action="delete", bank=bank, memory_id=memory_id, record_digest=restored["record_digest"])
     assert deleted["ok"] and call(memory, action="list", bank=bank)["facts"] == []
 
 
@@ -78,10 +92,19 @@ def test_every_memory_action_works_on_both_banks(agent, bank) -> None:
     ("inputs", "message"),
     [
         ({"action": "create", "bank": "coremem"}, "memory(action='create') needs fact_text."),
-        ({"action": "delete", "bank": "usermem"}, "memory(action='delete') needs memory_id."),
+        ({"action": "delete", "bank": "usermem"}, "memory(action='delete') needs memory_id, record_digest."),
+        (
+            {"action": "replace", "bank": "coremem", "memory_id": 1, "fact_text": "x"},
+            "memory(action='replace') needs record_digest.",
+        ),
+        ({"action": "delete", "bank": "usermem", "memory_id": 1}, "memory(action='delete') needs record_digest."),
+        (
+            {"action": "create", "bank": "coremem", "fact_text": "x", "record_digest": "0" * 64},
+            "memory(action='create') does not take record_digest.",
+        ),
         ({"action": "undo", "bank": "coremem"}, "memory(action='undo') needs event_id."),
         (
-            {"action": "delete", "bank": "coremem", "memory_id": 1, "fact_text": "x"},
+            {"action": "delete", "bank": "coremem", "memory_id": 1, "record_digest": "0" * 64, "fact_text": "x"},
             "memory(action='delete') does not take fact_text.",
         ),
         ({"action": "list", "bank": "coremem", "event_id": "e1"}, "memory(action='list') does not take event_id."),
@@ -104,6 +127,73 @@ def test_empty_inputs_count_as_left_out(agent) -> None:
     created = call(memory, action="create", bank="coremem", fact_text="Ships on Fridays.", event_id="", tags=[])
 
     assert created["ok"] is True, created
+
+
+# -- changes act only on the version the model read --------------------------------------
+
+
+def _refused(raw) -> dict:
+    """A refused change: a failed result (so the model step stops) with the shared reason."""
+
+    assert raw["status"] == "error", raw
+    payload = json.loads(result_text(raw))
+    assert payload["ok"] is False and payload["error_code"] == "changed_since_read", payload
+    return payload
+
+
+def _facts(bank: str) -> dict[int, str]:
+    return {fact["memory_id"]: fact["fact_text"] for fact in call(memory, action="list", bank=bank)["facts"]}
+
+
+@pytest.mark.parametrize("bank", ["coremem", "usermem"])
+@pytest.mark.parametrize("action", ["replace", "delete"])
+def test_a_change_based_on_an_older_read_is_refused(agent, bank, action) -> None:
+    read = call(memory, action="create", bank=bank, fact_text="Prefers trains.")["fact"]
+    # Another request changes the fact after this one read it.
+    call(
+        memory, action="replace", bank=bank, memory_id=1, fact_text="Prefers night trains.",
+        record_digest=read["record_digest"],
+    )
+
+    fields = {"fact_text": "Prefers planes."} if action == "replace" else {}
+    payload = _refused(memory(action=action, bank=bank, memory_id=1, record_digest=read["record_digest"], **fields))
+
+    assert f"List {bank} again" in payload["message"]
+    assert _facts(bank) == {1: "Prefers night trains."}
+
+
+@pytest.mark.parametrize("bank", ["coremem", "usermem"])
+@pytest.mark.parametrize("action", ["replace", "delete"])
+def test_a_delayed_change_after_a_restart_never_reaches_a_fact_that_reused_the_number(
+    agent, tmp_path, bank, action
+) -> None:
+    read = call(memory, action="create", bank=bank, fact_text="Prefers trains.")["fact"]
+    # Another request deletes it and saves an unrelated fact, which gets number 1 again.
+    call(memory, action="delete", bank=bank, memory_id=1, record_digest=read["record_digest"])
+    assert call(memory, action="create", bank=bank, fact_text="Lives in Lisbon.")["fact"]["memory_id"] == 1
+
+    # The first request resumes in a new process and sends its delayed change.
+    restarted = _memory_agent(tmp_path / "memory.db")
+    restarted._conversation_store = agent._conversation_store
+    set_agent_ref(restarted)
+    fields = {"fact_text": "Prefers planes."} if action == "replace" else {}
+    _refused(memory(action=action, bank=bank, memory_id=1, record_digest=read["record_digest"], **fields))
+
+    assert _facts(bank) == {1: "Lives in Lisbon."}
+
+
+@pytest.mark.parametrize("bank", ["coremem", "usermem"])
+def test_undo_after_a_later_edit_is_refused(agent, bank) -> None:
+    created = call(memory, action="create", bank=bank, fact_text="A")
+    a_to_b = call(
+        memory, action="replace", bank=bank, memory_id=1, fact_text="B", record_digest=created["fact"]["record_digest"]
+    )
+    call(memory, action="replace", bank=bank, memory_id=1, fact_text="C", record_digest=a_to_b["fact"]["record_digest"])
+
+    for event_id in (a_to_b["event_id"], created["event_id"]):
+        payload = _refused(memory(action="undo", bank=bank, event_id=event_id))
+        assert "Nothing was undone." in payload["message"]
+    assert _facts(bank) == {1: "C"}
 
 
 # -- topic tags ----------------------------------------------------------------------
