@@ -213,7 +213,10 @@ approval evidence.
    exactly one running step. Shared state and future outputs can make changes
    dependent; do not batch them merely to get one dialog.
 4. After the pause, apply each approved change with `apply_change(change_id,
-   reason)`; it finds the approval by the change id and applies it once. Never
+   reason)`; it finds the approval by the change id and applies it once. Check
+   each result before continuing. If a change waits or fails, the remaining calls
+   in that model step receive a "Not run" result and stay skipped after the
+   change resumes. Send still-needed calls again after checking the outcome. Never
    apply a denied change or ask for it again: a denial closes its step, and a new
    request that only that step covers is refused. Tell the person what will not
    happen and agree a different plan.
