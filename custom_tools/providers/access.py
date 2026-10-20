@@ -2,7 +2,9 @@
 
 Every agent holds these through its role's standard tool set
 (``agent_runtime``): what it can use, asking for access, and, for the team
-lead, restricting workers and revoking what it gave. Searching the catalog
+lead, restricting workers and revoking what it gave, both only in the request
+it works on and for that request's person (``AccessRequests.restrict`` and
+``revoke``). Searching the catalog
 (``find_tools``) is in ``custom_tools.providers.tool_loading``, because it
 works in both authorization modes. There is no tool
 to give a worker access: workers get it for each task, from what the team lead
@@ -41,7 +43,6 @@ from custom_messages.contracts.access_v2 import (
     AccessRequestV1,
     GrantKind,
     GrantLifetime,
-    GrantStatus,
     GrantV1,
     TargetKind,
     TargetRefV1,
@@ -317,10 +318,13 @@ def _active_meta(agent: Any) -> tuple[str | None, Any]:
 
 @tool
 def restrict_access(agent_type: str, reason: str, tool_id: str = "", folder: str = "", operation: str = "") -> str:
-    """Block a worker from a tool, one operation, or a folder you could have given it.
+    """Block a worker from a tool, one operation, or a folder you could have given it, in this request.
 
-    A restriction wins over any grant, including ones from people. Remove it
-    with revoke_access and the grant_id this returns.
+    The restriction counts only in the request you are working on and ends
+    with it; the person's other requests and other people's work are not
+    affected. While it lasts it wins over any grant, including ones from
+    people. Remove it with revoke_access and the grant_id this returns. For a
+    restriction on every request, propose a block with propose_access_change.
     """
 
     def run() -> str:
@@ -330,6 +334,7 @@ def restrict_access(agent_type: str, reason: str, tool_id: str = "", folder: str
             recipient_agent_type=str(agent_type or "").strip(),
             target=_target(tool_id, operation, folder),
             reason=str(reason or "").strip() or "No reason given.",
+            # The request this task works on; the restriction is bound to it.
             task_id=principal.work_id,
             person_id=person.person_id if person else None,
         )
@@ -337,7 +342,7 @@ def restrict_access(agent_type: str, reason: str, tool_id: str = "", folder: str
             {
                 "status": "restricted",
                 "grant_id": block.grant_id,
-                "message": f"{agent_type} can no longer use {requests.target_name(block.target)}.",
+                "message": f"{agent_type} can no longer use {requests.target_name(block.target)} in this request.",
             }
         )
 
@@ -346,23 +351,25 @@ def restrict_access(agent_type: str, reason: str, tool_id: str = "", folder: str
 
 @tool
 def revoke_access(grant_id: str) -> str:
-    """Revoke access or a restriction your agent type gave (see list_my_access
-    for grants you hold; grant ids come back from give_access)."""
+    """Revoke access or a restriction your agent type gave for the request you are working on.
+
+    Grant ids come back from restrict_access and authorize_scheduled_job_access.
+    What you gave for another request, or for another person's work, is not
+    yours to end here; a person can remove it.
+    """
 
     def run() -> str:
-        _agent, requests, principal, _person, _task_id = _context()
-        wanted = str(grant_id or "").strip()
-        revoked = requests.revoke(principal, wanted)
-        result: dict[str, Any] = {"status": "revoked", "grant_ids": revoked}
-        grant = requests.service.store.get(wanted)
+        _agent, requests, principal, person, _task_id = _context()
+        revocation = requests.revoke(
+            principal,
+            str(grant_id or "").strip(),
+            task_id=principal.work_id,
+            person_id=person.person_id if person else None,
+        )
+        result: dict[str, Any] = {"status": "revoked", "grant_ids": revocation.revoked}
         # The whole entry goes, except parts a person gave (AccessRequests.revoke).
-        remaining = [
-            held.grant_id
-            for held in (requests.service.entry_grants(grant) if grant is not None else [])
-            if held.status is GrantStatus.ACTIVE
-        ]
-        if remaining:
-            result["still_given_by_a_person"] = remaining
+        if revocation.kept_by_people:
+            result["still_given_by_a_person"] = revocation.kept_by_people
             result["message"] = (
                 "A person also gave this agent type access to the same tool, so it still has that access. "
                 "Tell the person you work for if it should be removed."

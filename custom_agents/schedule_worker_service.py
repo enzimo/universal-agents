@@ -473,14 +473,20 @@ class _HandOn:
         service = self.requests.service
         lead = self.actor.agent.type_subject()
         holder = schedule_subject(service.team_id, self.schedule_id)
+        work = {"task_id": self.actor.agent.work_id, "person_id": self.actor.person.person_id if self.actor.person else None}
         for grant in service.store.for_subjects(service.team_id, [holder]):
             if grant.granted_by != lead:
                 continue  # a person approved it in a run; it stays
+            if not self.requests.in_agent_reach(grant, **work):
+                # Given for another person's work (the schedule had another
+                # owner then); it never counts in this owner's runs, and an
+                # agent ends only what it gave for the person it works for.
+                continue
             tool_id = grant.target.id.partition("#")[0]
             wanted = needed.get(tool_id)
             if wanted is not None and wanted.rank >= grant.level.rank:
                 continue
-            self.ended += self.requests.revoke(self.actor.agent, grant.grant_id)
+            self.ended += self.requests.revoke(self.actor.agent, grant.grant_id, **work).revoked
             logger.info(
                 "A scheduled job no longer needs this access; it ended. event=schedule_access_ended "
                 "schedule_id=%s worker_type=%s tool_id=%s level=%s needed=%s",

@@ -560,7 +560,21 @@ def _ended_request_id(agent: Any, task_id: str) -> str | None:
     info = agent.task_manager.get_task_info(task_id)
     if info is None or getattr(info.task, "parent_task_id", None):
         return None
-    gateway_context = getattr(getattr(info, "meta", None), "gateway_context", None)
+    return request_id_of(getattr(info, "meta", None))
+
+
+def request_id_of(meta: Any) -> str | None:
+    """The request a stored task belongs to: its signed context id, or its schedule run's; None without one.
+
+    Every task of a request carries the request's context unchanged, so the
+    id ties a worker's task, or a plan step, to the person's request. It is
+    read without checking the signature again: the runtime checked the
+    context when it admitted the task, and callers only compare it with the
+    verified id of the active task (``verified_context_id``) or end what the
+    request was given, which must work after the context expired too.
+    """
+
+    gateway_context = getattr(meta, "gateway_context", None)
     signed = getattr(gateway_context, "task_context", None)  # SignedTaskContextV1
     if signed is not None:
         return str(signed.context.context_id)
@@ -765,6 +779,7 @@ __all__ = [
     "decided_elsewhere",
     "refusal_text",
     "register_task_access_cleanup",
+    "request_id_of",
     "runtime_access",
     "runtime_requests",
     "send_access_notice",
@@ -772,6 +787,7 @@ __all__ = [
     "resolve_meta_identity",
     "task_access",
     "task_person",
+    "verified_context_id",
     "verified_meta_person_id",
     "verified_task_context",
 ]

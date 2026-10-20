@@ -273,6 +273,47 @@ def test_imported_agent_access_and_blocks_still_control_real_decisions(tmp_path:
         cedar.close()
 
 
+@pytest.mark.integration
+@pytest.mark.skipif(not _CEDAR_BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
+def test_an_agents_restriction_for_one_request_stays_behind_and_a_persons_block_travels(tmp_path: Path) -> None:
+    from access_catalog.catalog import load_catalog
+    from access_control.cedar import CedarAccessClient
+    from access_control.decisions import AccessService
+    from access_control.entities import AgentPrincipal, PersonPrincipal, agent_role_resolver
+    from access_control.requests import AccessRequests
+    from access_control.starter_profiles import apply_starter_profile
+    from assistant_gateway.config import GatewayInstanceConfig
+    from tests.test_access_requests import RecordingInbox
+
+    config_path, _datasets = _old_instance(tmp_path)
+    cedar = CedarAccessClient(binary=str(_CEDAR_BINARY))
+    try:
+        service = AccessService(
+            store=AccessRepository(GatewayInstanceConfig.load(config_path).manager_storage_settings),
+            catalog=load_catalog(None), cedar=cedar, team_id=TEAM, agent_role_of=agent_role_resolver("TeamArchitect"),
+        )
+        ana = PersonPrincipal("usr_ana", TEAM, ("owner",))
+        apply_starter_profile(service, ana, "trusted", lead_agent_type="TeamArchitect")
+        requests = AccessRequests(service=service, inbox=RecordingInbox(), lead_agent_type="TeamArchitect")
+        create = TargetRefV1(kind=TargetKind.OPERATION, id="fn:schedules#create_scheduled_job")
+        restricted = requests.restrict(
+            AgentPrincipal("agent_lead", "TeamArchitect", "team_lead", TEAM, work_id="request_1"),
+            recipient_agent_type="WebResearchAgent", target=create, reason="Only change existing schedules",
+            task_id="request_1", person_id="usr_ana",
+        )
+        worker_type = SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(TEAM, "WebResearchAgent"))
+        blocked = requests.block(ana, subject=worker_type, target=create, reason="No new schedules")
+    finally:
+        cedar.close()
+
+    plan, target = _export_and_import(tmp_path, config_path)
+
+    outcomes = {record.key: record for record in plan.records if record.section == "access"}
+    assert f"grant/{restricted.grant_id}" not in outcomes, "it ends with its request, like task grants"
+    assert outcomes[f"grant/{blocked.grant_id}"].outcome is RecordOutcome.IMPORT
+    assert _target_store(target).get(blocked.grant_id) == blocked
+
+
 # -- the team's sharing choices (access_control.account_sharing) -----------------------
 
 

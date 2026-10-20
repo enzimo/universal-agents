@@ -17,7 +17,8 @@ same and can also bring more records from the same backup later
 - **Skills and tools**: reviewed skills, added web API and CLI tools with their
   programs, MCP connections, and installed procedures.
 - **People and access**: roles, channel bindings, Web Chat sign-ins, lasting
-  grants, blocks, shares, data folders, account links, person settings, and
+  grants, blocks (not TeamLead's restrictions for one request, which end with
+  their request), shares, data folders, account links, person settings, and
   the team's choices of which services' accounts and model keys are shared
   ([Shared or private](permissions.md#shared-or-private)). Disabled people
   stay disabled. Removed people do not move.

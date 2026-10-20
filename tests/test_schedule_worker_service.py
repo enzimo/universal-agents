@@ -611,6 +611,36 @@ def test_each_schedule_gets_its_own_access_that_follows_its_requirements(lead):
     assert ended.detail == {"ended_with_schedule": "job"}
 
 
+@needs_cedar
+def test_setup_leaves_access_given_for_another_persons_work_alone(lead):
+    """A schedule that changed owner keeps the earlier owner's setup grant; it never counts in this owner's runs."""
+
+    from datetime import datetime, timezone
+
+    from access_control.entities import schedule_subject
+    from custom_agents import access_runtime
+    from custom_messages.contracts.access_v2 import GrantStatus, GrantV1, TargetKind, TargetRefV1
+
+    enable_access(lead, starter_profile="trusted")
+    configure(lead, capabilities=PUBLISH)
+    service = access_runtime.runtime_access(lead).service
+    service.store.create(
+        GrantV1(
+            grant_id="grant-earlier-owner", team_id="team", subject=schedule_subject("team", "job"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="fn:publishing"),
+            granted_by=access_runtime.acting_agent(lead).agent.type_subject(),
+            created_at_utc=datetime.now(timezone.utc), for_person_id="earlier-owner",
+        )
+    )
+
+    # Publishing is no longer needed, but the team lead ends only what it gave for this owner's work.
+    configure(lead, expected_revision=1, capabilities=WEB_SEARCH)
+    result = ScheduleWorkerService(lead).authorize_access("job", expected_revision=2)
+
+    assert "grant-earlier-owner" not in result["ended"]
+    assert service.store.get("grant-earlier-owner").status is GrantStatus.ACTIVE
+
+
 def test_authorization_off_needs_no_hand_on(lead):
     configure(lead, capabilities=WEB_SEARCH)
     result = ScheduleWorkerService(lead).authorize_access("job", expected_revision=1)

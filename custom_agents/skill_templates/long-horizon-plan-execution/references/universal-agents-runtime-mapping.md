@@ -557,10 +557,11 @@ retention. Preserve recurring memory schedules.
 ### Inspecting and managing the current user's queue
 
 Use `list_task_queue` for your active execution roots, queue positions, blockers
-and delegated children. Read task history before treating two roots as
-duplicates. Use `control_task_queue` to pause runnable queued work, stop a
-confirmed duplicate, or resume the retained task once its blockers are resolved.
-Resume does not decide access requests, answer pending questions, or override
-budget pauses. Report the blocker and exact task ID instead of creating another
-copy. Self-status, own tool-result inspection and current-task history notes are
-standard access and need no grant.
+and delegated children. `control_task_queue` pauses, resumes or stops only tasks
+of the request you are working on. For a duplicate or any other request of the
+person, report its task ID and tell the person to ask in that request's own
+thread or to stop it with `/stop task <task_id>`. Resume does not decide access
+requests, answer pending questions, or override budget pauses. Report the
+blocker and exact task ID instead of creating another copy. Self-status, own
+tool-result inspection and current-task history notes are standard access and
+need no grant.

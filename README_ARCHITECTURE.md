@@ -321,9 +321,19 @@ each. They run in parallel on as many workers as the team allows:
   `cancel_delegated_task` (tool `fn:worker_pools`).
 
 Agents can inspect their current user's unfinished queue with `list_task_queue`
-and manage another task through `control_task_queue`. Cancellation retains
-history and stops attached work; resume refuses unresolved approvals, questions,
-delegation and runtime review. Pause notices identify the task and affected
+and manage another task of the request they work on through
+`control_task_queue` (`custom_tools/providers/task_queue.py`). A turn controls
+only its own request (owner's decision 2026-10-19): the target's stored signed
+context id must equal the turn's verified one (`access_runtime.request_id_of`,
+`verified_context_id`), checked before any state check, so stop is limited too.
+For another request the tool refuses and the person is told to ask in that
+request's thread or to stop it with `/stop task` or Settings → Tasks. Why: a
+person often has several requests open at once, one lead model turn running
+while the others wait for workers or people, and a model turn for one request
+must not end or wake another request the person is waiting on; people's own
+stops go through the manager without a model turn and stay immediate.
+Cancellation retains history and stops attached work; resume refuses unresolved
+approvals, questions, delegation and runtime review. Pause notices identify the task and affected
 worker. Settings also pages finished task results across agents, including
 stopped workers, ten records at a time. Runtime Controls sorts schedules by next
 fire time, with undated schedules last.
@@ -1502,6 +1512,26 @@ requests naming one operation are refused (`AccessService.operation_refusal`),
 because operation names are fragile (sending mail is both `gmail_send` and
 `command:gmail.send`); blocks may still name one.
 
+Agents' restrictions and revocations stay inside the request (owner's decision
+2026-10-19). `AccessRequests.restrict` decides whether TeamLead may restrict
+with the request and person of its task, and stores the block bound to both
+(`lifetime: task`, `task_id` = the request's signed context id, and
+`for_person_id`), so it counts only in that request, ends with it
+(`end_task_grants`) and stays behind in a team transfer like other task
+grants. `AccessRequests.revoke` ends only what the agent's type gave for its
+current request and person (`AccessRequests.in_agent_reach`): a grant for the
+same person's work and, when bound to a request, this request; a block bound
+to no request is never in an agent's reach. Parts of the same entry bound to
+another request stay. `GrantV1` lets a block name a person only when it is
+bound to one request. Why: a person often has several requests open at once,
+and they may share worker types, so a team-wide restriction or an entry-wide
+revocation from one request changed the person's other requests, and the
+lead's type could end access it handed down for another person. People's and
+administrators' blocks (`AccessRequests.block`, approved proposals) name no
+person and stay team-wide and immediate; TeamLead asks for a lasting one with
+`propose_access_change`. Restrictions made before this rule stay team-wide,
+and only an administrator removes them (`unblock`).
+
 One entry per tool (`access_control/grant_entries.py`): an agent's access to one
 tool for one person's work is one entry. A new grant that covers an existing
 one replaces it in the same transaction, and what was handed on from the old
@@ -1518,7 +1548,8 @@ removing the set left working. A person's decision stores its grants and its
 outcome in one transaction, so a grant it replaces ends only if the outcome is
 stored (see "Each request is decided once" below). Removing access removes the whole entry
 (`AccessService.revoke_by_person`, `AccessRequests.revoke`, proposals'
-removals). Why: people saw several independent grants for one tool, assumed the
+removals); an agent's revocation removes the entry's grants for its current
+request and person (see above). Why: people saw several independent grants for one tool, assumed the
 broadest replaced the others, and removing one could leave another working.
 
 Folders are access targets too (`access_control/folders.py`). A folder is named

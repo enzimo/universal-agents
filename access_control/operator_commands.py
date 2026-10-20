@@ -220,9 +220,13 @@ def person_for(lookup: MembershipLookup, person_id: str, team_id: str) -> Person
 
 def describe_grant(grant: GrantV1) -> str:
     if grant.kind is GrantKind.BLOCK:
-        until = (
-            f"until {grant.expires_at_utc.isoformat(timespec='minutes')}" if grant.expires_at_utc else "until removed"
-        )
+        if grant.expires_at_utc:
+            until = f"until {grant.expires_at_utc.isoformat(timespec='minutes')}"
+        elif grant.lifetime is GrantLifetime.TASK:
+            # An agent's restriction: it counts only in the request it was made in.
+            until = f"in request {grant.task_id} only" + (f", for {grant.for_person_id}'s work" if grant.for_person_id else "")
+        else:
+            until = "until removed"
         return (
             f"{grant.grant_id} [{grant.status.value}] block: {grant.subject.kind.value} {grant.subject.id} -> "
             f"blocked from {grant.target.kind.value} {grant.target.id} ({until}); "

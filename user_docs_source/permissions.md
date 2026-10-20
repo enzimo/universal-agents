@@ -269,7 +269,11 @@ offer the same choices as separate buttons (see
 described above; there is no tool for an agent to give access. TeamLead asks
 for access it will pass on with `request_access` and `hand_on=true`.
 `restrict_access` blocks a worker from one tool, operation or folder, and
-`revoke_access` takes back what TeamLead gave. Removing access also ends
+`revoke_access` takes back what TeamLead gave. Both act only in the request
+TeamLead is working on and for the person it works for: when you have several
+requests open that use the same worker, restricting it in one leaves the others
+alone, and a restriction ends with its request. TeamLead cannot take back what
+it gave for another request or another person. Removing access also ends
 everything handed down from it.
 
 **Notices.** The Inbox lists notices that need no decision: lasting access
@@ -483,8 +487,8 @@ request_access(folder='data/reports/2026', level='read', reason='Summarize the 2
 The request goes through the same steps as a request for a tool (see
 [How agents get access](#how-agents-get-access)). A worker's task gets a
 folder from TeamLead's access the same way as a tool, only a folder inside the
-one TeamLead holds, and TeamLead can block a worker from one with
-`restrict_access(agent_type=..., folder=..., reason=...)`. People give and
+one TeamLead holds, and TeamLead can block a worker from one in the current
+request with `restrict_access(agent_type=..., folder=..., reason=...)`. People give and
 block folders with `/access` and `assistant_cli access` (examples below).
 
 A grant, revocation or block applies to the next file an agent opens. An
@@ -912,7 +916,13 @@ Who may block and unblock:
   folder that contains the blocked one at all (see
   [Shell and Python code](#shell-and-python-code)).
 
-TeamLead's `restrict_access` creates the same kind of block on a worker.
+TeamLead's `restrict_access` creates the same kind of block on a worker, but
+only for the request TeamLead is working on: it counts in that request, ends
+with it and is not moved by a [team transfer](team-transfer.md). Your blocks,
+and blocks an administrator approves in a proposal, apply to every request
+until someone removes them. Restrictions TeamLead made before this rule apply
+to every request; an owner or administrator removes them with
+`/access unblock <block id>`.
 
 When an update renames or removes an operation that a block names, the block
 stops the whole tool instead, so it never quietly allows that operation again.

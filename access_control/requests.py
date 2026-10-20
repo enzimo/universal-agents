@@ -18,7 +18,10 @@ service (``access_control.decisions``):
   "ask me each time" grant is approved in place.
 - **An agent hands on access** (``give``), **restricts** it (a block, which
   anyone who could have given the access may add) or **revokes** what its
-  agent type handed out.
+  agent type handed out. An agent's restriction and revocation reach only the
+  request it works on and that request's person (owner's decision
+  2026-10-19), like the access agents hand on: a person often has several
+  requests open, and one request's turn must not change another's workers.
 - **A person blocks** an agent type, an agent or a person from a tool or one
   operation (``block``), and removes a block (``unblock``). A block wins over
   every grant from the next decision on, is recorded in the access store's
@@ -222,6 +225,14 @@ class RequestWatcher(Protocol):
 
     def stored(self, request: AccessRequestV1) -> None:
         """The request was stored (waiting, or granted at once by a hand-down)."""
+
+
+@dataclass(frozen=True)
+class AgentRevocation:
+    """What an agent's revocation ended, and the grants in the same entry a person gave for the same work."""
+
+    revoked: list[str]
+    kept_by_people: list[str]
 
 
 @dataclass(frozen=True)
@@ -1372,11 +1383,23 @@ class AccessRequests:
         recipient_agent_type: str,
         target: TargetRefV1,
         reason: str,
-        task_id: str | None = None,
-        person_id: str | None = None,
+        task_id: str | None,
+        person_id: str | None,
     ) -> GrantV1:
-        """Block a worker from a target the grantor could have given it (section 4.8)."""
+        """Block a worker from a target the grantor could have given it (section 4.8), in one request.
 
+        ``task_id`` is the request the grantor works on (``AgentPrincipal.work_id``)
+        and ``person_id`` the person it works for. They decide whether the
+        grantor may restrict, and the block is bound to both: it counts only
+        in that request (lifetime task, so it ends with the request) and only
+        for that person's work. The person's other requests and other
+        people's work keep the worker type's access. Lasting, team-wide
+        blocks are people's (``block``); TeamLead proposes one with
+        ``propose_access_change``.
+        """
+
+        if not task_id:
+            raise HandDownRefused("A restriction is made for the request you are working on, and this call has none.")
         if recipient_agent_type == grantor.agent_type:
             raise HandDownRefused("Restrict other agents; to stop using a tool yourself, just do not call it.")
         if self.service.agent_role_of(recipient_agent_type) != AGENT_ROLE_WORKER:
@@ -1392,17 +1415,23 @@ class AccessRequests:
             kind=GrantKind.BLOCK,
             subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(self.service.team_id, recipient_agent_type)),
             target=target,
+            lifetime=GrantLifetime.TASK,
+            task_id=task_id,
+            for_person_id=person_id,
             granted_by=grantor.type_subject(),
             reason=reason,
             created_at_utc=now,
         )
         created = self.service.store.create(block)
         logger.info(
-            "Access restricted. event=access_restricted grant_id=%s by=%s recipient=%s target=%s",
+            "Access restricted for one request. event=access_restricted grant_id=%s by=%s recipient=%s target=%s "
+            "task_id=%s person_id=%s",
             created.grant_id,
             grantor.agent_type,
             recipient_agent_type,
             target.id,
+            task_id,
+            person_id,
         )
         return created
 
@@ -1535,12 +1564,37 @@ class AccessRequests:
             raise HandDownRefused("Only the person who added this block, or an owner or administrator, can remove it.")
         return grant
 
-    def revoke(self, grantor: AgentPrincipal, grant_id: str) -> list[str]:
-        """Revoke access or a restriction the grantor's agent type gave.
+    @staticmethod
+    def in_agent_reach(grant: GrantV1, *, task_id: str | None, person_id: str | None) -> bool:
+        """Whether a grant belongs to the work an agent does now: request ``task_id`` for ``person_id``.
 
-        Access goes as a whole entry (``access_control.grant_entries``): every
-        grant in it that the grantor's type gave. Parts a person gave stay,
-        and the grantor is told to ask a person about them.
+        The grant must serve the same person's work (``for_person_id``; None
+        is work for nobody) and, when it is bound to one request, this one.
+        Every restriction an agent makes is bound to its request, so a block
+        bound to none (a person's, or one an agent made before restrictions
+        were bound to their request) is never in an agent's reach; people
+        remove those with ``unblock``.
+        """
+
+        if grant.for_person_id != person_id:
+            return False
+        if grant.kind is GrantKind.BLOCK or grant.task_id is not None:
+            return task_id is not None and grant.task_id == task_id
+        return True
+
+    def revoke(
+        self, grantor: AgentPrincipal, grant_id: str, *, task_id: str | None, person_id: str | None
+    ) -> AgentRevocation:
+        """Revoke access or a restriction the grantor's agent type gave for this request and person.
+
+        ``task_id`` is the request the grantor works on and ``person_id`` the
+        person it works for (``in_agent_reach``): a team lead working on one
+        request never ends what it handed down for another request or another
+        person's work (owner's decision 2026-10-19). Access goes as a whole
+        entry (``access_control.grant_entries``): every grant in it that the
+        grantor's type gave for this work. Parts a person gave stay, and the
+        grantor is told to ask a person about them; grants of the entry bound
+        to another request of the person stay with that request.
         """
 
         grant = self.service.store.get(grant_id)
@@ -1548,9 +1602,26 @@ class AccessRequests:
             raise HandDownRefused("There is no such grant in this team.")
         if grant.granted_by != grantor.type_subject():
             raise HandDownRefused("You can revoke only access your agent type gave; ask a person for anything else.")
-        entry = self.service.entry_grants(grant)
-        own = [held.grant_id for held in entry if held.granted_by == grantor.type_subject()]
-        others = [held.grant_id for held in entry if held.granted_by != grantor.type_subject()]
+        if not self.in_agent_reach(grant, task_id=task_id, person_id=person_id):
+            logger.info(
+                "An agent's revocation outside its request was refused. event=agent_revoke_outside_request_refused "
+                "grant_id=%s by=%s task_id=%s person_id=%s grant_task_id=%s grant_person_id=%s",
+                grant_id,
+                grantor.agent_type,
+                task_id,
+                person_id,
+                grant.task_id,
+                grant.for_person_id,
+            )
+            raise HandDownRefused(
+                "You can revoke only what your agent type gave for the request you are working on and the person "
+                "it works for. This one belongs to other work; a person can remove it."
+            )
+        in_reach = [
+            held for held in self.service.entry_grants(grant) if self.in_agent_reach(held, task_id=task_id, person_id=person_id)
+        ]
+        own = [held.grant_id for held in in_reach if held.granted_by == grantor.type_subject()]
+        others = [held.grant_id for held in in_reach if held.granted_by != grantor.type_subject()]
         if others:
             logger.info(
                 "An agent removed the access it gave; a person's grants in the same entry stay. "
@@ -1559,9 +1630,13 @@ class AccessRequests:
                 ",".join(own),
                 ",".join(others),
             )
-        return self.service.store.revoke_all(
+        revoked = self.service.store.revoke_all(
             self.service.team_id, own, actor=grantor.type_subject(), at=self.service.clock()
         )
+        # Read again: ending the agent's grants also ends what was handed down from them.
+        still_active = [self.service.store.get(held_id) for held_id in others]
+        kept = [held.grant_id for held in still_active if held is not None and held.status is GrantStatus.ACTIVE]
+        return AgentRevocation(revoked=revoked, kept_by_people=kept)
 
 
 __all__ = [
@@ -1572,6 +1647,7 @@ __all__ = [
     "APPLIED_AT_DECISION",
     "AccessInbox",
     "AccessRequests",
+    "AgentRevocation",
     "ChangeApplier",
     "FILE_DELIVERY_CHANGE",
     "RequestOutcome",
