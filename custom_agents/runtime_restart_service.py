@@ -1,7 +1,7 @@
 """Supervised runtime restarts bound to the work they interrupt, applied through ``apply_change``.
 
 TeamArchitect stages a plan that records the runtime state and, from it, the
-tasks the restart would interrupt or delay: every task the manager holds
+tasks the restart would interrupt or delay: every request execution root the manager holds
 (running, queued or waiting) and, for an ``all`` restart, the work other
 agents are running. A person approves the exact plan in the Inbox
 (``access_control.changes``), or, with authorization off, the person's
@@ -19,6 +19,7 @@ interrupt a task nobody agreed to, such as a new message or a scheduled run
 that arrived after planning. Work an agent runs for a task the manager
 delegated belongs to that task, so a specialist moving to the next part of
 an approved task changes nothing.
+Locally runnable plan steps and recovery tasks count under that same root.
 
 A manager restart ends the process running TeamArchitect, so it can
 interrupt the task that asked for it before the agent reads the result of
@@ -306,24 +307,29 @@ def _enum_value(value: Any) -> str:
 
 def _task_state(task_info: Any, *, current_task_id: str, task_manager: Any) -> RuntimeRestartTaskState:
     task_id = str(getattr(getattr(task_info, "task", None), "task_id", "") or "").strip()
+    # Plan steps and recovery tasks are locally runnable top-level tasks, but
+    # still belong to their original execution root. Approve that request,
+    # not whichever replaceable step happens to be queued when it is staged.
+    root_id = task_manager.resolve_root_task_id(task_id) or task_id
+    root_info = task_manager.get_task_info(root_id) or task_info
     # Keep the complete execution graph, flattened under its root. A worker
     # can start a descendant of an approved child without interrupting a new
     # request. The manager's graph resolver already handles parent cycles.
     children = (
         child for child in task_manager.get_execution_graph_task_infos(task_id)
-        if str(getattr(getattr(child, "task", None), "task_id", "") or "") != task_id
+        if str(getattr(getattr(child, "task", None), "task_id", "") or "") != root_id
     )
     return RuntimeRestartTaskState(
-        task_id=task_id,
-        state=_enum_value(getattr(task_info, "state", "unknown")),
-        is_current=task_id == current_task_id,
+        task_id=root_id,
+        state=_enum_value(getattr(root_info, "state", "unknown")),
+        is_current=root_id == current_task_id,
         subtasks=tuple(
             sorted(
                 (
                     RuntimeRestartTaskState(
                         task_id=str(getattr(getattr(child, "task", None), "task_id", "") or ""),
                         state=_enum_value(getattr(child, "state", "unknown")),
-                        is_current=False,
+                        is_current=child.task.task_id == current_task_id,
                     )
                     for child in children
                 ),
@@ -343,19 +349,11 @@ def capture_runtime_restart_impact(agent: Any, scope: str) -> RuntimeRestartImpa
     ).strip()
     get_task_infos = getattr(task_manager, "get_top_level_task_infos", None)
     task_infos = tuple(get_task_infos() or ()) if callable(get_task_infos) else ()
-    tasks = tuple(
-        sorted(
-            (
-                _task_state(
-                    task_info,
-                    current_task_id=current_task_id,
-                    task_manager=task_manager,
-                )
-                for task_info in task_infos
-            ),
-            key=lambda item: item.task_id,
-        )
-    )
+    roots: dict[str, RuntimeRestartTaskState] = {}
+    for task_info in task_infos:
+        state = _task_state(task_info, current_task_id=current_task_id, task_manager=task_manager)
+        roots[state.task_id] = state
+    tasks = tuple(roots[task_id] for task_id in sorted(roots))
 
     def count(method_name: str, fallback: int) -> int:
         method = getattr(task_manager, method_name, None)

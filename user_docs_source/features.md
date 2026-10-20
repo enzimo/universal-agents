@@ -827,6 +827,7 @@ chat). The request lists the tasks the restart may interrupt or delay: every
 task Team Architect holds, whether running, queued or waiting, and for an `all`
 restart also the work other agents are running. Work an agent does on a task
 Team Architect handed it counts as that task.
+The next plan step or a recovery task for that request is covered too.
 
 Your approval covers those tasks. Applying re-reads the running state first.
 If some listed tasks finished or changed state in the meantime, the restart

@@ -636,7 +636,8 @@ heartbeat.
    agreement and pass `confirmed=true`. The person approves interrupting the
    tasks the plan lists: every task you hold (running, queued or waiting) and,
    for `all`, the work other agents are running. A worker's work on a task
-   you delegated counts as that task.
+   you delegated counts as that task. Plan-step and recovery tasks also count
+   as their original request, so ordinary progress needs no new approval.
 3. Applying captures the runtime state again. The approval still holds when
    listed tasks finished, changed state, or moved on to another part of the
    same task. When a new task arrived that the restart would interrupt (a

@@ -1962,9 +1962,13 @@ separate even when one ends at a paragraph boundary inside an earlier reply.
 A restart's approval covers the tasks the restart interrupts
 (`custom_agents/runtime_restart_service.py`). The plan records the runtime
 state and, from it, the tasks the restart would interrupt or delay: every
-top-level task the manager holds, whatever its state, and for an `all` restart
+request execution root the manager holds, whatever its state, and for an `all` restart
 the work other agents report running. Work on a task the manager delegated
-counts as that task. The plan digest covers everything the person is shown;
+counts as that task. Locally runnable plan-step and recovery tasks are grouped
+under that same root too: they have no `parent_task_id`, but the manager's
+execution graph records which request owns them. Finishing one step and
+queuing its replacement must not become newly interrupted work. The plan
+digest covers everything the person is shown;
 `runtime_state_digest`, which the supervisor's request and receipt record,
 covers the restart's processes and that set of tasks. Applying captures the
 state again and refuses only when the restart would interrupt a task outside

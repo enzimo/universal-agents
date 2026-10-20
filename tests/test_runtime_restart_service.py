@@ -341,6 +341,39 @@ def test_a_task_finishing_keeps_an_approved_restart(agent) -> None:
     assert request["impact_snapshot"] == plan["impact_snapshot"]
 
 
+@pytest.mark.parametrize("scope", ["manager", "all"])
+def test_plan_step_progress_keeps_an_approved_request_restart(agent, scope: str) -> None:
+    manager = agent.task_manager
+    execution = manager.activate_plan_execution(
+        "task_waiting",
+        steps=[
+            {"title": "First step", "objective": "Produce the first result"},
+            {"title": "Second step", "objective": "Produce the second result"},
+        ],
+        final_review=False,
+    )
+    first_id = execution.plan_steps[0].current_step_task_id
+    assert manager.resolve_root_task_id(first_id) == "task_waiting"
+    service = RuntimeRestartService(agent)
+    plan = service.stage(scope=scope, reason="Reload")
+    call = _ask(agent, plan["change_id"])
+    _approve(agent, call)
+
+    manager.get_task_info(first_id).task.answer = "First step done"
+    manager.complete_task(first_id, _now())
+    second_id = manager.get_plan(execution.plan_id).plan_steps[1].current_step_task_id
+    assert second_id != first_id
+    assert manager.resolve_root_task_id(second_id) == "task_waiting"
+    if scope == "all":
+        _report(agent, _specialist_status(current_task_id=second_id))
+
+    status = service.status(plan["change_id"])
+    assert status["still_applies"] is True
+    assert status["new_interrupted_tasks"] == []
+    assert _resume(agent, plan["change_id"], call)["status"] == "applied"
+    assert len(_published(agent)) == 1
+
+
 def test_a_new_task_the_restart_would_interrupt_needs_a_new_approval(agent) -> None:
     service = RuntimeRestartService(agent)
     plan = service.stage(scope="manager", reason="Reload")
