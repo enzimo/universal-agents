@@ -353,9 +353,10 @@ def restrict_access(agent_type: str, reason: str, tool_id: str = "", folder: str
 def revoke_access(grant_id: str) -> str:
     """Revoke access or a restriction your agent type gave for the request you are working on.
 
-    Grant ids come back from restrict_access and authorize_scheduled_job_access.
+    Use the grant_id returned by restrict_access to remove a restriction.
     What you gave for another request, or for another person's work, is not
-    yours to end here; a person can remove it.
+    yours to end here. Lasting scheduled-job access changes through the job's
+    requirements or a person's access controls.
     """
 
     def run() -> str:

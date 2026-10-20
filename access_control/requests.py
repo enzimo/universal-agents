@@ -1568,19 +1568,14 @@ class AccessRequests:
     def in_agent_reach(grant: GrantV1, *, task_id: str | None, person_id: str | None) -> bool:
         """Whether a grant belongs to the work an agent does now: request ``task_id`` for ``person_id``.
 
-        The grant must serve the same person's work (``for_person_id``; None
-        is work for nobody) and, when it is bound to one request, this one.
-        Every restriction an agent makes is bound to its request, so a block
-        bound to none (a person's, or one an agent made before restrictions
-        were bound to their request) is never in an agent's reach; people
-        remove those with ``unblock``.
+        The grant must be bound to this request and serve the same person's
+        work (``for_person_id``; None is work for nobody). Lasting grants and
+        blocks bound to no request are never in an agent's reach here.
+        Scheduled-worker setup reconciles its lasting grants separately,
+        after checking the schedule's owner.
         """
 
-        if grant.for_person_id != person_id:
-            return False
-        if grant.kind is GrantKind.BLOCK or grant.task_id is not None:
-            return task_id is not None and grant.task_id == task_id
-        return True
+        return task_id is not None and grant.task_id == task_id and grant.for_person_id == person_id
 
     def revoke(
         self, grantor: AgentPrincipal, grant_id: str, *, task_id: str | None, person_id: str | None

@@ -276,6 +276,11 @@ alone, and a restriction ends with its request. TeamLead cannot take back what
 it gave for another request or another person. Removing access also ends
 everything handed down from it.
 
+Lasting access for a scheduled job is separate. TeamLead updates the job's
+requirements and runs `authorize_scheduled_job_access` to remove setup access
+the job no longer needs. This affects only that job and its current owner's
+access. Access a person gave stays until a person removes it.
+
 **Notices.** The Inbox lists notices that need no decision: lasting access
 TeamLead handed on without asking, such as a scheduled job's access (with a
 **Revoke** button; access added to one task is not announced), changes to team skills

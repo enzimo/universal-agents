@@ -160,6 +160,31 @@ def test_an_agent_revocation_for_another_persons_request_is_refused(requests) ->
     assert revoked.revoked == [members.grant_id] and revoked.kept_by_people == []
 
 
+@pytest.mark.parametrize("caller_request", ["request-a", "request-b"])
+def test_generic_revocation_cannot_end_a_schedules_lasting_access(requests, caller_request: str) -> None:
+    from access_control.entities import schedule_subject
+
+    outcome = requests.give(
+        lead_in("request-a"),
+        recipient=schedule_subject(TEAM, "job-a"),
+        target=SCHEDULES,
+        level=AccessLevel.WRITE,
+        reason="The scheduled job needs access",
+        lifetime=GrantLifetime.UNTIL_REVOKED,
+        person=OWNER,
+    )
+    grant = outcome.grant
+    assert grant is not None and grant.status is GrantStatus.ACTIVE
+    assert grant.task_id is None
+
+    with pytest.raises(HandDownRefused, match="request you are working on"):
+        requests.revoke(
+            lead_in(caller_request), grant.grant_id, task_id=caller_request, person_id=OWNER.person_id
+        )
+
+    assert requests.service.store.get(grant.grant_id).status is GrantStatus.ACTIVE
+
+
 def test_an_agent_revocation_ends_only_its_own_requests_part_of_an_entry(requests) -> None:
     first = hand_down_in(requests, "request-a", OWNER)
     second = hand_down_in(requests, "request-b", OWNER)

@@ -1536,9 +1536,9 @@ with the request and person of its task, and stores the block bound to both
 `for_person_id`), so it counts only in that request, ends with it
 (`end_task_grants`) and stays behind in a team transfer like other task
 grants. `AccessRequests.revoke` ends only what the agent's type gave for its
-current request and person (`AccessRequests.in_agent_reach`): a grant for the
-same person's work and, when bound to a request, this request; a block bound
-to no request is never in an agent's reach. Parts of the same entry bound to
+current request and person (`AccessRequests.in_agent_reach`): a grant bound to
+that exact request for the same person's work. Lasting grants and blocks bound
+to no request are never in an agent's reach. Parts of the same entry bound to
 another request stay. `GrantV1` lets a block name a person only when it is
 bound to one request. Why: a person often has several requests open at once,
 and they may share worker types, so a team-wide restriction or an entry-wide
@@ -1547,7 +1547,10 @@ lead's type could end access it handed down for another person. People's and
 administrators' blocks (`AccessRequests.block`, approved proposals) name no
 person and stay team-wide and immediate; TeamLead asks for a lasting one with
 `propose_access_change`. Restrictions made before this rule stay team-wide,
-and only an administrator removes them (`unblock`).
+and only an administrator removes them (`unblock`). Scheduled-worker setup
+reconciles lasting grants separately after checking the schedule's owner. It
+ends only grants the lead's type gave for that exact schedule and person when
+the saved requirements no longer need them; a person's grants stay.
 
 One entry per tool (`access_control/grant_entries.py`): an agent's access to one
 tool for one person's work is one entry. A new grant that covers an existing

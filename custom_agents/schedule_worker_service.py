@@ -468,16 +468,22 @@ class _HandOn:
         return needed
 
     def reconcile(self, needed: dict[str, AccessLevel]) -> None:
-        """End setup grants for this schedule that its requirements no longer need at that level."""
+        """End this schedule's setup grants after authorize_access checks its owner.
+
+        These lasting grants belong to the schedule, so the generic
+        request-bound revoke operation cannot end them. Reconciliation names
+        the exact schedule and person and ends only grants this lead type
+        gave. A person's grants and every other schedule's grants stay.
+        """
 
         service = self.requests.service
         lead = self.actor.agent.type_subject()
         holder = schedule_subject(service.team_id, self.schedule_id)
-        work = {"task_id": self.actor.agent.work_id, "person_id": self.actor.person.person_id if self.actor.person else None}
+        person_id = self.actor.person.person_id if self.actor.person else None
         for grant in service.store.for_subjects(service.team_id, [holder]):
             if grant.granted_by != lead:
                 continue  # a person approved it in a run; it stays
-            if not self.requests.in_agent_reach(grant, **work):
+            if grant.for_person_id != person_id:
                 # Given for another person's work (the schedule had another
                 # owner then); it never counts in this owner's runs, and an
                 # agent ends only what it gave for the person it works for.
@@ -486,7 +492,9 @@ class _HandOn:
             wanted = needed.get(tool_id)
             if wanted is not None and wanted.rank >= grant.level.rank:
                 continue
-            self.ended += self.requests.revoke(self.actor.agent, grant.grant_id, **work).revoked
+            self.ended += service.store.revoke_all(
+                service.team_id, [grant.grant_id], actor=lead, at=service.clock()
+            )
             logger.info(
                 "A scheduled job no longer needs this access; it ended. event=schedule_access_ended "
                 "schedule_id=%s worker_type=%s tool_id=%s level=%s needed=%s",
