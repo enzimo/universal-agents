@@ -349,7 +349,7 @@ agent:
 
     # Reactive handling after a provider rejects the active transcript as too large.
     reactive_overflow:
-      max_total_recovery_attempts: 3            # Shared ceiling for inner reductions and outer provider reinvocations.
+      max_total_recovery_attempts: 3            # Separate ceilings for reductions within each call and fresh provider calls within a turn.
       min_reduction_tokens: 1                   # Minimum measured message-token reduction required before retrying.
 
     # Built-in filters for noisy historical tool output.
