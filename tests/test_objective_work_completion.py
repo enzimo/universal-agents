@@ -1,5 +1,6 @@
 """Complete real Objective schedule payloads without relying on delivery metadata."""
 
+from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -16,14 +17,24 @@ from custom_messages.enums import (
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_tools.providers.objective_work import _build_objective_work_schedule
+from tests.broker_access_support import forget_task_context_keys, use_scheduler_key
 from test_objective_work_sessions import _manager, _objective
 from test_turn_action_outbox import _make_agent
+
+
+@pytest.fixture(autouse=True)
+def _signed_task_contexts(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    use_scheduler_key(monkeypatch)
+    yield
+    forget_task_context_keys()
 
 
 def _checkpointed_timer(tmp_path, *, schedule_changes=None):
     manager = _manager(tmp_path, policy=True)
     manager.set_owner_identity("manager", "Manager", "test_team", "TeamArchitect")
-    task, objective = _objective(manager)
+    # A scheduled run starts with scheduler identity; an admitted gateway
+    # request cannot be turned into another request when constructing the timer.
+    task, objective = _objective(manager, schedule_id="objective-timer")
     coordinator = manager.objective_work_coordinator
     policy = coordinator.enable_policy(
         objective.objective_id,

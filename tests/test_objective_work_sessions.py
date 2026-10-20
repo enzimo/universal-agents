@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 import yaml
 
+from access_control.identity import ContextSigner, ISSUER_SCHEDULER
 from custom_agents.objective_work_config import load_objective_work_execution_config
 from custom_agents.sdk.strands.turn import (
     _finalize_objective_work_invocation,
@@ -69,8 +70,8 @@ def _signed_task_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
     use_signed_contexts(monkeypatch)
 
 
-def _signed(person_id: str):
-    return context_signer().issue(team_id="team", person_id=person_id, person_roles=("owner",))
+def _signed(person_id: str, *, team_id: str = "team"):
+    return context_signer().issue(team_id=team_id, person_id=person_id, person_roles=("owner",))
 
 
 def _write_policy(path: Path, **overrides: object) -> Path:
@@ -129,23 +130,36 @@ def _manager(
     return manager
 
 
-def _objective(manager: TaskManager):
+def _objective(manager: TaskManager, *, schedule_id: str | None = None):
     task = Task(
         task_id="root-task",
         task_type=MessageMetaType.REQUEST,
         problem_statement="Deliver a long-running outcome.",
     )
+    if schedule_id is None:
+        task_context = _signed("objective-user", team_id=manager.identity.team_id)
+    else:
+        signer = ContextSigner.from_env(ISSUER_SCHEDULER)
+        assert signer is not None
+        task_context = signer.issue(
+            team_id=manager.identity.team_id,
+            person_id="objective-user",
+            person_roles=("owner",),
+            schedule_id=schedule_id,
+        )
     assert manager.add_task(
         task,
         MessageHeader(from_agent_id="user", response_routing_key="user"),
         MessageMeta(
             from_agent_name="user",
             conversation_id="conversation",
-            requester_type=RequesterType.USER_REQUESTER,
+            requester_type=(
+                RequesterType.USER_REQUESTER if schedule_id is None else RequesterType.TIMER_REQUESTER
+            ),
             gateway_context=GatewayContext(
                 canonical_user_id="objective-user",
                 session_key="objective-session",
-                task_context=_signed("objective-user"),
+                task_context=task_context,
             ),
         ),
         owner_person_id="objective-user",  # what admission records from the signed context

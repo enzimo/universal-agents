@@ -813,6 +813,50 @@ knowledge base), plus task history:
   `tests/knowledge_privacy_checks.py`. Rationale and the storage benchmark:
   architecture repository, memory and context architecture.
 
+The change ledger (`storage/change_ledger.py`) records which of a person's
+requests changed which record, in one order shared by every store that uses
+it; personal knowledge pages are the first. A person can run several
+separate requests at once, and two of them may change the same page. A
+revision check stops only stale writes, so a request that read the newest
+revision could still overwrite what another request had just changed. The
+store therefore refuses a request's change to a page that a different
+request changed after it started (`change_conflict`). The change is not made
+and the request tells the person, who can repeat it in a new message.
+
+- **Writers.** Who wrote comes from the verified context only: a person's
+  request is a context the gateway signed for that person. Scheduled work,
+  people's own edits on the Knowledge page and system upkeep are recorded,
+  but never stopped by this rule nor counted against a request; the
+  revision check still applies to them.
+- **Creates and notes.** Creating a page and adding a note overwrite
+  nothing, so they are recorded and never refused by this rule.
+- **Closed requests.** A request that was stopped or has ended changes
+  nothing (`request_closed`). This covers a worker still running after its
+  request ended.
+- **Request rows.** Each request's start position and state are recorded
+  in the task snapshot transaction (`storage/runtime_state_repository.py`):
+  admission opens it and the first task's terminal save closes it. Either
+  both writes commit or neither does, including during recovery; no later
+  callback can lose a lifecycle change. Saving a root's cancellation marker
+  also closes its request in that transaction, because restart recovery drops
+  cancelled tasks before saving another terminal snapshot. A request without a durable
+  admission is refused rather than assigned a new start at its first write.
+  The original gateway signature and team are checked again for this
+  historical attribution, even after expiry; unverified metadata never
+  opens or closes a request, and a failed identity check aborts the task save.
+- **Storage.** The check and the ledger entry share the store's write
+  transaction, after its own lock. PostgreSQL holds a lock on the request
+  row through the write, so closure waits for an already checked change
+  and later writes see the closed state. SQLite's `BEGIN IMMEDIATE` provides
+  the same exclusion. The shared counter row is updated last, bounded by
+  `lock_timeout` in PostgreSQL.
+- **Retention.** Entries and closed request rows older than seven days are
+  pruned when a request closes. They are deleted with a removed person's
+  task records and never travel in a team transfer.
+- **Refusal names.** The names are shared, in
+  `custom_messages.enums.ChangeRefusal`. A stale revision is
+  `changed_since_read`.
+
 Before a model call, the runtime assembles context from the current request,
 system and role instructions, task state, conversation history, relevant
 memory, routing context, and bounded artifact references. A provider buffer may

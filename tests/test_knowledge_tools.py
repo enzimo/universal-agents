@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,7 @@ from custom_tools.providers.knowledge import (
 from custom_tools.runtime_context import set_agent_ref
 from custom_tools.tool_results import result_text
 from storage.config import resolve_storage_settings
+from storage.change_ledger import ChangeRequestStore
 from storage.knowledge_repository import create_knowledge_repository
 from storage.pinned_memory_repository import SqlitePinnedMemoryRepository
 from tests.broker_access_support import context_signer
@@ -39,17 +41,17 @@ class _TaskManager:
     def __init__(self, *, signed_for: str | None, claimed: str) -> None:
         self._signed_for = signed_for
         self._claimed = claimed
-
-    def get_task_info(self, task_id: str):
-        signed = (
+        self.signed = (
             context_signer().issue(team_id=TEAM, person_id=self._signed_for, person_roles=("member",))
             if self._signed_for
             else None
         )
+
+    def get_task_info(self, task_id: str):
         return SimpleNamespace(
             meta=SimpleNamespace(
                 gateway_context=GatewayContext(
-                    source="test", user_id=self._claimed, canonical_user_id=self._claimed, task_context=signed
+                    source="test", user_id=self._claimed, canonical_user_id=self._claimed, task_context=self.signed
                 )
             )
         )
@@ -70,6 +72,11 @@ class _Agent:
         self.task_manager = _TaskManager(signed_for=signed_for, claimed=claimed or (signed_for or ""))
         self.task_manager.storage_settings = settings
         self.task_manager._db_path = str(db_path)
+        if self.task_manager.signed is not None:
+            context = self.task_manager.signed.context
+            ChangeRequestStore(settings).open(
+                team_id=TEAM, request_id=context.context_id, person_id=context.person_id, now=datetime.now(timezone.utc),
+            )
 
 
 def _call(agent, tool, **kwargs) -> dict:
@@ -84,6 +91,14 @@ def test_the_signed_person_wins_over_a_claimed_one(tmp_path):
     agent = _Agent(tmp_path / "kb.db", signed_for="alice", claimed="bob")
     actor = knowledge_actor(agent)
     assert actor.work_person_id == "alice" and actor.work_id
+
+
+def test_a_persons_request_is_named_for_the_change_ledger(tmp_path):
+    # The gateway signed this task's context for a person: it is that person's
+    # request, so its personal page changes are checked against their other requests.
+    actor = knowledge_actor(_Agent(tmp_path / "kb.db", signed_for="alice"))
+    assert actor.request_id and actor.request_id == actor.work_id
+    assert knowledge_actor(_Agent(tmp_path / "kb.db", signed_for=None)).request_id == ""
 
 
 def test_without_a_signed_context_the_work_is_for_nobody(tmp_path):

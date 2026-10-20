@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 from strands import tool
 
+from access_control.identity import ISSUER_GATEWAY
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.runtime_context import active_task_context, get_agent_ref
 from custom_tools.tool_results import failed
@@ -81,15 +82,21 @@ def knowledge_actor(agent: Any) -> KnowledgeActor:
 
     task_id, _meta = active_task_context(agent)
     context = verified_task_context(agent)
+    person_id = str(getattr(context, "person_id", "") or "") if context is not None else ""
+    work_id = str(getattr(context, "context_id", "") or "") if context is not None else ""
+    # A person's request is a context the gateway signed for a person; the
+    # scheduler signs scheduled work (and escalations from system work).
+    is_request = context is not None and context.issuer == ISSUER_GATEWAY and bool(person_id)
     return KnowledgeActor(
         kind=ActorKind.AGENT,
         actor_id=str(getattr(agent, "id", "") or ""),
         team_id=str(getattr(agent, "team_id", "") or ""),
         agent_type=str(getattr(agent, "named_agent_type", "") or ""),
         display_name=str(getattr(agent, "name", "") or ""),
-        work_person_id=str(getattr(context, "person_id", "") or "") if context is not None else "",
+        work_person_id=person_id,
         task_id=str(task_id or ""),
-        work_id=str(getattr(context, "context_id", "") or "") if context is not None else "",
+        work_id=work_id,
+        request_id=work_id if is_request else "",
     )
 
 

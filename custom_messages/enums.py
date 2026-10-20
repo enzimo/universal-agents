@@ -400,3 +400,22 @@ class ChangeRecordKind(StrEnum):
     # Applying an exact staged plan can change several kinds of record. Its
     # approval must finish before other calls act on the proposed change.
     STAGED_CHANGE = "staged_change"
+
+
+class ChangeRefusal(StrEnum):
+    """Why a store refused a change to a record another request may also change.
+
+    Named once here; stores and tools report these as the reason of a refused
+    change (``storage.change_ledger``).
+    """
+
+    # The record changed since the writer read it (the version it passed is old).
+    CHANGED_SINCE_READ = "changed_since_read"
+    # Another of the person's requests changed the record while this request ran.
+    CHANGE_CONFLICT = "change_conflict"
+    # The writing request was stopped or has ended.
+    REQUEST_CLOSED = "request_closed"
+    # Settling alone is not allowed, or the record is escalated: a person decides.
+    NEEDS_PERSON_DECISION = "needs_person_decision"
+    # Another write to the same file or credential is in progress.
+    RECORD_BUSY = "record_busy"

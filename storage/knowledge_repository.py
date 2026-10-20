@@ -89,7 +89,18 @@ from knowledge_base.vocabulary import (
     WriteAction,
     WriteOutcome,
 )
+from custom_messages.enums import ChangeRecordKind
 from runtime_settings.knowledge import KnowledgeWriteLimits
+from storage.change_ledger import (
+    ChangeRefused,
+    ChangeType,
+    ChangeWriter,
+    ChangeWriterKind,
+    RecordRef,
+    check_change,
+    ensure_ledger_tables,
+    record_change,
+)
 from storage.read_only import repositories_are_read_only
 from storage.sql_dialect import POSTGRES, SQLITE, SqlDialect
 
@@ -277,6 +288,8 @@ class _RelationalKnowledgeRepository:
                 conn.execute(statement)
             for statement in self._search_index_statements():
                 conn.execute(statement)
+            # Personal page changes are recorded in the change ledger, in the same transaction.
+            ensure_ledger_tables(conn, self._dialect)
             conn.commit()
 
     def _table_statements(self) -> list[str]:
@@ -848,6 +861,10 @@ class _RelationalKnowledgeRepository:
                 {"page_id": redirect.page_id, "redirects_to": redirect.reference()},
             )
         current = self._page_for_update(conn, change.key)
+        # Before the version check: a change another request made while this
+        # one ran is refused even when this request read the new version.
+        change_type = ChangeType.CREATE if current is None else ChangeType.CHANGE
+        self._check_ledger(conn, change.key, change.actor, current, change_type=change_type, now=now)
         if change.base_revision == 0:
             if current is not None:
                 raise KnowledgeError(
@@ -884,7 +901,54 @@ class _RelationalKnowledgeRepository:
             contribution_id=change.contribution_id,
             now=now,
         )
+        self._record_ledger(conn, page, change.actor, change_type=change_type, now=now)
         return page
+
+    # -- the change ledger (storage.change_ledger) ---------------------------------------
+
+    def _check_ledger(
+        self,
+        conn: Any,
+        key: PageKey,
+        actor: KnowledgeActor,
+        page: Optional[KnowledgePage],
+        *,
+        change_type: ChangeType,
+        now: datetime,
+    ) -> None:
+        """Refuse a personal page change the person's request may not make now (team pages are reviewed instead)."""
+
+        if key.space is not KnowledgeSpace.PERSONAL:
+            return
+        page_id = page.page_id if page is not None else ""
+        try:
+            check_change(
+                conn,
+                self._dialect,
+                team_id=key.team_id,
+                writer=_change_writer(actor),
+                record=RecordRef(ChangeRecordKind.KNOWLEDGE_PAGE, page_id or key.reference()),
+                change_type=change_type,
+                now=now,
+            )
+        except ChangeRefused as refused:
+            raise KnowledgeError(refused.reason.value, refused.message, {"page_id": page_id, **refused.details}) from None
+
+    def _record_ledger(
+        self, conn: Any, page: KnowledgePage, actor: KnowledgeActor, *, change_type: ChangeType, now: datetime
+    ) -> None:
+        if page.space is not KnowledgeSpace.PERSONAL:
+            return
+        record_change(
+            conn,
+            self._dialect,
+            team_id=page.team_id,
+            writer=_change_writer(actor),
+            record=RecordRef(ChangeRecordKind.KNOWLEDGE_PAGE, page.page_id),
+            change_type=change_type,
+            version=str(page.revision),
+            now=now,
+        )
 
     def _check_agent_limits(
         self,
@@ -1219,6 +1283,7 @@ class _RelationalKnowledgeRepository:
                     note, page_id=page.page_id, team_id=page.team_id,
                     space=page.space, owner_person_id=page.owner_person_id,
                 )
+                self._check_ledger(conn, page.key, actor, page, change_type=ChangeType.APPEND, now=now)
                 if limits is not None:
                     self._check_hourly_writes(conn, actor, limits=limits, now=now, page_id=page.page_id)
                 conn.execute(
@@ -1259,6 +1324,7 @@ class _RelationalKnowledgeRepository:
                     contribution_id=contribution_id,
                     now=now,
                 )
+                self._record_ledger(conn, page, actor, change_type=ChangeType.APPEND, now=now)
         except KnowledgeError as error:
             self.record_refusal(actor, action=WriteAction.NOTE, page_id=page.page_id, reason=error.code, now=now)
             raise
@@ -2032,6 +2098,18 @@ def knowledge_row_converters() -> dict[str, Any]:
 def _require_transfer_table(table: str) -> None:
     if table not in KNOWLEDGE_TRANSFER_TABLES:
         raise ValueError(f"{table!r} is not a knowledge table the transfer carries.")
+
+
+def _change_writer(actor: KnowledgeActor) -> ChangeWriter:
+    """Who writes, for the change ledger, from the actor's verified identity."""
+
+    if actor.kind is ActorKind.PERSON:
+        return ChangeWriter(ChangeWriterKind.PERSON, person_id=actor.work_person_id)
+    if actor.kind is ActorKind.AGENT and actor.request_id:
+        return ChangeWriter(ChangeWriterKind.REQUEST, request_id=actor.request_id, person_id=actor.work_person_id)
+    if actor.kind is ActorKind.AGENT and actor.work_person_id:
+        return ChangeWriter(ChangeWriterKind.SCHEDULED, person_id=actor.work_person_id)
+    return ChangeWriter(ChangeWriterKind.SYSTEM)
 
 
 def _work_key(actor: KnowledgeActor) -> str:
