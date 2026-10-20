@@ -233,7 +233,8 @@ def test_a_hand_down_under_ask_me_each_time_waits_and_is_approved_in_place(reque
 
 def test_the_team_lead_gives_for_a_task_restricts_and_revokes(requests) -> None:
     apply_starter_profile(requests.service, OWNER, "trusted", lead_agent_type=LEAD)
-    lead = AgentPrincipal("agent-lead", LEAD, "team_lead", TEAM)
+    lead = AgentPrincipal("agent-lead", LEAD, "team_lead", TEAM, work_id="task-1")
+    in_this_request = {"task_id": "task-1", "person_id": OWNER.person_id}
 
     # Workers get access for one task; lasting access for a person's work is refused.
     with pytest.raises(HandDownRefused, match="Workers keep no lasting access"):
@@ -264,18 +265,18 @@ def test_the_team_lead_gives_for_a_task_restricts_and_revokes(requests) -> None:
         recipient_agent_type=WORKER.agent_type,
         target=TargetRefV1(kind=TargetKind.OPERATION, id="fn:schedules#create_scheduled_job"),
         reason="Update existing schedules only",
-        person_id=OWNER.person_id,
+        **in_this_request,
     )
     assert not uses(requests, WORKER, OWNER, "fn:schedules#create_scheduled_job")
     assert uses(requests, WORKER, OWNER, "fn:schedules#update_scheduled_job")
     with pytest.raises(HandDownRefused, match="only workers"):
-        requests.restrict(WORKER, recipient_agent_type=LEAD, target=PUBLISHING, reason="No")
+        requests.restrict(WORKER, recipient_agent_type=LEAD, target=PUBLISHING, reason="No", **in_this_request)
 
     with pytest.raises(HandDownRefused, match="only access your agent type gave"):
-        requests.revoke(WORKER, given.grant.grant_id)
-    requests.revoke(lead, block.grant_id)
+        requests.revoke(WORKER, given.grant.grant_id, **in_this_request)
+    assert requests.revoke(lead, block.grant_id, **in_this_request).revoked == [block.grant_id]
     assert uses(requests, WORKER, OWNER, "fn:schedules#create_scheduled_job")
-    requests.revoke(lead, given.grant.grant_id)
+    requests.revoke(lead, given.grant.grant_id, **in_this_request)
     assert not uses(requests, WORKER, OWNER, "fn:schedules#update_scheduled_job")
 
 

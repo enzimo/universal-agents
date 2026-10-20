@@ -393,6 +393,12 @@ anything until you choose an explicit scope:
 - `/stop all` cancels all current nonterminal work owned by you across sessions
   and conversations.
 
+Your own stops apply at once, whatever an agent is doing. Agents cannot stop
+your other requests: while TeamLead works on one request it may pause, resume
+or stop only that request's own tasks. If you ask it about another request, it
+tells you to ask in that request's thread, or to stop it yourself with
+`/stop task <task_id>` or **Settings → Tasks**.
+
 Stopping work also ends the commands an agent is running for it, such as a
 build, a test run or a script, and the background processes those commands
 started, such as a development server. Each is asked to stop and is ended a
@@ -817,10 +823,18 @@ need to reconnect rather than pretending the count is known.
 
 After you review that state, Team Architect asks you to approve the exact
 restart in the Inbox (with authorization off, it asks for your agreement in the
-chat). Applying re-reads the running state first. If tasks, queues, or relevant
-agent execution state changed, the restart is refused and Team Architect must
-show a fresh plan. Approving a settings change or a skill never approves a
-restart.
+chat). The request lists the tasks the restart may interrupt or delay: every
+task Team Architect holds, whether running, queued or waiting, and for an `all`
+restart also the work other agents are running. Work an agent does on a task
+Team Architect handed it counts as that task.
+The next plan step or a recovery task for that request is covered too.
+
+Your approval covers those tasks. Applying re-reads the running state first.
+If some listed tasks finished or changed state in the meantime, the restart
+still goes ahead. If a new task arrived that the restart would interrupt, such
+as another message or a scheduled run, the restart is refused and Team
+Architect must ask you again with a fresh plan that lists it. Approving a
+settings change or a skill never approves a restart.
 
 The supervisor acts only on restart requests that record their approval: your
 approved request, your agreement with authorization off, or the authenticated

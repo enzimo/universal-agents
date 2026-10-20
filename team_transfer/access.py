@@ -17,7 +17,9 @@ operation this version does not have at all is imported for attention: it
 blocks the whole tool here (``access_control.stale_blocks``) until an
 administrator replaces it.
 
-What stays behind: task and one-time grants (they end with their task),
+What stays behind: task and one-time grants and the records of which tool
+call took each one-time use (``access_grant_uses``; they end with their task),
+including an agent's restrictions, which are bound to their request,
 revoked, denied and pending grants, grants that carry the approval id of a
 request that was not granted (an older version could leave one when it
 stopped between a decision's grants and its outcome; logged, see

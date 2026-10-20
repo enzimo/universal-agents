@@ -321,9 +321,19 @@ each. They run in parallel on as many workers as the team allows:
   `cancel_delegated_task` (tool `fn:worker_pools`).
 
 Agents can inspect their current user's unfinished queue with `list_task_queue`
-and manage another task through `control_task_queue`. Cancellation retains
-history and stops attached work; resume refuses unresolved approvals, questions,
-delegation and runtime review. Pause notices identify the task and affected
+and manage another task of the request they work on through
+`control_task_queue` (`custom_tools/providers/task_queue.py`). A turn controls
+only its own request (owner's decision 2026-10-19): the target's stored signed
+context id must equal the turn's verified one (`access_runtime.request_id_of`,
+`verified_context_id`), checked before any state check, so stop is limited too.
+For another request the tool refuses and the person is told to ask in that
+request's thread or to stop it with `/stop task` or Settings → Tasks. Why: a
+person often has several requests open at once, one lead model turn running
+while the others wait for workers or people, and a model turn for one request
+must not end or wake another request the person is waiting on; people's own
+stops go through the manager without a model turn and stay immediate.
+Cancellation retains history and stops attached work; resume refuses unresolved
+approvals, questions, delegation and runtime review. Pause notices identify the task and affected
 worker. Settings also pages finished task results across agents, including
 stopped workers, ten records at a time. Runtime Controls sorts schedules by next
 fire time, with undated schedules last.
@@ -1434,7 +1444,24 @@ manager storage (`storage/access_repository.py`).
 
 Every function tool call is decided the same way by one Strands
 `BeforeToolCallEvent` hook that runs last (`custom_agents/access_runtime.py`),
-so an earlier cancellation cannot use up a one-time grant. It skips calls the
+so an earlier cancellation cannot use up a one-time grant. A one-time use
+belongs to the call that took it. The hook gives each call a stable id
+(`call_operation_id`: a hash of the agent id, the `tracking_id` Strands gives
+the model step's message, and the tool use id), and the store records it with
+the use in the same transaction as the guarded update (`access_grant_uses`,
+`AccessRepository.consume`). This matters because a tool that waits for a
+person inside itself (`apply_change`, `set_up_tools`, the access workflow and
+proposal tools) pauses with a Strands interrupt, and Strands runs the call
+again from its start when it resumes, this hook included. The resumed call
+keeps its use and takes no second one. A sibling call of the same step, a
+later call (also one whose model server repeats the tool use id) and the fresh
+call a task makes after a restart all find the grant used: a paused call lives
+only in its process, so a restart never resumes it, and its use stays spent.
+The use is still taken at the decision, before the call runs, because that
+guarded update is what stops two sibling calls from both passing on one use.
+A use is never given back, also when the call then fails. The broker gate,
+folder decisions and code access decide each request once and take a use
+without a call id. It skips calls the
 broker decides, Strands' structured-output tool (the turn answer), and names the
 agent has no tool for: nothing runs for those, and Strands answers "Unknown
 tool", which the runtime guardrails extend with a hint when the name is a turn
@@ -1534,6 +1561,29 @@ requests naming one operation are refused (`AccessService.operation_refusal`),
 because operation names are fragile (sending mail is both `gmail_send` and
 `command:gmail.send`); blocks may still name one.
 
+Agents' restrictions and revocations stay inside the request (owner's decision
+2026-10-19). `AccessRequests.restrict` decides whether TeamLead may restrict
+with the request and person of its task, and stores the block bound to both
+(`lifetime: task`, `task_id` = the request's signed context id, and
+`for_person_id`), so it counts only in that request, ends with it
+(`end_task_grants`) and stays behind in a team transfer like other task
+grants. `AccessRequests.revoke` ends only what the agent's type gave for its
+current request and person (`AccessRequests.in_agent_reach`): a grant bound to
+that exact request for the same person's work. Lasting grants and blocks bound
+to no request are never in an agent's reach. Parts of the same entry bound to
+another request stay. `GrantV1` lets a block name a person only when it is
+bound to one request. Why: a person often has several requests open at once,
+and they may share worker types, so a team-wide restriction or an entry-wide
+revocation from one request changed the person's other requests, and the
+lead's type could end access it handed down for another person. People's and
+administrators' blocks (`AccessRequests.block`, approved proposals) name no
+person and stay team-wide and immediate; TeamLead asks for a lasting one with
+`propose_access_change`. Restrictions made before this rule stay team-wide,
+and only an administrator removes them (`unblock`). Scheduled-worker setup
+reconciles lasting grants separately after checking the schedule's owner. It
+ends only grants the lead's type gave for that exact schedule and person when
+the saved requirements no longer need them; a person's grants stay.
+
 One entry per tool (`access_control/grant_entries.py`): an agent's access to one
 tool for one person's work is one entry. A new grant that covers an existing
 one replaces it in the same transaction, and what was handed on from the old
@@ -1550,7 +1600,8 @@ removing the set left working. A person's decision stores its grants and its
 outcome in one transaction, so a grant it replaces ends only if the outcome is
 stored (see "Each request is decided once" below). Removing access removes the whole entry
 (`AccessService.revoke_by_person`, `AccessRequests.revoke`, proposals'
-removals). Why: people saw several independent grants for one tool, assumed the
+removals); an agent's revocation removes the entry's grants for its current
+request and person (see above). Why: people saw several independent grants for one tool, assumed the
 broadest replaced the others, and removing one could leave another working.
 
 Folders are access targets too (`access_control/folders.py`). A folder is named
@@ -1939,6 +1990,33 @@ outcomes until the next model invocation consumes them. Duplicate notes are
 matched at their boundaries, so a shorter requester correction is retained.
 Interrupt replies include their steering event id, keeping distinct replies
 separate even when one ends at a paragraph boundary inside an earlier reply.
+
+A restart's approval covers the tasks the restart interrupts
+(`custom_agents/runtime_restart_service.py`). The plan records the runtime
+state and, from it, the tasks the restart would interrupt or delay: every
+request execution root the manager holds, whatever its state, and for an `all` restart
+the work other agents report running. Work on a task the manager delegated
+counts as that task. Locally runnable plan-step and recovery tasks are grouped
+under that same root too: they have no `parent_task_id`, but the manager's
+execution graph records which request owns them. Finishing one step and
+queuing its replacement must not become newly interrupted work. The plan
+digest covers everything the person is shown;
+`runtime_state_digest`, which the supervisor's request and receipt record,
+covers the restart's processes and that set of tasks. Applying captures the
+state again and refuses only when the restart would interrupt a task outside
+the set, such as a new message or a scheduled run; tasks finishing, waiting or
+changing state keep the approval, because the person already agreed to
+interrupt each of them. The digest used to cover every task's state, the
+current task and other agents' queue counts, so any scheduled run, heartbeat
+item, finished worker or new message made an approved restart unusable, and
+with background work running a restart could rarely be applied. A refusal uses
+the approval up, as for any plan that no longer applies, and names the new
+tasks, so TeamArchitect stages a fresh plan that lists them. Plans need schema
+3: plans staged under the earlier rule are refused rather than converted,
+because their approval text promised the stricter rule. The review lists the
+tasks in one line of at most 1000 characters, naming them while they fit and
+always giving the exact count; a busy manager used to produce a longer line,
+which could not be shown for review at all.
 
 An installed MCP server is one team tool, `mcp:<name>`, in the `mcp_servers`
 tool set that members hold as a standard set (`access_catalog/catalog.py`,

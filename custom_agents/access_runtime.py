@@ -13,7 +13,12 @@ through the tool catalog and asks the access service (``access_control``):
 - the agent's role comes from its own settings: the team lead, a built-in
   system agent (``access_role: system``), or a worker;
 - with authorization off, every catalog tool is allowed (decision D8: trusted
-  single-person mode); the broker, the sandbox and path rules still apply.
+  single-person mode); the broker, the sandbox and path rules still apply;
+- each call is decided with its own stable id (``call_operation_id``). A tool
+  that waits for a person inside itself pauses with a Strands interrupt, and
+  Strands runs the call again from its start when it resumes, this hook
+  included; the id lets the access service see that the call already took
+  its one-time use, so the resumed call keeps it, and no other call gets it.
 
 A refusal cancels the call with the tool, operation, level, the reason and the
 exact next step; there are no denial receipts.
@@ -22,6 +27,7 @@ exact next step; there are no denial receipts.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, replace
@@ -338,8 +344,15 @@ def decided_elsewhere(catalog: ToolCatalog, function: str, resolution: Operation
     return tool is not None and tool.kind is ToolKind.MCP
 
 
-def decide_call(agent: Any, function: str, arguments: Mapping[str, Any] | None) -> AccessDecisionV1 | None:
-    """The decision for one function call, or None when this point does not decide it."""
+def decide_call(
+    agent: Any, function: str, arguments: Mapping[str, Any] | None, *, operation_id: str | None = None
+) -> AccessDecisionV1 | None:
+    """The decision for one function call, or None when this point does not decide it.
+
+    ``operation_id`` is the call's id (``call_operation_id``); a one-time use
+    the decision takes is bound to it. Trusted code deciding outside a tool
+    call passes none.
+    """
 
     access = runtime_access(agent)
     catalog = access.catalog
@@ -360,8 +373,72 @@ def decide_call(agent: Any, function: str, arguments: Mapping[str, Any] | None) 
         )
     # A worker's task gets what the team lead may hand on at once ("access follows the work").
     return access.service.decide(
-        agent=principal, person=person, resolution=resolution, task_id=principal.work_id, hand_on_for_task=True
+        agent=principal,
+        person=person,
+        resolution=resolution,
+        task_id=principal.work_id,
+        hand_on_for_task=True,
+        operation_id=operation_id,
     )
+
+
+# Prefix of the ids call_operation_id makes, so a reader of the store knows what they name.
+TOOL_CALL_OPERATION_PREFIX = "tool_call:"
+
+
+def _asked_for(message: Any, tool_use_id: str) -> bool:
+    """Whether this message is a model step that asked for the tool use."""
+
+    if not isinstance(message, Mapping) or message.get("role") != "assistant":
+        return False
+    tool_uses = (block.get("toolUse") for block in message.get("content") or () if isinstance(block, Mapping))
+    return any(isinstance(use, Mapping) and use.get("toolUseId") == tool_use_id for use in tool_uses)
+
+
+def _step_tracking_id(messages: Any, tool_use_id: str) -> str | None:
+    """The ``tracking_id`` of the latest model step (assistant message) that asked for this tool use."""
+
+    step = next((message for message in reversed(list(messages or ())) if _asked_for(message, tool_use_id)), None)
+    tracking_id = step.get("tracking_id") if step is not None else None
+    return str(tracking_id) if tracking_id else None
+
+
+def call_operation_id(agent: Any, event: BeforeToolCallEvent) -> str | None:
+    """The stable id of one tool call, which a one-time use it takes is bound to.
+
+    Strands runs a call that paused inside its tool again from its start when
+    it resumes, and this hook decides it again; the same id lets the access
+    service recognize the use the call already took
+    (``AccessRepository.consume``). It covers the agent, the model step that
+    asked for the call (the step message's ``tracking_id``: a UUID Strands
+    gives every message and keeps with it, also in the paused call it
+    replays) and the call's tool use id (unique within one step, which
+    Strands' own resume relies on). The tool use id alone is not enough: some
+    model servers repeat their ids in later steps. The parts are hashed to a
+    fixed length, because tool use ids can be long. Sibling calls of one step
+    and calls of later steps get other ids, so they never pass on that use.
+    An agent's id is new each time it starts, so a call's id never outlives
+    its process; neither does a paused call (no Strands session is stored:
+    after a restart the task continues with a fresh model turn).
+
+    None when no model step in the agent's history asked for the call: it
+    cannot be resumed, so its use is bound to no call. That is logged, because
+    every model-driven call has a step.
+    """
+
+    tool_use_id = str(event.tool_use.get("toolUseId") or "")
+    step = _step_tracking_id(getattr(event.agent, "messages", None), tool_use_id) if tool_use_id else None
+    if step is None:
+        logger.warning(
+            "A tool call is not in the agent's model history, so a one-time use it takes is bound to no call. "
+            "event=tool_call_without_model_step agent_id=%s tool=%s tool_use_id=%s",
+            getattr(agent, "id", None),
+            event.tool_use.get("name"),
+            tool_use_id or None,
+        )
+        return None
+    parts = "\n".join((str(getattr(agent, "id", "") or ""), step, tool_use_id))
+    return TOOL_CALL_OPERATION_PREFIX + hashlib.sha256(parts.encode("utf-8")).hexdigest()
 
 
 def verified_task_context(agent: Any, access: RuntimeAccess | None = None) -> TaskContextV1 | None:
@@ -560,7 +637,21 @@ def _ended_request_id(agent: Any, task_id: str) -> str | None:
     info = agent.task_manager.get_task_info(task_id)
     if info is None or getattr(info.task, "parent_task_id", None):
         return None
-    gateway_context = getattr(getattr(info, "meta", None), "gateway_context", None)
+    return request_id_of(getattr(info, "meta", None))
+
+
+def request_id_of(meta: Any) -> str | None:
+    """The request a stored task belongs to: its signed context id, or its schedule run's; None without one.
+
+    Every task of a request carries the request's context unchanged, so the
+    id ties a worker's task, or a plan step, to the person's request. It is
+    read without checking the signature again: the runtime checked the
+    context when it admitted the task, and callers only compare it with the
+    verified id of the active task (``verified_context_id``) or end what the
+    request was given, which must work after the context expired too.
+    """
+
+    gateway_context = getattr(meta, "gateway_context", None)
     signed = getattr(gateway_context, "task_context", None)  # SignedTaskContextV1
     if signed is not None:
         return str(signed.context.context_id)
@@ -735,7 +826,10 @@ class AccessDecisionHook:
         arguments = event.tool_use.get("input")
         try:
             decision = await asyncio.to_thread(
-                decide_call, self.agent, function, arguments if isinstance(arguments, Mapping) else None
+                partial(decide_call, operation_id=call_operation_id(self.agent, event)),
+                self.agent,
+                function,
+                arguments if isinstance(arguments, Mapping) else None,
             )
         except Exception:  # noqa: BLE001 - a decision that cannot run denies
             logger.exception(
@@ -761,10 +855,12 @@ __all__ = [
     "AuthorizationOff",
     "RuntimeAccess",
     "agent_principal",
+    "call_operation_id",
     "decide_call",
     "decided_elsewhere",
     "refusal_text",
     "register_task_access_cleanup",
+    "request_id_of",
     "runtime_access",
     "runtime_requests",
     "send_access_notice",
@@ -772,6 +868,7 @@ __all__ = [
     "resolve_meta_identity",
     "task_access",
     "task_person",
+    "verified_context_id",
     "verified_meta_person_id",
     "verified_task_context",
 ]

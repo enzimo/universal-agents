@@ -144,9 +144,10 @@ def _secure_cli_impl(
         "context": {
             **trusted_context,
             # Generated inside the trusted tool boundary rather than supplied
-            # by the model. The broker uses it to distinguish later retries
-            # after a one-use grant has been consumed.
-        "invocation_id": new_id("sec_cli_inv"),
+            # by the model; it names this request in the broker's tool
+            # context. Access decisions do not use it: the broker decides
+            # each request once, and each request takes its own one-time use.
+            "invocation_id": new_id("sec_cli_inv"),
         },
     }
     request = Request(

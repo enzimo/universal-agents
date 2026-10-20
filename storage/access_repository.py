@@ -4,7 +4,11 @@ Grants are immutable records; only their status, use count and revocation
 fields change, and those live in their own columns so updates are atomic:
 
 - consuming a one-time grant is a guarded update (``uses_remaining > 0``) made
-  immediately before the effect, so two uses can never both succeed;
+  immediately before the effect, so two uses can never both succeed. A use
+  taken for one tool call records the call's id (``access_grant_uses``, in
+  the same transaction): Strands runs a call that paused inside its tool
+  again from its start when it resumes, and the access hook decides it again,
+  so that call keeps the use it took, and no other call can pass on it;
 - revoking a grant marks it and every grant handed down from it as revoked in
   one transaction (validity is also checked up the parent chain at every
   decision, so a stale child can never act);
@@ -290,6 +294,16 @@ class AccessRepository:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS access_grants_parent ON access_grants(parent_grant_id)"
             )
+            # Which call took each use of a grant with a use count (consume).
+            # operation_id is the call's id from the access hook
+            # (custom_agents.access_runtime.call_operation_id). Uses end with
+            # their task, like one-time grants, and never travel in a team
+            # transfer.
+            conn.execute("""CREATE TABLE IF NOT EXISTS access_grant_uses (
+                grant_id TEXT NOT NULL, operation_id TEXT NOT NULL, team_id TEXT NOT NULL,
+                used_at TEXT NOT NULL,
+                PRIMARY KEY (grant_id, operation_id)
+            )""")
             # sequence keeps the log's order when events share a timestamp: it
             # is the team's next number, taken inside the write transaction.
             conn.execute("""CREATE TABLE IF NOT EXISTS access_events (
@@ -1149,8 +1163,18 @@ class AccessRepository:
         kind = "grant_approved" if status is GrantStatus.ACTIVE else "grant_denied"
         self._event(conn, self._new_event(grant, kind, actor, at))
 
-    def consume(self, grant_id: str, *, at: datetime) -> None:
-        """Use one of a grant's remaining uses, or raise if none is left."""
+    def consume(self, grant_id: str, *, at: datetime, operation_id: str | None = None) -> bool:
+        """Use one of a grant's remaining uses for one operation, or raise if none is left.
+
+        ``operation_id`` names the tool call the use is for (the access hook
+        passes ``custom_agents.access_runtime.call_operation_id``). A call that
+        already holds a use of this grant keeps it: nothing more is used and
+        False is returned. That happens when Strands runs a paused call again
+        as it resumes and the access hook decides it a second time. Without an
+        id the use belongs to no call and is never recognized again. True when
+        a use was taken now. The check, the guarded update and the record of
+        the use are one transaction, so two calls never share one use.
+        """
 
         grant = self.get(grant_id)
         if grant is None:
@@ -1158,6 +1182,9 @@ class AccessRepository:
         p = self.dialect.bind
         with self._connect() as conn:
             conn.begin_write()
+            if operation_id is not None and self._use_held_in(conn, grant_id, operation_id):
+                conn.commit()
+                return False
             updated = conn.execute(
                 f"UPDATE access_grants SET uses_remaining = uses_remaining - 1 "
                 f"WHERE grant_id={p} AND status={p} AND uses_remaining > 0",
@@ -1166,9 +1193,29 @@ class AccessRepository:
             if getattr(updated, "rowcount", 1) != 1:
                 conn.commit()
                 raise AccessStoreConflict(f"Grant {grant_id} has no uses left.")
-            self._event(conn, self._new_event(grant, "grant_consumed", None, at))
+            if operation_id is not None:
+                conn.execute(
+                    f"INSERT INTO access_grant_uses(grant_id, operation_id, team_id, used_at) VALUES ({p},{p},{p},{p})",
+                    (grant_id, operation_id, grant.team_id, _utc(at)),
+                )
+            detail = {"operation_id": operation_id} if operation_id is not None else {}
+            self._event(conn, self._new_event(grant, "grant_consumed", None, at, **detail))
             self._bump(conn, grant.team_id)
             conn.commit()
+        return True
+
+    def use_held(self, grant_id: str, operation_id: str) -> bool:
+        """Whether the operation (one tool call) already took a use of the grant (``consume``)."""
+
+        with self._connect() as conn:
+            return self._use_held_in(conn, grant_id, operation_id)
+
+    def _use_held_in(self, conn: Any, grant_id: str, operation_id: str) -> bool:
+        p = self.dialect.bind
+        row = conn.execute(
+            f"SELECT 1 FROM access_grant_uses WHERE grant_id={p} AND operation_id={p}", (grant_id, operation_id)
+        ).fetchone()
+        return row is not None
 
     def revoke_all(self, team_id: str, grant_ids: Iterable[str], *, actor: SubjectRefV1, at: datetime) -> list[str]:
         """Revoke several grants (one entry) and what was handed down from them, in one transaction."""
