@@ -217,6 +217,24 @@ contains `instance_config.yaml`, `team.env`, `control/`, `dbs/`, `state/`, and
 instance created by an earlier version still has a `workspace/` folder; the
 container refuses to start until you run the move commands it prints.
 
+### NATS 2.15 upgrades
+
+The container images and native installer include NATS Server 2.15.1. NATS
+2.15 adds a default limit of 1,000 consumers per stream. A team uses several
+consumers per agent, and object-store watchers use consumers too. Existing
+stream configuration may still report `max_consumers: -1` while the server
+enforces its default, so check capacity before upgrading a large team. Raise
+the limit in the NATS stream, account or server configuration when needed.
+The startup consumer report checks account usage; it does not report this
+per-stream limit.
+
+For an external NATS cluster, follow the
+[NATS 2.15 upgrade guide](https://docs.nats.io/release-notes/upgrade-to-2.15).
+It recommends upgrading older 2.14 clusters to at least 2.14.7 before 2.15,
+postponing stream and consumer scaling or moves until every node is upgraded,
+and downgrading only to 2.14.7 or later. The included single-server deployment
+does not perform a rolling cluster upgrade.
+
 ### Keep the databases on local disk
 
 The SQLite databases in `dbs/` belong on a disk local to the host, not on a
@@ -254,6 +272,20 @@ stopped. If the setup itself fails, the container refuses to start and logs
 Preparation makes a harmless write on every start so a previous interrupted
 setup or transaction cannot leave the first slow write to competing services.
 It preserves the stored records and database version.
+
+The container also sets up the team's message streams in NATS before the
+services start (`event=nats_streams_prepared`, with the stream names). The
+gateway creates them, and the team lead and the agents only check once that
+they exist. Without that step, on a new team, after an upgrade that adds or
+changes a stream, or (with `transport.storage: memory`) on any start of the
+container's own NATS server, the team lead could check before the gateway was
+ready and stop with "Stream
+TEAM_..._WORK is missing; start the topology owner first", and every service
+stopped with it. If the streams cannot be set up, for example because NATS
+cannot be reached or refuses a change to an existing stream, the container
+refuses to start and logs `event=nats_streams_prepare_failed` with the error.
+When NATS cannot be reached, that refusal comes after the NATS client's own
+retries, about two minutes.
 
 When Kubernetes profiles are enabled, the execution artifact directory must be
 backed by the same PVC that the profile names. Mount it at
@@ -300,11 +332,17 @@ modules. After updating the reconciler implementation, rebuild and redeploy the
 image before running cleanup; copying only the script into an older image can
 leave it using older classification code.
 
+Images keep only compiled Python files, so start the reconciler as a module
+(`python -m scripts.reconcile_nats_consumers`). `docker exec` runs in `/app`,
+the image's working folder, where Python finds it. A command that names
+`/app/scripts/reconcile_nats_consumers.py` fails because that file is not in
+the image.
+
 Start with the read-only report:
 
 ```bash
 docker exec --user 0 "$UA_CONTAINER" \
-  python /app/scripts/reconcile_nats_consumers.py \
+  python -m scripts.reconcile_nats_consumers \
   --config /data/instance_config.yaml \
   --start-local-nats
 ```
@@ -313,7 +351,7 @@ Then apply the exact generated-id candidates:
 
 ```bash
 docker exec --user 0 "$UA_CONTAINER" \
-  python /app/scripts/reconcile_nats_consumers.py \
+  python -m scripts.reconcile_nats_consumers \
   --config /data/instance_config.yaml \
   --start-local-nats \
   --apply \
@@ -333,6 +371,27 @@ Newly created process consumers are deleted during graceful shutdown. NATS
 also expires them after
 `transport.process_consumer_inactive_threshold_seconds`, so this manual command
 is only needed for records created by older releases.
+
+Every start runs the same read-only report before any agent starts, and its
+lines appear in the container log. What the report finds stays in its own
+lines, for example the warning `event=nats_consumer_capacity_high` when the
+team uses 90 percent or more of the account's consumer limit, and the agents
+start. When the report cannot run at all, the log shows one error,
+`event=nats_consumer_preflight_not_run`, with a `reason`:
+
+| `reason` | Meaning |
+| --- | --- |
+| `program_missing` | The image does not contain the report. Rebuild it from a maintained Dockerfile. |
+| `start_failed` | Python could not start the report; `detail` gives the operating-system error. |
+| `timed_out` | No result after 30 seconds, for example from a NATS server that accepts connections but stops answering. |
+| `exited_with_error` | The report stopped with an error. Its `event=nats_consumer_reconciliation_failed` line just above gives the cause in `error=`, for example a refused connection when NATS is not running or a wrong address, or `Authorization Violation` for a wrong user or password. |
+
+The report tries each NATS server twice, a second apart, then stops with the
+server's own error, so a refused connection delays the start by about a
+second per server.
+
+Agents still start without the report. Fix the cause, then run the read-only
+report above by hand.
 
 ## OpenAI Codex OAuth in Docker
 
@@ -735,6 +794,9 @@ Verify:
   generated-site index.
 - `/docs` works from chat.
 - `/auth status` answers (the secure tool broker always runs).
+- Logs show `event=nats_consumer_reconciliation_complete` before the agents
+  start, and no `event=nats_consumer_preflight_not_run` error
+  ([JetStream consumer report](#remove-abandoned-jetstream-consumers-in-docker-swarm)).
 - Channel adapters log their startup and accepted inbound messages.
 - `python -m assistant_cli execution-job-list --config ...` can read the
   controller's team-scoped inventory.
@@ -742,6 +804,7 @@ Verify:
 ## Common Failures
 
 - Missing instance: run `docker run ... onboard` first.
+- The team lead or an agent stops with "Stream ... is missing; start the topology owner first": the container sets up the streams before any service starts, so they were removed from NATS while the runtime ran, for example by a restart of an external NATS server with `transport.storage: memory`. Restart the container to set them up again.
 - Multiple instances under `/data`: set `TEAM_INSTANCE_ROOT` or `TEAM_INSTANCE_CONFIG`.
 - Generated site links unreachable: publish the website port and set `network.public_origin` plus `interactive_apps.plugins.builtin.internal_website.settings.public_port` to browser-reachable values.
 - Auth links unreachable: publish the broker port and set `network.public_origin` plus `security_layer.broker_public_port` to browser-reachable values.

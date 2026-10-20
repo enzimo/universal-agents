@@ -942,6 +942,26 @@ startup failures. MCP tools follow their separate registration path and cannot b
 named in these lists.
 
 The topology owner establishes JetStream streams before consumers validate them.
+The gateway (or a team lead started without an instance configuration) creates
+or updates the team's streams when it connects; the manager, the startup agents
+and every worker only check, once, that they exist with the expected settings
+(`custom_transport.nats_topology`). The headless launcher starts all of them at
+the same moment, so whenever the streams were missing or out of date (a new
+team, an upgrade that adds or changes a stream, and with
+`transport.storage: memory` every start of the container's own NATS server)
+a manager whose check came first stopped, and every service stopped with it;
+slow storage delays the gateway's start enough to make that order likely. The
+launcher therefore runs the gateway's own stream setup, with the gateway's
+configuration and environment, as its last step before starting any service
+(`docker.launch_headless.prepare_message_streams`,
+`event=nats_streams_prepared`). The gateway repeats it when it connects and
+finds nothing to change. Nothing waits or polls: a participant that still finds
+no streams (for example after they were removed from NATS while the runtime
+ran) fails at once with "start the topology owner first", and a setup the
+broker refuses stops the launch with `event=nats_streams_prepare_failed`.
+In-app restarts keep the streams they started with, because transport settings
+are operator-owned and change only with a new launch.
+
 Each agent owns one model execution slot across turn preparation, invocation,
 and completion. Parent recovery waits for that owner; queued tasks cannot claim
 the slot during an active turn. Control and status messages remain responsive.
@@ -3007,6 +3027,39 @@ runs `env_secrets.py check-container-env`, which refuses a container
 environment that sets both `<NAME>` and `<NAME>_FILE`. That check covers the
 container's own environment only, because the environments the launchers build
 may hold a `team.env` value next to its file form on purpose.
+
+Maintained images keep only compiled `.pyc` files
+(`docker/strip_python_sources.sh`), so no program may be started by its `.py`
+path. The container entrypoint finds its programs with `python_program_path`,
+the Python launchers (`docker/run_bundle.py`, `docker/launch_headless.py`)
+with `docker.python_entrypoints.resolve_python_entrypoint`, and the code
+sandbox its helper in `custom_tools.code_sandbox`; each falls back to the
+`.pyc`. The strip script's `required_entrypoints` lists every such program and
+stops the build when one has no compiled file, and
+`tests/test_docker_python_entrypoints.py` builds a stripped tree with that
+script and checks that the launchers name programs only through the resolver
+and that each one is listed. The build is where a packaging mistake has to
+fail: one launcher call that named its `.py` file only logged a warning at
+start-up, and nobody noticed it for several releases.
+
+Before any agent creates a JetStream consumer, the launcher runs the read-only
+consumer report (`run_nats_consumer_preflight`,
+`scripts/reconcile_nats_consumers.py`). A report that finishes exits 0 and logs
+its own findings, such as consumer usage near the account's limit; a report
+that cannot run is one error, `event=nats_consumer_preflight_not_run`, with a
+`reason`, so the two never look alike. Neither stops start-up: the report only
+informs, it neither changes nor protects anything, and agents report their own
+NATS errors. Making it a start-up gate would let a slow or briefly unreachable
+NATS server, or an external server that refuses consumer listing, stop the
+whole team. Because start-up waits for it, the report's first connection fails
+fast: nats-py retries a failed first connection about 60 times, two seconds
+apart, even with `allow_reconnect=False`, so the report sets
+`max_reconnect_attempts=1` (two tries per server; 0 would mean retry forever)
+and records the server's own error from `error_cb`, since nats-py then raises
+only a generic `NoServersError`. The launcher's 30-second limit stays as the
+backstop for a server that accepts connections and stops answering. Long-running
+services keep nats-py's retries, so they wait for a NATS server that is still
+starting.
 
 The Docker bundle can supervise NATS, optional PostgreSQL, the manager, startup
 specialists, gateway, website, activity collector, secure broker, and execution

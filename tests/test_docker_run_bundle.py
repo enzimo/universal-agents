@@ -332,7 +332,7 @@ def test_start_local_nats_captures_early_server_output(
     monkeypatch.setattr(
         "docker.nats_service.subprocess.run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
-            args[0], 0, stdout="nats-server: v2.14.1\n", stderr=""
+            args[0], 0, stdout="nats-server: v2.15.1\n", stderr=""
         ),
     )
     monkeypatch.setattr("docker.nats_service.subprocess.Popen", fake_popen)
@@ -387,7 +387,7 @@ def test_start_local_nats_uses_configured_auth_without_logging_password(
     monkeypatch.setattr(
         "docker.nats_service.subprocess.run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
-            args[0], 0, stdout="nats-server: v2.14.1\n", stderr=""
+            args[0], 0, stdout="nats-server: v2.15.1\n", stderr=""
         ),
     )
     monkeypatch.setattr("docker.nats_service.subprocess.Popen", fake_popen)
@@ -470,7 +470,7 @@ def test_start_local_nats_rejects_partial_auth(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setattr(
         "docker.nats_service.subprocess.run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
-            args[0], 0, stdout="nats-server: v2.14.1\n", stderr=""
+            args[0], 0, stdout="nats-server: v2.15.1\n", stderr=""
         ),
     )
 
