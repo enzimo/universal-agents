@@ -1676,7 +1676,7 @@ def test_startup_failures_and_signals_clean_up_first_start_services(
 # --- the manager database is set up before any service opens it -------------
 
 
-def test_the_manager_database_is_set_up_once_before_the_services_start(tmp_path: Path) -> None:
+def test_the_manager_database_is_primed_before_each_start(tmp_path: Path) -> None:
     import docker.launch_headless as lh
 
     config = _make_config(tmp_path)
@@ -1684,9 +1684,8 @@ def test_the_manager_database_is_set_up_once_before_the_services_start(tmp_path:
     assert path == lh.resolve_manager_db_path(config)
     # In WAL mode with its first write done, so no service creates the file.
     assert Path(f"{path}-wal").stat().st_size > 0
-    wal_before = Path(f"{path}-wal").read_bytes()
     assert lh.prepare_manager_database(config) == path
-    assert Path(f"{path}-wal").read_bytes() == wal_before, "a prepared file is left as it is"
+    assert Path(f"{path}-wal").stat().st_size > 0
 
 
 def test_a_postgres_manager_store_has_no_file_to_set_up(tmp_path: Path) -> None:

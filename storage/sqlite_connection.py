@@ -29,7 +29,7 @@ behaviors made that pattern block callers for seconds:
   2.3 ms. A held connection runs no transaction, so it holds no lock and does
   not stop checkpoints.
 
-- A new file's one-time setup (``prepare_sqlite_database``) runs once, alone,
+- Startup preparation (``prepare_sqlite_database``) runs alone on each launch,
   before several processes open the file. The first connection to a new file
   switches it to WAL, and the first write then creates the WAL. Both hold
   SQLite's locks across several disk flushes, and the other processes' first
@@ -37,8 +37,11 @@ behaviors made that pattern block callers for seconds:
   about 0.6 s or more) several services opening the new manager database at
   the same moment failed with "database is locked", and the launcher stopped
   every service. The headless launcher therefore prepares the shared manager
-  database before it starts any service (``docker.launch_headless``). Each
-  connection also sets ``synchronous=NORMAL`` before the switch, which saves
+  database before it starts any service (``docker.launch_headless``). It also
+  commits a harmless header write on later starts, since an interrupted
+  transaction can leave WAL mode and uncommitted WAL frames without preparing
+  the next write. Each connection also sets ``synchronous=NORMAL`` before the
+  switch, which saves
   one of its flushes.
 - While several processes create their tables at once, a statement can fail
   with "database schema has changed": SQLite retries only once when the schema
@@ -432,14 +435,17 @@ def configure_sqlite_connection(
 
 
 def prepare_sqlite_database(db_path: str, *, logger: logging.Logger | None = None) -> bool:
-    """Do a database file's one-time setup before several processes open it.
+    """Prime a database's next write before several processes open it.
 
     Switches a file that is not in WAL mode yet (including a new one) to WAL
     and makes its first write, so the WAL exists before any service opens the
     file (module docstring). The write sets ``user_version`` to the value it
     already has: it writes one WAL frame and changes nothing the stores read.
-    A file already in WAL mode is left as it is. Returns whether the file was
-    set up now. Nothing is created in read-only mode or for an in-memory path.
+    This harmless write runs on every launch: WAL mode and even a large WAL
+    can survive an interrupted, uncommitted transaction without priming the
+    next write. SQLite decides which transactions committed; file size is not
+    evidence of that. Returns whether the file was prepared. Nothing is
+    created in read-only mode or for an in-memory path.
 
     Call it only while no other process uses the file, as the headless
     launcher does before it starts the services.
@@ -455,8 +461,6 @@ def prepare_sqlite_database(db_path: str, *, logger: logging.Logger | None = Non
         # services' first write would have to create it again.
         _keep_wal_on_close(conn, db_path=db_path, logger=logger)
         conn.execute(f"PRAGMA busy_timeout = {DEFAULT_SQLITE_BUSY_TIMEOUT_MS}")
-        if _first_cell(conn.execute("PRAGMA journal_mode").fetchone()).lower() == "wal":
-            return False
         configure_sqlite_connection(conn, db_path=db_path, logger=logger)
         version = int(_first_cell(conn.execute("PRAGMA user_version").fetchone()) or 0)
         conn.execute(f"PRAGMA user_version = {version}")

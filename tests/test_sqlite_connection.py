@@ -335,17 +335,16 @@ def test_the_slow_log_says_whether_the_call_ran_on_an_event_loop(tmp_path, monke
     assert any("thread.db" in line and "on_event_loop=false" in line for line in opens)
 
 
-# --- one-time setup before several processes open a file ---------------------
+# --- startup preparation before several processes open a file ----------------
 
 
-def test_preparing_a_new_file_switches_it_to_wal_and_writes_the_wal_once(tmp_path, caplog):
+def test_preparing_each_start_keeps_wal_ready_without_changing_database_contents(tmp_path, caplog):
     path = str(tmp_path / "dbs" / "task_history.db")
     with caplog.at_level(logging.INFO, logger="storage.sqlite_connection"):
         assert prepare_sqlite_database(path) is True
     assert "event=sqlite_database_prepared" in caplog.text
     # The first write already created the WAL, so no service has to.
     assert os.path.getsize(path + "-wal") > 0
-    wal = open(path + "-wal", "rb").read()
     raw = sqlite3.connect(path)
     raw.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)  # as the stores' connections do
     try:
@@ -354,9 +353,8 @@ def test_preparing_a_new_file_switches_it_to_wal_and_writes_the_wal_once(tmp_pat
         assert raw.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
     finally:
         raw.close()
-    assert prepare_sqlite_database(path) is False, "a file already in WAL is left as it is"
-    # Closing its only connection must not checkpoint and delete the WAL either.
-    assert open(path + "-wal", "rb").read() == wal
+    assert prepare_sqlite_database(path) is True
+    assert os.path.getsize(path + "-wal") > 0
 
 
 def test_preparing_switches_an_existing_file_without_changing_its_content(tmp_path):
@@ -376,6 +374,86 @@ def test_preparing_switches_an_existing_file_without_changing_its_content(tmp_pa
         assert raw.execute("SELECT value FROM work").fetchall() == [("kept",)]
     finally:
         raw.close()
+
+
+@pytest.mark.parametrize("emptied_by_checkpoint", [False, True], ids=["missing-wal", "truncated-wal"])
+def test_preparing_wal_mode_without_a_frame_primes_it_and_preserves_records(tmp_path, emptied_by_checkpoint):
+    path = str(tmp_path / "unprimed.db")
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("CREATE TABLE work (value TEXT)")
+        raw.execute("INSERT INTO work VALUES ('kept')")
+        raw.execute("PRAGMA user_version = 7")
+        raw.commit()
+        raw.execute("PRAGMA journal_mode=WAL")
+    finally:
+        raw.close()  # An external connection's normal close removes the WAL.
+    if emptied_by_checkpoint:
+        assert prepare_sqlite_database(path)
+        with connect_sqlite(path) as conn:
+            assert conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+
+    assert prepare_sqlite_database(path) is True
+    assert os.path.getsize(path + "-wal") > 32
+    with connect_sqlite(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert conn.execute("SELECT value FROM work").fetchall() == [("kept",)]
+    assert prepare_sqlite_database(path) is True
+
+
+def test_retry_after_process_exit_between_wal_switch_and_first_write_finishes_preparing(tmp_path):
+    import subprocess
+
+    path = str(tmp_path / "interrupted.db")
+    process = subprocess.run(
+        [sys.executable, "-c", """
+import os
+import sys
+from storage import sqlite_connection as store
+configure = store.configure_sqlite_connection
+def exit_after_switch(*args, **kwargs):
+    configure(*args, **kwargs)
+    os._exit(73)
+store.configure_sqlite_connection = exit_after_switch
+store.prepare_sqlite_database(sys.argv[1])
+""", path],
+        check=False, timeout=15, capture_output=True, text=True,
+    )
+    assert process.returncode == 73, process.stderr
+    assert prepare_sqlite_database(path) is True
+    assert os.path.getsize(path + "-wal") > 32
+    with connect_sqlite(path) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
+    assert prepare_sqlite_database(path) is True
+
+
+def test_preparing_recovers_spilled_uncommitted_wal_before_other_writers_start(tmp_path):
+    import subprocess
+
+    path = str(tmp_path / "spilled.db")
+    process = subprocess.run([sys.executable, "-c", """
+import os
+import sqlite3
+import sys
+c = sqlite3.connect(sys.argv[1])
+c.execute('CREATE TABLE work (value BLOB)')
+c.commit()
+c.execute('PRAGMA journal_mode=WAL')
+c.execute('PRAGMA cache_size=5')
+c.execute('BEGIN')
+for _ in range(50):
+    c.execute('INSERT INTO work VALUES (zeroblob(10000))')
+os._exit(73)
+""", path], check=False, timeout=15, capture_output=True, text=True)
+    assert process.returncode == 73, process.stderr
+    assert os.path.getsize(path + "-wal") > 100_000, "real cache spill left full but uncommitted frames"
+    assert prepare_sqlite_database(path) is True
+    with connect_sqlite(path) as conn:
+        assert conn.execute("SELECT count(*) FROM work").fetchone()[0] == 0
+        conn.execute("INSERT INTO work VALUES ('new committed work')")
+    with connect_sqlite(path) as conn:
+        assert conn.execute("SELECT value FROM work").fetchall() == [("new committed work",)]
 
 
 def test_preparing_creates_nothing_when_read_only_or_in_memory(tmp_path):

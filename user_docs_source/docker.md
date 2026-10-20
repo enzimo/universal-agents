@@ -245,12 +245,15 @@ new volume while the container is stopped. A slow database call is logged as
 the thread, `on_event_loop` and the process (`pid` and `program`);
 `on_event_loop=true` means it held up the gateway's chat apps and Web Chat too.
 
-Before the first start's services run, the container sets up the shared manager
+Before each start's services run, the container prepares the shared manager
 database (`event=sqlite_database_prepared`), so the services never create it
 at the same moment. Without that step, a disk that takes over half a second per
 sync made their first opens fail with "database is locked" and the container
 stopped. If the setup itself fails, the container refuses to start and logs
 `event=manager_database_prepare_failed` with the database and the error.
+Preparation makes a harmless write on every start so a previous interrupted
+setup or transaction cannot leave the first slow write to competing services.
+It preserves the stored records and database version.
 
 When Kubernetes profiles are enabled, the execution artifact directory must be
 backed by the same PVC that the profile names. Mount it at

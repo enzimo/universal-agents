@@ -373,7 +373,7 @@ def resolve_manager_db_path(config: GatewayInstanceConfig) -> Path:
 
 
 def prepare_manager_database(config: GatewayInstanceConfig) -> Path | None:
-    """Do the manager database's one-time setup before any service opens it.
+    """Prime the manager database before any service opens it on each launch.
 
     The manager, gateway, secure tool broker, execution controller and
     startup agents all open this file as they start. On the first start its
