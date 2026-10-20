@@ -190,6 +190,7 @@ async def test_access_resume_clears_old_blocker_before_final_review(
         _execute_turn_decision_outbox=dispatch,
         turn_executor=SimpleNamespace(
             _apply_agent_result_transformer=lambda _, result: result,
+            prepare_turn_decision=AsyncMock(),
             decode_result=lambda **_: SimpleNamespace(
                 decision=None, structured_output_details=None
             ),
@@ -197,6 +198,7 @@ async def test_access_resume_clears_old_blocker_before_final_review(
     )
     await resume_interrupted_task_turn(agent, task.task_id)
     if interrupt_again:
+        agent.turn_executor.prepare_turn_decision.assert_not_awaited()
         assert (
             manager.task_state.human_interaction_blockers[task.task_id][
                 "access_request_id"
@@ -205,6 +207,15 @@ async def test_access_resume_clears_old_blocker_before_final_review(
         )
         assert manager.get_next_task_to_process() is None
         return
+    agent.turn_executor.prepare_turn_decision.assert_awaited_once_with(
+        msg_content=task,
+        msg_header=session.msg_header,
+        msg_meta=session.msg_meta,
+        task_id=task.task_id,
+        decision=None,
+        strands_agent=sdk,
+        decision_tool_name="",
+    )
     assert manager.get_task_info(task.task_id).state == ProgressState.PARTIAL
     assert manager.get_next_task_to_process() == task.task_id
     manager.update_main_task_state(task.task_id, ProgressState.IN_PROGRESS, now)
