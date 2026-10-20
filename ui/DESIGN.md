@@ -827,7 +827,7 @@ that leads to it (owner's request 2026-10-12).
   text is rendered as text. Task paging, refresh errors and mutation
   confirmations remain independent per agent. An unavailable agent must not
   replace another agent's visible work.
-- Team ends with **Installed procedures**, for administrators only. An installed
+- Team then shows **Installed procedures**, for administrators only. An installed
   procedure is a fixed operation a developer built into the runtime. Agents may
   propose using one, and administrators **Add** or **Reject** each proposal
   here. Explain that adding one gives no agent access by itself: each use is
@@ -850,6 +850,15 @@ that leads to it (owner's request 2026-10-12).
 - Added procedures render as a compact table with **Procedure**, **Risk**,
   **Team lead may pass it on**, **Built-in code** (**Matches the runtime** or
   **Does not match the runtime**), **Added**, and **Definition ID**.
+- Team ends with **File Retention**: how many days chat uploads and scratch
+  files are kept, where 0 keeps them forever. When the gateway says the person
+  may change them (`can_change`), show one row with **Days to keep chat
+  uploads**, **Days to keep scratch files** and **Save** (primary; **Saving…**
+  while busy). Everyone else sees the two values as a short list ("90 days",
+  "Kept forever") and "Only administrators change how long files are kept."
+  After saving, say that chat uploads follow the new number at the next
+  cleanup, within six hours, and scratch files after the next restart. A
+  failure keeps the typed numbers.
 - Browser alerts are opt-in from Settings. Ask for browser permission only on a click;
   explain HTTPS/browser requirements or a denied permission in place. Store the
   preference by signed-in user and browser. Use generic alert text without message

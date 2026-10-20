@@ -1655,6 +1655,53 @@ def test_runtime_settings_stale_source_is_rejected_before_write(tmp_path: Path) 
     assert GatewayInstanceConfig.load(config_path).heartbeat.enabled is False
 
 
+def test_runtime_settings_refuses_an_update_between_plan_check_and_backup(tmp_path, monkeypatch) -> None:
+    from config_file_updates import ConfigFileConflict
+
+    path = _write_config(tmp_path, heartbeat_enabled=False)
+    agent = _fake_agent(path)
+    service = RuntimeSettingsService(agent)
+    staged = service.stage([{"path": "heartbeat.enabled", "value": True}], reason="race test")
+    original_apply = service._apply_instance_config
+
+    def independent_update_then_apply(*args, **kwargs):
+        other = GatewayInstanceConfig.load(path)
+        other.instance_name = "another writer"
+        other.save()
+        return original_apply(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_apply_instance_config", independent_update_then_apply)
+    with pytest.raises(ConfigFileConflict):
+        service.apply(staged["change_id"], _agreement())
+    after = GatewayInstanceConfig.load(path)
+    assert after.instance_name == "another writer"
+    assert after.heartbeat.enabled is False
+    assert not list(path.parent.glob("instance_config.yaml.bak.runtime-settings.*"))
+
+
+def test_runtime_settings_receipt_failure_keeps_later_writer_and_original_error(tmp_path, monkeypatch, caplog) -> None:
+    import custom_agents.runtime_settings_service as module
+
+    path = _write_config(tmp_path, heartbeat_enabled=False)
+    service = RuntimeSettingsService(_fake_agent(path))
+    staged = service.stage([{"path": "heartbeat.enabled", "value": True}], reason="receipt failure test")
+    real_write = module.atomic_write_bytes
+
+    def change_then_fail_receipt(destination, content, **kwargs):
+        if destination.parent.name == "settings_change_receipts":
+            other = GatewayInstanceConfig.load(path)
+            other.instance_name = "later writer"
+            other.save()
+            raise OSError("receipt storage failed")
+        return real_write(destination, content, **kwargs)
+
+    monkeypatch.setattr(module, "atomic_write_bytes", change_then_fail_receipt)
+    with pytest.raises(OSError, match="receipt storage failed"):
+        service.apply(staged["change_id"], _agreement())
+    assert GatewayInstanceConfig.load(path).instance_name == "later writer"
+    assert "event=runtime_settings_rollback_conflict" in caplog.text
+
+
 def test_runtime_settings_tampered_plan_is_rejected(tmp_path: Path) -> None:
     config_path = _write_config(tmp_path, heartbeat_enabled=False)
     set_agent_ref(_fake_agent(config_path))

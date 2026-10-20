@@ -481,6 +481,12 @@ class WebChatAttachmentSettings(BaseModel):
     max_file_bytes: int = (
         INTERACTIVE_APP_DEFAULTS.internal_website_attachment_max_file_bytes.value
     )
+    # Uploads from every chat app use this block's limits and retention
+    # (assistant_gateway.upload_retention deletes older ones; 0 keeps them).
+    retention_days: int = Field(
+        default=INTERACTIVE_APP_DEFAULTS.internal_website_attachment_retention_days.value,
+        ge=0,
+    )
     allowed_kinds: list[str] = Field(
         default_factory=lambda: list(
             INTERACTIVE_APP_DEFAULTS.internal_website_attachment_allowed_kinds.value

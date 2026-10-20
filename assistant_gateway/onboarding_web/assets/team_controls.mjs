@@ -1,6 +1,7 @@
 /**
  * Settings → Team in Web Chat: live team members, defined agent classes, MCP
- * connections, hosted MCP servers and installed procedures.
+ * connections, hosted MCP servers, installed procedures and File Retention
+ * (file_retention_controls.mjs, passed in as `retention`, read on each refresh).
  *
  * - Members follow the team's live status (team_activity.mjs, about every two
  *   seconds) while the Team tab is open: the same copy the sidebar activity
@@ -274,7 +275,7 @@ export function renderInstalledProcedures(document, entries, { formatTime = loca
  */
 export function createTeamControls({
   panel, content, proceduresContainer, status, refreshButton, client, getSessionKey, teamActivity,
-  browser = globalThis, formatTime = localTime, now = () => Date.now(),
+  retention = null, browser = globalThis, formatTime = localTime, now = () => Date.now(),
 }) {
   const document = browser.document;
   // `rest`: the last full read's other tables, redrawn with each members update.
@@ -660,7 +661,8 @@ export function createTeamControls({
   }
 
   function refresh() {
-    return Promise.all([load(), loadProcedures(0)]);
+    // File Retention (file_retention_controls.mjs) is read with the rest of the panel.
+    return Promise.all([load(), loadProcedures(0), retention ? retention.load() : undefined]);
   }
 
   refreshButton.addEventListener("click", () => { refresh(); });
@@ -682,6 +684,7 @@ export function createTeamControls({
     resetStatus() {
       setStatus("", false);
       setProceduresStatus("", false);
+      if (retention) retention.resetStatus();
     },
     /** Sign-out: forget everything and ignore replies to earlier reads. */
     clear() {
@@ -693,6 +696,7 @@ export function createTeamControls({
       Object.assign(procedures, { offset: 0, busy: false, loaded: false, confirmedSession: "" });
       content.replaceChildren();
       proceduresBody.replaceChildren();
+      if (retention) retention.clear();
       this.resetStatus();
     },
   };

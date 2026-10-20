@@ -526,6 +526,9 @@ class GatewayStateStore:
     def get_attachment(self, attachment_id: str) -> Optional[AttachmentRecord]:
         return self._repository.get_attachment(attachment_id)
 
+    def delete_uploads_created_before(self, cutoff: str, *, uploads_dir: str, limit: int) -> tuple[str, ...]:
+        return self._repository.delete_uploads_created_before(cutoff, uploads_dir=uploads_dir, limit=limit)
+
     def update_attachment_nats_ref(
         self,
         *,

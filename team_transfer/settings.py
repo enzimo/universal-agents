@@ -204,8 +204,13 @@ class SettingsSection:
 
         config: GatewayInstanceConfig = context.scratch[_CONFIG_KEY]
         if context.existing:
+            # Planning validates a new model; preserve the destination revision
+            # from which its unchanged fields came, rather than treating it as new.
+            config.save(
+                context.layout.instance_config_path,
+                expected_revision=context.scratch["settings.original_config"].source_revision,
+            )
             _refresh_unchanged_model_defaults(context, config)
-            config.save(context.layout.instance_config_path)
         else:
             bootstrap_instance(config)
         if not config.launch.secrets_from_environment:

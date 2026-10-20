@@ -326,6 +326,10 @@ class DeliveryRepository(Protocol):
 
     def get_attachment(self, attachment_id: str) -> AttachmentRecord | None: ...
 
+    def delete_uploads_created_before(self, cutoff: str, *, uploads_dir: str, limit: int) -> tuple[str, ...]:
+        """Delete old records inside ``uploads_dir`` only; return their file paths."""
+        ...
+
     def update_attachment_nats_ref(
         self,
         *,

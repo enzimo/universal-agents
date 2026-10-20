@@ -5101,19 +5101,24 @@ def _onboard(args: argparse.Namespace) -> None:
     config_path = config.config_path
     existing_config_found = config_path.exists()
     before_config = read_yaml_mapping(config_path)
+    expected_config_revision = None
     if existing_config_found:
         existing_config = GatewayInstanceConfig.load(config_path)
+        # Reconciliation validates a fresh model and drops private attributes.
+        # Keep the revision of the destination read before reconciliation so a
+        # concurrent update is refused rather than accepted as the new baseline.
+        expected_config_revision = existing_config.source_revision
         config = _reconcile_existing_onboarding_config(existing_config, config, args)
         config = GatewayInstanceConfig.model_validate(config.model_dump(mode="json"))
 
     if config.launch.secrets_from_environment:
         _refuse_env_file_options_for_environment_secrets(args, seed)
         created_paths, before_env, after_env = _write_cli_onboarding_with_environment_secrets(
-            config, answers
+            config, answers, expected_config_revision=expected_config_revision
         )
     else:
         created_paths, before_env, after_env = _write_cli_onboarding_env_file(
-            config, answers, args=args, seed=seed
+            config, answers, args=args, seed=seed, expected_config_revision=expected_config_revision
         )
     config_added, config_updated, config_removed = diff_config_paths(
         before_config, read_yaml_mapping(config.config_path)
@@ -5146,10 +5151,12 @@ def _bootstrap_cli_onboarded_instance(
     answers: dict[str, Any],
     *,
     source_env_file_path: Optional[str],
+    expected_config_revision: str | None,
 ) -> list[Path]:
     return bootstrap_instance(
         config,
         source_env_file_path=source_env_file_path,
+        expected_config_revision=expected_config_revision,
         assistant_purpose=str(answers["assistant_purpose"]).strip() or None,
         assistant_response_style=str(answers["assistant_response_style"]).strip()
         or None,
@@ -5163,6 +5170,7 @@ def _write_cli_onboarding_env_file(
     *,
     args: argparse.Namespace,
     seed: GatewayOnboardingSeed,
+    expected_config_revision: str | None,
 ) -> tuple[list[Path], dict[str, str], dict[str, str]]:
     """Write the instance with its secrets in team.env (launch.secrets_source: env_file)."""
 
@@ -5173,7 +5181,8 @@ def _write_cli_onboarding_env_file(
     )
     before_env = parse_env_file(env_path)
     created_paths = _bootstrap_cli_onboarded_instance(
-        config, answers, source_env_file_path=seed.source_env_file_path
+        config, answers, source_env_file_path=seed.source_env_file_path,
+        expected_config_revision=expected_config_revision,
     )
     _merge_photon_onboarding_env(env_path, answers)
     rotate = bool(getattr(args, "rotate_internal_credentials", False))
@@ -5220,11 +5229,13 @@ def _refuse_env_file_options_for_environment_secrets(
 def _write_cli_onboarding_with_environment_secrets(
     config: GatewayInstanceConfig,
     answers: dict[str, Any],
+    *,
+    expected_config_revision: str | None,
 ) -> tuple[list[Path], dict[str, str], dict[str, str]]:
     """Write the instance without team.env; the first user's storage settings come from the environment."""
 
     created_paths = _bootstrap_cli_onboarded_instance(
-        config, answers, source_env_file_path=None
+        config, answers, source_env_file_path=None, expected_config_revision=expected_config_revision
     )
     # The broker's own Sealbox store, not a secret the environment supplies.
     for sealbox_path in ensure_instance_sealbox_material(config):

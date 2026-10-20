@@ -34,10 +34,6 @@ RUNTIME_PYTHON_ROOTS = (
     "tests",
 )
 ALLOWED_DIRECT_UUID4_CALLERS = {
-    (
-        "assistant_gateway/interactive_apps/website_handlers/configuration.py",
-        "_write_text_atomic",
-    ),
     ("assistant_gateway/onboarding_web/server.py", "_handle_xai_device_login_start"),
     ("custom_agents/agent_profile_service.py", "update_team_lead_soul"),
     ("custom_agents/external_skills.py", "_apply_staged_skills"),

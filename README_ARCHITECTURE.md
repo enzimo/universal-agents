@@ -1131,7 +1131,7 @@ signed-in Web Chat session and sends each message as that person.
 
 Agents keep temporary files in `scratch/` of their task folder. When the
 internal-improvement maintenance schedule fires, trusted code in the manager
-deletes files there older than `tool_policy.scratch_retention_days` (14 by
+deletes files there older than `tool_policy.scratch_retention_days` (21 by
 default, 0 turns it off) from every person's and the agents' `scratch/`,
 walking folders without following links, and gives InternalImprovementAgent
 the counts (`custom_agents/scratch_retention.py`). The maintenance run itself
@@ -2508,9 +2508,29 @@ already (a browser retry gets the first send's answer), and every file passes
 the upload checks (`inbound_attachments.check_inbound_attachment_bytes`; all
 files are checked before any is saved). Saved uploads go to `state/uploads`
 under the checked conversation's own key, and their records take that
-conversation's owner. Nothing deletes upload records except removing their
-owner, so a file saved for a refused send would stay as a stray, and in another
-person's conversation it would count as theirs.
+conversation's owner. A file saved for a refused send would otherwise stay as
+a stray until the cleanup below, and in another person's conversation it would
+count as theirs.
+
+The gateway deletes uploads older than the internal website's
+`attachments.retention_days` (90 by default, 0 keeps them) when it starts and
+every six hours after (`assistant_gateway/upload_retention.py`). Its database
+query selects only paths under `state/uploads`; the same attachment table
+also holds outgoing copies in `scratch/sent/`, whose records stay available
+under their separate scratch retention. It deletes the old upload records
+first, oldest first and in batches, then their files, so a
+failure leaves a file without a record, never a record without its file. Then
+it deletes every file in `state/uploads` older than the cutoff, which also
+removes files left without a record, and the folders left empty. It shares the
+link-safe folder walk with the scratch cleanup (`old_file_cleanup.py`). The
+gateway is the only writer of `state/uploads`; agents work on their own copies.
+Administrators change both retention numbers in Settings → Team → File
+Retention (`assistant_gateway/file_retention.py`). That is a `runtime_settings`
+change in the gateway's own controls, so `PersonChangeCheck` decides who may.
+The save changes only those two fields of `instance_config.yaml`, keeps a
+backup as the configuration editor does, and is refused when the file changed
+meanwhile. Upload retention applies from the next cleanup; scratch retention
+applies after a restart, because the manager reads its settings when it starts.
 
 A person can answer one earlier chat message with the channel's reply feature.
 That message often belongs to another conversation than the one the chat
@@ -2977,7 +2997,29 @@ credentials, the public origin, the website listener) in memory
 PostgreSQL address is applied by the storage resolvers
 (`TEAM_BUNDLED_POSTGRES_ADDRESS`). Writers load the file as stored
 (`load_saved`), change only their own fields and save, so no deployment detail
-or stale in-memory value is ever written back. The bundle used to run every
+or stale in-memory value is ever written back. Every instance-config writer
+uses `config_file_updates.replace_config_file`: it holds the shared
+`file_locking.exclusive_file_lock` while checking the source revision, making
+any backup and replacing the file atomically. Loaded models retain the hash
+of the exact bytes parsed. A stale model refuses to save; a new model creates
+an absent file unless its caller supplies the destination revision for an
+intentional replacement. This covers retention, manager-route and diagnostic
+changes, the configuration editor, runtime settings plans, schema upgrades,
+onboarding and team transfer. Editor saves and restores require the revision
+returned by GET; an older open editor must reload. Approved runtime plans
+still require their exact source digest, and a failed receipt can restore a
+backup only while the applied revision is still current. The separate lock
+file survives atomic replacement and excludes threads and processes; lock
+failure refuses the write. External hand edits cannot participate in an
+advisory lock, so stop runtime writers before editing the file directly.
+Onboarding keeps the destination revision read before reconciliation, even
+when validation builds a fresh model. Bootstrap renders controls and reads
+source files first, then accepts the checked settings write before changing
+control files, merging the environment or handing over credentials. A stale
+configuration therefore changes none of those auxiliary files. Later transfer
+batches likewise save checked settings before refreshing model defaults.
+
+The bundle used to run every
 process from a copy written at container start; settings saved while the
 runtime ran then waited for a container restart. For the same reason the
 launcher, on each in-app restart, recomputes the environment variables it
