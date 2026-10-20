@@ -19,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.tool_result_support import tool_json
 from strands.interrupt import Interrupt, InterruptException
 
 from access_control.entities import PersonPrincipal
@@ -164,7 +165,7 @@ def test_a_restart_waits_for_a_person_and_the_supervisor_accepts_it(agent) -> No
     assert request.change.kind == "runtime_restart" and "manager" in request.change.title
     assert request.change.summary.startswith("Restart ") and "manager" in request.change.summary
     _approve(agent, call, note="Go ahead, nobody is using it now")
-    applied = json.loads(asyncio.run(apply_change._tool_func(plan["change_id"], "Load the new model settings", call)))
+    applied = tool_json(asyncio.run(apply_change._tool_func(plan["change_id"], "Load the new model settings", call)))
 
     assert applied["status"] == "applied", applied
     assert applied["note"] == "Go ahead, nobody is using it now"
@@ -197,7 +198,7 @@ def test_a_denied_restart_returns_the_note(agent) -> None:
         asyncio.run(apply_change._tool_func(plan["change_id"], "Reload", call))
     _decide(agent, call, AccessReviewChoice.DENY, note="Not during office hours")
 
-    result = json.loads(asyncio.run(apply_change._tool_func(plan["change_id"], "Reload", call)))
+    result = tool_json(asyncio.run(apply_change._tool_func(plan["change_id"], "Reload", call)))
 
     assert result["status"] == "denied" and result["note"] == "Not during office hours"
     assert not list(_requests_dir(agent).glob("*.json"))
@@ -212,7 +213,7 @@ def test_a_restart_whose_running_state_changed_is_refused(agent) -> None:
     _approve(agent, call, note="Only if nothing else is running")
     agent.task_manager.queue_depth = 5
 
-    result = json.loads(asyncio.run(apply_change._tool_func(plan["change_id"], "Reload", call)))
+    result = tool_json(asyncio.run(apply_change._tool_func(plan["change_id"], "Reload", call)))
 
     assert result["status"] == "refused" and "state changed" in result["reason"]
     assert result["note"] == "Only if nothing else is running"
@@ -256,7 +257,7 @@ def _dispatch_approved(agent, *, scope: str = "manager", call_id: str = "tooluse
     with pytest.raises(InterruptException):
         asyncio.run(apply_change._tool_func(plan["change_id"], "Reload saved settings", call))
     _approve(agent, call, note="Check the saved settings")
-    result = json.loads(asyncio.run(apply_change._tool_func(plan["change_id"], "Reload saved settings", call)))
+    result = tool_json(asyncio.run(apply_change._tool_func(plan["change_id"], "Reload saved settings", call)))
     assert result["status"] == "applied", result
     return plan
 

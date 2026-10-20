@@ -27,7 +27,6 @@ from default_values import (
     TRANSPORT_DEFAULTS,
 )
 from runtime_settings.instance_layout import InstanceLayout
-from custom_agents.change_requests_runtime import register_change_requests
 from custom_agents.lease_loss_wind_down import is_winding_down
 from custom_agents.agent_instantiation_skill import (
     ensure_runtime_agent_instantiation_skill,
@@ -921,11 +920,10 @@ def create_strands_agent(config: dict):
         agent_kwargs["id"] = config["id"]
 
     agent = UniversalAgent(**agent_kwargs)
-    # Each person's request this agent receives is opened and closed in the
-    # change ledger (custom_agents.change_requests_runtime), with the operator's
-    # switch for checks between a person's separate requests.
+    # Request lifecycle is saved with task state. This one operator value
+    # controls only the ledger's cross-request and closed-request checks.
     conflict_checks = bool(config.get("request_conflict_checks", AGENT_DEFAULTS.request_conflict_checks.value))
-    register_change_requests(agent, conflict_checks=conflict_checks)
+    agent._request_conflict_checks = conflict_checks
     (_logger.info if conflict_checks else _logger.warning)(
         "Checks between a person's separate requests are %s for this agent. event=request_conflict_checks "
         "enabled=%s agent_type=%s",

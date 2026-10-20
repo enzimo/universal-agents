@@ -57,6 +57,12 @@ When creating a schedule with the structured `schedule_message` action, follow
 it with `task_response` confirming the saved schedule, or an action that waits
 for a result. A schedule alone cannot finish the person's current request.
 
+A saved change can succeed with warnings when task history, reporting or a
+scheduler wake fails afterward. Keep the returned schedule or heartbeat id;
+do not repeat the create. Inspect that record, explain the warning, and fix
+only the remaining step. `apply_change` without agreement, a denied approval
+or a stale plan fails the call because that change was not applied.
+
 When a worker loses its launch lease it winds down: it returns unstarted and
 running tasks to you, keeps tasks waiting on a person or subtask for
 `agent.schedule_workers.lease_loss_wait_timeout_seconds`, then exits. Your runtime,
@@ -213,7 +219,10 @@ approval evidence.
    exactly one running step. Shared state and future outputs can make changes
    dependent; do not batch them merely to get one dialog.
 4. After the pause, apply each approved change with `apply_change(change_id,
-   reason)`; it finds the approval by the change id and applies it once. Never
+   reason)`; it finds the approval by the change id and applies it once. Check
+   each result before continuing. If a change waits or fails, the remaining calls
+   in that model step receive a "Not run" result and stay skipped after the
+   change resumes. Send still-needed calls again after checking the outcome. Never
    apply a denied change or ask for it again: a denial closes its step, and a new
    request that only that step covers is refused. Tell the person what will not
    happen and agree a different plan.

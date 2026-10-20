@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta
+from threading import Barrier, Event
+from uuid import uuid4
 
 import pytest
 
@@ -24,8 +28,10 @@ from storage.change_ledger import (
     ChangeRequestStore,
     ChangeWriterKind,
     RequestState,
+    close_request,
+    prune,
 )
-from storage.config import StorageSettings
+from storage.config import StorageSettings, resolve_storage_settings
 from storage.knowledge_repository import create_knowledge_repository
 from storage.postgres_connection import connect_postgres
 from storage.sqlite_connection import connect_sqlite
@@ -187,16 +193,18 @@ def test_creating_a_page_is_recorded_and_never_stopped(storage, setup):
     ]
 
 
-def test_a_request_without_a_row_starts_at_its_first_change_with_a_warning(storage, setup, caplog):
+def test_a_request_without_durable_admission_is_refused_without_resetting_its_start(storage, setup, caplog):
     svc, _requests = setup
     with caplog.at_level(logging.WARNING, logger="storage.change_ledger"):
-        assert edit(svc, request_actor("req_old"), "Leave Tuesday.", base=1) == 2
-    assert "event=change_ledger_request_row_created_late" in caplog.text
+        assert refusal(svc, request_actor("req_old"), "Leave Tuesday.", base=1) == ChangeRefusal.REQUEST_CLOSED
+    assert "event=change_ledger_request_not_admitted" in caplog.text
     assert "request_id=req_old" in caplog.text
-    # Its row now exists and is open: a later change by another request still stops it.
+    assert request_ids(storage) == []
     ChangeRequestStore(storage).open(team_id=TEAM, request_id="req_new", person_id=ALICE, now=NOW)
-    assert edit(svc, request_actor("req_new"), "Leave Wednesday.", base=2) == 3
-    assert refusal(svc, request_actor("req_old"), "Leave Thursday.", base=3) == ChangeRefusal.CHANGE_CONFLICT
+    assert edit(svc, request_actor("req_new"), "Leave Wednesday.", base=1) == 2
+    # Reading the newest revision cannot turn an unadmitted request into a new one.
+    assert refusal(svc, request_actor("req_old"), "Leave Thursday.", base=2) == ChangeRefusal.REQUEST_CLOSED
+    assert request_ids(storage) == ["req_new"]
 
 
 def test_team_pages_are_not_in_the_ledger(storage, setup):
@@ -295,3 +303,94 @@ def test_with_checks_turned_off_requests_are_recorded_but_never_refused(storage,
     with _connect(storage) as conn:
         checked = [int(r[0]) for r in conn.execute("SELECT checked FROM change_ledger ORDER BY position").fetchall()]
     assert checked == [1, 0, 0, 0, 1]
+
+
+@pytest.mark.live
+@pytest.mark.postgres
+@pytest.mark.integration
+def test_request_closure_waits_for_a_checked_write_then_refuses_later_writes(tmp_path, monkeypatch):
+    """Closure cannot commit while a page change still holds an OPEN check."""
+
+    from psycopg.conninfo import make_conninfo
+
+    with knowledge_storage("postgres", tmp_path) as settings:
+        svc = service(settings)
+        svc.write(person(ALICE), PAGE, DraftInput(title="Trip", body="Original."))
+        requests = ChangeRequestStore(settings)
+        requests.open(team_id=TEAM, request_id="request_a", person_id=ALICE, now=NOW)
+        closing_name = "ledger_close_" + uuid4().hex
+        closing_settings = resolve_storage_settings({
+            "backend": "postgres", "postgres": {"dsn": make_conninfo(settings.postgres_dsn, application_name=closing_name)},
+        })
+        closing_store = ChangeRequestStore(closing_settings)
+        checked, release = Event(), Event()
+        repo = svc._repository
+        original = repo._check_ledger
+
+        def hold_checked_write(*args, **kwargs):
+            original(*args, **kwargs)
+            checked.set()
+            assert release.wait(10), "The test did not release its checked writer."
+
+        monkeypatch.setattr(repo, "_check_ledger", hold_checked_write)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            write = pool.submit(edit, svc, request_actor("request_a"), "Already checked.", base=1)
+            try:
+                assert checked.wait(10)
+                close = pool.submit(
+                    closing_store.close, team_id=TEAM, request_id="request_a", person_id=ALICE,
+                    state=RequestState.STOPPED, now=NOW,
+                )
+                # Observe PostgreSQL itself waiting for the row lock. A test
+                # thread that merely has not been scheduled cannot satisfy this.
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not close.done():
+                    with connect_postgres(settings.postgres_dsn) as conn:
+                        waiting = conn.execute(
+                            "SELECT wait_event_type FROM pg_stat_activity WHERE application_name=%s", (closing_name,),
+                        ).fetchone()
+                    if waiting is not None and waiting[0] == "Lock":
+                        break
+                    time.sleep(0.01)
+                else:
+                    pytest.fail("Request closure did not wait for the checked write's row lock.")
+            finally:
+                release.set()
+            assert write.result(timeout=10) == 2
+            close.result(timeout=10)
+        monkeypatch.setattr(repo, "_check_ledger", original)
+        assert svc.read(person(ALICE), PAGE).page.body == "Already checked."
+        assert refusal(svc, request_actor("request_a"), "Too late.", base=2) == ChangeRefusal.REQUEST_CLOSED
+
+
+@pytest.mark.live
+@pytest.mark.postgres
+@pytest.mark.integration
+def test_retention_does_not_deadlock_concurrent_terminal_saves(tmp_path):
+    """Each save holds an old closed row before both try to prune the other."""
+
+    with knowledge_storage("postgres", tmp_path) as settings:
+        requests = ChangeRequestStore(settings)
+        old = NOW - LEDGER_RETENTION - timedelta(days=1)
+        for request_id in ("request_a", "request_b"):
+            requests.open(team_id=TEAM, request_id=request_id, person_id=ALICE, now=old)
+            requests.close(team_id=TEAM, request_id=request_id, person_id=ALICE, state=RequestState.ENDED, now=old)
+        both_locked = Barrier(2)
+
+        def terminal_save(request_id):
+            with connect_postgres(settings.postgres_dsn) as conn:
+                conn.begin_write()
+                close_request(
+                    conn, conn.dialect, team_id=TEAM, request_id=request_id, person_id=ALICE,
+                    state=RequestState.ENDED, now=NOW,
+                )
+                both_locked.wait(timeout=5)
+                prune(conn, conn.dialect, team_id=TEAM, before=NOW - LEDGER_RETENTION)
+                conn.commit()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(terminal_save, "request_a")
+            second = pool.submit(terminal_save, "request_b")
+            first.result(timeout=10)
+            second.result(timeout=10)
+        assert request_ids(settings) == []

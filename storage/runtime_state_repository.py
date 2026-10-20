@@ -11,6 +11,7 @@ from typing import Any
 from custom_messages.contracts.runtime_snapshot_v3 import TaskSnapshotRecord, decode_runtime_snapshot
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 from storage.schedule_worker_repository import ScheduleWorkerRepository
+from storage.change_ledger import ensure_ledger_tables, record_task_request_state, require_same_request_identity
 from storage import task_custody_repository as custody
 from storage.task_custody_repository import (
     TaskCustodyConflict, TaskCustodyRow, TaskCustodyTakenOver, TaskCustodyTakeover,
@@ -240,7 +241,9 @@ class _RelationalRuntimeStateRepository:
                 # abort this transfer instead of overwriting accepted work.
                 conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})", values)
                 if parts is not None:
-                    self._write_task_records(conn, replacement.owner_agent_id, parts.records, replace_all=True)
+                    self._write_task_records(
+                        conn, replacement.owner_agent_id, parts.records, replace_all=True, team_id=replacement.team_id,
+                    )
                     self._transfer_task_custody(conn, sources=list(expected), replacement=replacement, records=parts.records)
                     ScheduleWorkerRepository.transfer_custody(
                         conn, self._dialect, sources=tuple(expected),
@@ -297,6 +300,7 @@ class _RelationalRuntimeStateRepository:
         try:
             ensure_storage_parent_dir(self._db_path)
             with self._connect() as conn:
+                ensure_ledger_tables(conn, self._dialect)
                 ScheduleWorkerRepository.ensure_occurrence_schema(conn)
                 custody.ensure_schema(conn)
                 conn.execute(
@@ -452,7 +456,7 @@ class _RelationalRuntimeStateRepository:
                         runtime_state_json = excluded.runtime_state_json, updated_at = excluded.updated_at""",
                     (owner_agent_id, owner_agent_name, team_id, owner_named_agent_type, parts.header_json, datetime.now(timezone.utc).isoformat()),
                 )
-                self._write_task_records(conn, owner_agent_id, parts.records, replace_all=True)
+                self._write_task_records(conn, owner_agent_id, parts.records, replace_all=True, team_id=team_id)
                 if schedule_admission is not None:
                     ScheduleWorkerRepository.commit_admission(conn, self._dialect, schedule_admission)
                 if team_id:
@@ -545,7 +549,7 @@ class _RelationalRuntimeStateRepository:
                         conn, self._dialect, DeferredMessageClaim(owner_agent_id, deferred_message_id),
                         consume=False, logger=self._logger,
                     )
-                self._write_task_records(conn, owner_agent_id, records, replace_all=False)
+                self._write_task_records(conn, owner_agent_id, records, replace_all=False, team_id=row[1])
                 conn.execute(f"UPDATE active_task_runtime SET updated_at = {bind} WHERE owner_agent_id = {bind}",
                              (datetime.now(timezone.utc).isoformat(), owner_agent_id))
                 conn.commit()
@@ -568,6 +572,7 @@ class _RelationalRuntimeStateRepository:
 
     def _write_task_records(
         self, conn: Any, owner_agent_id: str, records: dict[tuple[str, str], str], *, replace_all: bool,
+        team_id: Optional[str],
     ) -> None:
         bind = self._dialect.bind
         # Compare compact digests, never read unrelated histories back merely
@@ -580,23 +585,54 @@ class _RelationalRuntimeStateRepository:
             for section, record_id in existing.keys() - records.keys():
                 conn.execute(f"DELETE FROM active_task_runtime_records WHERE owner_agent_id = {bind} AND section = {bind} AND record_id = {bind}",
                              (owner_agent_id, section, record_id))
-        for (section, record_id), payload in records.items():
+        # Competing snapshot owners can admit the same roots in a different
+        # model order. Acquire their request-row locks in the same task order
+        # before custody checks choose the one holder, instead of deadlocking.
+        for (section, record_id), payload in sorted(records.items()):
             digest = payload_digest(payload)
             if existing.get((section, record_id)) == digest:
                 continue
+            task = (
+                self._checked_task_snapshot(conn, owner_agent_id, record_id, payload, saved=(section, record_id) in existing)
+                if section == "tasks" else None
+            )
             conn.execute(f"""INSERT INTO active_task_runtime_records
                 (owner_agent_id, section, record_id, payload_json, payload_digest)
                 VALUES ({bind}, {bind}, {bind}, {bind}, {bind})
                 ON CONFLICT(owner_agent_id, section, record_id) DO UPDATE SET
                     payload_json = excluded.payload_json, payload_digest = excluded.payload_digest""",
                 (owner_agent_id, section, record_id, payload, digest))
-            if section == "tasks":
-                from custom_messages.enums import ProgressState
+            if task is not None:
+                self._record_task_outcome(conn, owner_agent_id, team_id, task)
 
-                state = json.loads(payload).get("state")
-                if state in {item.value for item in (ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.CANCELLED, ProgressState.ABANDONED)}:
-                    ScheduleWorkerRepository.record_terminal_task(conn, self._dialect,
-                        agent_id=owner_agent_id, task_id=record_id, outcome=state)
+    def _checked_task_snapshot(
+        self, conn: Any, owner_agent_id: str, task_id: str, payload: str, *, saved: bool,
+    ) -> TaskSnapshotRecord:
+        """Validate only the changed task's immutable request identity."""
+
+        task = TaskSnapshotRecord.model_validate_json(payload)
+        if saved:
+            p = self._dialect.bind
+            previous = conn.execute(
+                f"SELECT payload_json FROM active_task_runtime_records "
+                f"WHERE owner_agent_id={p} AND section={p} AND record_id={p}",
+                (owner_agent_id, "tasks", task_id),
+            ).fetchone()
+            require_same_request_identity(TaskSnapshotRecord.model_validate_json(previous[0]), task)
+        return task
+
+    def _record_task_outcome(
+        self, conn: Any, owner_agent_id: str, team_id: Optional[str], task: TaskSnapshotRecord,
+    ) -> None:
+        """Keep request lifecycle and schedule outcomes in the task's transaction."""
+
+        from custom_messages.enums import ProgressState
+
+        record_task_request_state(conn, self._dialect, team_id=team_id, task=task, now=datetime.now(timezone.utc))
+        if task.state in {ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.CANCELLED, ProgressState.ABANDONED}:
+            ScheduleWorkerRepository.record_terminal_task(
+                conn, self._dialect, agent_id=owner_agent_id, task_id=task.task_id, outcome=task.state.value,
+            )
 
     def _sync_task_custody(
         self, conn: Any, records: dict[tuple[str, str], str], previous_task_ids: set[str], *,
@@ -857,6 +893,7 @@ class _RelationalRuntimeStateRepository:
                             cancelled_at,
                         ),
                     )
+                self._close_cancelled_requests(conn, team_id, normalized_task_ids)
                 conn.commit()
         except Exception as exc:
             self._logger.error(
@@ -866,6 +903,34 @@ class _RelationalRuntimeStateRepository:
                 exc,
             )
             raise
+
+    def _close_cancelled_requests(self, conn: Any, team_id: str, task_ids: list[str]) -> None:
+        """A persisted stop closes root requests even if recovery drops their task.
+
+        Read identities from saved, team-scoped task records, never the command
+        body. A stop of only a delegated task leaves its root request open.
+        No snapshot row lock is taken: the request row itself serializes this
+        closure with checked writes and concurrent terminal saves.
+        """
+
+        from custom_messages.enums import ProgressState
+
+        p = self._dialect.bind
+        placeholders = ", ".join([p] * len(task_ids))
+        records = conn.execute(
+            f"SELECT r.payload_json FROM active_task_runtime_records r "
+            f"JOIN active_task_runtime a ON a.owner_agent_id=r.owner_agent_id "
+            f"WHERE a.team_id={p} AND r.section={p} AND r.record_id IN ({placeholders}) "
+            "ORDER BY r.record_id, r.owner_agent_id",
+            (team_id, "tasks", *task_ids),
+        ).fetchall()
+        for row in records:
+            task = TaskSnapshotRecord.model_validate_json(row[0])
+            record_task_request_state(
+                conn, self._dialect, team_id=team_id,
+                task=task.model_copy(update={"state": ProgressState.CANCELLED}),
+                now=datetime.now(timezone.utc),
+            )
 
     def get_task_cancellation(
         self,

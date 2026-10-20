@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +19,9 @@ from custom_tools.providers.knowledge import (
     knowledge_write,
 )
 from custom_tools.runtime_context import set_agent_ref
+from custom_tools.tool_results import result_text
 from storage.config import resolve_storage_settings
+from storage.change_ledger import ChangeRequestStore
 from storage.knowledge_repository import create_knowledge_repository
 from storage.pinned_memory_repository import SqlitePinnedMemoryRepository
 from tests.broker_access_support import context_signer
@@ -38,17 +41,17 @@ class _TaskManager:
     def __init__(self, *, signed_for: str | None, claimed: str) -> None:
         self._signed_for = signed_for
         self._claimed = claimed
-
-    def get_task_info(self, task_id: str):
-        signed = (
+        self.signed = (
             context_signer().issue(team_id=TEAM, person_id=self._signed_for, person_roles=("member",))
             if self._signed_for
             else None
         )
+
+    def get_task_info(self, task_id: str):
         return SimpleNamespace(
             meta=SimpleNamespace(
                 gateway_context=GatewayContext(
-                    source="test", user_id=self._claimed, canonical_user_id=self._claimed, task_context=signed
+                    source="test", user_id=self._claimed, canonical_user_id=self._claimed, task_context=self.signed
                 )
             )
         )
@@ -69,12 +72,17 @@ class _Agent:
         self.task_manager = _TaskManager(signed_for=signed_for, claimed=claimed or (signed_for or ""))
         self.task_manager.storage_settings = settings
         self.task_manager._db_path = str(db_path)
+        if self.task_manager.signed is not None:
+            context = self.task_manager.signed.context
+            ChangeRequestStore(settings).open(
+                team_id=TEAM, request_id=context.context_id, person_id=context.person_id, now=datetime.now(timezone.utc),
+            )
 
 
 def _call(agent, tool, **kwargs) -> dict:
     set_agent_ref(agent)
     try:
-        return json.loads(tool(**kwargs))
+        return json.loads(result_text(tool(**kwargs)))
     finally:
         set_agent_ref(None)
 
@@ -93,7 +101,7 @@ def test_a_persons_request_is_named_for_the_change_ledger(tmp_path):
     assert knowledge_actor(_Agent(tmp_path / "kb.db", signed_for=None)).request_id == ""
     assert actor.conflict_checks is True
     switched_off = _Agent(tmp_path / "kb.db", signed_for="alice")
-    switched_off._request_conflict_checks = False  # agent.request_conflict_checks: false (change_requests_runtime)
+    switched_off._request_conflict_checks = False  # agent.request_conflict_checks: false, set at agent construction
     assert knowledge_actor(switched_off).conflict_checks is False
 
 
@@ -133,6 +141,14 @@ def test_tools_write_read_search_and_never_name_people(tmp_path):
 
 def test_refusals_explain_what_to_do(tmp_path):
     system = _Agent(tmp_path / "kb.db", signed_for=None)
+    # A refused change is a failed result, so a model step stops at it (custom_tools.tool_results).
+    set_agent_ref(system)
+    try:
+        raw = knowledge_write(page="team/db", title="DB", body="password: hunter22")
+        saved = knowledge_write(page="team/ok", title="OK", body="Fine.")
+    finally:
+        set_agent_ref(None)
+    assert raw["status"] == "error" and isinstance(saved, str)
     blocked = _call(system, knowledge_write, page="team/db", title="DB", body="password: hunter22")
     assert blocked["error_code"] == "sensitive_content" and "hunter22" not in json.dumps(blocked)
     missing = _call(system, knowledge_read, page="team/nothing")

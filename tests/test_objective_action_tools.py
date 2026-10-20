@@ -9,7 +9,6 @@ per action with real Cedar, so a block can still stop exactly one action.
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +21,7 @@ from custom_tools.providers.objective_work import objective_work_profiles, objec
 from custom_tools.providers.objectives import objectives
 from tests.test_access_request_tools import BINARY, OWNER, TEAM, make_agent, owner_service
 from tests.test_access_request_tools import storage as access_storage
+from tests.tool_result_support import tool_json
 
 storage = access_storage  # the shared fixture: a manager database and verify keys
 
@@ -46,7 +46,7 @@ storage = access_storage  # the shared fixture: a manager database and verify ke
     ],
 )
 def test_each_tool_says_which_inputs_an_action_takes(tool, inputs, message) -> None:
-    result = json.loads(tool(**inputs))
+    result = tool_json(tool(**inputs))
 
     assert (result["error_code"], result["error"]) == ("invalid_input", message)
 

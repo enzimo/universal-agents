@@ -397,6 +397,9 @@ class ChangeRecordKind(StrEnum):
     OBJECTIVE = "objective"
     HEARTBEAT_ITEM = "heartbeat_item"
     FILE = "file"
+    # Applying an exact staged plan can change several kinds of record. Its
+    # approval must finish before other calls act on the proposed change.
+    STAGED_CHANGE = "staged_change"
 
 
 class ChangeRefusal(StrEnum):

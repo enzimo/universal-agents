@@ -834,13 +834,22 @@ and the request tells the person, who can repeat it in a new message.
   nothing (`request_closed`). This covers a worker still running after its
   request ended.
 - **Request rows.** Each request's start position and state are recorded
-  when the agent receiving the person's message admits it
-  (`custom_agents/change_requests_runtime.py`), and closed when that first
-  task ends. A request without a row, such as one started before an
-  upgrade, starts at its first change, with a warning.
+  in the task snapshot transaction (`storage/runtime_state_repository.py`):
+  admission opens it and the first task's terminal save closes it. Either
+  both writes commit or neither does, including during recovery; no later
+  callback can lose a lifecycle change. Saving a root's cancellation marker
+  also closes its request in that transaction, because restart recovery drops
+  cancelled tasks before saving another terminal snapshot. A request without a durable
+  admission is refused rather than assigned a new start at its first write.
+  The original gateway signature and team are checked again for this
+  historical attribution, even after expiry; unverified metadata never
+  opens or closes a request, and a failed identity check aborts the task save.
 - **Storage.** The check and the ledger entry share the store's write
-  transaction, after its own lock. The shared counter row is updated last,
-  bounded by `lock_timeout` in PostgreSQL.
+  transaction, after its own lock. PostgreSQL holds a lock on the request
+  row through the write, so closure waits for an already checked change
+  and later writes see the closed state. SQLite's `BEGIN IMMEDIATE` provides
+  the same exclusion. The shared counter row is updated last, bounded by
+  `lock_timeout` in PostgreSQL.
 - **Retention.** Entries and closed request rows older than seven days are
   pruned when a request closes. They are deleted with a removed person's
   task records and never travel in a team transfer.
@@ -2499,6 +2508,32 @@ boundary. Durable inbox and outbox records provide ordering, duplicate
 detection, acknowledgements, and reconnect recovery without giving adapters
 gateway filesystem or repository access.
 
+A tool call's outcome is read only from its Strands result status: a returned
+dict with `status` and `content` passes through, and any other return value is
+wrapped as a success. So tools that change memory facts, knowledge pages,
+heartbeat items, Objectives, schedules or files return a failed result (status
+`error`, `custom_tools/tool_results.py`) whenever the change was not made: a
+refusal, invalid input such as a call missing an input its action needs, a
+record that does not exist, or an error. The model reads the same JSON reason
+as before. A change that was made stays a success, also with warnings, and so
+does one staged for a person's approval or proposed for review, because the
+tool did what it does.
+
+Knowledge curation uses the same result handler as ordinary knowledge tools,
+so a refused publication, merge, revert or other curator change also fails the
+Strands call. `apply_change` fails when agreement is missing, approval was
+denied, a plan is stale, or the adapter did not apply the change. Its local
+approval interrupt still pauses and resumes the same call.
+
+After a store confirms a change, independent history, reporting, scheduler
+wake and inspection failures cannot change that success into a failed call.
+`custom_agents.change_followups` records each failed follow-up separately as
+`event=change_followup_failed` with the record id and step, and returns an
+explicit warning with the saved result. This prevents an agent from retrying
+a successful create and making a duplicate. Inspect the returned record id
+and address the warning instead. A schedule update that saves an expiration
+in the past succeeds and reports that the expired schedule was removed.
+
 Agent definitions are declarative and list the tools a type works with as tool
 catalog ids or tool set ids (`default_tools`, `custom_agents/default_tools.py`);
 the catalog maps them to reviewed callables (`access_catalog/tool_functions.py`).
@@ -2560,10 +2595,11 @@ hints without a process restart. External and hosted MCP tools enter through
 the same installed registry and the broker's per-call access check.
 
 A model often asks for several tool calls in one step, and Strands runs them
-side by side. Calls that change a stored record (a memory fact, a knowledge
-page, a schedule, an Objective, a heartbeat item or a file: operations with a
-`record_kind` in `functions.yaml`, `custom_messages.enums.ChangeRecordKind`)
-run first, one at a time, in the model's order
+side by side. Calls that change a stored record or apply an exact staged plan
+run first, one at a time, in the model's order. These operations name a
+`record_kind` in `functions.yaml` (`custom_messages.enums.ChangeRecordKind`):
+a memory fact, a knowledge page, a schedule, an Objective, a heartbeat item,
+a file or a staged change
 (`custom_agents/sdk/strands/changes_first.py`). When one does not go through
 (an error result, an access denial, or a pause for a person's decision), every
 later call of that step gets a "not run" error result instead of running; the
@@ -2580,6 +2616,16 @@ names none (it may say `none`), so a new action cannot change records without
 running first. The executor uses two
 private Strands names, guarded by `tests/test_changes_first_executor.py` on the
 locked SDK version.
+
+Knowledge curation changes follow this rule too, including publishing or
+rejecting contributions and resolving notes: these change the page's knowledge
+state even when they leave its body alone. `apply_change` always runs among
+the changes because it both waits for approval and applies the exact plan.
+System schedule tools only stage a plan, so ordering them without ordering
+`apply_change` would let other calls run before a schedule change was approved.
+All plan applications use `record_kind: staged_change`; ordering never reads
+the plan or decides access, and each existing change service still checks and
+applies its exact approved plan.
 
 Model providers sit behind factories and adapters, so task and message
 contracts do not depend on one provider. Context budgeting, compaction, and
