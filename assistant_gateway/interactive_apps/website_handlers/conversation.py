@@ -13,6 +13,7 @@ from assistant_gateway.application.commands.account_link import ACCOUNT_LINK_COM
 from assistant_gateway.domain.message_types import ACCOUNT_LINK_COMMAND_MESSAGE_TYPE
 from assistant_gateway.application.gateway_application import (
     GatewayApplicationResponse,
+    GatewaySession,
 )
 from assistant_gateway.application.transcript_service import TranscriptCursorError
 from assistant_gateway.application.website_application import (
@@ -35,7 +36,6 @@ from custom_messages.contracts.runtime_v1 import (
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from assistant_gateway.interactive_apps.website_support import (
     LOGGER,
-    WebChatSession,
     _CLIENT_ID_PATTERN,
     _WEB_CHAT_ALLOWED_COMMANDS,
     _WEB_CHAT_COMMAND_NOT_AVAILABLE,
@@ -335,38 +335,17 @@ class WebsiteConversationHandlers:
     async def _handle_web_chat_message(self, request: web.Request) -> web.Response:
         web_session = self.operations._require_web_chat_session(request)
         owner = self.operations._required_web_chat_owner(web_session)
-        payload, attachments = await self._web_chat_payload_and_attachments(
-            request, web_session
-        )
+        # Files are read here and saved only after every check below passes, so
+        # a refused, resent or misaddressed send leaves no file behind, least of
+        # all in another person's conversation.
+        payload, uploads = await self._web_chat_payload_and_uploads(request)
         text = str(payload.get("message") or "").strip()
-        if not text and not attachments:
+        if not text and not uploads:
             raise web.HTTPBadRequest(text="message is required.")
         client_request_id = self._required_client_request_id(payload)
-        session_key = str(payload.get("session_key") or "").strip()
-        if not session_key:
-            raise web.HTTPBadRequest(
-                text="session_key is required; create a Web Chat session first."
-            )
-        existing_session = self.application.sessions.get_session_details(session_key)
-        if (
-            existing_session is None
-            or not self.application.sessions.can_access_web_chat_session(
-                session_key=session_key,
-                owner_canonical_user_id=owner,
-            )
-        ):
-            raise web.HTTPNotFound(text="Thread not found.")
-        requested_conversation_id = (
-            str(payload.get("conversation_id") or "").strip() or None
+        session_key, existing_session = self._senders_web_chat_session(
+            payload, owner=owner
         )
-        if (
-            requested_conversation_id
-            and existing_session.conversation_id
-            and requested_conversation_id != existing_session.conversation_id
-        ):
-            raise web.HTTPConflict(
-                text="conversation_id does not match the server session."
-            )
         conversation_id = existing_session.conversation_id
         task_text = text or "User sent attachment(s)."
 
@@ -376,15 +355,27 @@ class WebsiteConversationHandlers:
             conversation_id=conversation_id,
             client_request_id=client_request_id,
             text=text,
-            has_attachments=bool(attachments),
+            has_attachments=bool(uploads),
         )
         if early_response is not None:
             return early_response
 
+        # A "?" with files is an ordinary message, not a progress question.
         has_pending_query = (
             False
-            if self.application.is_task_progress_status_request(text, attachments)
+            if not uploads and self.application.is_task_progress_status_request(text)
             else await self.application.has_pending_query(session_key)
+        )
+        if uploads and has_pending_query:
+            raise web.HTTPBadRequest(
+                text="Attachments are not supported while answering a pending task query."
+            )
+        # Saved under the checked conversation's own key, which names its owner
+        # (the browser may name the conversation by an alias).
+        attachments = self._store_web_chat_uploads(
+            uploads,
+            session_key=existing_session.session_key,
+            conversation_id=conversation_id,
         )
         if attachments:
             attachment_summary = [
@@ -440,6 +431,41 @@ class WebsiteConversationHandlers:
         web_response.headers["Cache-Control"] = "no-store"
         return web_response
 
+    def _senders_web_chat_session(
+        self,
+        payload: dict[str, Any],
+        *,
+        owner: str,
+    ) -> tuple[str, GatewaySession]:
+        """The conversation a send names, as named and as stored, when it is the sender's."""
+
+        session_key = str(payload.get("session_key") or "").strip()
+        if not session_key:
+            raise web.HTTPBadRequest(
+                text="session_key is required; create a Web Chat session first."
+            )
+        existing_session = self.application.sessions.get_session_details(session_key)
+        if (
+            existing_session is None
+            or not self.application.sessions.can_access_web_chat_session(
+                session_key=session_key,
+                owner_canonical_user_id=owner,
+            )
+        ):
+            raise web.HTTPNotFound(text="Thread not found.")
+        requested_conversation_id = (
+            str(payload.get("conversation_id") or "").strip() or None
+        )
+        if (
+            requested_conversation_id
+            and existing_session.conversation_id
+            and requested_conversation_id != existing_session.conversation_id
+        ):
+            raise web.HTTPConflict(
+                text="conversation_id does not match the server session."
+            )
+        return session_key, existing_session
+
     async def _submit_web_chat_turn(
         self,
         *,
@@ -480,10 +506,7 @@ class WebsiteConversationHandlers:
             return response, tuple(
                 message for message in exchange if message is not None
             )
-        if attachments:
-            raise web.HTTPBadRequest(
-                text="Attachments are not supported while answering a pending task query."
-            )
+        # The handler refuses files while a question waits, before saving them.
         acceptance = self.application.transcripts.record_local_user_message(
             owner_canonical_user_id=owner,
             session_key=session_key,
@@ -867,11 +890,12 @@ class WebsiteConversationHandlers:
             )
         return client_request_id
 
-    async def _web_chat_payload_and_attachments(
+    async def _web_chat_payload_and_uploads(
         self,
         request: web.Request,
-        web_session: WebChatSession,
-    ) -> tuple[dict[str, Any], list[UserTaskAttachment]]:
+    ) -> tuple[dict[str, Any], list[Any]]:
+        """The send's fields and its uploaded file parts, read but not saved."""
+
         if not request.content_type.startswith("multipart/"):
             return await self.operations._json_payload(request), []
 
@@ -879,45 +903,59 @@ class WebsiteConversationHandlers:
             raise web.HTTPBadRequest(text="Web Chat attachments are disabled.")
         form = await request.post()
         payload: dict[str, Any] = {}
-        file_fields: list[Any] = []
+        uploads: list[Any] = []
         for key, value in form.items():
             if hasattr(value, "file") and hasattr(value, "filename"):
-                file_fields.append(value)
+                uploads.append(value)
             else:
                 payload[str(key)] = str(value)
+        return payload, uploads
 
-        self.operations._required_web_chat_owner(web_session)
-        session_key = str(payload.get("session_key") or "").strip()
-        if not session_key:
-            raise web.HTTPBadRequest(
-                text="session_key is required before uploading attachments."
-            )
-        conversation_id = str(payload.get("conversation_id") or "").strip() or None
-        payload["session_key"] = session_key
-        if conversation_id:
-            payload["conversation_id"] = conversation_id
+    def _store_web_chat_uploads(
+        self,
+        uploads: list[Any],
+        *,
+        session_key: str,
+        conversation_id: str | None,
+    ) -> list[UserTaskAttachment]:
+        """Save and record the files of a send that passed every check.
 
-        attachments: list[UserTaskAttachment] = []
-        for file_field in file_fields:
-            try:
-                source = getattr(file_field, "file", None)
-                if source is None:
-                    raise AttachmentValidationError(
-                        f"{getattr(file_field, 'filename', None) or 'attachment'} "
-                        "did not include file bytes."
-                    )
-                stored = require_website_runtime(self.runtime).attachments.store_bytes(
-                    data=source.read(),
-                    filename=str(getattr(file_field, "filename", None) or "attachment"),
-                    content_type=str(getattr(file_field, "content_type", "") or ""),
+        Every file is checked before any is saved, so a refused file leaves the
+        send's other files unsaved too. A whole send is at most one file's size
+        limit plus 2 MB (the app's ``client_max_size``), so holding its files in
+        memory is bounded.
+        """
+
+        if not uploads:
+            return []
+        store = require_website_runtime(self.runtime).attachments
+        try:
+            files = [_upload_file(upload) for upload in uploads]
+            for data, filename, content_type in files:
+                store.check_bytes(data=data, filename=filename, content_type=content_type)
+            return [
+                store.store_bytes(
+                    data=data,
+                    filename=filename,
+                    content_type=content_type,
                     session_key=session_key,
                     conversation_id=conversation_id,
                     origin="web_chat",
-                )
-            except AttachmentValidationError as exc:
-                raise web.HTTPBadRequest(text=str(exc)) from exc
-            attachments.append(stored.attachment)
-        return payload, attachments
+                ).attachment
+                for data, filename, content_type in files
+            ]
+        except AttachmentValidationError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
 
     def _web_chat_help(self) -> str:
         return build_web_chat_help()
+
+
+def _upload_file(upload: Any) -> tuple[bytes, str, str]:
+    """An uploaded file part's bytes, name and content type."""
+
+    filename = str(getattr(upload, "filename", None) or "attachment")
+    source = getattr(upload, "file", None)
+    if source is None:
+        raise AttachmentValidationError(f"{filename} did not include file bytes.")
+    return source.read(), filename, str(getattr(upload, "content_type", "") or "")

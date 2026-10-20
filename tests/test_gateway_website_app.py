@@ -6,11 +6,13 @@ import asyncio
 import inspect
 import json
 import re
+import sqlite3
 import tempfile
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from aiohttp import FormData, web
@@ -3901,6 +3903,214 @@ async def test_internal_website_web_chat_attachment_only_message_is_allowed(
     assert sent["text"] == "User sent attachment(s)."
     assert len(sent["attachments"]) == 1
     assert sent["attachments"][0].kind == "image"
+
+
+_NOTES_FILE = ("notes.txt", b"upload bytes", "text/plain")
+
+
+def _upload_form(
+    *,
+    session_key: str,
+    client_request_id: str,
+    message: str = "Please read this.",
+    conversation_id: str | None = None,
+    files: tuple[tuple[str, bytes, str], ...] = (_NOTES_FILE,),
+) -> FormData:
+    form = FormData()
+    form.add_field("message", message)
+    form.add_field("session_key", session_key)
+    if conversation_id is not None:
+        form.add_field("conversation_id", conversation_id)
+    form.add_field("client_request_id", client_request_id)
+    for filename, data, content_type in files:
+        form.add_field(
+            "attachments[]", BytesIO(data), filename=filename, content_type=content_type
+        )
+    return form
+
+
+def _saved_uploads(config: GatewayInstanceConfig, database: Path) -> tuple[int, int]:
+    """Upload files on disk and upload records in the gateway database."""
+
+    uploads_dir = config.layout.uploads_dir
+    files = (
+        sum(1 for path in uploads_dir.rglob("*") if path.is_file())
+        if uploads_dir.exists()
+        else 0
+    )
+    with sqlite3.connect(database) as conn:
+        (records,) = conn.execute("SELECT COUNT(*) FROM gateway_attachments").fetchone()
+    return files, records
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "session_key",
+    ["website:web-chat:beta_thread", "website:web-chat:no_such_thread"],
+    ids=["another-persons-conversation", "unknown-conversation"],
+)
+async def test_web_chat_upload_to_a_conversation_the_sender_does_not_own_saves_nothing(
+    tmp_path: Path,
+    session_key: str,
+) -> None:
+    """Files are saved only once the conversation is known to be the sender's.
+
+    Before, the files were saved and recorded under the named conversation, as
+    its owner's, and only then refused, so they stayed in another person's folder.
+    """
+
+    config = _config(tmp_path)
+    config.interactive_apps.internal_website.web_chat_enabled = True
+    database = tmp_path / "gateway.db"
+    store = GatewayStateStore(str(database))
+    gateway = _StatefulFakeGateway(store)
+    gateway.identity_service.resolve_web_token = lambda raw_token: (
+        SimpleNamespace(
+            user=SimpleNamespace(canonical_user_id="user_alpha", display_name="Alice")
+        )
+        if raw_token == "ua_user_token"
+        else None
+    )
+    store.create_session(
+        session_key="website:web-chat:beta_thread",
+        conversation_id="conv_beta",
+        manager_agent_id="manager_1",
+        channel_name="website",
+        user_id="user_beta",
+        chat_id="web-chat",
+        owner_canonical_user_id="user_beta",
+    )
+    app = InternalWebsiteInteractiveApp(
+        config, gateway=gateway, bridge=SimpleNamespace()
+    )
+
+    async with TestClient(TestServer(app.build_app())) as client:
+        response = await client.post(
+            "/api/web-chat/chat",
+            headers=await _signed_in(client, "ua_user_token"),
+            data=_upload_form(session_key=session_key, client_request_id="upload_1"),
+        )
+
+    assert response.status == 404
+    assert gateway.sent_user_messages == []
+    assert _saved_uploads(config, database) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_web_chat_resent_upload_gets_the_first_answer_without_saving_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A browser retry of a send with files returns the first send's messages and saves nothing new."""
+
+    config = _config(tmp_path)
+    _enable_web_chat(config, monkeypatch)
+    database = tmp_path / "gateway.db"
+    store = GatewayStateStore(str(database))
+    store.create_session(
+        session_key="website:web-chat:retry_thread",
+        conversation_id="conv_retry",
+        manager_agent_id="manager_1",
+        channel_name="website",
+        user_id=config.user.canonical_user_id,
+        chat_id="web-chat",
+        owner_canonical_user_id=config.user.canonical_user_id,
+    )
+    gateway = _StatefulFakeGateway(store)
+    app = InternalWebsiteInteractiveApp(
+        config, gateway=gateway, bridge=SimpleNamespace()
+    )
+
+    async with TestClient(TestServer(app.build_app())) as client:
+        headers = await _signed_in(client)
+        responses = [
+            await client.post(
+                "/api/web-chat/chat",
+                headers=headers,
+                data=_upload_form(
+                    session_key="website:web-chat:retry_thread",
+                    client_request_id="upload_retry_1",
+                ),
+            )
+            for _ in range(2)
+        ]
+        first, resent = [await response.json() for response in responses]
+
+    assert [response.status for response in responses] == [200, 200]
+    assert [message["message_id"] for message in resent["messages"]] == [
+        message["message_id"] for message in first["messages"]
+    ]
+    assert len(gateway.sent_user_messages) == 1
+    assert _saved_uploads(config, database) == (1, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("form_fields", "waiting_for_answer", "status"),
+    [
+        pytest.param({"message": "/help"}, False, 400, id="slash-command"),
+        pytest.param(
+            {"conversation_id": "conv_other"}, False, 409, id="other-conversation-id"
+        ),
+        pytest.param(
+            {"client_request_id": "not a request id"}, False, 400, id="bad-request-id"
+        ),
+        pytest.param({}, True, 400, id="assistant-waits-for-an-answer"),
+        # The first file passes its checks, the second does not.
+        pytest.param(
+            {"files": (_NOTES_FILE, ("run.sh", b"echo hello", "text/x-shellscript"))},
+            False,
+            400,
+            id="a-later-file-is-refused",
+        ),
+    ],
+)
+async def test_web_chat_refused_upload_saves_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    form_fields: dict[str, Any],
+    waiting_for_answer: bool,
+    status: int,
+) -> None:
+    """Every refusal of a send with files comes before the files are saved."""
+
+    config = _config(tmp_path)
+    _enable_web_chat(config, monkeypatch)
+    database = tmp_path / "gateway.db"
+    store = GatewayStateStore(str(database))
+    # The fake gateway has a question waiting only in "pending_session".
+    store.create_session(
+        session_key="pending_session",
+        conversation_id="conv_pending",
+        manager_agent_id="manager_1",
+        channel_name="website",
+        user_id=config.user.canonical_user_id,
+        chat_id="web-chat",
+        owner_canonical_user_id=config.user.canonical_user_id,
+    )
+    gateway = _StatefulFakeGateway(store)
+    if waiting_for_answer:
+        gateway.pending_query = object()
+    app = InternalWebsiteInteractiveApp(
+        config, gateway=gateway, bridge=SimpleNamespace()
+    )
+    fields = {
+        "session_key": "pending_session",
+        "client_request_id": "upload_refused_1",
+        **form_fields,
+    }
+
+    async with TestClient(TestServer(app.build_app())) as client:
+        response = await client.post(
+            "/api/web-chat/chat",
+            headers=await _signed_in(client),
+            data=_upload_form(**fields),
+        )
+
+    assert response.status == status
+    assert gateway.sent_user_messages == []
+    assert gateway.replies_to_pending == []
+    assert _saved_uploads(config, database) == (0, 0)
 
 
 @pytest.mark.asyncio

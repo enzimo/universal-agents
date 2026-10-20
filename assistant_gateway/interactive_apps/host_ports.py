@@ -11,6 +11,7 @@ from assistant_gateway.attachments import StagedAttachmentReader
 from assistant_gateway.inbound_attachments import (
     InboundAttachmentStoragePolicy,
     StoredInboundAttachment,
+    check_inbound_attachment_bytes,
     store_inbound_attachment_bytes_with_policy,
 )
 from assistant_gateway.interactive_apps.contracts import InteractiveAppApplication
@@ -23,6 +24,10 @@ from custom_messages.contracts.attachments_v1 import AttachmentOrigin
 
 class InteractiveAppAttachmentStore(Protocol):
     """Validate/store bytes without exposing a repository or aggregate config."""
+
+    def check_bytes(self, *, data: bytes, filename: str, content_type: str) -> None:
+        """Refuse an upload ``store_bytes`` would refuse, without saving anything."""
+        ...
 
     def store_bytes(
         self,
@@ -50,6 +55,11 @@ class LocalInteractiveAppAttachmentStore:
         self._policy = policy
         self._application = application
         self._register_with_application = register_with_application
+
+    def check_bytes(self, *, data: bytes, filename: str, content_type: str) -> None:
+        check_inbound_attachment_bytes(
+            data=data, filename=filename, content_type=content_type, policy=self._policy
+        )
 
     def store_bytes(
         self,
