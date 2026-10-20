@@ -936,6 +936,12 @@ async def _run_resumed_turn(
         msg_meta=session.msg_meta,
     )
 
+    await agent.turn_executor.prepare_turn_decision(
+        msg_content=session.msg_content, msg_header=session.msg_header, msg_meta=session.msg_meta,
+        task_id=task_id, decision=outcome.decision, strands_agent=session.strands_agent,
+        decision_tool_name=getattr(session.invoke_kwargs.get("structured_output_model"), "__name__", ""),
+    )
+
     content = await agent._execute_turn_decision_outbox(
         decision=outcome.decision,
         incoming_content=session.msg_content,

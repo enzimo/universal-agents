@@ -10,6 +10,7 @@ from functools import partial
 from typing import Any, List, Optional
 
 from custom_agents.control_runtime import handle_interrupted_turn
+from custom_agents.turn_failure_runtime import settle_failed_turn
 from custom_agents.conversation_runtime import finalize_conversation_turn
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.task_manager import TaskInfo
@@ -173,50 +174,11 @@ async def _resume_parent_task_if_ready(self, parent_task_id: str) -> None:
             self, task_id=parent_task_id, task_info=parent_task_info
         )
     except Exception as e:
-        self._logger.error(
-            f"[{self.id}] Error resuming parent task {parent_task_id}: {e}"
-        )
-        now_ts = datetime.now(timezone.utc).isoformat()
-        parent_task_info = await self.task_manager.operations_runtime.run(
-            self.task_manager.update_task_result,
-            parent_task_info.task.task_id,
-            TaskResultUpdate(
-                errors=list(parent_task_info.task.errors or [])
-                + [f"Error resuming after subtasks: {e}"]
-            ),
-        )
-        if parent_task_info is None:
-            return
-        await finalize_conversation_turn(
-            conversation_store=self._conversation_store,
-            conversation_compactor=self._conversation_compactor,
-            conversation_artifact_offloader=self._conversation_artifact_offloader,
-            strands_messages=list(getattr(self._strands_agent, "messages", []) or []),
-            task_manager=self.task_manager,
-            task_info=parent_task_info,
-            task_status=ProgressState.FAILED.value,
-            logger=self._logger,
-            agent_id=self.id,
-            team_id=self.team_id,
-            named_agent_type=self.named_agent_type,
-            summary_generator=self._conversation_summary_generator,
-        )
-        await self._notify_context_after_turn(
-            task_info=parent_task_info,
-            task_status=ProgressState.FAILED.value,
-        )
-        await self.task_manager.operations_runtime.run(
-            self.task_manager.fail_task,
-            parent_task_id,
-            f"Error resuming after subtasks: {e}",
-            now_ts,
-        )
-        await self._send_task_error_response(
-            parent_task_info.task,
-            parent_task_info.header,
-            parent_task_info.meta,
-            f"Error resuming after subtasks: {e}",
-        )
+        # The one failed-turn handling (turn_failure_runtime): a hand-off is
+        # logged, anything else fails the task and tells its requester, and a
+        # wait-limit stop also tells the person. Before 2026-10-19 this path
+        # failed the task itself, so a failover hand-off was failed too.
+        await settle_failed_turn(self, parent_task_id, parent_task_info, e)
     finally:
         await self._refresh_self_agent_state()
 

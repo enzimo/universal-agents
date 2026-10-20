@@ -225,10 +225,24 @@ class DefaultContextEngine:
             source="instance_delivery_context.build_instance_delivery_context",
         )
 
-        if isinstance(request.incoming_content, Task) and request.incoming_content.task_type == MessageMetaType.REQUEST:
+        incoming_task = (
+            request.incoming_content
+            if isinstance(request.incoming_content, Task)
+            and request.incoming_content.task_type == MessageMetaType.REQUEST
+            else None
+        )
+        # What earlier turns of this task did before it waited
+        # (custom_agents.turn_work_notes); empty on the task's first turn.
+        earlier_turn_work = (
+            self.task_manager.render_earlier_turn_work_markdown(request.execution_task_id)
+            if incoming_task is not None
+            else ""
+        )
+        if incoming_task is not None:
             current_request_context = render_current_request_context(
-                request.incoming_content,
+                incoming_task,
                 request.incoming_meta,
+                continuing=bool(earlier_turn_work),
             )
             if current_request_context:
                 sections.append(
@@ -269,6 +283,7 @@ class DefaultContextEngine:
                     pinned=True,
                     source="TaskManager.render_task_query_history_markdown",
                 )
+                self._append_earlier_turn_work(sections, prompt_parts, earlier_turn_work)
             if not request.isolated_recovery_task and not request.plan_step_task:
                 if self.memory_plugin_manager is not None:
                     for memory_section in self.memory_plugin_manager.hydrate(request):
@@ -344,6 +359,7 @@ class DefaultContextEngine:
                     pinned=True,
                     source="TaskManager.summarize_task_history_markdown",
                 )
+                self._append_earlier_turn_work(sections, prompt_parts, earlier_turn_work)
 
                 task_runtime_timing_context = (
                     ""
@@ -588,6 +604,21 @@ class DefaultContextEngine:
         if "tool_setup_context" in degraded_sections:
             return ""
         return self.adapters.build_tool_setup_context(request.incoming_meta)
+
+    def _append_earlier_turn_work(
+        self, sections: list[ContextSection], prompt_parts: list[str], text: str
+    ) -> None:
+        """Pinned: without it a resumed turn starts its task over (turn_work_notes)."""
+
+        self._append_prompt_section(
+            sections,
+            prompt_parts,
+            name="earlier_turn_work",
+            text=text,
+            priority=72,
+            pinned=True,
+            source="TaskManager.render_earlier_turn_work_markdown",
+        )
 
     def _append_prompt_section(
         self,

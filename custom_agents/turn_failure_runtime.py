@@ -45,6 +45,7 @@ from custom_agents.objective_work_completion import ObjectiveWorkCompletionError
 from custom_agents.provider_error_runtime import ProviderTimeoutError, iter_exception_chain
 from custom_agents.provider_limits import ProviderLimitExhausted
 from custom_agents.runtime_recovery import fail_recovered_executing_task
+from custom_agents.task_wait_limit import TaskWaitLimitReached, tell_person_about_wait_limit
 from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
 from custom_messages.enums import ProgressState
 
@@ -77,7 +78,7 @@ def task_runtime_error_message(error: Exception) -> str:
     key_error = _model_key_error(error)
     if key_error is not None:
         return str(key_error)
-    if isinstance(error, (ProviderTimeoutError, ObjectiveWorkCompletionError, ProviderLimitExhausted)):
+    if isinstance(error, (ProviderTimeoutError, ObjectiveWorkCompletionError, ProviderLimitExhausted, TaskWaitLimitReached)):
         return str(error)
     if isinstance(error, MaxTokensReachedException):
         return f"Runtime error: {MODEL_OUTPUT_LIMIT_MESSAGE}"
@@ -98,6 +99,11 @@ def _log_turn_failure(agent: Any, task_id: str, error: Exception) -> None:
             "event=objective_work_completion_rejected task_id=%s session_id=%s "
             "objective_id=%s schedule_id=%s reason=%s outcome=failed message=%s",
             task_id, error.session_id, error.objective_id, error.schedule_id, error.reason, error,
+        )
+    elif isinstance(error, TaskWaitLimitReached):
+        logger.warning(
+            "[%s] event=task_wait_limit_failed task_id=%s waits=%s limit=%s outcome=failed",
+            agent.id, task_id, error.waits, error.limit,
         )
     elif isinstance(error, UnroutableTaskInterruptError):
         logger.warning("event=task_input_unroutable task_id=%s outcome=failed message=%s", task_id, error)
@@ -172,6 +178,9 @@ async def fail_task_after_turn_error(agent: Any, task_id: str, task_info: Any, e
         # The typed reason travels with the failure, for the requester's trusted code.
         failed_task = failed_task.model_copy(update={"failure": error.failure})
     await agent._send_task_error_response(failed_task, task_info.header, task_info.meta, runtime_error)
+    if isinstance(error, TaskWaitLimitReached):
+        # A scheduled run's failure goes to the scheduler; tell the person too.
+        await tell_person_about_wait_limit(agent, task_info, error)
 
 
 async def settle_failed_turn(agent: Any, task_id: str, task_info: Any, error: Exception) -> None:
@@ -244,6 +253,7 @@ __all__ = [
     "MODEL_OUTPUT_LIMIT_MESSAGE",
     "ORPHANED_SLOT_MESSAGE",
     "TURN_HANDED_OFF",
+    "TaskWaitLimitReached",
     "UnroutableTaskInterruptError",
     "fail_task_after_turn_error",
     "release_orphaned_execution_slot",

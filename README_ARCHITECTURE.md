@@ -999,6 +999,37 @@ later turn act on it again; a repeated delegation is not deduplicated across
 turns. Details are in the runtime execution architecture document of the
 ua-architecture repository ("Pending work and shutdown", "Context assembly").
 
+Each model turn starts with an empty model conversation, so a later turn of a
+task knows only the task's saved history. When a turn ends with its task still
+open (it delegated, escalated, asked a question, sent a credential form, or
+paused at its tool-call budget), trusted code saves what the turn did before
+anything is sent: the tools it called with short input previews and their
+results, and what it sent (`custom_agents/turn_work_notes.py`). Every later
+turn of the task shows this as "Work already done in this task", says the
+task is continuing and labels its request accordingly. Rationale: without it a
+resumed turn saw only the original request and did the work again; a scheduled
+audit that escalated its findings re-ran itself after every reply from the team
+lead.
+
+Fresh invocations and live SDK interrupt resumes share the same decision
+checks and work recording before dispatch. A resumed session records its own
+model messages even when another task replaced the facade's current model.
+Copied child history stays available as history, but does not count as the
+parent's own work notes or waits.
+
+As a backstop, one task may send something out and wait for it at most five
+times (`MAX_WAITS_PER_TASK` in `custom_agents/task_wait_limit.py`): a
+delegation, an escalation, a question or a credential form. A turn that would
+start a sixth wait is refused before it sends anything, and the task fails with
+a plain explanation; for a scheduled run the person also gets a chat message.
+A worker's report to TeamLead (`worker_result`) is not a wait: it is sent as
+its own task that gets no reply (`custom_agents/worker_result_reports.py`).
+It retains its source task as parent without registering a pending subtask,
+so the worker finishes immediately and the report cannot close the original
+person's request ledger. Ordinary delegated work still answers its requester.
+The limit is fixed in code because a setting would change the team transfer's
+settings format.
+
 ## Authorization and credentials
 
 Every trust boundary keeps its own deterministic checks. These include gateway

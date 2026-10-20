@@ -441,7 +441,10 @@ def test_the_owner_has_no_roles_unless_the_gateway_recorded_them_as_active(world
 
 
 @pytest.mark.asyncio
-async def test_the_team_leads_admission_signs_the_escalation_for_the_owner(tmp_path, monkeypatch) -> None:
+# A delegated escalation has the worker's task as parent; a worker_result
+# report is its own task with none (custom_agents.worker_result_reports).
+@pytest.mark.parametrize("parent_task_id", ["worker_task_1", None])
+async def test_the_team_leads_admission_signs_the_escalation_for_the_owner(tmp_path, monkeypatch, parent_task_id) -> None:
     from custom_agents import task_message_runtime
     from custom_messages.enums import SystemScheduleKind
     from tests.test_turn_action_outbox import _make_agent
@@ -472,7 +475,7 @@ async def test_the_team_leads_admission_signs_the_escalation_for_the_owner(tmp_p
     try:
         await task_message_runtime._handle_task_request(
             lead,
-            Task(task_id="escalation_1", parent_task_id="worker_task_1", task_type=MessageMetaType.REQUEST),
+            Task(task_id="escalation_1", parent_task_id=parent_task_id, task_type=MessageMetaType.REQUEST),
             MessageHeader(from_agent_id="worker_1", response_routing_key="worker_1"),
             escalation,
         )

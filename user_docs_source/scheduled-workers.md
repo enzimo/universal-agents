@@ -569,6 +569,19 @@ The existing delegated-task workflow waits for the lead's repair. A review messa
 does not itself give access; the concrete operation must pass its normal checks
 when execution resumes. Never put credentials in schedule requirements or messages.
 
+When a run has results for you (for example what it changed), the worker sends
+TeamLead a report and finishes the run in the same step; it does not wait for a
+reply. TeamLead decides whether to message you about it. A worker waits for
+TeamLead only when it needs something: your input, a decision, or help from
+another specialist.
+
+A task may send something out and wait for it at most five times. A task that
+would wait a sixth time is probably repeating itself, so it is stopped: nothing
+more is sent, and for a scheduled run you get a chat message saying so.
+Changes it already made are kept.
+The limit counts that task's own waits, including after access or setup
+approval. A child task's waits do not use its parent's allowance.
+
 ## Change the worker or launch rules
 
 ### Custom agent types

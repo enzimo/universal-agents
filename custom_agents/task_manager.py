@@ -57,6 +57,7 @@ from custom_messages.contracts.runtime_snapshot_v3 import (
     TurnActionOutboxRecord,
 )
 from custom_agents.task_records import AfterActionReportRecordResult, ReportedWorkIdentity, TaskInfo
+from custom_agents.turn_work_notes import note_summary, render_earlier_turn_work, turn_work_notes
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import (
     AfterActionReport,
@@ -2047,6 +2048,38 @@ class TaskManager(
             agent_name=agent_name,
             agent_id=agent_id,
         )
+
+    def record_turn_work(
+        self,
+        task_id: str,
+        details: Dict[str, Any],
+        *,
+        agent_name: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> Optional[TaskHistoryEntry]:
+        """Save what a turn did before its task waited (``custom_agents.turn_work_notes``)."""
+        return self.append_history_entry(
+            task_id,
+            note_summary(details),
+            source=TaskHistorySource.SYSTEM,
+            entry_type=TaskHistoryType.TASK_EVENT,
+            importance=TaskHistoryImportance.HIGH,
+            agent_name=agent_name,
+            agent_id=agent_id,
+            details=details,
+        )
+
+    def count_started_waits(self, task_id: str) -> int:
+        """How often the task's turns sent something out and waited for it (``task_wait_limit``)."""
+        return sum(
+            1 for entry in turn_work_notes(self.get_task(task_id)) if (entry.details or {}).get("started_wait")
+        )
+
+    def render_earlier_turn_work_markdown(self, task_id: Optional[str]) -> str:
+        """The "Work already done in this task" prompt section ("" on a task's first turn)."""
+        if not task_id:
+            return ""
+        return render_earlier_turn_work(turn_work_notes(self.get_task(task_id)))
 
     def log_agent_note(
         self,

@@ -77,7 +77,7 @@ from custom_agents.model_runtime_profile import (
     runtime_llm_profile_from_agent,
 )
 from env_secrets import get_env_with_file_fallback
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter
 from strands import Agent
 from strands.agent.agent_result import AgentResult
 
@@ -250,6 +250,7 @@ from custom_agents import delegation_runtime
 from custom_agents import subtask_watchdog_runtime
 from custom_agents import turn_action_outbox_runtime
 from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
+from custom_agents.task_wait_limit import MAX_WAITS_PER_TASK
 from custom_agents.task_steering_runtime import (
     RuntimeSteeringPlugin,
     StrandsInterruptedTurnSession,
@@ -274,7 +275,6 @@ from custom_agents.task_runtime_coordinator import (
 )
 from custom_agents.schedule_store import ScheduleStore, schedule_claim_scope_for_agent
 from custom_agents.structured_llm_messages import (
-    StructuredAgentTurnDecision,
     TurnAction,
 )
 from custom_agents.task_manager import TaskInfo, TaskManager
@@ -365,6 +365,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 DEFAULT_TEAM_ID = AGENT_DEFAULTS.no_team_id.value
+_TURN_ACTION_ADAPTER = TypeAdapter(TurnAction)
 MARKDOWN_FENCE_PATTERN = re.compile(r"(?<!\\)```")
 MARKDOWN_INLINE_CODE_PATTERN = re.compile(r"(?<!\\)`")
 MARKDOWN_BOLD_PATTERN = re.compile(r"(?<!\\)\*\*")
@@ -4408,10 +4409,9 @@ class UniversalAgent(BaseModel):
 
     def _turn_action_from_outbox_record(self, record: Any) -> TurnAction:
         action_payload = dict(record.payload_json.get("action") or {})
-        decision = StructuredAgentTurnDecision.model_validate(
-            {"actions": [action_payload]}
-        )
-        return decision.actions[0]
+        # The full batch was validated before persistence. Recovery reads one
+        # action, which may require a later response in its original batch.
+        return _TURN_ACTION_ADAPTER.validate_python(action_payload)
 
     async def _ensure_turn_action_source_task(
         self,
@@ -6062,6 +6062,8 @@ class UniversalAgent(BaseModel):
                     read_partial_tool_call_limit=self.task_manager.read_partial_tool_call_limit,
                     read_runtime_resume_directive=self.task_manager.read_runtime_resume_directive,
                     release_turn_start_notes=self.task_manager.release_turn_start_notes,
+                    record_turn_work=self.task_manager.record_turn_work,
+                    count_started_waits=self.task_manager.count_started_waits,
                     count_recoverable_pauses=self.task_manager.count_recoverable_pauses,
                     get_task_info=self.task_manager.get_task_info,
                     is_isolated_recovery_task=self.task_manager.is_isolated_recovery_task,
@@ -6156,6 +6158,7 @@ class UniversalAgent(BaseModel):
             workspace_dir=self.workspace_dir,
             instance_root=self.instance_root,
             is_team_lead=bool(self.is_team_lead),
+            max_waits_per_task=MAX_WAITS_PER_TASK,
         ))
 
     def _transform_turn_result(

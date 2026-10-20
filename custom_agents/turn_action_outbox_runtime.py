@@ -19,6 +19,8 @@ from custom_agents.delegated_work_runtime import (
 )
 from custom_agents.pending_work_runtime import wake_pending_work_after
 from custom_agents.task_runtime_state import TurnStartNotes
+from custom_agents.task_records import TaskInfo
+from custom_agents.worker_result_reports import is_worker_result_report, prepare_worker_result_report
 from custom_agents.conversation_delivery_states import (
     DELIVERY_STATE_NOTIFICATION_QUEUED,
     DELIVERY_STATE_SUPPRESSED,
@@ -127,6 +129,27 @@ def _external_wait_barrier_reason(content: ContentType) -> str | None:
     return None
 
 
+def _is_report_from_worker(self: Any, comms_message: CommsMessage, incoming_content: ContentType) -> bool:
+    """A worker's ``worker_result`` escalation for its own task (``worker_result_reports``)."""
+
+    return (
+        getattr(self, "named_agent_type", None) != TEAM_ARCHITECT_AGENT_TYPE
+        and isinstance(incoming_content, Task)
+        and incoming_content.task_type == MessageMetaType.REQUEST
+        and is_worker_result_report(comms_message.msg_meta)
+    )
+
+
+async def _incoming_task_info(self: Any, incoming_content: ContentType) -> TaskInfo:
+    task_id = getattr(incoming_content, "task_id", None)
+    task_info: Optional[TaskInfo] = await self.task_manager.operations_runtime.run(
+        self.task_manager.get_task_info, task_id
+    )
+    if task_info is None:
+        raise RuntimeError(f"Cannot send a report for task {task_id}: its local task record is missing.")
+    return task_info
+
+
 def _validate_manager_mediated_worker_delegation(self, action: TurnAction) -> None:
     if not isinstance(action, DelegateTaskAction):
         return
@@ -150,7 +173,6 @@ def _comms_message_from_turn_action(self, action: TurnAction) -> Optional[CommsM
             to_named_agent_type=action.target_named_agent_type,
             to_agent_name=action.target_agent_name,
             requester_type=action.requester_type,
-            is_response_requested=action.is_response_requested,
             manager_escalation=action.manager_escalation,
         )
         # A delegation is always a new task, so its id is generated, never taken
@@ -605,20 +627,24 @@ async def _should_suppress_timer_response_after_notify_user(
     return await _timer_task_already_used_notify_user(self, incoming_content.task_id)
 
 
-def _should_suppress_unrequested_top_level_agent_response(
+def _should_suppress_unrequested_agent_response(
     *,
     incoming_content: ContentType,
     incoming_meta: MessageMeta,
     outgoing_content: ContentType,
 ) -> bool:
-    """Honor fire-and-forget semantics for top-level tasks sent by another agent."""
+    """Honor no-reply tasks while ordinary delegated work always answers.
+
+    Reports keep source parentage for identity and request lifecycle, without
+    making their sender wait for an acknowledgment.
+    """
     if not (
         isinstance(incoming_content, Task)
         and isinstance(outgoing_content, Task)
         and incoming_content.task_type == MessageMetaType.REQUEST
         and outgoing_content.task_type == MessageMetaType.RESPONSE
         and outgoing_content.task_id == incoming_content.task_id
-        and incoming_content.parent_task_id is None
+        and (incoming_content.parent_task_id is None or is_worker_result_report(incoming_meta))
     ):
         return False
     return (
@@ -672,9 +698,6 @@ def _turn_decision_from_comms_message(
                         ),
                         target_agent_name=getattr(meta, "to_agent_name", None),
                         requester_type=getattr(meta, "requester_type", None),
-                        is_response_requested=bool(
-                            getattr(meta, "is_response_requested", True)
-                        ),
                     )
                 ]
             )
@@ -1122,6 +1145,17 @@ async def _schedule_turn_action_recovery(
     raise exc
 
 
+def _is_waiting_delegation(content: Any, meta: MessageMeta) -> bool:
+    """Source lineage does not imply the sender waits for a report's reply."""
+
+    return (
+        isinstance(content, Task)
+        and content.task_type == MessageMetaType.REQUEST
+        and bool(content.parent_task_id)
+        and not (is_worker_result_report(meta) and meta.is_response_requested is False)
+    )
+
+
 async def _record_delegation_before_publish(
     self: Any, content: Any, meta: MessageMeta, named_agent_type: Optional[str]
 ) -> None:
@@ -1130,11 +1164,7 @@ async def _record_delegation_before_publish(
     A free worker can take the task and its claim can be handled before the
     publish call returns (``delegated_work_runtime.record_publication``).
     """
-    if not (
-        isinstance(content, Task)
-        and content.task_type == MessageMetaType.REQUEST
-        and content.parent_task_id
-    ):
+    if not _is_waiting_delegation(content, meta):
         return
     await self.task_manager.operations_runtime.run(
         partial(
@@ -1317,6 +1347,16 @@ async def _execute_turn_action_record(
     if isinstance(content, Task):
         if suppress_outbound_dispatch and post_activation_guard_content is not None:
             pass
+        elif content.task_type == MessageMetaType.REQUEST and _is_report_from_worker(
+            self, comms_message, incoming_content
+        ):
+            content, header, meta = await prepare_worker_result_report(
+                self,
+                comms_message=comms_message,
+                parent_task_info=await _incoming_task_info(self, incoming_content),
+                header=header,
+                record_id=record_id,
+            )
         elif content.task_type == MessageMetaType.REQUEST:
             existing_delegated_task_id = delegated_side_effects.get("delegated_task_id")
             if existing_delegated_task_id:
@@ -1435,7 +1475,7 @@ async def _execute_turn_action_record(
                     )
                     auto_suppressed_unrequested_agent_response = (
                         not explicit_suppressed_response
-                        and _should_suppress_unrequested_top_level_agent_response(
+                        and _should_suppress_unrequested_agent_response(
                             incoming_content=incoming_content,
                             incoming_meta=incoming_meta,
                             outgoing_content=content,
@@ -1691,9 +1731,7 @@ async def _execute_turn_action_record(
         )
     else:
         if (
-            isinstance(content, Task)
-            and content.task_type == MessageMetaType.REQUEST
-            and content.parent_task_id
+            _is_waiting_delegation(content, meta)
             and not delegated_target_verified
         ):
             target_agent_name = getattr(meta, "to_agent_name", None)
@@ -1717,14 +1755,10 @@ async def _execute_turn_action_record(
         record_id,
         status=TURN_ACTION_HELD_BACK if held_back else "dispatched",
         phase="publish",
-        side_effects=None if suppress_outbound_dispatch else _publish_confirmation(content, publish_sequence),
+        side_effects=None if suppress_outbound_dispatch else _publish_confirmation(content, meta, publish_sequence),
     )
 
-    if (
-        isinstance(content, Task)
-        and content.task_type == MessageMetaType.REQUEST
-        and content.parent_task_id
-    ):
+    if _is_waiting_delegation(content, meta):
         await _after_delegation_published(
             self,
             record_id=record_id,
@@ -1978,9 +2012,9 @@ async def _finish_claim_confirmed_delegation(
     return await _complete_published_delegation(self, record=refreshed or record, action=action)
 
 
-def _publish_confirmation(content: Any, publish_sequence: Optional[int]) -> Optional[Dict[str, Any]]:
+def _publish_confirmation(content: Any, meta: MessageMeta, publish_sequence: Optional[int]) -> Optional[Dict[str, Any]]:
     """Side effects that record a delegated task's successful publish, or None for other actions."""
-    if not (isinstance(content, Task) and content.task_type == MessageMetaType.REQUEST and content.parent_task_id):
+    if not _is_waiting_delegation(content, meta):
         return None
     return {PUBLISH_CONFIRMED: PUBLISHED_BY_CALL, "delegated_publish_sequence": publish_sequence}
 
