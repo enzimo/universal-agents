@@ -6,10 +6,8 @@ from pathlib import Path
 import pytest
 
 from assistant_gateway.bootstrap import bootstrap_instance
-from assistant_gateway.application.response_coordinator import (
-    GatewayTaskSteeringRequest,
-)
-from assistant_gateway.application.request_context import GatewayRequestRoute
+from assistant_gateway.application.thread_guidance import NOT_STARTED_TEXT
+from assistant_gateway.domain.request_state import RUN_STATE_RUNNING
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.gateway import (
     UserGateway,
@@ -52,26 +50,18 @@ async def _send_task_steering(
 ):
     session = gateway.session_repository.get_session(session_key)
     assert session is not None
-    route = GatewayRequestRoute(canonical_user_id=canonical_user_id)
-    presentation = gateway._request_context_service.requester_presentation_for_session(
-        session,
-        route,
+    gateway.state_store.record_request(
+        correlation_id="corr_running",
+        session_key=session_key,
+        request_kind="interactive",
+        request_text="Prepare the report",
+        conversation_id=session.conversation_id,
+        followup_to_task_id=None,
+        active_task_id=target_task_id,
+        run_state=RUN_STATE_RUNNING,
     )
-    return await gateway._response_coordinator.send_task_steering(
-        GatewayTaskSteeringRequest(
-            text=text,
-            session_key=session.session_key,
-            conversation_id=session.conversation_id,
-            gateway_context=gateway._request_context_service.build_gateway_context(
-                session_key=session.session_key,
-                delivery_mode="interactive",
-                route=route,
-                manager_agent_id=gateway._manager_client.manager_id,
-            ),
-            requester_display_name=presentation.display_name,
-            request_timezone=presentation.timezone,
-            target_task_id=target_task_id,
-        )
+    return await gateway.application.send_user_message(
+        text, session_key=session_key, canonical_user_id=canonical_user_id
     )
 
 
@@ -263,7 +253,7 @@ async def test_gateway_task_steering_uses_session_owner_display_name(
     ],
 )
 @pytest.mark.asyncio
-async def test_user_message_during_credential_workflow_starts_new_conversation_task(
+async def test_user_message_during_credential_workflow_stays_with_running_request(
     tmp_path: Path,
     request_kind: str,
     credential_status: str,
@@ -280,7 +270,9 @@ async def test_user_message_during_credential_workflow_starts_new_conversation_t
         request_kind=request_kind,
         request_text="store credential",
         conversation_id=session.conversation_id,
-        followup_to_task_id="task_waiting_for_credential",
+        followup_to_task_id=None,
+        active_task_id="task_waiting_for_credential",
+        run_state=RUN_STATE_RUNNING,
         status=credential_status,
     )
     gateway._manager_client.register_response_channel(
@@ -295,20 +287,18 @@ async def test_user_message_during_credential_workflow_starts_new_conversation_t
     finally:
         gateway._manager_client.unregister_response_channel("corr_credential")
 
-    assert response.message_type == "task"
-    assert response.text == "Restart request accepted."
-    assert transport.operational == []
-    assert len(transport.durable) == 1
-    published_task = transport.durable[0].msg_content
-    assert isinstance(published_task, Task)
-    assert published_task.problem_statement == "restart yourself"
+    assert response.message_type == "task_steering"
+    assert response.text == NOT_STARTED_TEXT
+    assert len(transport.operational) == 1
+    assert transport.durable == []
+    assert gateway.request_repository.get_held_guidance(response.correlation_id) is not None
     credential_request = gateway.state_store.get_request("corr_credential")
     assert credential_request is not None
     assert credential_request.status == credential_status
 
 
 @pytest.mark.asyncio
-async def test_resolve_target_skips_completed_steering_operation(
+async def test_running_request_ignores_completed_guidance(
     tmp_path: Path,
 ) -> None:
     gateway = UserGateway(_config(tmp_path))
@@ -325,6 +315,8 @@ async def test_resolve_target_skips_completed_steering_operation(
         conversation_id=session.conversation_id,
         followup_to_task_id="task_waiting_for_credential",
         status=REQUEST_STATUS_WAITING_FOR_CREDENTIAL,
+        active_task_id="task_credential",
+        run_state=RUN_STATE_RUNNING,
     )
     gateway.state_store.record_request(
         correlation_id="corr_completed_steering",
@@ -336,14 +328,15 @@ async def test_resolve_target_skips_completed_steering_operation(
         status="accepted",
     )
 
-    assert await gateway._response_coordinator.resolve_target(
-        session_key=session.session_key,
-        conversation_id=session.conversation_id,
-    ) == ("task_waiting_for_credential", "corr_credential_parent")
+    running = gateway._request_service.running_request(
+        session_key=session.session_key, conversation_id=session.conversation_id
+    )
+    assert running.correlation_id == "corr_credential_parent"
+    assert running.active_task_id == "task_credential"
 
 
 @pytest.mark.asyncio
-async def test_stale_active_task_steering_is_readmitted_as_new_web_request(
+async def test_guidance_for_a_task_the_lead_has_not_admitted_is_held_without_new_work(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -382,8 +375,10 @@ async def test_stale_active_task_steering_is_readmitted_as_new_web_request(
         request_kind="interactive",
         request_text="Long-running request",
         conversation_id=session.conversation_id,
-        followup_to_task_id="task_already_archived",
-        status="waiting_for_steering",
+        followup_to_task_id="task_previous",
+        active_task_id="task_waiting_for_admission",
+        run_state=RUN_STATE_RUNNING,
+        status="pending",
     )
 
     response = await gateway.application.send_user_message(
@@ -396,20 +391,17 @@ async def test_stale_active_task_steering_is_readmitted_as_new_web_request(
         canonical_user_id=user.canonical_user_id,
     )
 
-    assert response.message_type == "task"
-    assert response.text == "Restart request accepted."
+    assert response.message_type == "task_steering"
+    assert response.text == NOT_STARTED_TEXT
     assert len(transport.operational) == 1
-    assert len(transport.durable) == 1
-    published_task = transport.durable[0].msg_content
-    assert isinstance(published_task, Task)
-    assert published_task.problem_statement == "restart yourself"
-    stale_request = gateway.state_store.get_request("corr_stale_active_task")
-    assert stale_request is not None
-    assert stale_request.status == "stale"
-    recovered_request = gateway.state_store.get_request(response.correlation_id)
-    assert recovered_request is not None
-    assert recovered_request.request_kind == "interactive"
-    assert recovered_request.status == "completed"
+    assert transport.durable == []
+    running = gateway.state_store.get_request("corr_stale_active_task")
+    assert running.run_state == RUN_STATE_RUNNING
+    guidance = gateway.state_store.get_request(response.correlation_id)
+    assert guidance.request_kind == "task_steering"
+    assert guidance.status == "held"
+    held = gateway.request_repository.get_held_guidance(response.correlation_id)
+    assert held.target_correlation_id == running.correlation_id
     history = gateway._transcript_service.history_page(
         owner_canonical_user_id=session.owner_canonical_user_id,
         session_key=session.session_key,
@@ -417,5 +409,165 @@ async def test_stale_active_task_steering_is_readmitted_as_new_web_request(
     )
     assert [message.content for message in history.messages] == [
         "restart yourself",
-        "Restart request accepted.",
+        NOT_STARTED_TEXT,
     ]
+
+
+@pytest.mark.asyncio
+async def test_uncertain_request_publication_keeps_later_messages_on_that_request(
+    tmp_path: Path,
+) -> None:
+    class UncertainPublication(_SteeringTransport):
+        durable_attempts = 0
+
+        async def publish_durable(self, envelope, *, routing_key):
+            self.durable_attempts += 1
+            # The broker may have saved the message before this error.
+            raise RuntimeError("Publication acknowledgment was lost")
+
+    transport = UncertainPublication()
+    gateway = UserGateway(_config(tmp_path), manager_transport=transport)
+    transport.gateway = gateway
+    session = gateway.application.start_new_session()
+
+    with pytest.raises(RuntimeError, match="acknowledgment was lost"):
+        await gateway.application.send_user_message(
+            "Prepare the report", session_key=session.session_key
+        )
+    running = gateway._request_service.running_request(
+        session_key=session.session_key, conversation_id=session.conversation_id
+    )
+    assert running is not None
+    response = await gateway.application.send_user_message(
+        "Use June figures", session_key=session.session_key
+    )
+
+    assert response.message_type == "task_steering"
+    assert transport.durable_attempts == 1
+    steering = transport.operational[0][0].msg_content
+    assert steering.target_task_id == running.active_task_id
+    assert steering.target_correlation_id == running.correlation_id
+
+
+@pytest.mark.asyncio
+async def test_newer_guidance_waits_for_an_older_in_flight_publication(tmp_path: Path) -> None:
+    class DelayedFirstGuidance(_SteeringTransport):
+        def __init__(self):
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def publish_operational(self, envelope, *, routing_key):
+            if envelope.msg_content.guidance_text == "First guidance":
+                self.entered.set()
+                await self.release.wait()
+            await super().publish_operational(envelope, routing_key=routing_key)
+
+    transport = DelayedFirstGuidance()
+    gateway = UserGateway(_config(tmp_path), manager_transport=transport)
+    transport.gateway = gateway
+    session = gateway.application.start_new_session()
+    first = asyncio.create_task(_send_task_steering(
+        gateway, "First guidance", session_key=session.session_key, target_task_id="task_running"
+    ))
+    try:
+        async with asyncio.timeout(10):
+            await transport.entered.wait()
+            second = await gateway.application.send_user_message(
+                "Second guidance", session_key=session.session_key
+            )
+            assert transport.operational == []
+            # The timer must obey the same ordering as a direct send.
+            await gateway._thread_guidance.retry_held()
+            assert transport.operational == []
+            transport.release.set()
+            await first
+            await gateway._thread_guidance.retry_held()
+    finally:
+        transport.release.set()
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+
+    assert [envelope.msg_content.guidance_text for envelope, _ in transport.operational] == [
+        "First guidance", "Second guidance"
+    ]
+    assert gateway.request_repository.get_held_guidance(second.correlation_id) is None
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_older_guidance_keeps_its_order_after_gateway_restart(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    path = str(tmp_path / "gateway.db")
+    first_transport = _StaleSteeringThenTaskTransport()
+    first_gateway = UserGateway(config, state_store=GatewayStateStore(path), manager_transport=first_transport)
+    first_transport.gateway = first_gateway
+    session = first_gateway.application.start_new_session()
+    first = await _send_task_steering(
+        first_gateway, "First guidance", session_key=session.session_key, target_task_id="task_running"
+    )
+    assert first_gateway.request_repository.get_held_guidance(first.correlation_id) is not None
+
+    next_transport = _StaleSteeringThenTaskTransport()
+    next_gateway = UserGateway(config, state_store=GatewayStateStore(path), manager_transport=next_transport)
+    next_transport.gateway = next_gateway
+    second = await next_gateway.application.send_user_message("Second guidance", session_key=session.session_key)
+    await next_gateway._thread_guidance.retry_held()
+
+    assert next_transport.operational
+    assert all(envelope.msg_content.guidance_text == "First guidance" for envelope in next_transport.operational)
+    assert next_gateway.request_repository.get_held_guidance(second.correlation_id) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("root_status", ["open_wait", "timed_out", "waiting_for_credential", "waiting_for_credential_result"])
+async def test_sibling_schedule_final_never_finishes_the_original_chat_request(tmp_path: Path, root_status: str) -> None:
+    class CaptureRoot(_SteeringTransport):
+        def __init__(self):
+            super().__init__()
+            self.root = None
+            self.started = asyncio.Event()
+
+        async def publish_durable(self, envelope, *, routing_key):
+            self.root = envelope
+            self.started.set()
+
+    transport = CaptureRoot()
+    gateway = UserGateway(_config(tmp_path), manager_transport=transport)
+    transport.gateway = gateway
+    session = gateway.application.start_new_session()
+    original = asyncio.create_task(gateway.application.send_user_message(
+        "Save a timer and delegate the rest", session_key=session.session_key
+    ))
+    try:
+        async with asyncio.timeout(10):
+            await transport.started.wait()
+            root = transport.root
+            correlation = root.msg_meta.msg_correlation_id
+            root_id = root.msg_content.task_id
+            if root_status != "open_wait":
+                original.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await original
+                gateway.state_store.update_request_status(correlation, root_status)
+            before = gateway.state_store.get_request(correlation)
+
+            def response(task_id, text):
+                return MessageEnvelope(
+                    msg_content=Task(task_id=task_id, task_type=MessageMetaType.RESPONSE, answer=text),
+                    msg_header=MessageHeader(from_agent_id="manager_agent_1"),
+                    msg_meta=root.msg_meta,
+                )
+
+            await gateway._manager_client.handle_response(response("task_scheduled", "Timer result"))
+            after = gateway.state_store.get_request(correlation)
+            assert after == before
+            assert after.run_state == RUN_STATE_RUNNING
+            if root_status == "open_wait":
+                assert not original.done()
+            await gateway._manager_client.handle_response(response(root_id, "Original result"))
+            if root_status == "open_wait":
+                assert (await original).text == "Original result"
+            assert gateway.state_store.get_request(correlation).run_state == "finished"
+    finally:
+        original.cancel()
+        await asyncio.gather(original, return_exceptions=True)

@@ -898,18 +898,20 @@ def exercise_gateway_state_store(
     assert [row.delivery_id for row in due] == [delivery_id]
     store.mark_delivery_delivered(delivery_id)
     assert store.get_due_deliveries() == []
-    store.upsert_pending_query(
+    store.add_pending_query(
         session_key="session_live_pg",
         correlation_id="corr_live_pg_query",
         task_query_id="task_query_live_pg",
         parent_task_id="task_live_pg_archive",
         conversation_id="conversation_live_pg",
         query_text="Do you want a follow-up validation?",
-        status="pending",
     )
-    assert store.get_pending_query("session_live_pg") is not None
-    store.clear_pending_query("session_live_pg")
-    assert store.get_pending_query("session_live_pg") is None
+    assert [
+        question.task_query_id
+        for question in store.list_open_pending_queries("session_live_pg")
+    ] == ["task_query_live_pg"]
+    assert store.close_pending_query("task_query_live_pg", status="answered") is True
+    assert store.list_open_pending_queries("session_live_pg") == []
     store.upsert_scheduled_target(
         scheduled_job_id="scheduled_live_pg",
         session_key="session_live_pg",

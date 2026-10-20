@@ -51,16 +51,25 @@ class GatewayDeliveryService:
         session_key: str,
         conversation_id: str | None,
         last_task_id: str | None,
+        finished_task_id: str | None = None,
     ) -> None:
-        """Atomically record immediate delivery and conversation lineage."""
+        """Atomically record immediate delivery and conversation lineage.
+
+        ``finished_task_id`` names the task that actually finished, separately
+        from lineage: a late form result may deliberately keep newer lineage.
+        """
 
         with self._unit_of_work_factory.delivery_unit_of_work() as unit_of_work:
-            if correlation_id:
+            record = unit_of_work.request.get_request(correlation_id) if correlation_id else None
+            matches = record is None or record.matches_task(finished_task_id or last_task_id)
+            if correlation_id and matches:
                 unit_of_work.request.update_request_status(
                     correlation_id,
                     "delivered",
                 )
-            if conversation_id:
+                if finished_task_id is not None:
+                    unit_of_work.request.finish_request(correlation_id)
+            if conversation_id and (matches or record is not None and conversation_id != record.conversation_id):
                 unit_of_work.session.register_conversation_session(
                     session_key=session_key,
                     conversation_id=conversation_id,
@@ -80,25 +89,37 @@ class GatewayDeliveryService:
         conversation_id: str | None,
         last_task_id: str | None,
         owner_canonical_user_id: str | None = None,
+        finished_task_id: str | None = None,
     ) -> str:
-        """Atomically enqueue a delivery and update related request state."""
+        """Atomically enqueue a delivery and update related request state.
+
+        A final reply held for quiet hours still ends its request now
+        (``finished_task_id``): the work is done, only showing it waits.
+        """
 
         with self._unit_of_work_factory.delivery_unit_of_work() as unit_of_work:
+            record = unit_of_work.request.get_request(correlation_id) if correlation_id else None
+            matches = record is None or record.matches_task(finished_task_id or last_task_id)
             delivery_id = unit_of_work.delivery.add_deferred_delivery(
                 session_key=session_key,
                 origin_kind=origin_kind,
                 payload=payload,
                 rendered_text=rendered_text,
                 available_after=available_after,
-                correlation_id=correlation_id,
+                # The payload retains the transport correlation. This
+                # column names only the request whose state delivery may
+                # change, including when the deferred copy is later shown.
+                correlation_id=correlation_id if matches else None,
                 owner_canonical_user_id=owner_canonical_user_id,
             )
-            if correlation_id:
+            if correlation_id and matches:
                 unit_of_work.request.update_request_status(
                     correlation_id,
                     "deferred",
                 )
-            if conversation_id:
+                if finished_task_id is not None:
+                    unit_of_work.request.finish_request(correlation_id)
+            if conversation_id and (matches or record is not None and conversation_id != record.conversation_id):
                 unit_of_work.session.register_conversation_session(
                     session_key=session_key,
                     conversation_id=conversation_id,

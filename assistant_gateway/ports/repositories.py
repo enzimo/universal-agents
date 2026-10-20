@@ -20,7 +20,14 @@ from assistant_gateway.domain.identity import (
     GatewayUserWebInviteRecord,
     GatewayUserWebTokenRecord,
 )
-from assistant_gateway.domain.request_state import CredentialCollectionRecord, PendingQueryRecord, RequestRecord, ToolSetupRecord
+from assistant_gateway.domain.request_state import (
+    CredentialCollectionRecord,
+    PendingQueryAdded,
+    HeldGuidanceRecord,
+    PendingQueryRecord,
+    RequestRecord,
+    ToolSetupRecord,
+)
 from assistant_gateway.domain.sessions import (
     SessionConversationListRecord,
     SessionConversationRecord,
@@ -147,7 +154,25 @@ class SessionRepository(Protocol):
         thread_id: str | None = None,
         status: str | None = None,
         owner_canonical_user_id: str | None = None,
-    ) -> None: ...
+    ) -> None:
+        """Save a session and make it its chat's current one (the person's own chat traffic only)."""
+
+    def upsert_session_without_switching_chat(
+        self,
+        *,
+        session_key: str,
+        conversation_id: str | None,
+        last_task_id: str | None,
+        manager_agent_id: str | None,
+        session_alias: str | None = None,
+        channel_name: str | None = None,
+        user_id: str | None = None,
+        chat_id: str | None = None,
+        thread_id: str | None = None,
+        status: str | None = None,
+        owner_canonical_user_id: str | None = None,
+    ) -> None:
+        """Save a session without changing its chat's current one (replies, task lineage)."""
 
     def set_session_alias(
         self,
@@ -192,9 +217,40 @@ class RequestRepository(Protocol):
         followup_to_task_id: str | None,
         status: str = "pending",
         owner_canonical_user_id: str | None = None,
-    ) -> None: ...
+        active_task_id: str | None = None,
+        run_state: str | None = None,
+    ) -> None:
+        """Insert or update a request row.
+
+        ``run_state="running"`` admits the thread's request and raises
+        ``ThreadRequestRunning`` when another request already runs in the
+        same session conversation. An update keeps the row's task and run
+        state when the caller gives none.
+        """
 
     def get_request(self, correlation_id: str) -> RequestRecord | None: ...
+
+    def get_running_request(
+        self,
+        *,
+        session_key: str,
+        conversation_id: str | None,
+    ) -> RequestRecord | None:
+        """The request running in this session conversation, if any."""
+
+    def finish_request(self, correlation_id: str) -> bool:
+        """Mark a running request finished; False when it was not running."""
+
+    def hold_guidance(self, record: HeldGuidanceRecord) -> None:
+        """Keep guidance until its running request confirms it."""
+
+    def list_held_guidance(self) -> list[HeldGuidanceRecord]:
+        """Every held guidance message, oldest first."""
+
+    def get_held_guidance(self, correlation_id: str) -> HeldGuidanceRecord | None: ...
+
+    def release_held_guidance(self, correlation_id: str, *, status: str) -> bool:
+        """Stop holding guidance and record how it ended; False when already released."""
 
     def update_request_status(self, correlation_id: str, status: str) -> None: ...
 
@@ -213,7 +269,8 @@ class RequestRepository(Protocol):
         limit: int = 5,
     ) -> list[RequestRecord]: ...
 
-    def upsert_pending_query(
+    # Agent questions to people, by question id (``gateway_questions``).
+    def add_pending_query(
         self,
         *,
         session_key: str,
@@ -223,25 +280,27 @@ class RequestRepository(Protocol):
         conversation_id: str | None,
         query_text: str,
         query_payload_json: str | None = None,
-        status: str = "pending",
         owner_canonical_user_id: str | None = None,
-    ) -> None: ...
+    ) -> PendingQueryAdded: ...
 
-    def get_pending_query(self, session_key: str) -> PendingQueryRecord | None: ...
+    def get_pending_query(self, task_query_id: str) -> PendingQueryRecord | None: ...
 
-    def clear_pending_query(
-        self,
-        session_key: str,
-        *,
-        status: str = "completed",
-    ) -> None: ...
+    def list_open_pending_queries(self, session_key: str) -> list[PendingQueryRecord]: ...
 
-    def expire_pending_queries(
-        self,
-        *,
-        cutoff_iso: str,
-        status: str = "expired",
-    ) -> int: ...
+    def mark_pending_query_shown(self, task_query_id: str) -> bool: ...
+
+    def clear_pending_query_shown(self, task_query_id: str) -> None:
+        """A failed delivery leaves an open question waiting to be shown."""
+
+    def close_pending_query(self, task_query_id: str, *, status: str) -> bool: ...
+
+    def reopen_answered_pending_query(self, task_query_id: str) -> bool: ...
+
+    def close_open_pending_queries_for_task(
+        self, *, correlation_id: str, parent_task_id: str, status: str
+    ) -> list[PendingQueryRecord]: ...
+
+    def expire_pending_queries(self, *, cutoff_iso: str) -> int: ...
 
 
 @runtime_checkable

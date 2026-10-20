@@ -361,12 +361,12 @@ class WebsiteConversationHandlers:
             return early_response
 
         # A "?" with files is an ordinary message, not a progress question.
-        has_pending_query = (
-            False
+        waiting_question_id = (
+            None
             if not uploads and self.application.is_task_progress_status_request(text)
-            else await self.application.has_pending_query(session_key)
+            else await self.application.waiting_question_id(session_key)
         )
-        if uploads and has_pending_query:
+        if uploads and waiting_question_id:
             raise web.HTTPBadRequest(
                 text="Attachments are not supported while answering a pending task query."
             )
@@ -404,7 +404,7 @@ class WebsiteConversationHandlers:
                 text=text,
                 task_text=task_text,
                 attachments=attachments,
-                has_pending_query=has_pending_query,
+                waiting_question_id=waiting_question_id,
             )
         except TimeoutError as exc:
             raise web.HTTPGatewayTimeout(text=str(exc)) from exc
@@ -476,12 +476,12 @@ class WebsiteConversationHandlers:
         text: str,
         task_text: str,
         attachments: list[UserTaskAttachment],
-        has_pending_query: bool,
+        waiting_question_id: str | None,
     ) -> (
         tuple[GatewayApplicationResponse, tuple[WebTranscriptMessageV1, ...]]
         | web.Response
     ):
-        if not has_pending_query:
+        if waiting_question_id is None:
             response = await self.application.send_user_message(
                 task_text,
                 session_key=session_key,
@@ -532,8 +532,10 @@ class WebsiteConversationHandlers:
                 conversation_id=conversation_id,
                 exchange=exchange,
             )
+        # The answer names the question found before the send was accepted.
         response = await self.application.reply_to_pending_query(
             session_key=session_key,
+            task_query_id=waiting_question_id,
             response_text=text,
         )
         reply = self.application.transcripts.record_local_response(

@@ -187,8 +187,12 @@ class GatewayApplication(Protocol):
     ) -> GatewayApplicationResponse:
         """Return the current task-progress status for a channel route."""
 
-    async def has_pending_query(self, session_key: str) -> bool:
-        """Return whether a valid pending clarification owns the next response."""
+    async def waiting_question_id(self, session_key: str) -> str | None:
+        """The agent question a message in this chat answers, if one waits.
+
+        Pass it to ``reply_to_pending_query``: the answer then goes to this
+        question even if another message answers it first.
+        """
 
     def start_new_session(
         self,
@@ -205,10 +209,11 @@ class GatewayApplication(Protocol):
         self,
         *,
         session_key: str,
+        task_query_id: str,
         response_text: str,
         replied_message: RepliedMessage | None = None,
     ) -> GatewayApplicationResponse:
-        """Reply to the pending clarification for a session."""
+        """Answer the named question waiting in a chat."""
 
     async def list_scheduled_jobs(
         self,

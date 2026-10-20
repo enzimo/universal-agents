@@ -84,8 +84,8 @@ class _Progress:
 
 class _Clarification:
     @staticmethod
-    async def has_pending_query(session_key: str) -> bool:
-        return session_key == "session_with_query"
+    async def waiting_question_id(session_key: str) -> str | None:
+        return "task_query_1" if session_key == "session_with_query" else None
 
 
 class _Schedules:
@@ -156,8 +156,8 @@ async def test_runtime_application_normalizes_queries_and_schedule_models() -> N
     dependencies, _ = _application_dependencies()
     application = GatewayRuntimeApplication(**dependencies)
 
-    assert await application.has_pending_query("session_with_query") is True
-    assert await application.has_pending_query("session_without_query") is False
+    assert await application.waiting_question_id("session_with_query") == "task_query_1"
+    assert await application.waiting_question_id("session_without_query") is None
 
     jobs = await application.list_scheduled_jobs(session_key="session_1")
 

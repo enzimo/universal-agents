@@ -104,8 +104,15 @@ class ScheduleWriter:
     # -- sessions and delivery targets ------------------------------------------------
 
     def _session(self, route: SessionRouteV1) -> None:
+        """Write a carried session; only the session that was its chat's current one becomes current.
+
+        Sessions are written in key order and a person's older session (one a
+        schedule still delivers through) can sort after their current one, so
+        writing a session must never switch its chat to it.
+        """
+
         # The session's conversation and last task are history (module docstring).
-        self.gateway.upsert_session(
+        self.gateway.upsert_session_without_switching_chat(
             session_key=route.session_key,
             session_alias=route.session_alias,
             conversation_id=None,
@@ -118,18 +125,25 @@ class ScheduleWriter:
             status=route.status,
             owner_canonical_user_id=route.owner_person_id,
         )
-        if (
-            route.channel_current
-            and route.channel_name
-            and route.user_id
-            and route.chat_id
-        ):
-            self.gateway.set_active_session_for_channel(
-                channel_name=route.channel_name,
-                user_id=route.user_id,
-                chat_id=route.chat_id,
-                thread_id=route.thread_id,
-                session_key=route.session_key,
+        if not route.channel_current or route.chat is None:
+            return
+        channel_name, user_id, chat_id, thread_id = route.chat
+        current = self.gateway.set_active_session_for_channel_if_unset(
+            channel_name=channel_name,
+            user_id=user_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            session_key=route.session_key,
+        )
+        if current != route.session_key:
+            # Only a later batch gets here; its plan lists the session (``_plan_session``).
+            logger.warning(
+                "A chat already has a current session in this instance, which stays current; the imported "
+                "session that was current in the export is not. event=team_transfer_session_current_kept "
+                "session_key=%s current_session_key=%s channel_name=%s",
+                route.session_key,
+                current,
+                route.channel_name,
             )
 
     def _target(self, target: ScheduledTargetV1) -> None:

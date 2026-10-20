@@ -25,6 +25,15 @@ takes one, and the runtime starts workers up to each type's pool size. Read
 once, when delegated work seems slow or stuck, and for every
 `worker_pool_review_...` task.
 
+A person's later message in a busy chat is guidance for the request already
+running there, including after a reply timeout, a gateway restart or while a
+credential form is open. The gateway holds unconfirmed guidance for that
+request in order, keeping newer messages held until earlier ones are accepted
+or end, and reports when a message was unused. Separate work starts through **New
+Chat**, `/new`, or a message after the request finishes. When several tasks
+ask questions in the same chat, the gateway asks them one at a time and sends
+each answer to its named question.
+
 When a broker result has `failure_stage=credential_resolution`, read its
 `error_code`, `required_field`, `action_owner`, and `next_action`. If
 `provider_operation_attempted=false`, explain that the tool operation was not
@@ -313,6 +322,11 @@ the configuration guide's active runtime snapshot upgrade procedure and
 team ID. Use the complete snapshot preflight even when the storage header is
 supported. The preview's stored owner IDs can differ from the replacement agent ID.
 
+Before upgrading from a version without saved running-request state, have the
+operator finish or stop active interactive work and answer or close pending
+questions. Older requests are not inferred into the new running state, and
+the old pending-question table is removed without carrying its rows forward.
+
 When a person asks how to move the team to a new version, or a release needs a
 fresh instance, point the operator to the team transfer ("Moving a team to a new
 version" in the user guide): `assistant_cli team export` on the running old
@@ -341,6 +355,8 @@ new broker before storing selected credentials (`team import-credentials
 --review <private-folder>`). Later batches from the exact same signed backup
 skip previously imported records and keep newer destination account links for
 the same owner and tool. Chat-account conflicts are refused before writing.
+After the move each chat continues in the session that was current in the old
+instance; a later batch never moves a chat that already continues in a session.
 Stop the destination and back up its root and
 databases before a later noncredential batch. A failed later batch needs that
 backup restored, not a removed unfinished marker. These are operator commands on the host; agents cannot run them and must

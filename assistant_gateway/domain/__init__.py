@@ -14,7 +14,11 @@ from assistant_gateway.domain.identity import (
     GatewayUserWebInviteRecord,
     GatewayUserWebTokenRecord,
 )
-from assistant_gateway.domain.request_state import PendingQueryRecord, RequestRecord
+from assistant_gateway.domain.request_state import (
+    PendingQueryRecord,
+    PendingQueryStatus,
+    RequestRecord,
+)
 from assistant_gateway.domain.sessions import (
     SessionConversationListRecord,
     SessionConversationRecord,
@@ -34,6 +38,7 @@ __all__ = [
     "GatewayUserWebInviteRecord",
     "GatewayUserWebTokenRecord",
     "PendingQueryRecord",
+    "PendingQueryStatus",
     "RequestRecord",
     "ScheduledTargetRecord",
     "SessionConversationListRecord",

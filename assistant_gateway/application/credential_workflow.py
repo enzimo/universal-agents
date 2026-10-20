@@ -316,9 +316,10 @@ class GatewayCredentialWorkflow:
                 manager_agent_id=self._manager_client.manager_id,
             )
         else:
-            self._request_service.update_status(
+            self._request_service.update_task_status(
                 correlation_id,
                 REQUEST_STATUS_WAITING_FOR_CREDENTIAL,
+                task_id=None,
             )
         session_id = broker_session.session_id
         record = CredentialCollectionRecord(

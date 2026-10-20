@@ -32,6 +32,7 @@ from assistant_gateway.domain.message_types import (
     TOOL_SETUP_MESSAGE_TYPE,
     TOOL_SETUP_UNAVAILABLE_MESSAGE_TYPE,
 )
+from assistant_gateway.domain.request_state import HeldGuidanceRecord
 from assistant_gateway.domain.sessions import SessionRecord
 from assistant_gateway.domain.transcript import (
     TRANSCRIPT_CHANNEL_WEBSITE,
@@ -147,6 +148,11 @@ class TranscriptRequestRecord:
     request_text: str
     followup_to_task_id: str | None
     status: str = "pending"
+    # A thread's request: its task id and running state (request_state).
+    active_task_id: str | None = None
+    run_state: str | None = None
+    # Guidance for the running request, held until that request confirms it.
+    held_guidance: HeldGuidanceRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -343,7 +349,11 @@ class GatewayTranscriptService:
                     followup_to_task_id=request_record.followup_to_task_id,
                     status=request_record.status,
                     owner_canonical_user_id=owner,
+                    active_task_id=request_record.active_task_id,
+                    run_state=request_record.run_state,
                 )
+                if request_record.held_guidance is not None:
+                    unit_of_work.request.hold_guidance(request_record.held_guidance)
             unit_of_work.commit()
         return TranscriptAcceptance(message=message, created=True)
 

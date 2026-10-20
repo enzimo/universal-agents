@@ -154,7 +154,8 @@ class _FakeGateway:
         self.schedule_control_calls: list[dict] = []
         self.mcp_control_calls: list[dict] = []
         self.memory_calls: list[tuple[str, dict]] = []
-        self.pending_query = None
+        # The id of the question waiting in "pending_session", if any.
+        self.waiting_question: str | None = None
         self.event_sink = None
 
     async def emit_delivery_event(self, event) -> bool:
@@ -183,12 +184,18 @@ class _FakeGateway:
             conversation_id="conv_new",
         )
 
-    async def resolve_pending_query_for_session(self, session_key: str):
-        return self.pending_query if session_key == "pending_session" else None
+    async def waiting_question_id_for_session(self, session_key: str):
+        return self.waiting_question if session_key == "pending_session" else None
 
-    async def reply_to_pending_query(self, *, session_key: str, response_text: str, replied_message=None):
+    async def reply_to_pending_query(
+        self, *, session_key: str, task_query_id: str, response_text: str, replied_message=None
+    ):
         self.replies_to_pending.append(
-            {"session_key": session_key, "response_text": response_text}
+            {
+                "session_key": session_key,
+                "task_query_id": task_query_id,
+                "response_text": response_text,
+            }
         )
         return SimpleNamespace(
             text=f"Pending reply: {response_text}",
@@ -2414,7 +2421,7 @@ async def test_website_app_handles_new_and_pending_chat_paths(
     _write_site(config)
     # A per-test database: the in-memory fake store is a shared file.
     gateway = _StatefulFakeGateway(GatewayStateStore(str(tmp_path / "gateway.db")))
-    gateway.pending_query = object()
+    gateway.waiting_question = "task_query_pending"
     app = InternalWebsiteInteractiveApp(
         config, gateway=gateway, bridge=SimpleNamespace()
     )
@@ -2443,7 +2450,11 @@ async def test_website_app_handles_new_and_pending_chat_paths(
     assert pending_response.status == 200
     assert pending_payload["reply"] == "Pending reply: Use the 12 mm shaft."
     assert gateway.replies_to_pending == [
-        {"session_key": "pending_session", "response_text": "Use the 12 mm shaft."}
+        {
+            "session_key": "pending_session",
+            "task_query_id": "task_query_pending",
+            "response_text": "Use the 12 mm shaft.",
+        }
     ]
 
 
@@ -4170,7 +4181,7 @@ async def test_web_chat_refused_upload_saves_nothing(
     )
     gateway = _StatefulFakeGateway(store)
     if waiting_for_answer:
-        gateway.pending_query = object()
+        gateway.waiting_question = "task_query_pending"
     app = InternalWebsiteInteractiveApp(
         config, gateway=gateway, bridge=SimpleNamespace()
     )

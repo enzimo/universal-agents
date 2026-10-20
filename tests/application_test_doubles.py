@@ -255,9 +255,9 @@ class CoreApplicationDouble:
         request = GatewayCommandRequest(**values, query_handler=query_handler)
         return await self._commands.execute(request)
 
-    async def has_pending_query(self, session_key: str) -> bool:
-        resolver = getattr(self._candidate, "resolve_pending_query_for_session")
-        return await resolver(session_key) is not None
+    async def waiting_question_id(self, session_key: str) -> str | None:
+        resolver = getattr(self._candidate, "waiting_question_id_for_session")
+        return await resolver(session_key)
 
     async def send_user_message(
         self,

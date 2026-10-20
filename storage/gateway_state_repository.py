@@ -32,7 +32,18 @@ from assistant_gateway.domain.identity import (
     GatewayUserWebTokenRecord,
     TeamRoleHolderRequired,
 )
-from assistant_gateway.domain.request_state import CredentialCollectionRecord, PendingQueryRecord, RequestRecord, ToolSetupRecord
+from assistant_gateway.domain.request_state import (
+    RUN_STATE_FINISHED,
+    RUN_STATE_RUNNING,
+    CredentialCollectionRecord,
+    HeldGuidanceRecord,
+    PendingQueryAdded,
+    PendingQueryRecord,
+    PendingQueryStatus,
+    RequestRecord,
+    ThreadRequestRunning,
+    ToolSetupRecord,
+)
 from assistant_gateway.domain.sessions import (
     SessionConversationListRecord,
     SessionConversationRecord,
@@ -269,6 +280,22 @@ class GatewayStateRepository(
         owner_canonical_user_id: Optional[str] = None,
     ) -> None: ...
 
+    def upsert_session_without_switching_chat(
+        self,
+        *,
+        session_key: str,
+        session_alias: Optional[str] = None,
+        conversation_id: Optional[str],
+        last_task_id: Optional[str],
+        manager_agent_id: Optional[str],
+        channel_name: Optional[str] = None,
+        user_id: Optional[str] = None,
+        chat_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        status: Optional[str] = None,
+        owner_canonical_user_id: Optional[str] = None,
+    ) -> None: ...
+
     def set_session_alias(
         self, session_key: str, session_alias: Optional[str]
     ) -> None: ...
@@ -284,6 +311,16 @@ class GatewayStateRepository(
         thread_id: Optional[str] = None,
         session_key: str,
     ) -> None: ...
+
+    def set_active_session_for_channel_if_unset(
+        self,
+        *,
+        channel_name: str,
+        user_id: str,
+        chat_id: str,
+        thread_id: Optional[str] = None,
+        session_key: str,
+    ) -> str: ...
 
     def get_active_session_for_channel(
         self,
@@ -305,6 +342,8 @@ class GatewayStateRepository(
         followup_to_task_id: Optional[str],
         status: str = "pending",
         owner_canonical_user_id: Optional[str] = None,
+        active_task_id: Optional[str] = None,
+        run_state: Optional[str] = None,
     ) -> None: ...
 
     def get_request(self, correlation_id: str) -> Optional[RequestRecord]: ...
@@ -368,7 +407,7 @@ class GatewayStateRepository(
         nats_object_name: str,
     ) -> Optional[AttachmentRecord]: ...
 
-    def upsert_pending_query(
+    def add_pending_query(
         self,
         *,
         session_key: str,
@@ -378,19 +417,26 @@ class GatewayStateRepository(
         conversation_id: Optional[str],
         query_text: str,
         query_payload_json: Optional[str] = None,
-        status: str = "pending",
         owner_canonical_user_id: Optional[str] = None,
-    ) -> None: ...
+    ) -> PendingQueryAdded: ...
 
-    def get_pending_query(self, session_key: str) -> Optional[PendingQueryRecord]: ...
+    def get_pending_query(self, task_query_id: str) -> Optional[PendingQueryRecord]: ...
 
-    def clear_pending_query(
-        self, session_key: str, *, status: str = "completed"
-    ) -> None: ...
+    def list_open_pending_queries(self, session_key: str) -> list[PendingQueryRecord]: ...
 
-    def expire_pending_queries(
-        self, *, cutoff_iso: str, status: str = "expired"
-    ) -> int: ...
+    def mark_pending_query_shown(self, task_query_id: str) -> bool: ...
+
+    def clear_pending_query_shown(self, task_query_id: str) -> None: ...
+
+    def close_pending_query(self, task_query_id: str, *, status: str) -> bool: ...
+
+    def reopen_answered_pending_query(self, task_query_id: str) -> bool: ...
+
+    def close_open_pending_queries_for_task(
+        self, *, correlation_id: str, parent_task_id: str, status: str
+    ) -> list[PendingQueryRecord]: ...
+
+    def expire_pending_queries(self, *, cutoff_iso: str) -> int: ...
 
     def upsert_scheduled_target(
         self,
@@ -909,6 +955,12 @@ class _RelationalGatewayStateRepository:
 
     _dialect: SqlDialect
 
+    @staticmethod
+    def _is_integrity_error(exc: Exception) -> bool:
+        """Whether a write was refused by a constraint (each database names it differently)."""
+
+        raise NotImplementedError
+
 
     def _connect(self) -> sqlite3.Connection | _BorrowedConnection:
         active = self._active_transaction.get()
@@ -991,6 +1043,31 @@ class _RelationalGatewayStateRepository:
                 conn, "gateway_requests", "owner_canonical_user_id", "TEXT"
             )
             self._ensure_column(conn, "gateway_requests", "active_task_id", "TEXT")
+            self._ensure_column(conn, "gateway_requests", "run_state", "TEXT")
+            # One running request per thread (session conversation). The
+            # store enforces it so two messages arriving together, or two
+            # gateway processes, cannot both start a request in one thread.
+            conn.execute(
+                f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_requests_running_thread
+                ON gateway_requests(session_key, (COALESCE(conversation_id, '')))
+                WHERE run_state = '{RUN_STATE_RUNNING}'
+                """
+            )
+            # Guidance its running request has not confirmed yet
+            # (assistant_gateway.application.thread_guidance).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS gateway_held_guidance (
+                    correlation_id TEXT PRIMARY KEY,
+                    target_correlation_id TEXT NOT NULL,
+                    session_key TEXT NOT NULL,
+                    conversation_id TEXT,
+                    steering_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             # Setup pages tasks wait on (assistant_gateway.application.tool_setup).
             conn.execute("""CREATE TABLE IF NOT EXISTS gateway_credential_collections (
                 credential_request_id TEXT PRIMARY KEY, broker_session_id TEXT NOT NULL,
@@ -1081,27 +1158,41 @@ class _RelationalGatewayStateRepository:
                 ON gateway_attachments(created_at)
                 """
             )
+            # Agent questions to people, one row per question id. The earlier
+            # table kept one row per chat session, so a second question erased
+            # the first; its rows are dropped (questions open during the
+            # upgrade end, and their tasks stop waiting at their own limit).
+            conn.execute("DROP TABLE IF EXISTS gateway_pending_queries")
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS gateway_pending_queries (
-                    session_key TEXT PRIMARY KEY,
+                CREATE TABLE IF NOT EXISTS gateway_questions (
+                    task_query_id TEXT PRIMARY KEY,
+                    session_key TEXT NOT NULL,
                     correlation_id TEXT NOT NULL,
-                    task_query_id TEXT NOT NULL,
                     parent_task_id TEXT,
                     conversation_id TEXT,
                     owner_canonical_user_id TEXT,
                     query_text TEXT NOT NULL,
                     query_payload_json TEXT,
                     created_at TEXT NOT NULL,
-                    status TEXT NOT NULL
+                    queued_at TEXT NOT NULL,
+                    shown_at TEXT,
+                    status TEXT NOT NULL,
+                    closed_at TEXT
                 )
                 """
             )
-            self._ensure_column(
-                conn, "gateway_pending_queries", "owner_canonical_user_id", "TEXT"
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_gateway_questions_session
+                ON gateway_questions(session_key, status, queued_at)
+                """
             )
-            self._ensure_column(
-                conn, "gateway_pending_queries", "query_payload_json", "TEXT"
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_gateway_questions_request
+                ON gateway_questions(correlation_id, status)
+                """
             )
             conn.execute(
                 """
@@ -1932,6 +2023,15 @@ class _RelationalGatewayStateRepository:
         status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
     ) -> None:
+        """Save a session and make it its chat's current one: for the person's own chat traffic.
+
+        When the saved session has a full chat route (channel, user and chat),
+        the person's next message in that chat goes to it
+        (``gateway_channel_sessions``). Fields left ``None`` keep their saved
+        values. Writes that are not the person's own chat traffic use
+        ``upsert_session_without_switching_chat``.
+        """
+
         with _RepositoryTransaction(self) as transaction:
             self._upsert_session(
                 session_key=session_key,
@@ -1945,6 +2045,47 @@ class _RelationalGatewayStateRepository:
                 thread_id=thread_id,
                 status=status,
                 owner_canonical_user_id=owner_canonical_user_id,
+                switch_chat=True,
+            )
+            transaction.commit()
+
+    def upsert_session_without_switching_chat(
+        self,
+        *,
+        session_key: str,
+        session_alias: Optional[str] = None,
+        conversation_id: Optional[str],
+        last_task_id: Optional[str],
+        manager_agent_id: Optional[str],
+        channel_name: Optional[str] = None,
+        user_id: Optional[str] = None,
+        chat_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        status: Optional[str] = None,
+        owner_canonical_user_id: Optional[str] = None,
+    ) -> None:
+        """Save a session like ``upsert_session`` without changing which session is its chat's current one.
+
+        For writes that are not the person's own chat traffic: a team import
+        writing the sessions it carries, and a reply recording its task on the
+        session it was asked in after the person may have moved to another
+        session. Neither may decide where the person's next message goes.
+        """
+
+        with _RepositoryTransaction(self) as transaction:
+            self._upsert_session(
+                session_key=session_key,
+                session_alias=session_alias,
+                conversation_id=conversation_id,
+                last_task_id=last_task_id,
+                manager_agent_id=manager_agent_id,
+                channel_name=channel_name,
+                user_id=user_id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                status=status,
+                owner_canonical_user_id=owner_canonical_user_id,
+                switch_chat=False,
             )
             transaction.commit()
 
@@ -1962,6 +2103,7 @@ class _RelationalGatewayStateRepository:
         thread_id: Optional[str],
         status: Optional[str],
         owner_canonical_user_id: Optional[str],
+        switch_chat: bool,
     ) -> None:
         existing = self.get_session(session_key)
         updated_at = utc_now_iso()
@@ -2045,7 +2187,7 @@ class _RelationalGatewayStateRepository:
             if thread_id is not None
             else (existing.thread_id if existing else None)
         )
-        if resolved_channel_name and resolved_user_id and resolved_chat_id:
+        if switch_chat and resolved_channel_name and resolved_user_id and resolved_chat_id:
             self.set_active_session_for_channel(
                 channel_name=resolved_channel_name,
                 user_id=resolved_user_id,
@@ -2122,6 +2264,44 @@ class _RelationalGatewayStateRepository:
             )
             conn.commit()
 
+    def set_active_session_for_channel_if_unset(
+        self,
+        *,
+        channel_name: str,
+        user_id: str,
+        chat_id: str,
+        thread_id: Optional[str] = None,
+        session_key: str,
+    ) -> str:
+        """Make the session its chat's current one only when the chat has none; return the chat's current session key.
+
+        A team import restores the session that was current when the team was
+        exported. A chat that already has a current session in this instance
+        keeps it: the person may have used the instance since an earlier batch.
+        """
+
+        bind = self._dialect.bind
+        route = (channel_name, user_id, chat_id, thread_id or "")
+        with self._connect() as conn:
+            conn.execute(
+                f"""
+                INSERT INTO gateway_channel_sessions (channel_name, user_id, chat_id, thread_id, session_key, updated_at)
+                VALUES ({bind}, {bind}, {bind}, {bind}, {bind}, {bind})
+                ON CONFLICT(channel_name, user_id, chat_id, thread_id) DO NOTHING
+                """,
+                (*route, session_key, utc_now_iso()),
+            )
+            row = conn.execute(
+                f"""
+                SELECT session_key
+                FROM gateway_channel_sessions
+                WHERE channel_name = {bind} AND user_id = {bind} AND chat_id = {bind} AND thread_id = {bind}
+                """,
+                route,
+            ).fetchone()
+            conn.commit()
+        return str(row["session_key"])
+
     def get_active_session_for_channel(
         self,
         *,
@@ -2154,44 +2334,60 @@ class _RelationalGatewayStateRepository:
         followup_to_task_id: Optional[str],
         status: str = "pending",
         owner_canonical_user_id: Optional[str] = None,
+        active_task_id: Optional[str] = None,
+        run_state: Optional[str] = None,
     ) -> None:
         created_at = utc_now_iso()
         owner = owner_canonical_user_id
         if owner is None:
             session = self.get_session(session_key)
             owner = session.owner_canonical_user_id if session else None
-        with self._connect() as conn:
-            conn.execute(
-                f"""
-                INSERT INTO gateway_requests
-                (
-                    correlation_id, session_key, request_kind, request_text, conversation_id,
-                    followup_to_task_id, owner_canonical_user_id, created_at, status
+        bind = self._dialect.bind
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    f"""
+                    INSERT INTO gateway_requests
+                    (
+                        correlation_id, session_key, request_kind, request_text, conversation_id,
+                        followup_to_task_id, owner_canonical_user_id, created_at, status,
+                        active_task_id, run_state
+                    )
+                    VALUES ({", ".join([bind] * 11)})
+                    ON CONFLICT(correlation_id) DO UPDATE SET
+                        session_key = excluded.session_key,
+                        request_kind = excluded.request_kind,
+                        request_text = excluded.request_text,
+                        conversation_id = excluded.conversation_id,
+                        followup_to_task_id = excluded.followup_to_task_id,
+                        owner_canonical_user_id = excluded.owner_canonical_user_id,
+                        created_at = excluded.created_at,
+                        status = excluded.status,
+                        active_task_id = COALESCE(excluded.active_task_id, gateway_requests.active_task_id),
+                        run_state = COALESCE(excluded.run_state, gateway_requests.run_state)
+                    """,
+                    (
+                        correlation_id,
+                        session_key,
+                        request_kind,
+                        request_text,
+                        conversation_id,
+                        followup_to_task_id,
+                        owner,
+                        created_at,
+                        status,
+                        active_task_id,
+                        run_state,
+                    ),
                 )
-                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
-                ON CONFLICT(correlation_id) DO UPDATE SET
-                    session_key = excluded.session_key,
-                    request_kind = excluded.request_kind,
-                    request_text = excluded.request_text,
-                    conversation_id = excluded.conversation_id,
-                    followup_to_task_id = excluded.followup_to_task_id,
-                    owner_canonical_user_id = excluded.owner_canonical_user_id,
-                    created_at = excluded.created_at,
-                    status = excluded.status
-                """,
-                (
-                    correlation_id,
-                    session_key,
-                    request_kind,
-                    request_text,
-                    conversation_id,
-                    followup_to_task_id,
-                    owner,
-                    created_at,
-                    status,
-                ),
-            )
-            conn.commit()
+                conn.commit()
+        except Exception as exc:
+            # Only the running-thread index can refuse this write (the
+            # correlation id conflict is an update), so a refused running
+            # admission means the thread already has its request.
+            if run_state == RUN_STATE_RUNNING and self._is_integrity_error(exc):
+                raise ThreadRequestRunning(session_key, conversation_id) from exc
+            raise
 
     def get_request(self, correlation_id: str) -> Optional[RequestRecord]:
         with self._connect() as conn:
@@ -2199,7 +2395,7 @@ class _RelationalGatewayStateRepository:
                 f"""
                 SELECT correlation_id, session_key, request_kind, request_text, conversation_id,
                        followup_to_task_id, created_at, status, owner_canonical_user_id,
-                       active_task_id
+                       active_task_id, run_state
                 FROM gateway_requests
                 WHERE correlation_id = {self._dialect.bind}
                 """,
@@ -2208,6 +2404,84 @@ class _RelationalGatewayStateRepository:
         if not row:
             return None
         return RequestRecord(**dict(row))
+
+    def get_running_request(
+        self,
+        *,
+        session_key: str,
+        conversation_id: Optional[str],
+    ) -> Optional[RequestRecord]:
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT correlation_id, session_key, request_kind, request_text, conversation_id,
+                       followup_to_task_id, created_at, status, owner_canonical_user_id,
+                       active_task_id, run_state
+                FROM gateway_requests
+                WHERE session_key = {bind}
+                  AND COALESCE(conversation_id, '') = {bind}
+                  AND run_state = {bind}
+                """,
+                (session_key, conversation_id or "", RUN_STATE_RUNNING),
+            ).fetchone()
+        return RequestRecord(**dict(row)) if row else None
+
+    def finish_request(self, correlation_id: str) -> bool:
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE gateway_requests SET run_state = {bind}
+                WHERE correlation_id = {bind} AND run_state = {bind}
+                """,
+                (RUN_STATE_FINISHED, correlation_id, RUN_STATE_RUNNING),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def hold_guidance(self, record: HeldGuidanceRecord) -> None:
+        values = asdict(record)
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            conn.execute(
+                f"INSERT INTO gateway_held_guidance ({', '.join(values)}) VALUES ({', '.join([bind] * len(values))})",
+                tuple(values.values()),
+            )
+            conn.commit()
+
+    def list_held_guidance(self) -> list[HeldGuidanceRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM gateway_held_guidance ORDER BY created_at ASC, correlation_id ASC"
+            ).fetchall()
+        return [HeldGuidanceRecord(**dict(row)) for row in rows]
+
+    def get_held_guidance(self, correlation_id: str) -> Optional[HeldGuidanceRecord]:
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT * FROM gateway_held_guidance WHERE correlation_id = {self._dialect.bind}",
+                (correlation_id,),
+            ).fetchone()
+        return HeldGuidanceRecord(**dict(row)) if row else None
+
+    def release_held_guidance(self, correlation_id: str, *, status: str) -> bool:
+        """Delete the held copy and record the outcome together; only one caller wins."""
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"DELETE FROM gateway_held_guidance WHERE correlation_id = {bind}",
+                (correlation_id,),
+            )
+            released = cursor.rowcount > 0
+            if released:
+                conn.execute(
+                    f"UPDATE gateway_requests SET status = {bind} WHERE correlation_id = {bind}",
+                    (status, correlation_id),
+                )
+            conn.commit()
+        return released
 
     def update_request_status(self, correlation_id: str, status: str) -> None:
         with self._connect() as conn:
@@ -2235,8 +2509,9 @@ class _RelationalGatewayStateRepository:
                 UPDATE gateway_requests
                    SET status = {self._dialect.bind}, active_task_id = {self._dialect.bind}
                  WHERE correlation_id = {self._dialect.bind}
+                   AND (run_state IS NULL OR active_task_id = {self._dialect.bind})
                 """,
-                (status, normalized_task_id, correlation_id),
+                (status, normalized_task_id, correlation_id, normalized_task_id),
             )
             conn.commit()
 
@@ -2356,7 +2631,7 @@ class _RelationalGatewayStateRepository:
                 f"""
                 SELECT correlation_id, session_key, request_kind, request_text, conversation_id,
                        followup_to_task_id, created_at, status, owner_canonical_user_id,
-                       active_task_id
+                       active_task_id, run_state
                 FROM gateway_requests
                 WHERE session_key = {self._dialect.bind}
                 ORDER BY created_at DESC
@@ -2584,7 +2859,27 @@ class _RelationalGatewayStateRepository:
             conn.commit()
         return self.get_attachment(attachment_id)
 
-    def upsert_pending_query(
+    # Agent questions to people (``gateway_questions``). Every change of a
+    # question's status is conditional on it still being open, so exactly one
+    # outcome takes each question: an answer, its expiry, its request ending,
+    # or a newer question of its own task.
+    _QUESTION_COLUMNS = (
+        "task_query_id, session_key, correlation_id, parent_task_id, conversation_id, "
+        "owner_canonical_user_id, query_text, query_payload_json, created_at, queued_at, "
+        "shown_at, status, closed_at"
+    )
+
+    def _question_rows(
+        self, conn: Any, where: str, params: Sequence[Any]
+    ) -> list[PendingQueryRecord]:
+        rows = conn.execute(
+            f"SELECT {self._QUESTION_COLUMNS} FROM gateway_questions WHERE {where} "
+            "ORDER BY queued_at, task_query_id",
+            tuple(params),
+        ).fetchall()
+        return [PendingQueryRecord(**dict(row)) for row in rows]
+
+    def add_pending_query(
         self,
         *,
         session_key: str,
@@ -2594,87 +2889,207 @@ class _RelationalGatewayStateRepository:
         conversation_id: Optional[str],
         query_text: str,
         query_payload_json: Optional[str] = None,
-        status: str = "pending",
         owner_canonical_user_id: Optional[str] = None,
-    ) -> None:
-        created_at = utc_now_iso()
+    ) -> PendingQueryAdded:
+        """Keep one arriving question behind the session's earlier open ones.
+
+        The same question arriving again (a redelivered message) changes
+        nothing, so an answered question is never reopened by a repeat. A newer
+        question of the same request and task takes the place in line of that
+        task's open one: the lead waits only for a task's latest question.
+        """
+
+        bind = self._dialect.bind
+        now = utc_now_iso()
         owner = owner_canonical_user_id
         if owner is None:
             session = self.get_session(session_key)
             owner = session.owner_canonical_user_id if session else None
         with self._connect() as conn:
-            conn.execute(
+            existing = self._question_rows(conn, f"task_query_id = {bind}", (task_query_id,))
+            if existing:
+                return PendingQueryAdded(stored=existing[0], created=False)
+            replaced = self._question_rows(
+                conn,
+                f"session_key = {bind} AND correlation_id = {bind} "
+                f"AND parent_task_id = {bind} AND status = {bind}",
+                (session_key, correlation_id, parent_task_id, PendingQueryStatus.OPEN.value),
+            )
+            record = PendingQueryRecord(
+                session_key=session_key,
+                correlation_id=correlation_id,
+                task_query_id=task_query_id,
+                parent_task_id=parent_task_id,
+                conversation_id=conversation_id,
+                query_text=query_text,
+                created_at=now,
+                queued_at=replaced[0].queued_at if replaced else now,
+                status=PendingQueryStatus.OPEN.value,
+                query_payload_json=query_payload_json,
+                owner_canonical_user_id=owner,
+            )
+            cursor = conn.execute(
                 f"""
-                INSERT INTO gateway_pending_queries
-                (session_key, correlation_id, task_query_id, parent_task_id, conversation_id, query_text,
-                 query_payload_json, owner_canonical_user_id, created_at, status)
-                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
-                ON CONFLICT(session_key) DO UPDATE SET
-                    correlation_id = excluded.correlation_id,
-                    task_query_id = excluded.task_query_id,
-                    parent_task_id = excluded.parent_task_id,
-                    conversation_id = excluded.conversation_id,
-                    query_text = excluded.query_text,
-                    query_payload_json = excluded.query_payload_json,
-                    owner_canonical_user_id = excluded.owner_canonical_user_id,
-                    created_at = excluded.created_at,
-                    status = excluded.status
+                INSERT INTO gateway_questions ({self._QUESTION_COLUMNS})
+                VALUES ({", ".join([bind] * 13)})
+                ON CONFLICT(task_query_id) DO NOTHING
                 """,
                 (
-                    session_key,
-                    correlation_id,
-                    task_query_id,
-                    parent_task_id,
-                    conversation_id,
-                    query_text,
-                    query_payload_json,
-                    owner,
-                    created_at,
-                    status,
+                    record.task_query_id,
+                    record.session_key,
+                    record.correlation_id,
+                    record.parent_task_id,
+                    record.conversation_id,
+                    record.owner_canonical_user_id,
+                    record.query_text,
+                    record.query_payload_json,
+                    record.created_at,
+                    record.queued_at,
+                    record.shown_at,
+                    record.status,
+                    record.closed_at,
                 ),
             )
+            if cursor.rowcount <= 0:
+                # Another delivery of the same question was stored first.
+                conn.commit()
+                stored = self._question_rows(conn, f"task_query_id = {bind}", (task_query_id,))
+                return PendingQueryAdded(stored=stored[0], created=False)
+            for earlier in replaced:
+                conn.execute(
+                    f"""
+                    UPDATE gateway_questions SET status = {bind}, closed_at = {bind}
+                     WHERE task_query_id = {bind} AND status = {bind}
+                    """,
+                    (
+                        PendingQueryStatus.REPLACED.value,
+                        now,
+                        earlier.task_query_id,
+                        PendingQueryStatus.OPEN.value,
+                    ),
+                )
             conn.commit()
+        return PendingQueryAdded(stored=record, created=True, replaced=tuple(replaced))
 
-    def get_pending_query(self, session_key: str) -> Optional[PendingQueryRecord]:
+    def get_pending_query(self, task_query_id: str) -> Optional[PendingQueryRecord]:
         with self._connect() as conn:
-            row = conn.execute(
-                f"""
-                SELECT session_key, correlation_id, task_query_id, parent_task_id, conversation_id,
-                       query_text, query_payload_json, created_at, status, owner_canonical_user_id
-                FROM gateway_pending_queries
-                WHERE session_key = {self._dialect.bind} AND status = 'pending'
-                """,
-                (session_key,),
-            ).fetchone()
-        if not row:
-            return None
-        return PendingQueryRecord(**dict(row))
-
-    def clear_pending_query(
-        self, session_key: str, *, status: str = "completed"
-    ) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                f"""
-                UPDATE gateway_pending_queries
-                SET status = {self._dialect.bind}
-                WHERE session_key = {self._dialect.bind}
-                """,
-                (status, session_key),
+            rows = self._question_rows(
+                conn, f"task_query_id = {self._dialect.bind}", (task_query_id,)
             )
-            conn.commit()
+        return rows[0] if rows else None
 
-    def expire_pending_queries(
-        self, *, cutoff_iso: str, status: str = "expired"
-    ) -> int:
+    def list_open_pending_queries(self, session_key: str) -> list[PendingQueryRecord]:
+        """The session's open questions, oldest place in line first."""
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            return self._question_rows(
+                conn,
+                f"session_key = {bind} AND status = {bind}",
+                (session_key, PendingQueryStatus.OPEN.value),
+            )
+
+    def mark_pending_query_shown(self, task_query_id: str) -> bool:
+        bind = self._dialect.bind
         with self._connect() as conn:
             cursor = conn.execute(
                 f"""
-                UPDATE gateway_pending_queries
-                SET status = {self._dialect.bind}
-                WHERE status = 'pending' AND created_at < {self._dialect.bind}
+                UPDATE gateway_questions SET shown_at = {bind}
+                 WHERE task_query_id = {bind} AND status = {bind} AND shown_at IS NULL
                 """,
-                (status, cutoff_iso),
+                (utc_now_iso(), task_query_id, PendingQueryStatus.OPEN.value),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def clear_pending_query_shown(self, task_query_id: str) -> None:
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE gateway_questions SET shown_at = NULL "
+                f"WHERE task_query_id = {bind} AND status = {bind}",
+                (task_query_id, PendingQueryStatus.OPEN.value),
+            )
+            conn.commit()
+
+    def close_pending_query(self, task_query_id: str, *, status: str) -> bool:
+        """End one open question; False when something else ended it first."""
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE gateway_questions SET status = {bind}, closed_at = {bind}
+                 WHERE task_query_id = {bind} AND status = {bind}
+                """,
+                (status, utc_now_iso(), task_query_id, PendingQueryStatus.OPEN.value),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def reopen_answered_pending_query(self, task_query_id: str) -> bool:
+        """Open an answered question again: its answer could not be sent."""
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE gateway_questions SET status = {bind}, closed_at = NULL
+                 WHERE task_query_id = {bind} AND status = {bind}
+                """,
+                (
+                    PendingQueryStatus.OPEN.value,
+                    task_query_id,
+                    PendingQueryStatus.ANSWERED.value,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def close_open_pending_queries_for_task(
+        self, *, correlation_id: str, parent_task_id: str, status: str
+    ) -> list[PendingQueryRecord]:
+        """End the open questions of one finished task; returns the ones this ended.
+
+        The task is named with its request because every run of a recurring
+        schedule shares the schedule's request id: one run finishing must not
+        end another run's question.
+        """
+
+        bind = self._dialect.bind
+        closed: list[PendingQueryRecord] = []
+        with self._connect() as conn:
+            for record in self._question_rows(
+                conn,
+                f"correlation_id = {bind} AND parent_task_id = {bind} AND status = {bind}",
+                (correlation_id, parent_task_id, PendingQueryStatus.OPEN.value),
+            ):
+                cursor = conn.execute(
+                    f"""
+                    UPDATE gateway_questions SET status = {bind}, closed_at = {bind}
+                     WHERE task_query_id = {bind} AND status = {bind}
+                    """,
+                    (status, utc_now_iso(), record.task_query_id, PendingQueryStatus.OPEN.value),
+                )
+                if cursor.rowcount > 0:
+                    closed.append(record)
+            conn.commit()
+        return closed
+
+    def expire_pending_queries(self, *, cutoff_iso: str) -> int:
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE gateway_questions SET status = {bind}, closed_at = {bind}
+                 WHERE status = {bind} AND created_at < {bind}
+                """,
+                (
+                    PendingQueryStatus.EXPIRED.value,
+                    utc_now_iso(),
+                    PendingQueryStatus.OPEN.value,
+                    cutoff_iso,
+                ),
             )
             conn.commit()
             return int(cursor.rowcount)
@@ -4035,10 +4450,11 @@ class _RelationalGatewayStateRepository:
     _PERSON_SESSION_TABLES = (
         "gateway_session_conversations",
         "gateway_requests",
+        "gateway_held_guidance",
         "gateway_credential_collections",
         "gateway_deliveries",
         "gateway_attachments",
-        "gateway_pending_queries",
+        "gateway_questions",
         "gateway_transcript_messages",
         "gateway_transcript_session_sequences",
         "gateway_channel_sessions",
@@ -4292,6 +4708,10 @@ class SqliteGatewayStateRepository(_RelationalGatewayStateRepository):
     def _ensure_column(self, conn: Any, table_name: str, column_name: str, column_type: str) -> None:
         ensure_sqlite_column(conn, table_name, column_name, column_type, logger=self._logger)
 
+    @staticmethod
+    def _is_integrity_error(exc: Exception) -> bool:
+        return isinstance(exc, sqlite3.IntegrityError)
+
 
 class PostgresGatewayStateRepository(_RelationalGatewayStateRepository):
     """Postgres implementation for gateway session and delivery state."""
@@ -4318,6 +4738,10 @@ class PostgresGatewayStateRepository(_RelationalGatewayStateRepository):
     def _ensure_column(self, conn: Any, table_name: str, column_name: str, column_type: str) -> None:
         conn.execute(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_type}')
         return
+
+    @staticmethod
+    def _is_integrity_error(exc: Exception) -> bool:
+        return exc.__class__.__name__ in {"IntegrityError", "UniqueViolation"}
 
 
 def create_gateway_state_repository(
