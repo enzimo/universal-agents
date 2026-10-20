@@ -9,13 +9,15 @@ from custom_agents.task_runtime_state import PlanRuntimeState
 from custom_agents.task_runtime_state import TaskRuntimeState
 from custom_agents.task_runtime_state import cache_plan_objective, cache_task_objective
 import logging
+from storage.change_ledger import ChangeRefused
 from storage.durable_owner_scope_repository import DurableOwnerScopeRepository
 from storage.objective_repository import ObjectiveRepository, ObjectiveView
 from storage.objective_work_repository import ObjectiveWorkRepository
 from custom_agents.task_manager_plans import PlanCoordinator
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from custom_agents.task_records import TaskInfo
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -29,7 +31,7 @@ from id_generation import new_id
 class ObjectiveSaveFailed(RuntimeError):
     """An Objective change was not written to the store.
 
-    Raised by ``ObjectiveCoordinator._save_objective`` for changes that a tool
+    Raised by ``ObjectiveCoordinator`` writes for changes that a tool
     call or a person's command asked for, so the reply says the change was
     not saved instead of returning the changed record as if it were.
     """
@@ -50,6 +52,22 @@ _HELD_REVIEW_CONCLUSIONS = {
     ObjectiveStatus.PAUSED: "objective_paused",
     ObjectiveStatus.DELETING: "objective_deletion_pending",
 }
+
+
+@dataclass
+class _TaskEndReview:
+    """One task-end review: what was read before the store transaction, and what it concluded."""
+
+    task_id: str
+    terminal_state: str
+    timestamp: str
+    summary: Optional[str]
+    active_task_ids: List[str]
+    active_plan_ids: List[str]
+    conclusion: str = ""
+    decision_summary: str = ""
+    # The review decided the Objective's status (its last linked work ended).
+    decided_status: bool = False
 
 
 class ObjectiveCoordinator:
@@ -100,37 +118,15 @@ class ObjectiveCoordinator:
             PlanStatus.ABANDONED,
         }
 
-    def _save_objective(self, objective: ObjectiveRecord) -> None:
-        """Write the Objective, or raise ``ObjectiveSaveFailed``.
-
-        For changes a tool call or a person's command asked for: the caller
-        reports that nothing was saved. A step that goes on without the write,
-        because its own records are already stored, uses
-        ``_save_objective_logged``. The plan and task lookups change only after
-        the write, so they never point at a change the store does not have.
-        """
-        if not self.operations.objectives_enabled():
-            self._logger.error(
-                "An Objective change was not saved because Objectives are off. "
-                "event=objective_save_failed objective_id=%s reason=objectives_disabled",
-                objective.objective_id,
-            )
-            raise ObjectiveSaveFailed(objective.objective_id)
-        now_ts = datetime.now(timezone.utc).isoformat()
-        objective.owner_agent_id = self.operations.durable_manager_scope_id()
+    def _stamp(self, objective: ObjectiveRecord) -> None:
+        """The team lead's fields and the write time, set on every record this coordinator writes."""
         objective.owner_agent_name = objective.owner_agent_name or self.identity.owner_agent_name
         objective.team_id = objective.team_id or self.identity.team_id
         objective.owner_named_agent_type = objective.owner_named_agent_type or self.identity.owner_named_agent_type
-        objective.updated_at = now_ts
-        try:
-            self.objective_repository.save_objective(objective)
-        except Exception as exc:
-            self._logger.error(
-                "An Objective change was not saved. event=objective_save_failed objective_id=%s error=%s",
-                objective.objective_id,
-                exc,
-            )
-            raise ObjectiveSaveFailed(objective.objective_id) from exc
+        objective.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def _remember_links(self, objective: ObjectiveRecord) -> None:
+        """Point the plan and task lookups at a stored Objective (only after the write)."""
         # Only links of tasks and plans this agent holds: the Objective lists
         # finished ones too (task_runtime_state.TASK_SCOPED_FIELDS).
         for plan_id in [objective.current_plan_id, *objective.plan_ids]:
@@ -140,59 +136,119 @@ class ObjectiveCoordinator:
             if task_id:
                 cache_task_objective(self.task_state, self.objective_state, task_id, objective.objective_id)
 
+    def _save_failed(self, objective_id: str, exc: BaseException) -> ObjectiveSaveFailed:
+        self._logger.error(
+            "An Objective change was not saved. event=objective_save_failed objective_id=%s error=%s",
+            objective_id,
+            exc,
+        )
+        return ObjectiveSaveFailed(objective_id)
+
+    def _insert_objective(self, objective: ObjectiveRecord) -> None:
+        """Store a new Objective, or raise ``ObjectiveSaveFailed``."""
+        if not self.operations.objectives_enabled():
+            self._logger.error(
+                "An Objective change was not saved because Objectives are off. "
+                "event=objective_save_failed objective_id=%s reason=objectives_disabled",
+                objective.objective_id,
+            )
+            raise ObjectiveSaveFailed(objective.objective_id)
+        objective.owner_agent_id = self.operations.durable_manager_scope_id()
+        self._stamp(objective)
+        try:
+            self.objective_repository.insert_objective(objective)
+        except Exception as exc:
+            raise self._save_failed(objective.objective_id, exc) from exc
+        self._remember_links(objective)
+
+    def _commit_change(
+        self,
+        objective_id: Optional[str],
+        change: ObjectiveChange,
+        *,
+        expected_version: Optional[str] = None,
+    ) -> Optional[ObjectiveRecord]:
+        """Apply ``change`` to the stored Objective in one store transaction.
+
+        Returns the record after the change (unchanged when ``change`` returns
+        False), or None when there is no such Objective. A failed write raises
+        ``ObjectiveSaveFailed``. With ``expected_version`` (an agent's edit)
+        the store raises ``ChangeRefused`` (``changed_since_read``) when the
+        Objective changed since the agent read it; that passes through to the
+        caller, which reports it. ``change`` runs inside the transaction, so
+        it only edits the record: it reports a refusal through its own state,
+        never by writing anything else.
+        """
+        if not objective_id or not self.operations.objectives_enabled() or not self.identity.owner_agent_id:
+            return None
+        scope = self.operations.durable_manager_scope_id()
+        if not scope:
+            return None
+
+        def stamped(objective: ObjectiveRecord) -> bool:
+            if not change(objective):
+                return False
+            self._stamp(objective)
+            return True
+
+        try:
+            objective = self.objective_repository.change_objective(
+                objective_id,
+                owner_agent_id=scope,
+                change=stamped,
+                expected_version=expected_version,
+            )
+        except ChangeRefused:
+            raise
+        except Exception as exc:
+            raise self._save_failed(objective_id, exc) from exc
+        if objective is not None:
+            self._remember_links(objective)
+        return objective
+
     def change_objective(
         self,
         objective_id: str,
         change: ObjectiveChange,
         *,
         step: Optional[str] = None,
+        expected_version: Optional[str] = None,
     ) -> Optional[ObjectiveRecord]:
-        """Load the stored Objective, apply ``change`` and save it, in the caller's one operation.
+        """Change the stored Objective in one store transaction; the way to change one from outside this class.
 
-        Why this is the way to change an Objective from outside this class:
-        ``ObjectiveRepository.save_objective`` writes the whole record, so a
-        copy loaded in an earlier manager operation and saved later silently
-        erases everything stored in between (a work-policy event, a progress
-        update, a schedule link). The task operation lane runs one operation
-        at a time, so loading, changing and saving inside one operation sees
-        and keeps every earlier change. Callers run this inside a lane
-        operation and never keep a record to save later.
+        Why: a copy of the record kept and saved later would erase whatever
+        was stored in between (a work-policy event, a progress update, a
+        schedule or task link), also from another team lead process. The
+        store applies ``change`` to the stored row inside its write
+        transaction (``ObjectiveRepository.change_objective``), so nothing a
+        change does not touch is ever written back from an older copy.
+        Callers still run this inside a task operation, so their own steps
+        happen in order.
 
         ``change`` edits the record in place and returns False when there is
         nothing to save. Returns the record after the change, or None when the
         Objective does not exist. Without ``step`` a failed save raises
-        ``ObjectiveSaveFailed``; with ``step`` it is logged (see
-        ``_save_objective_logged``) and None is returned.
+        ``ObjectiveSaveFailed``. With ``step`` (trusted bookkeeping nobody
+        waits on: a task starting, ending or gaining a subtask, a plan
+        following its task, a work session recording progress) the failure is
+        logged with the step and None is returned: their own records are
+        stored elsewhere, so only the Objective's copy of the change is lost.
+        Bookkeeping passes no ``expected_version``, so it is never refused.
         """
-        objective = self._get_objective_record(objective_id)
-        if objective is None:
-            return None
-        if not change(objective):
-            return objective
         if step is None:
-            self._save_objective(objective)
-            return objective
-        return objective if self._save_objective_logged(objective, step=step) else None
-
-    def _save_objective_logged(self, objective: ObjectiveRecord, *, step: str) -> bool:
-        """Write the Objective for a step that goes on without it; False when the write failed.
-
-        For trusted steps nobody waits on: a task starting, ending or gaining
-        a subtask, a plan following its task, a work session recording its
-        progress. Their own records are stored elsewhere, so only the
-        Objective's copy of the change (an event, a link, a review) is lost,
-        and the failure is logged with ``step``.
-        """
+            return self._commit_change(objective_id, change, expected_version=expected_version)
         try:
-            self._save_objective(objective)
+            return self._commit_change(objective_id, change, expected_version=expected_version)
         except ObjectiveSaveFailed:
-            self._logger.warning(
-                "Went on without the Objective change. event=objective_save_skipped objective_id=%s step=%s",
-                objective.objective_id,
-                step,
-            )
-            return False
-        return True
+            self._log_skipped(objective_id, step)
+            return None
+
+    def _log_skipped(self, objective_id: Optional[str], step: str) -> None:
+        self._logger.warning(
+            "Went on without the Objective change. event=objective_save_skipped objective_id=%s step=%s",
+            objective_id,
+            step,
+        )
 
     def _append_objective_event(
         self,
@@ -622,16 +678,22 @@ class ObjectiveCoordinator:
             return None
 
         self.objective_state.task_to_objective_id[task_id] = objective.objective_id
-        if task_id not in objective.related_task_ids:
-            objective.related_task_ids.append(task_id)
+
+        def link_task(stored: ObjectiveRecord) -> bool:
+            if task_id in stored.related_task_ids:
+                return False
+            stored.related_task_ids.append(task_id)
             self._append_objective_event(
-                objective,
+                stored,
                 ObjectiveEventType.TASK_LINKED,
                 f"Linked incoming task {task_id} to objective.",
                 task_id=task_id,
                 user_visible=False,
             )
-            self._save_objective_logged(objective, step="incoming_task_linked")
+            return True
+
+        # Merged into the stored record: an agent's edit made meanwhile stays.
+        objective = self.change_objective(objective.objective_id, link_task, step="incoming_task_linked") or objective
 
         current_plan = self.operations.get_plan(objective.current_plan_id) if objective.current_plan_id else None
         if current_plan is None or current_plan.status != PlanStatus.ACTIVE:
@@ -690,12 +752,13 @@ class ObjectiveCoordinator:
         user_visible: bool = False,
         reason: Optional[str] = None,
     ) -> Optional[ObjectiveRecord]:
-        objective = self._get_objective_record(objective_id)
-        if objective is None:
-            self._logger.warning("Cannot link schedule %s to unknown objective %s.", schedule_id, objective_id)
-            return None
-        existing = next((link for link in objective.schedule_links if link.schedule_id == schedule_id), None)
-        if existing is None:
+        def link(objective: ObjectiveRecord) -> bool:
+            existing = next((item for item in objective.schedule_links if item.schedule_id == schedule_id), None)
+            if existing is not None:
+                if existing.managed_by_objective == managed_by_objective:
+                    return False
+                existing.managed_by_objective = managed_by_objective
+                return True
             objective.schedule_links.append(
                 ObjectiveScheduleLink(
                     schedule_id=schedule_id,
@@ -710,9 +773,11 @@ class ObjectiveCoordinator:
                 user_visible=user_visible,
                 details={"reason": reason} if reason else {},
             )
-        else:
-            existing.managed_by_objective = managed_by_objective
-        self._save_objective(objective)
+            return True
+
+        objective = self._commit_change(objective_id, link)
+        if objective is None:
+            self._logger.warning("Cannot link schedule %s to unknown objective %s.", schedule_id, objective_id)
         return objective
 
     def link_heartbeat_to_objective(
@@ -724,19 +789,16 @@ class ObjectiveCoordinator:
         user_visible: bool = False,
         reason: Optional[str] = None,
     ) -> Optional[ObjectiveRecord]:
-        objective = self._get_objective_record(objective_id)
-        if objective is None:
-            self._logger.warning(
-                "Cannot link heartbeat item %s to unknown objective %s.",
-                heartbeat_item_id,
-                objective_id,
+        def link(objective: ObjectiveRecord) -> bool:
+            existing = next(
+                (item for item in objective.heartbeat_links if item.heartbeat_item_id == heartbeat_item_id),
+                None,
             )
-            return None
-        existing = next(
-            (link for link in objective.heartbeat_links if link.heartbeat_item_id == heartbeat_item_id),
-            None,
-        )
-        if existing is None:
+            if existing is not None:
+                if existing.managed_by_objective == managed_by_objective:
+                    return False
+                existing.managed_by_objective = managed_by_objective
+                return True
             objective.heartbeat_links.append(
                 ObjectiveHeartbeatLink(
                     heartbeat_item_id=heartbeat_item_id,
@@ -751,9 +813,15 @@ class ObjectiveCoordinator:
                 user_visible=user_visible,
                 details={"reason": reason} if reason else {},
             )
-        else:
-            existing.managed_by_objective = managed_by_objective
-        self._save_objective(objective)
+            return True
+
+        objective = self._commit_change(objective_id, link)
+        if objective is None:
+            self._logger.warning(
+                "Cannot link heartbeat item %s to unknown objective %s.",
+                heartbeat_item_id,
+                objective_id,
+            )
         return objective
 
     def create_objective(
@@ -903,7 +971,7 @@ class ObjectiveCoordinator:
         self.objective_state.task_to_objective_id[objective_task_id] = objective.objective_id
         self.objective_state.plan_to_objective_id[plan_id] = objective.objective_id
 
-        self._save_objective(objective)
+        self._insert_objective(objective)
         plan: Optional[PlanRecord] = self.operations.get_plan(plan_id)
         if plan is not None:
             plan.objective_id = objective.objective_id
@@ -1019,7 +1087,7 @@ class ObjectiveCoordinator:
 
     def _record_objective_continuation_start(
         self,
-        objective: ObjectiveRecord,
+        objective_id: str,
         *,
         source_task_id: str,
         continuation_task_id: str,
@@ -1027,25 +1095,33 @@ class ObjectiveCoordinator:
         current_focus: Optional[str],
         user_visible: bool,
     ) -> None:
-        previous_status = objective.status
-        objective.status = ObjectiveStatus.ACTIVE
-        if current_focus is not None:
-            objective.current_focus = current_focus.strip() or objective.current_focus
-        objective.progress_summary = f"Started continuation Task {continuation_task_id}."
-        self._append_objective_event(
-            objective,
-            ObjectiveEventType.PROGRESS_UPDATED,
-            "Started a new Task to continue Objective work.",
-            task_id=continuation_task_id,
-            plan_id=objective.current_plan_id,
-            user_visible=user_visible,
-            details={
-                "source_task_id": source_task_id,
-                "previous_status": previous_status.value,
-                "work_brief": work_brief,
-            },
-        )
-        self._save_objective(objective)
+        """Record a continuation Task on the stored Objective, or raise ``ObjectiveSaveFailed``."""
+
+        def start(stored: ObjectiveRecord) -> bool:
+            previous_status = stored.status
+            stored.status = ObjectiveStatus.ACTIVE
+            if current_focus is not None:
+                stored.current_focus = current_focus.strip() or stored.current_focus
+            stored.progress_summary = f"Started continuation Task {continuation_task_id}."
+            self._append_objective_event(
+                stored,
+                ObjectiveEventType.PROGRESS_UPDATED,
+                "Started a new Task to continue Objective work.",
+                task_id=continuation_task_id,
+                plan_id=stored.current_plan_id,
+                user_visible=user_visible,
+                details={
+                    "source_task_id": source_task_id,
+                    "previous_status": previous_status.value,
+                    "work_brief": work_brief,
+                },
+            )
+            return True
+
+        objective = self._commit_change(objective_id, start)
+        if objective is None:
+            # Deleted since the continuation began: nothing can record it.
+            raise ObjectiveSaveFailed(objective_id)
         self.operations.append_history_entry(
             source_task_id,
             f"Started continuation Task for Objective `{objective.objective_id}`.",
@@ -1106,10 +1182,9 @@ class ObjectiveCoordinator:
                 datetime.now(timezone.utc).isoformat(),
             )
             return None
-        refreshed = self._get_objective_record(objective.objective_id) or objective
         try:
             self._record_objective_continuation_start(
-                refreshed,
+                objective.objective_id,
                 source_task_id=source_task_id,
                 continuation_task_id=task_id,
                 work_brief=normalized_work_brief,
@@ -1137,61 +1212,45 @@ class ObjectiveCoordinator:
         task_id: Optional[str] = None,
         plan_id: Optional[str] = None,
         user_visible: bool = True,
+        expected_version: Optional[str] = None,
     ) -> Optional[ObjectiveRecord]:
-        objective = self._get_objective_record(objective_id)
+        """Record progress and criterion updates on the stored Objective.
+
+        ``expected_version`` is the version the agent read (``objective_version``);
+        the store refuses the update with ``changed_since_read`` when the
+        Objective changed since. A closed Objective records nothing.
+        """
+        outcome = {"closed": False, "changed": False}
+
+        def progress(objective: ObjectiveRecord) -> bool:
+            if objective.status in self._objective_terminal_statuses():
+                outcome["closed"] = True
+                return False
+            if not self._apply_progress_fields(objective, progress_summary, current_focus, criterion_updates):
+                return False
+            self._append_objective_event(
+                objective,
+                ObjectiveEventType.PROGRESS_UPDATED,
+                "Updated objective progress.",
+                task_id=task_id,
+                plan_id=plan_id or objective.current_plan_id,
+                user_visible=user_visible,
+                details={
+                    "progress_summary": objective.progress_summary,
+                    "current_focus": objective.current_focus,
+                    "criterion_updates": criterion_updates or [],
+                },
+            )
+            outcome["changed"] = True
+            return True
+
+        objective = self._commit_change(objective_id, progress, expected_version=expected_version)
         if objective is None:
             return None
-        if objective.status in self._objective_terminal_statuses():
+        if outcome["closed"]:
             self._logger.warning("Ignoring progress update for terminal objective %s.", objective_id)
+        if not outcome["changed"]:
             return objective
-
-        changed = False
-        if progress_summary is not None and progress_summary != objective.progress_summary:
-            objective.progress_summary = progress_summary.strip() or None
-            changed = True
-        if current_focus is not None and current_focus != objective.current_focus:
-            objective.current_focus = current_focus.strip() or None
-            changed = True
-
-        criteria_by_id = {criterion.criterion_id: criterion for criterion in objective.success_criteria}
-        for raw_update in criterion_updates or []:
-            if not isinstance(raw_update, dict):
-                continue
-            criterion = criteria_by_id.get(str(raw_update.get("criterion_id") or ""))
-            if criterion is None:
-                description = str(raw_update.get("description") or "").strip()
-                if not description:
-                    continue
-                criterion = ObjectiveSuccessCriterion(description=description)
-                objective.success_criteria.append(criterion)
-                criteria_by_id[criterion.criterion_id] = criterion
-                changed = True
-            if raw_update.get("status") is not None:
-                criterion.status = self._coerce_objective_criterion_status(raw_update["status"])
-                changed = True
-            if "evidence_summary" in raw_update:
-                evidence_summary = raw_update.get("evidence_summary")
-                criterion.evidence_summary = str(evidence_summary).strip() if evidence_summary else None
-                changed = True
-            if changed:
-                criterion.updated_at = datetime.now(timezone.utc).isoformat()
-
-        if not changed:
-            return objective
-        self._append_objective_event(
-            objective,
-            ObjectiveEventType.PROGRESS_UPDATED,
-            "Updated objective progress.",
-            task_id=task_id,
-            plan_id=plan_id or objective.current_plan_id,
-            user_visible=user_visible,
-            details={
-                "progress_summary": objective.progress_summary,
-                "current_focus": objective.current_focus,
-                "criterion_updates": criterion_updates or [],
-            },
-        )
-        self._save_objective(objective)
         self.operations.emit_activity(
             activity_type=TaskActivityType.OBJECTIVE_UPDATED,
             stage=TaskActivityStage.RUNNING,
@@ -1202,6 +1261,56 @@ class ObjectiveCoordinator:
             details=objective.model_dump(mode="json"),
         )
         return objective
+
+    def _apply_progress_fields(
+        self,
+        objective: ObjectiveRecord,
+        progress_summary: Optional[str],
+        current_focus: Optional[str],
+        criterion_updates: Optional[List[Dict[str, Any]]],
+    ) -> bool:
+        """Set the progress, focus and criterion updates on a stored record; False when nothing changed."""
+        changed = False
+        if progress_summary is not None and progress_summary != objective.progress_summary:
+            objective.progress_summary = progress_summary.strip() or None
+            changed = True
+        if current_focus is not None and current_focus != objective.current_focus:
+            objective.current_focus = current_focus.strip() or None
+            changed = True
+
+        criteria_by_id = {criterion.criterion_id: criterion for criterion in objective.success_criteria}
+        for raw_update in criterion_updates or []:
+            if isinstance(raw_update, dict) and self._apply_criterion_update(objective, criteria_by_id, raw_update):
+                changed = True
+        return changed
+
+    def _apply_criterion_update(
+        self,
+        objective: ObjectiveRecord,
+        criteria_by_id: Dict[str, ObjectiveSuccessCriterion],
+        raw_update: Dict[str, Any],
+    ) -> bool:
+        """One criterion update: a known criterion by id, or a new one by description; False when nothing changed."""
+        criterion = criteria_by_id.get(str(raw_update.get("criterion_id") or ""))
+        changed = False
+        if criterion is None:
+            description = str(raw_update.get("description") or "").strip()
+            if not description:
+                return False
+            criterion = ObjectiveSuccessCriterion(description=description)
+            objective.success_criteria.append(criterion)
+            criteria_by_id[criterion.criterion_id] = criterion
+            changed = True
+        if raw_update.get("status") is not None:
+            criterion.status = self._coerce_objective_criterion_status(raw_update["status"])
+            changed = True
+        if "evidence_summary" in raw_update:
+            evidence_summary = raw_update.get("evidence_summary")
+            criterion.evidence_summary = str(evidence_summary).strip() if evidence_summary else None
+            changed = True
+        if changed:
+            criterion.updated_at = datetime.now(timezone.utc).isoformat()
+        return changed
 
     def _transition_current_plan_for_objective_status(
         self,
@@ -1244,68 +1353,67 @@ class ObjectiveCoordinator:
         plan_id: Optional[str] = None,
         user_visible: bool = True,
         deletion_operation_id: Optional[str] = None,
+        expected_version: Optional[str] = None,
     ) -> Optional[ObjectiveRecord]:
-        """Set an Objective's lifecycle status from its stored record, in one operation.
+        """Set an Objective's lifecycle status on its stored record, in one store transaction.
 
         A request that changes nothing (a second pause, a retried deletion
         step) records no event and saves nothing. Entering ``deleting``
         records ``deletion_operation_id`` and the request time in the same
         write as the status, so a deletion never exists without them.
+        ``expected_version`` is the version an agent read; a person's
+        controls and trusted steps pass none.
         """
-        objective = self._get_objective_record(objective_id)
-        if objective is None:
-            return None
         target_status = self._coerce_objective_status(status)
-        if target_status == ObjectiveStatus.SATISFIED:
-            if objective.requires_user_confirmation and not (
-                user_confirmation_summary or objective.user_confirmation_summary
-            ):
-                raise ValueError("Objective requires user confirmation before it can be marked satisfied.")
-            if (
-                objective.completion_policy == ObjectiveCompletionPolicy.SUCCESS_CRITERIA_MET
-                and any(criterion.status != ObjectiveCriterionStatus.MET for criterion in objective.success_criteria)
-            ):
-                raise ValueError("Objective success criteria must all be met before it can be marked satisfied.")
-
-        previous_status = objective.status
         now_ts = datetime.now(timezone.utc).isoformat()
-        before = objective.model_dump(mode="json")
-        self._apply_objective_status_fields(
-            objective,
-            target_status,
-            summary=summary,
-            user_confirmation_summary=user_confirmation_summary,
-            satisfied_by_task_id=satisfied_by_task_id,
-            task_id=task_id,
-            plan_id=plan_id,
-            deletion_operation_id=deletion_operation_id,
-            timestamp=now_ts,
-        )
-        if previous_status == target_status:
-            if objective.model_dump(mode="json") == before:
-                # Nothing to record; a terminal status still closes a Plan
-                # left open (the step does nothing when it is closed).
-                self._transition_current_plan_for_objective_status(
-                    objective, target_status, summary=summary, task_id=task_id or satisfied_by_task_id, timestamp=now_ts
-                )
-                return self._get_objective_record(objective.objective_id) or objective
-        else:
-            self._append_objective_event(
+        outcome: Dict[str, Any] = {"refusal": None, "previous": None}
+
+        def set_status(objective: ObjectiveRecord) -> bool:
+            refusal = self._satisfaction_refusal(objective, target_status, user_confirmation_summary)
+            if refusal:
+                outcome["refusal"] = refusal
+                return False
+            previous_status = objective.status
+            before = objective.model_dump(mode="json")
+            self._apply_objective_status_fields(
                 objective,
-                ObjectiveEventType.STATUS_CHANGED,
-                f"Objective status changed from {previous_status.value} to {target_status.value}.",
-                task_id=task_id or satisfied_by_task_id,
-                plan_id=plan_id or objective.current_plan_id,
-                user_visible=user_visible,
-                details={
-                    "previous_status": previous_status.value,
-                    "new_status": target_status.value,
-                    "summary": summary,
-                },
+                target_status,
+                summary=summary,
+                user_confirmation_summary=user_confirmation_summary,
+                satisfied_by_task_id=satisfied_by_task_id,
+                task_id=task_id,
+                plan_id=plan_id,
+                deletion_operation_id=deletion_operation_id,
                 timestamp=now_ts,
             )
+            if previous_status == target_status and objective.model_dump(mode="json") == before:
+                return False
+            if previous_status != target_status:
+                self._append_objective_event(
+                    objective,
+                    ObjectiveEventType.STATUS_CHANGED,
+                    f"Objective status changed from {previous_status.value} to {target_status.value}.",
+                    task_id=task_id or satisfied_by_task_id,
+                    plan_id=plan_id or objective.current_plan_id,
+                    user_visible=user_visible,
+                    details={
+                        "previous_status": previous_status.value,
+                        "new_status": target_status.value,
+                        "summary": summary,
+                    },
+                    timestamp=now_ts,
+                )
+            outcome["previous"] = previous_status
+            return True
+
         # Saved before its Plan closes, so a failed save leaves both unchanged.
-        self._save_objective(objective)
+        objective = self._commit_change(objective_id, set_status, expected_version=expected_version)
+        if objective is None:
+            return None
+        if outcome["refusal"]:
+            raise ValueError(outcome["refusal"])
+        # A terminal status closes a Plan left open, also when nothing else
+        # changed (the step does nothing when it is closed).
         self._transition_current_plan_for_objective_status(
             objective,
             target_status,
@@ -1313,18 +1421,39 @@ class ObjectiveCoordinator:
             task_id=task_id or satisfied_by_task_id,
             timestamp=now_ts,
         )
-        self.operations.emit_activity(
-            activity_type=TaskActivityType.OBJECTIVE_UPDATED,
-            stage=TaskActivityStage.COMPLETED if target_status == ObjectiveStatus.SATISFIED else TaskActivityStage.RUNNING,
-            task_id=task_id or satisfied_by_task_id or (objective.related_task_ids[-1] if objective.related_task_ids else None),
-            summary=f"Objective status changed: {objective.title}",
-            detail=f"{previous_status.value} -> {target_status.value}",
-            user_visible=user_visible,
-            details=objective.model_dump(mode="json"),
-        )
-        self.operations.persist_runtime_state()
+        previous_status = outcome["previous"]
+        if previous_status is not None:
+            self.operations.emit_activity(
+                activity_type=TaskActivityType.OBJECTIVE_UPDATED,
+                stage=TaskActivityStage.COMPLETED if target_status == ObjectiveStatus.SATISFIED else TaskActivityStage.RUNNING,
+                task_id=task_id or satisfied_by_task_id or (objective.related_task_ids[-1] if objective.related_task_ids else None),
+                summary=f"Objective status changed: {objective.title}",
+                detail=f"{previous_status.value} -> {target_status.value}",
+                user_visible=user_visible,
+                details=objective.model_dump(mode="json"),
+            )
+            self.operations.persist_runtime_state()
         # Closing the Plan may have saved its own links on the Objective.
         return self._get_objective_record(objective.objective_id) or objective
+
+    @staticmethod
+    def _satisfaction_refusal(
+        objective: ObjectiveRecord,
+        target_status: ObjectiveStatus,
+        user_confirmation_summary: Optional[str],
+    ) -> Optional[str]:
+        """Why the stored Objective cannot be marked satisfied yet, or None."""
+        if target_status != ObjectiveStatus.SATISFIED:
+            return None
+        if objective.requires_user_confirmation and not (
+            user_confirmation_summary or objective.user_confirmation_summary
+        ):
+            return "Objective requires user confirmation before it can be marked satisfied."
+        if objective.completion_policy == ObjectiveCompletionPolicy.SUCCESS_CRITERIA_MET and any(
+            criterion.status != ObjectiveCriterionStatus.MET for criterion in objective.success_criteria
+        ):
+            return "Objective success criteria must all be met before it can be marked satisfied."
+        return None
 
     def _apply_objective_status_fields(
         self,
@@ -1367,61 +1496,6 @@ class ObjectiveCoordinator:
             objective.deleted_at = objective.deleted_at or timestamp
             objective.deletion_summary = (summary or "").strip() or "Objective deletion completed."
 
-    def _review_objective_with_active_plan(
-        self,
-        objective: ObjectiveRecord,
-        *,
-        task_id: str,
-        terminal_state: str,
-        active_plan_ids: List[str],
-        timestamp: str,
-        task_summary: Optional[str],
-    ) -> ObjectiveRecord:
-        previous_status = objective.status
-        if terminal_state == ProgressState.COMPLETED.value:
-            objective.status = ObjectiveStatus.ACTIVE
-            conclusion = "plan_work_remains"
-            decision_summary = (
-                "The execution Task completed, but the Objective-owned Plan still has work remaining."
-            )
-        else:
-            objective.status = ObjectiveStatus.BLOCKED
-            conclusion = "task_failed_plan_remains_active"
-            decision_summary = (
-                f"The execution Task ended with state {terminal_state}; the Objective and its Plan remain "
-                "available for a replacement Task."
-            )
-        objective.progress_summary = task_summary.strip() if task_summary else decision_summary
-        if previous_status != objective.status:
-            self._append_objective_event(
-                objective,
-                ObjectiveEventType.STATUS_CHANGED,
-                f"Objective status changed from {previous_status.value} to {objective.status.value}.",
-                task_id=task_id,
-                plan_id=objective.current_plan_id,
-                user_visible=True,
-                details={
-                    "previous_status": previous_status.value,
-                    "new_status": objective.status.value,
-                    "summary": objective.progress_summary,
-                    "reason": conclusion,
-                },
-                timestamp=timestamp,
-            )
-        self._append_objective_review_completed(
-            objective,
-            task_id=task_id,
-            timestamp=timestamp,
-            conclusion=conclusion,
-            summary=decision_summary,
-            terminal_state=terminal_state,
-            active_task_ids=[],
-            active_plan_ids=active_plan_ids,
-        )
-        self._save_objective_logged(objective, step=f"task_end_review:{conclusion}")
-        self.operations.persist_runtime_state()
-        return objective
-
     def review_objective_after_task_terminal(
         self,
         task_id: str,
@@ -1431,211 +1505,262 @@ class ObjectiveCoordinator:
         timestamp: Optional[str] = None,
         summary: Optional[str] = None,
     ) -> Optional[ObjectiveRecord]:
+        """Review the Objective after one of its tasks ended (trusted bookkeeping).
+
+        Which of its tasks and plans are still active is read first, from the
+        team lead's own records; the review itself is then applied to the
+        stored Objective inside one store transaction
+        (``_apply_task_end_review``), so an agent's edit saved meanwhile stays
+        and the review is never refused for it. A failed save is logged with
+        its conclusion and the task end goes on.
+        """
         objective = self._get_objective_record(objective_id)
         if objective is None:
             return None
-        objective_owned_task_ids = set(objective.related_task_ids or []) | set(objective.recovery_task_ids or [])
-        if task_id not in objective_owned_task_ids:
+        if not self._reviews_task_end(objective, task_id):
             return objective
-        if objective.status in self._objective_terminal_statuses():
-            return objective
-
-        terminal_state_value = (
-            terminal_state.value if isinstance(terminal_state, ProgressState) else str(terminal_state)
+        review = _TaskEndReview(
+            task_id=task_id,
+            terminal_state=terminal_state.value if isinstance(terminal_state, ProgressState) else str(terminal_state),
+            timestamp=timestamp or datetime.now(timezone.utc).isoformat(),
+            summary=summary,
+            active_task_ids=self._active_task_ids_for_objective(objective),
+            active_plan_ids=self._active_plan_ids_for_objective(objective),
         )
-        now_ts = timestamp or datetime.now(timezone.utc).isoformat()
+
+        def apply_review(stored: ObjectiveRecord) -> bool:
+            if not self._reviews_task_end(stored, task_id):
+                return False
+            self._apply_task_end_review(stored, review)
+            return True
+
+        try:
+            reviewed = self._commit_change(objective.objective_id, apply_review)
+        except ObjectiveSaveFailed:
+            self._log_skipped(objective.objective_id, f"task_end_review:{review.conclusion or 'not_recorded'}")
+            reviewed = None
+        if reviewed is not None and review.decided_status:
+            self.operations.emit_activity(
+                activity_type=TaskActivityType.OBJECTIVE_UPDATED,
+                stage=(
+                    TaskActivityStage.COMPLETED
+                    if reviewed.status == ObjectiveStatus.SATISFIED
+                    else TaskActivityStage.RUNNING
+                ),
+                task_id=task_id,
+                summary=f"Objective review completed: {reviewed.title}",
+                detail=review.decision_summary,
+                user_visible=True,
+                details=reviewed.model_dump(mode="json"),
+            )
+        self.operations.persist_runtime_state()
+        return reviewed or objective
+
+    def _reviews_task_end(self, objective: ObjectiveRecord, task_id: str) -> bool:
+        """Whether a task's end is reviewed on this Objective: one of its own tasks, while it is open."""
+        owned = set(objective.related_task_ids or []) | set(objective.recovery_task_ids or [])
+        return task_id in owned and objective.status not in self._objective_terminal_statuses()
+
+    def _apply_task_end_review(self, objective: ObjectiveRecord, review: "_TaskEndReview") -> None:
+        """Record the review on the stored record; sets ``review.conclusion``.
+
+        Runs inside the store transaction, so it only edits the record.
+        """
         self._append_objective_event(
             objective,
             ObjectiveEventType.REVIEW_REQUESTED,
             "Reviewing objective after linked task reached a terminal state.",
-            task_id=task_id,
+            task_id=review.task_id,
             plan_id=objective.current_plan_id,
             user_visible=False,
             details={
-                "terminal_task_id": task_id,
-                "terminal_state": terminal_state_value,
-                "summary": summary,
+                "terminal_task_id": review.task_id,
+                "terminal_state": review.terminal_state,
+                "summary": review.summary,
             },
-            timestamp=now_ts,
+            timestamp=review.timestamp,
         )
-
-        active_task_ids = self._active_task_ids_for_objective(objective)
-        active_plan_ids = self._active_plan_ids_for_objective(objective)
         held_conclusion = _HELD_REVIEW_CONCLUSIONS.get(objective.status)
         if held_conclusion is not None:
             # A person's pause or pending deletion outranks the review: the
             # Objective keeps its status and its links stay off. Nothing
             # re-reviews it on resume; the next task, schedule or work
             # session that ends does.
-            self._append_objective_review_completed(
+            self._complete_review(
                 objective,
-                task_id=task_id,
-                timestamp=now_ts,
-                conclusion=held_conclusion,
-                summary=f"Objective review deferred because the Objective is {objective.status.value}.",
-                terminal_state=terminal_state_value,
-                active_task_ids=active_task_ids,
-                active_plan_ids=active_plan_ids,
+                review,
+                held_conclusion,
+                f"Objective review deferred because the Objective is {objective.status.value}.",
+                active_task_ids=review.active_task_ids,
+                active_plan_ids=review.active_plan_ids,
             )
-            self._save_objective_logged(objective, step=f"task_end_review:{held_conclusion}")
-            self.operations.persist_runtime_state()
-            return objective
-        if active_task_ids:
+            return
+        if review.active_task_ids:
             objective.progress_summary = (
-                summary.strip()
-                if summary
+                review.summary.strip()
+                if review.summary
                 else "A linked task reached a terminal state; another Objective-linked Task is still active."
             )
-            self._append_objective_review_completed(
+            self._complete_review(
                 objective,
-                task_id=task_id,
-                timestamp=now_ts,
-                conclusion="active_work_remains",
-                summary="Objective remains active because another linked Task is still running.",
-                terminal_state=terminal_state_value,
-                active_task_ids=active_task_ids,
-                active_plan_ids=active_plan_ids,
+                review,
+                "active_work_remains",
+                "Objective remains active because another linked Task is still running.",
+                active_task_ids=review.active_task_ids,
+                active_plan_ids=review.active_plan_ids,
             )
-            self._save_objective_logged(objective, step="task_end_review:active_work_remains")
-            self.operations.persist_runtime_state()
-            return objective
+            return
+        if review.active_plan_ids:
+            self._review_with_active_plan(objective, review)
+            return
+        if self._objective_continues_after_tasks(objective):
+            self._review_standing_objective(objective, review)
+            return
+        self._review_closing_objective(objective, review)
 
-        if active_plan_ids:
-            return self._review_objective_with_active_plan(
-                objective,
-                task_id=task_id,
-                terminal_state=terminal_state_value,
-                active_plan_ids=active_plan_ids,
-                timestamp=now_ts,
-                task_summary=summary,
+    def _complete_review(
+        self,
+        objective: ObjectiveRecord,
+        review: "_TaskEndReview",
+        conclusion: str,
+        decision_summary: str,
+        *,
+        active_task_ids: Sequence[str] = (),
+        active_plan_ids: Sequence[str] = (),
+    ) -> None:
+        review.conclusion = conclusion
+        review.decision_summary = decision_summary
+        self._append_objective_review_completed(
+            objective,
+            task_id=review.task_id,
+            timestamp=review.timestamp,
+            conclusion=conclusion,
+            summary=decision_summary,
+            terminal_state=review.terminal_state,
+            active_task_ids=list(active_task_ids),
+            active_plan_ids=list(active_plan_ids),
+        )
+
+    def _set_reviewed_status(
+        self, objective: ObjectiveRecord, review: "_TaskEndReview", status: ObjectiveStatus, reason: str
+    ) -> None:
+        """Set the status a review decided, with its event when it changes."""
+        previous_status = objective.status
+        objective.status = status
+        if previous_status == status:
+            return
+        self._append_objective_event(
+            objective,
+            ObjectiveEventType.STATUS_CHANGED,
+            f"Objective status changed from {previous_status.value} to {status.value}.",
+            task_id=review.task_id,
+            plan_id=objective.current_plan_id,
+            user_visible=True,
+            details={
+                "previous_status": previous_status.value,
+                "new_status": status.value,
+                "summary": objective.progress_summary,
+                "reason": reason,
+            },
+            timestamp=review.timestamp,
+        )
+
+    def _review_with_active_plan(self, objective: ObjectiveRecord, review: "_TaskEndReview") -> None:
+        if review.terminal_state == ProgressState.COMPLETED.value:
+            status = ObjectiveStatus.ACTIVE
+            conclusion = "plan_work_remains"
+            decision_summary = "The execution Task completed, but the Objective-owned Plan still has work remaining."
+        else:
+            status = ObjectiveStatus.BLOCKED
+            conclusion = "task_failed_plan_remains_active"
+            decision_summary = (
+                f"The execution Task ended with state {review.terminal_state}; the Objective and its Plan remain "
+                "available for a replacement Task."
             )
+        objective.progress_summary = review.summary.strip() if review.summary else decision_summary
+        self._set_reviewed_status(objective, review, status, conclusion)
+        self._complete_review(
+            objective, review, conclusion, decision_summary, active_plan_ids=review.active_plan_ids
+        )
 
-        continuing_links = self._objective_has_continuing_links(objective)
-        if (
+    def _objective_continues_after_tasks(self, objective: ObjectiveRecord) -> bool:
+        return (
             objective.completion_policy == ObjectiveCompletionPolicy.RECURRING_INDEFINITE
             or objective.horizon in {ObjectiveHorizon.RECURRING, ObjectiveHorizon.STANDING}
-            or continuing_links
-        ):
+            or self._objective_has_continuing_links(objective)
+        )
+
+    def _review_standing_objective(self, objective: ObjectiveRecord, review: "_TaskEndReview") -> None:
+        conclusion = "standing_or_recurring_objective_remains_active"
+        if objective.status == ObjectiveStatus.PROPOSED:
             previous_status = objective.status
-            if objective.status == ObjectiveStatus.PROPOSED:
-                objective.status = ObjectiveStatus.ACTIVE
-                self._append_objective_event(
-                    objective,
-                    ObjectiveEventType.STATUS_CHANGED,
-                    f"Objective status changed from {previous_status.value} to active.",
-                    task_id=task_id,
-                    plan_id=objective.current_plan_id,
-                    user_visible=True,
-                    details={
-                        "previous_status": previous_status.value,
-                        "new_status": objective.status.value,
-                        "summary": "Recurring or standing Objective has terminal task activity.",
-                        "reason": "standing_or_recurring_objective_remains_active",
-                    },
-                    timestamp=now_ts,
-                )
-            objective.progress_summary = (
-                summary.strip()
-                if summary
-                else "Latest linked task finished; Objective remains active for recurring or standing work."
-            )
-            self._append_objective_review_completed(
-                objective,
-                task_id=task_id,
-                timestamp=now_ts,
-                conclusion="standing_or_recurring_objective_remains_active",
-                summary=objective.progress_summary,
-                terminal_state=terminal_state_value,
-                active_task_ids=[],
-                active_plan_ids=[],
-            )
-            self._save_objective_logged(
-                objective, step="task_end_review:standing_or_recurring_objective_remains_active"
-            )
-            self.operations.persist_runtime_state()
-            return objective
-
-        target_status: ObjectiveStatus
-        conclusion: str
-        decision_summary: str
-        if terminal_state_value == ProgressState.COMPLETED.value:
-            if (
-                objective.requires_user_confirmation
-                or objective.completion_policy == ObjectiveCompletionPolicy.USER_CONFIRMS
-            ):
-                target_status = ObjectiveStatus.BLOCKED
-                conclusion = "awaiting_user_confirmation"
-                decision_summary = "Linked work finished; Objective requires user confirmation before it can be marked satisfied."
-            elif objective.completion_policy == ObjectiveCompletionPolicy.SUCCESS_CRITERIA_MET:
-                if objective.success_criteria and all(
-                    criterion.status == ObjectiveCriterionStatus.MET for criterion in objective.success_criteria
-                ):
-                    target_status = ObjectiveStatus.SATISFIED
-                    conclusion = "success_criteria_met"
-                    decision_summary = "All Objective success criteria are met and no linked work remains."
-                else:
-                    target_status = ObjectiveStatus.BLOCKED
-                    conclusion = "unmet_success_criteria"
-                    decision_summary = "Linked work finished, but Objective success criteria are still open."
-            else:
-                target_status = ObjectiveStatus.SATISFIED
-                conclusion = "manager_decides_task_satisfied_objective"
-                decision_summary = "Linked task completed and no active Objective-linked work remains."
-        else:
-            target_status = ObjectiveStatus.BLOCKED
-            conclusion = "terminal_task_did_not_satisfy_objective"
-            decision_summary = (
-                f"Linked task ended with state {terminal_state_value}; Objective needs follow-up before it can close."
-            )
-
-        previous_status = objective.status
-        objective.status = target_status
-        objective.progress_summary = summary.strip() if summary else decision_summary
-        if target_status == ObjectiveStatus.SATISFIED:
-            objective.satisfied_by_task_id = objective.satisfied_by_task_id or task_id
-            objective.satisfied_at = objective.satisfied_at or now_ts
-        if previous_status != target_status:
+            objective.status = ObjectiveStatus.ACTIVE
             self._append_objective_event(
                 objective,
                 ObjectiveEventType.STATUS_CHANGED,
-                f"Objective status changed from {previous_status.value} to {target_status.value}.",
-                task_id=task_id,
+                f"Objective status changed from {previous_status.value} to active.",
+                task_id=review.task_id,
                 plan_id=objective.current_plan_id,
                 user_visible=True,
                 details={
                     "previous_status": previous_status.value,
-                    "new_status": target_status.value,
-                    "summary": objective.progress_summary,
+                    "new_status": objective.status.value,
+                    "summary": "Recurring or standing Objective has terminal task activity.",
                     "reason": conclusion,
                 },
-                timestamp=now_ts,
+                timestamp=review.timestamp,
             )
-        self._append_objective_review_completed(
-            objective,
-            task_id=task_id,
-            timestamp=now_ts,
-            conclusion=conclusion,
-            summary=decision_summary,
-            terminal_state=terminal_state_value,
-            active_task_ids=[],
-            active_plan_ids=[],
+        objective.progress_summary = (
+            review.summary.strip()
+            if review.summary
+            else "Latest linked task finished; Objective remains active for recurring or standing work."
         )
-        if self._save_objective_logged(objective, step=f"task_end_review:{conclusion}"):
-            self.operations.emit_activity(
-                activity_type=TaskActivityType.OBJECTIVE_UPDATED,
-                stage=(
-                    TaskActivityStage.COMPLETED
-                    if target_status == ObjectiveStatus.SATISFIED
-                    else TaskActivityStage.RUNNING
-                ),
-                task_id=task_id,
-                summary=f"Objective review completed: {objective.title}",
-                detail=decision_summary,
-                user_visible=True,
-                details=objective.model_dump(mode="json"),
+        self._complete_review(objective, review, conclusion, objective.progress_summary)
+
+    @staticmethod
+    def _closing_decision(objective: ObjectiveRecord, terminal_state: str) -> tuple[ObjectiveStatus, str, str]:
+        """The status, conclusion and summary for an Objective whose last linked work ended."""
+        if terminal_state != ProgressState.COMPLETED.value:
+            return (
+                ObjectiveStatus.BLOCKED,
+                "terminal_task_did_not_satisfy_objective",
+                f"Linked task ended with state {terminal_state}; Objective needs follow-up before it can close.",
             )
-        self.operations.persist_runtime_state()
-        return objective
+        if objective.requires_user_confirmation or objective.completion_policy == ObjectiveCompletionPolicy.USER_CONFIRMS:
+            return (
+                ObjectiveStatus.BLOCKED,
+                "awaiting_user_confirmation",
+                "Linked work finished; Objective requires user confirmation before it can be marked satisfied.",
+            )
+        if objective.completion_policy != ObjectiveCompletionPolicy.SUCCESS_CRITERIA_MET:
+            return (
+                ObjectiveStatus.SATISFIED,
+                "manager_decides_task_satisfied_objective",
+                "Linked task completed and no active Objective-linked work remains.",
+            )
+        if objective.success_criteria and all(
+            criterion.status == ObjectiveCriterionStatus.MET for criterion in objective.success_criteria
+        ):
+            return (
+                ObjectiveStatus.SATISFIED,
+                "success_criteria_met",
+                "All Objective success criteria are met and no linked work remains.",
+            )
+        return (
+            ObjectiveStatus.BLOCKED,
+            "unmet_success_criteria",
+            "Linked work finished, but Objective success criteria are still open.",
+        )
+
+    def _review_closing_objective(self, objective: ObjectiveRecord, review: "_TaskEndReview") -> None:
+        target_status, conclusion, decision_summary = self._closing_decision(objective, review.terminal_state)
+        objective.progress_summary = review.summary.strip() if review.summary else decision_summary
+        if target_status == ObjectiveStatus.SATISFIED:
+            objective.satisfied_by_task_id = objective.satisfied_by_task_id or review.task_id
+            objective.satisfied_at = objective.satisfied_at or review.timestamp
+        self._set_reviewed_status(objective, review, target_status, conclusion)
+        self._complete_review(objective, review, conclusion, decision_summary)
+        review.decided_status = True
 
     def _active_task_ids_for_objective(self, objective: ObjectiveRecord) -> List[str]:
         linked_task_ids = set(objective.related_task_ids or [])

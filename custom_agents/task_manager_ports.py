@@ -128,7 +128,10 @@ class PlansEnabledOperation(Protocol):
 
 
 class ObjectiveChange(Protocol):
-    """Edit a freshly loaded Objective in place; False when there is nothing to save."""
+    """Edit the stored Objective in place inside the store's write transaction; False when there is nothing to save.
+
+    It only edits the record: it never writes another store.
+    """
 
     def __call__(self, objective: ObjectiveRecord, /) -> bool: ...
 
@@ -136,10 +139,11 @@ class ObjectiveChange(Protocol):
 class ChangeObjectiveOperation(Protocol):
     """Change the stored Objective for a step that goes on without it.
 
-    ``ObjectiveCoordinator.change_objective`` with ``step``: it loads the
-    stored record, applies ``change`` and saves, all in the caller's one
-    operation, so nothing stored since an earlier read is lost. A failed save
-    is logged with ``step`` and returns None, as does a missing Objective.
+    ``ObjectiveCoordinator.change_objective`` with ``step``: the store applies
+    ``change`` to the stored record inside one write transaction, so nothing
+    stored since an earlier read is lost and the step is never refused for
+    another writer's change. A failed save is logged with ``step`` and returns
+    None, as does a missing Objective.
     """
 
     def __call__(

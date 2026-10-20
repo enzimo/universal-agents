@@ -7,7 +7,17 @@ by each action, while grants cover the whole tool; blocks may stop one
 action. Each tool checks which inputs its action takes
 (``custom_tools.action_inputs``). Status changes use fresh records and the
 shared lifecycle operation (``custom_agents.objective_lifecycle``), including
-linked schedules and heartbeat items. Functions with many inputs of their
+linked schedules and heartbeat items.
+
+Versions: reading or listing an Objective returns its ``version``
+(``objective_version``, the fields an agent decides on). The ``objectives``
+tool's changes (``update_progress``, ``update_status``) require it as
+``expected_version`` and are refused with ``changed_since_read`` when the
+Objective changed since the agent read it, so a decision made on an older
+read never overwrites another request's change. Starting or recording work on
+an Objective (continuation tasks, plan execution, work sessions, linking a
+schedule or heartbeat item) only adds to its bookkeeping, which merges into
+the stored record, so those tools take no version. Functions with many inputs of their
 own stay separate: ``create_objective``,
 ``start_objective_task``, ``propose_objective_work_profile``,
 ``record_objective_work_checkpoint``, ``activate_plan_execution`` and
@@ -46,7 +56,12 @@ from custom_messages.contracts.routing_v1 import MessageHeader
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task
-from custom_messages.records.objectives import ObjectiveHeartbeatLink, ObjectiveScheduleLink
+from custom_messages.records.objectives import (
+    ObjectiveHeartbeatLink,
+    ObjectiveRecord,
+    ObjectiveScheduleLink,
+    objective_version,
+)
 from custom_messages.enums import (
     MessageMetaType,
     ObjectiveHealthDisposition,
@@ -71,6 +86,7 @@ from custom_tools.runtime_context import (
 from id_generation import (
     new_id,
 )
+from storage.change_ledger import ChangeRefused
 
 if TYPE_CHECKING:
     from custom_agents.strands_agent import UniversalAgent
@@ -108,6 +124,25 @@ from custom_tools.providers.diagnostics import (
 from custom_tools.providers.heartbeat import _heartbeat_store
 
 logger = logging.getLogger(__name__)
+
+
+def _objective_payload(agent: "UniversalAgent", objective: ObjectiveRecord) -> dict[str, Any]:
+    """An Objective as the tools return it: its id, its version, the record and its markdown summary."""
+
+    return {
+        "objective_id": objective.objective_id,
+        "version": objective_version(objective),
+        "objective": objective.model_dump(mode="json"),
+        "markdown": agent.task_manager.operations_runtime.run_sync(
+            agent.task_manager.render_objective_markdown, objective.objective_id
+        ),
+    }
+
+
+def _refused(refusal: ChangeRefused) -> dict[str, Any]:
+    """A change the store refused (``changed_since_read``), as a failed result."""
+
+    return failed({"error": refusal.message, "error_code": refusal.reason.value, **refusal.details})
 
 
 
@@ -292,6 +327,9 @@ def create_objective(
 
     The Objective belongs to the person the source task works for, so a
     specified task must work for the same person as the current one.
+
+    The reply includes the Objective's `version`; `objectives` updates need it
+    as `expected_version`.
     """
     agent = get_agent_ref()
     if agent is None:
@@ -363,12 +401,8 @@ def create_objective(
             "created_by_task_id": objective.created_by_task_id,
             "promoted_from_task_id": objective.promoted_from_task_id,
             "creation_mode": returned_creation_mode,
-            "objective_id": objective.objective_id,
             "plan_id": objective.current_plan_id,
-            "objective": objective.model_dump(mode="json"),
-            "markdown": agent.task_manager.operations_runtime.run_sync(
-                agent.task_manager.render_objective_markdown, objective.objective_id
-            ),
+            **_objective_payload(agent, objective),
         },
         default=str,
     )
@@ -400,16 +434,7 @@ def _get_objective(objective_id: str = "", task_id: str = "", plan_id: str = "")
     )
     if objective is None:
         return json.dumps({"objective_id": resolved_objective_id, "objective": None})
-    return json.dumps(
-        {
-            "objective_id": objective.objective_id,
-            "objective": objective.model_dump(mode="json"),
-            "markdown": agent.task_manager.operations_runtime.run_sync(
-                agent.task_manager.render_objective_markdown, objective.objective_id
-            ),
-        },
-        default=str,
-    )
+    return json.dumps(_objective_payload(agent, objective), default=str)
 
 
 def _list_objectives(
@@ -451,6 +476,7 @@ def _list_objectives(
 
 
 def _update_progress(
+    expected_version: str,
     objective_id: str = "",
     progress_summary: str = "",
     current_focus: str = "",
@@ -495,7 +521,10 @@ def _update_progress(
             task_id=task_id or agent.task_manager.current_task_id,
             plan_id=plan_id or None,
             user_visible=_coerce_tool_bool(user_visible),
+            expected_version=expected_version,
         )
+    except ChangeRefused as refusal:
+        return _refused(refusal)
     except (ValueError, json.JSONDecodeError, ObjectiveSaveFailed) as exc:
         return failed({"error": str(exc)})
 
@@ -503,20 +532,12 @@ def _update_progress(
         return failed(
             {"error": f"Failed to update objective {resolved_objective_id}"}
         )
-    return json.dumps(
-        {
-            "objective_id": objective.objective_id,
-            "objective": objective.model_dump(mode="json"),
-            "markdown": agent.task_manager.operations_runtime.run_sync(
-                agent.task_manager.render_objective_markdown, objective.objective_id
-            ),
-        },
-        default=str,
-    )
+    return json.dumps(_objective_payload(agent, objective), default=str)
 
 
 def _update_status(
     status: str,
+    expected_version: str,
     objective_id: str = "",
     summary: str = "",
     user_confirmation_summary: str = "",
@@ -568,11 +589,14 @@ def _update_status(
         plan_id=plan_id or None,
         user_visible=_coerce_tool_bool(user_visible),
         policy_person_id=person.person_id if person is not None else None,
+        expected_version=expected_version,
     )
     try:
         outcome = agent.task_manager.operations_runtime.run_sync(
             partial(_change_status_in_operation, agent), resolved_objective_id, change
         )
+    except ChangeRefused as refusal:
+        return _refused(refusal)
     except (ValueError, ObjectiveSaveFailed) as exc:
         return failed({"error": str(exc)})
 
@@ -599,13 +623,7 @@ def _settable_status(status: str) -> ObjectiveStatus | dict[str, Any]:
 
 def _status_payload(agent: "UniversalAgent", outcome: ObjectiveLifecycleOutcome) -> dict[str, Any]:
     objective = outcome.objective
-    payload: dict[str, Any] = {
-        "objective_id": objective.objective_id,
-        "objective": objective.model_dump(mode="json"),
-        "markdown": agent.task_manager.operations_runtime.run_sync(
-            agent.task_manager.render_objective_markdown, objective.objective_id
-        ),
-    }
+    payload = _objective_payload(agent, objective)
     warnings = [_lifecycle_warning(objective.objective_id, item) for item in outcome.incomplete]
     warnings += [_skipped_link_warning(objective.objective_id, item) for item in outcome.skipped]
     if warnings:
@@ -1426,9 +1444,12 @@ _OBJECTIVE_REF = ("objective_id", "task_id", "plan_id")
 OBJECTIVES_ACTIONS = actions(
     get=((), _OBJECTIVE_REF),
     list=((), ("limit", "statuses", "horizons", "include_closed")),
-    update_progress=((), (*_OBJECTIVE_REF, "progress_summary", "current_focus", "criterion_updates_json", "user_visible")),
+    update_progress=(
+        ("expected_version",),
+        (*_OBJECTIVE_REF, "progress_summary", "current_focus", "criterion_updates_json", "user_visible"),
+    ),
     update_status=(
-        ("status",),
+        ("status", "expected_version"),
         (*_OBJECTIVE_REF, "summary", "user_confirmation_summary", "satisfied_by_current_task", "user_visible"),
     ),
 )
@@ -1452,6 +1473,7 @@ def objectives(
     user_confirmation_summary: Optional[str] = None,
     satisfied_by_current_task: bool = False,
     user_visible: Optional[bool] = None,
+    expected_version: Optional[str] = None,
 ) -> str | dict[str, Any]:
     """See and update durable Objectives (manager-only).
 
@@ -1460,9 +1482,10 @@ def objectives(
     An Objective is found by `objective_id`, `task_id` or `plan_id`, or else from the current task.
 
     Actions:
-    - `get`: one Objective, with its markdown summary.
-    - `list`: Objectives (up to `limit`, 20 by default); `statuses` and `horizons` are optional
-      comma-separated values, and closed ones are left out unless `include_closed`.
+    - `get`: one Objective, with its `version` and markdown summary.
+    - `list`: Objectives with their `version` (up to `limit`, 20 by default); `statuses` and
+      `horizons` are optional comma-separated values, and closed ones are left out unless
+      `include_closed`.
     - `update_progress`: its `progress_summary`, `current_focus`, or success criteria
       (`criterion_updates_json`, a JSON list of criterion update objects).
     - `update_status`: change its lifecycle `status`, with a `summary`. Marking a user-confirmed
@@ -1470,6 +1493,12 @@ def objectives(
       task as what satisfied it. Pausing or closing it also pauses its bounded work sessions and the
       schedules and heartbeat items it manages; `active` resumes only what an Objective control
       paused. `deleting` and `deleted` are refused: only the person deletes an Objective.
+
+    Both updates need `expected_version`: the `version` that `get` or `list` returned. If the
+    Objective changed since (another of the person's requests may have changed it), nothing is
+    changed and the reply has `error_code` `changed_since_read`: read it again with `get`, check
+    that your change still fits what it says now, and pass the new version. Each reply that
+    changed it returns its new `version`.
 
     Updates are shown to the person unless `user_visible` is false.
 
@@ -1490,6 +1519,7 @@ def objectives(
         user_confirmation_summary: What the person confirmed, to mark a user-confirmed Objective satisfied.
         satisfied_by_current_task: This task satisfied the Objective.
         user_visible: Whether the person sees the update (true by default).
+        expected_version: The Objective's version from `get` or `list`; required to update it.
     """
 
     reference = {"objective_id": objective_id, "task_id": task_id, "plan_id": plan_id}
@@ -1507,6 +1537,7 @@ def objectives(
         "user_confirmation_summary": user_confirmation_summary,
         "satisfied_by_current_task": satisfied_by_current_task,
         "user_visible": user_visible,
+        "expected_version": expected_version,
     }
     refusal = input_refusal("objectives", action, OBJECTIVES_ACTIONS, inputs)
     if refusal:
@@ -1521,6 +1552,7 @@ def objectives(
         )
     if action == "update_progress":
         return _update_progress(
+            str(expected_version),
             **found,
             progress_summary=progress_summary or "",
             current_focus=current_focus or "",
@@ -1529,6 +1561,7 @@ def objectives(
         )
     return _update_status(
         str(status),
+        str(expected_version),
         **found,
         summary=summary or "",
         user_confirmation_summary=user_confirmation_summary or "",

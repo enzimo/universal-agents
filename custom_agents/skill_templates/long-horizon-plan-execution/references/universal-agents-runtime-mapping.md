@@ -116,6 +116,13 @@ Treat these lifecycles independently after promotion:
 - Treat the Task that created an Objective as provenance only unless it is also
   explicitly part of the Objective-owned task lineage. Its later failure must
   not change the successfully created Objective or Plan.
+- Change an Objective's progress or status from what you last read:
+  `objectives(action="get")`, `list` and `create_objective` return its
+  `version`, and `update_progress` and `update_status` need it as
+  `expected_version`. A `changed_since_read` refusal means another request
+  changed the Objective meanwhile and nothing was changed; read it again and
+  decide on what it says now. Linked tasks, Plans, schedules, heartbeat items
+  and work sessions do not change the version.
 
 Supply semantic titles, objectives, rationale, evidence needs, and recovery
 intent. Leave runtime-owned task, plan, step, conversation, correlation, and

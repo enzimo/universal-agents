@@ -989,6 +989,14 @@ Architect works for you, it sees your Objectives and the team's Objectives
 never another person's. The team's Objectives change only in work for an
 administrator or in work that runs for no person.
 
+Two of your requests can work on the same Objective at once. When one of them
+changes what the Objective asks for (for example marks a success criterion
+met), Team Architect's other request can't overwrite that change with a
+decision made from what it read earlier: its change is refused, it reads the
+Objective again and decides on what it says now. Work that only records
+progress, such as a task finishing or a schedule being linked, never undoes a
+change and never blocks one.
+
 Heartbeat items linked to an Objective follow the same ownership rules. A
 shared heartbeat runs for its launcher's person and skips an Objective that
 person cannot change, with a warning in the runtime log. Use a schedule owned
