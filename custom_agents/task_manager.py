@@ -57,6 +57,7 @@ from custom_messages.contracts.runtime_snapshot_v3 import (
     TurnActionOutboxRecord,
 )
 from custom_agents.task_records import AfterActionReportRecordResult, ReportedWorkIdentity, TaskInfo
+from custom_agents.turn_work_notes import note_summary, render_earlier_turn_work, turn_work_notes
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import (
     AfterActionReport,
@@ -2048,6 +2049,38 @@ class TaskManager(
             agent_id=agent_id,
         )
 
+    def record_turn_work(
+        self,
+        task_id: str,
+        details: Dict[str, Any],
+        *,
+        agent_name: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> Optional[TaskHistoryEntry]:
+        """Save what a turn did before its task waited (``custom_agents.turn_work_notes``)."""
+        return self.append_history_entry(
+            task_id,
+            note_summary(details),
+            source=TaskHistorySource.SYSTEM,
+            entry_type=TaskHistoryType.TASK_EVENT,
+            importance=TaskHistoryImportance.HIGH,
+            agent_name=agent_name,
+            agent_id=agent_id,
+            details=details,
+        )
+
+    def count_started_waits(self, task_id: str) -> int:
+        """How often the task's turns sent something out and waited for it (``task_wait_limit``)."""
+        return sum(
+            1 for entry in turn_work_notes(self.get_task(task_id)) if (entry.details or {}).get("started_wait")
+        )
+
+    def render_earlier_turn_work_markdown(self, task_id: Optional[str]) -> str:
+        """The "Work already done in this task" prompt section ("" on a task's first turn)."""
+        if not task_id:
+            return ""
+        return render_earlier_turn_work(turn_work_notes(self.get_task(task_id)))
+
     def log_agent_note(
         self,
         task_id: str,
@@ -3518,6 +3551,49 @@ class TaskManager(
         task_info = self.get_task_info(parent_task_id)
         return task_info.meta if task_info else None
 
+    def _save_task_state_change(
+        self, task_info: TaskInfo, new_state: ProgressState, timestamp: str
+    ) -> ProgressState:
+        """Save the state and its history before running the transition's effects.
+
+        The history save also commits a root request's ledger closure. Until
+        that transaction succeeds, a failed transition must retain its queue
+        and execution state so the caller can retry. The runtime checkpoint
+        keeps collection references; restore this task's in-place state too.
+        A custody failure may have released the task, which must stay released.
+        """
+
+        task_id = task_info.task.task_id
+        checkpoint = self.runtime_snapshot_coordinator.state.checkpoint()
+        previous_state = task_info.state
+        previous_states_count = len(task_info.task.task_state)
+        try:
+            if not self.is_runnable_state(new_state):
+                from custom_agents.task_queue_safety import remove_queue_entry
+
+                remove_queue_entry(self, task_id)
+            task_info.update_state(new_state, timestamp)
+            self.append_history_entry(
+                task_id,
+                f"State changed from {previous_state.value} to {new_state.value}.",
+                entry_type=TaskHistoryType.STATE_CHANGE,
+                importance=TaskHistoryImportance.NORMAL,
+                timestamp=timestamp,
+                details={"from_state": previous_state.value, "to_state": new_state.value},
+            )
+        except Exception:
+            if self.get_task_info(task_id) is task_info:
+                task_info.state = previous_state
+                del task_info.task.task_state[previous_states_count:]
+                self.runtime_snapshot_coordinator.state.restore(checkpoint)
+                self._logger.warning(
+                    "Task state change was not saved; retained its previous state. "
+                    "event=task_state_change_rolled_back task_id=%s previous_state=%s attempted_state=%s",
+                    task_id, previous_state.value, new_state.value,
+                )
+            raise
+        return previous_state
+
     def update_main_task_state(
         self, task_id: str, new_state: ProgressState, timestamp: str
     ) -> bool:
@@ -3538,20 +3614,7 @@ class TaskManager(
         if not self.can_transition_task_state(task_id, new_state):
             return False
 
-        if not self.is_runnable_state(new_state):
-            from custom_agents.task_queue_safety import remove_queue_entry
-
-            remove_queue_entry(self, task_id)
-        previous_state = task_info.state
-        task_info.update_state(new_state, timestamp)
-        self.append_history_entry(
-            task_id,
-            f"State changed from {previous_state.value} to {new_state.value}.",
-            entry_type=TaskHistoryType.STATE_CHANGE,
-            importance=TaskHistoryImportance.NORMAL,
-            timestamp=timestamp,
-            details={"from_state": previous_state.value, "to_state": new_state.value},
-        )
+        previous_state = self._save_task_state_change(task_info, new_state, timestamp)
         if self.get_task_info(task_id) is not task_info:
             return False
 

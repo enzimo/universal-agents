@@ -59,6 +59,9 @@ class _TaskManager:
     def render_task_query_history_markdown(self, task_id: str, *, latest_only=False) -> str:
         return ""
 
+    def render_earlier_turn_work_markdown(self, task_id) -> str:
+        return ""
+
 
 class _ConversationCompactor:
     def compact_if_needed(self, **kwargs):

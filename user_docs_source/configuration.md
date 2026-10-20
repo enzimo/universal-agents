@@ -129,6 +129,22 @@ resets the entire store.
 
 The system uses two different YAML configuration tracks plus env files.
 
+## Separate requests changing the same record
+
+A person can have several requests running at once, for example in separate
+Web Chat threads. When two of them change the same record (today, one of the
+person's own knowledge pages), the later change is refused instead of being
+saved over the earlier one, and the agent tells the person, who can repeat it in
+a new message. A request that was stopped or has finished changes nothing,
+including a helper agent still working on it. Changes made from a page that is
+out of date ("changed since you read it") are always refused.
+
+`agent.request_conflict_checks` (default `true`) turns the checks between
+requests on or off. With `false`, the later change is saved over the earlier
+one, as before this check existed, and the Status page shows a note while it is
+off. Agents cannot change this setting. Turning it on again counts only
+changes made from then on.
+
 ## File Roles
 
 | File | Role |

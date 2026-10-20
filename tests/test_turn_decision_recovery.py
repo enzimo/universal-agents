@@ -101,6 +101,9 @@ async def test_prose_recovery_uses_role_allowed_actions(is_team_lead, compatible
     if expected == "manager_escalation":
         assert runtime_action.target_named_agent_type == "TeamArchitect"
         assert runtime_action.manager_escalation.escalation_type == "needs_user_input"
-        assert runtime_action.is_response_requested
+        # Every delegation, an escalation included, makes the task wait for its answer.
+        from custom_agents.turn_work_notes import decision_starts_wait
+
+        assert decision_starts_wait(result.structured_output.to_runtime_decision())
     elif expected == "task_response":
         assert runtime_action.task.answer == "Done."

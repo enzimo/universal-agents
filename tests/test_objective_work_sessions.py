@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 import yaml
 
+from access_control.identity import ContextSigner, ISSUER_SCHEDULER
 from custom_agents.objective_work_config import load_objective_work_execution_config
 from custom_agents.sdk.strands.turn import (
     _finalize_objective_work_invocation,
@@ -59,6 +60,7 @@ from custom_tools.tool_stop import ToolStop
 from runtime_settings.instance_layout import InstanceLayout
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
+from tests.tool_result_support import sdk_tool_result, tool_json, tool_yaml
 
 
 @pytest.fixture(autouse=True)
@@ -68,8 +70,8 @@ def _signed_task_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
     use_signed_contexts(monkeypatch)
 
 
-def _signed(person_id: str):
-    return context_signer().issue(team_id="team", person_id=person_id, person_roles=("owner",))
+def _signed(person_id: str, *, team_id: str = "team"):
+    return context_signer().issue(team_id=team_id, person_id=person_id, person_roles=("owner",))
 
 
 def _write_policy(path: Path, **overrides: object) -> Path:
@@ -128,23 +130,36 @@ def _manager(
     return manager
 
 
-def _objective(manager: TaskManager):
+def _objective(manager: TaskManager, *, schedule_id: str | None = None):
     task = Task(
         task_id="root-task",
         task_type=MessageMetaType.REQUEST,
         problem_statement="Deliver a long-running outcome.",
     )
+    if schedule_id is None:
+        task_context = _signed("objective-user", team_id=manager.identity.team_id)
+    else:
+        signer = ContextSigner.from_env(ISSUER_SCHEDULER)
+        assert signer is not None
+        task_context = signer.issue(
+            team_id=manager.identity.team_id,
+            person_id="objective-user",
+            person_roles=("owner",),
+            schedule_id=schedule_id,
+        )
     assert manager.add_task(
         task,
         MessageHeader(from_agent_id="user", response_routing_key="user"),
         MessageMeta(
             from_agent_name="user",
             conversation_id="conversation",
-            requester_type=RequesterType.USER_REQUESTER,
+            requester_type=(
+                RequesterType.USER_REQUESTER if schedule_id is None else RequesterType.TIMER_REQUESTER
+            ),
             gateway_context=GatewayContext(
                 canonical_user_id="objective-user",
                 session_key="objective-session",
-                task_context=_signed("objective-user"),
+                task_context=task_context,
             ),
         ),
         owner_person_id="objective-user",  # what admission records from the signed context
@@ -209,7 +224,7 @@ def test_suggest_tool_preserves_explicit_session_estimates(
     task, objective = _objective(manager)
     _tool_agent(manager, task.task_id, monkeypatch)
     try:
-        result = json.loads(objective_work_sessions(
+        result = tool_json(objective_work_sessions(
             action="suggest", objective_id=objective.objective_id, estimated_sessions=estimated_sessions,
         ))
         assert result["estimated_sessions"] == expected_sessions
@@ -373,7 +388,7 @@ def test_replacement_manager_reconciles_complete_legacy_objective_work_scope(
     )
     task, objective = _objective(original)
     _agent, schedule_store = _tool_agent(original, task.task_id, monkeypatch)
-    enabled = json.loads(
+    enabled = tool_json(
         objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the accepted daily work bounds.", profile_name="daily", confirmed=True)
     )
     assert "error" not in enabled, enabled
@@ -665,9 +680,11 @@ def test_policy_rejects_hidden_auto_activation_and_missing_required_skill(
         load_objective_work_execution_config([str(missing_path)])
 
 
+@pytest.mark.parametrize("wake_fails", [False, True])
 def test_enable_tool_requires_confirmation_and_installs_protected_schedule(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    wake_fails: bool,
 ) -> None:
     manager = _manager(tmp_path, policy=True)
     task, objective = _objective(manager)
@@ -696,20 +713,29 @@ def test_enable_tool_requires_confirmation_and_installs_protected_schedule(
         lambda _plugin, _sdk_agent: ["Long-Horizon-Plan-Execution"],
     )
 
-    denied = yaml.safe_load(
+    denied = tool_yaml(
         objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the daily bounded profile.", profile_name="daily", confirmed=False)
     )
     assert "Explicit user confirmation" in denied["error"]
 
-    enabled = yaml.safe_load(
-        objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the daily bounded profile.", profile_name="daily", confirmed=True)
-    )
+    if wake_fails:
+        def unavailable():
+            raise RuntimeError("Event loop is closed")
+        agent._scheduler_wake.set = unavailable
+    result = asyncio.run(sdk_tool_result(objective_work_sessions, {
+        "action": "enable", "objective_id": objective.objective_id,
+        "confirmation_summary": "Use the daily bounded profile.", "profile_name": "daily", "confirmed": True,
+    }))
+    assert result["status"] == "success", result
+    enabled = tool_yaml(result)
     schedule = schedule_store.get_scheduled_message(enabled["schedule_id"])
     assert schedule is not None
     assert schedule.management_class == ScheduleManagementClass.SYSTEM
     assert schedule.system_schedule_kind == SystemScheduleKind.OBJECTIVE_WORK_SESSION
     assert schedule.objective_id == objective.objective_id
     assert enabled["required_skills"] == ["long-horizon-plan-execution"]
+    assert bool(enabled.get("warnings")) is wake_fails
+    assert manager.objective_work_coordinator.snapshot(objective.objective_id)["policy"]["status"] == "active"
 
 
 def test_agent_authored_profile_envelope_rejects_excessive_frequency_and_budget(
@@ -776,7 +802,7 @@ def test_reusable_profile_requires_exact_acceptance_survives_restart_and_reconfi
     task, objective = _objective(manager)
     _agent, _schedule_store = _tool_agent(manager, task.task_id, monkeypatch)
 
-    proposal = yaml.safe_load(
+    proposal = tool_yaml(
         propose_objective_work_profile(
             profile_name="six-hour-focus",
             cadence_cron="0 */6 * * *",
@@ -795,12 +821,12 @@ def test_reusable_profile_requires_exact_acceptance_survives_restart_and_reconfi
     assert "error" not in proposal, proposal
     assert proposal["status"] == ObjectiveWorkProfileProposalStatus.PENDING.value
 
-    mismatch = yaml.safe_load(
+    mismatch = tool_yaml(
         objective_work_profiles(action="apply", proposal_id=proposal["proposal_id"], proposal_digest="0" * 64, confirmation_summary="Install the exact six-hour profile for future Objectives.", confirmed=True)
     )
     assert "does not match" in mismatch["error"]
 
-    applied = yaml.safe_load(
+    applied = tool_yaml(
         objective_work_profiles(action="apply", proposal_id=proposal["proposal_id"], proposal_digest=proposal["proposal_digest"], confirmation_summary="Install the exact six-hour profile for future Objectives.", confirmed=True)
     )
     assert applied["installed_profile"]["profile_name"] == "six-hour-focus"
@@ -809,7 +835,7 @@ def test_reusable_profile_requires_exact_acceptance_survives_restart_and_reconfi
         == ObjectiveWorkProfileProposalStatus.APPLIED.value
     )
 
-    replacement_proposal = yaml.safe_load(
+    replacement_proposal = tool_yaml(
         propose_objective_work_profile(
             profile_name="six-hour-focus",
             cadence_cron="0 */8 * * *",
@@ -831,7 +857,7 @@ def test_reusable_profile_requires_exact_acceptance_survives_restart_and_reconfi
         replacement_proposal["replaces_installed_profile_id"]
         == applied["installed_profile"]["installed_profile_id"]
     )
-    replacement = yaml.safe_load(
+    replacement = tool_yaml(
         objective_work_profiles(action="apply", proposal_id=replacement_proposal["proposal_id"], proposal_digest=replacement_proposal["proposal_digest"], confirmation_summary="Replace the saved profile with these exact updated bounds.", confirmed=True)
     )
     assert (
@@ -862,7 +888,7 @@ def test_reusable_profile_requires_exact_acceptance_survives_restart_and_reconfi
         monkeypatch,
     )
 
-    enabled = yaml.safe_load(
+    enabled = tool_yaml(
         objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use my installed six-hour profile.", profile_name="six-hour-focus", confirmed=True)
     )
     first_schedule_id = enabled["schedule_id"]
@@ -871,11 +897,11 @@ def test_reusable_profile_requires_exact_acceptance_survives_restart_and_reconfi
     assert enabled["profile_proposal_id"] == replacement_proposal["proposal_id"]
     assert enabled["cadence_cron"] == "0 */8 * * *"
 
-    removed = yaml.safe_load(
+    removed = tool_yaml(
         objective_work_profiles(action="remove", profile_name="six-hour-focus", confirmation_summary="Remove it from my catalog; existing policy snapshots must remain stable.", confirmed=True)
     )
     assert removed["status"] == ObjectiveWorkInstalledProfileStatus.REMOVED.value
-    catalog = yaml.safe_load(objective_work_profiles(action="list", include_proposals=False))
+    catalog = tool_yaml(objective_work_profiles(action="list", include_proposals=False))
     assert "six-hour-focus" not in {
         item["profile_name"] for item in catalog["profiles"]
     }
@@ -886,7 +912,7 @@ def test_reusable_profile_requires_exact_acceptance_survives_restart_and_reconfi
     assert snapshotted_policy.profile_source == ObjectiveWorkProfileSource.INSTALLED
     assert snapshotted_policy.profile_name == "six-hour-focus"
 
-    reconfigured = yaml.safe_load(
+    reconfigured = tool_yaml(
         objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Return this Objective to the operator daily profile.", profile_name="daily", confirmed=True)
     )
     assert reconfigured["schedule_id"] == first_schedule_id
@@ -911,7 +937,7 @@ def test_one_time_profile_applies_only_to_bound_objective_and_is_idempotent(
     task, objective = _objective(manager)
     _agent, schedule_store = _tool_agent(manager, task.task_id, monkeypatch)
 
-    proposal = yaml.safe_load(
+    proposal = tool_yaml(
         propose_objective_work_profile(
             profile_name="launch-window",
             cadence_cron="0 */4 * * *",
@@ -929,12 +955,12 @@ def test_one_time_profile_applies_only_to_bound_objective_and_is_idempotent(
         )
     )
     assert "error" not in proposal, proposal
-    denied = yaml.safe_load(
+    denied = tool_yaml(
         objective_work_profiles(action="apply", proposal_id=proposal["proposal_id"], proposal_digest=proposal["proposal_digest"], confirmation_summary="Apply these exact bounds only to the launch Objective.", confirmed=False)
     )
     assert "confirmation" in denied["error"]
 
-    applied = yaml.safe_load(
+    applied = tool_yaml(
         objective_work_profiles(action="apply", proposal_id=proposal["proposal_id"], proposal_digest=proposal["proposal_digest"], confirmation_summary="Apply these exact bounds only to the launch Objective.", confirmed=True)
     )
     policy = applied["policy"]
@@ -943,7 +969,7 @@ def test_one_time_profile_applies_only_to_bound_objective_and_is_idempotent(
     assert policy["cadence_cron"] == "0 */4 * * *"
     assert len(schedule_store.get_all()) == 1
 
-    repeated = yaml.safe_load(
+    repeated = tool_yaml(
         objective_work_profiles(action="apply", proposal_id=proposal["proposal_id"], proposal_digest=proposal["proposal_digest"], confirmation_summary="Apply these exact bounds only to the launch Objective.", confirmed=True)
     )
     assert repeated["already_applied"] is True
@@ -962,7 +988,7 @@ def test_one_time_profile_applies_only_to_bound_objective_and_is_idempotent(
         "link_schedule_to_objective",
         fail_objective_schedule_link,
     )
-    failed_reconfiguration = yaml.safe_load(
+    failed_reconfiguration = tool_yaml(
         objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Try to replace the one-time profile with daily.", profile_name="daily", confirmed=True)
     )
     assert "error" in failed_reconfiguration, failed_reconfiguration
@@ -995,7 +1021,7 @@ def test_team_profile_application_rechecks_current_administrator_authority(
     )
     team = manager.create_objective(task_id=system.task_id, title="Team outcome", desired_outcome="x", why="y")
     _agent, store = _tool_agent(manager, source.task_id, monkeypatch)
-    proposal = json.loads(propose_objective_work_profile(
+    proposal = tool_json(propose_objective_work_profile(
         profile_name="team-window", cadence_cron="0 */4 * * *", active_seconds=3600,
         checkpoint_reserve_seconds=300, checkpoint_reserve_turns=2,
         checkpoint_reserve_tokens=50_000, checkpoint_reserve_tool_calls=1,
@@ -1008,7 +1034,7 @@ def test_team_profile_application_rechecks_current_administrator_authority(
         confirmation_summary="Apply these exact team bounds.", confirmed=True,
     )
     if already_applied:
-        assert "policy" in json.loads(objective_work_profiles(**acceptance))
+        assert "policy" in tool_json(objective_work_profiles(**acceptance))
     before = manager.get_objective(team.objective_id).model_dump(mode="json")
     schedule_count = len(store.get_all())
     meta = manager.get_task_info(source.task_id).meta.model_copy(deep=True)
@@ -1018,7 +1044,7 @@ def test_team_profile_application_rechecks_current_administrator_authority(
     member = Task(task_id="member_acceptance", task_type=MessageMetaType.REQUEST, problem_statement="Apply profile.")
     assert manager.add_task(member, manager.get_task_info(source.task_id).header, meta, owner_person_id="objective-user")
     manager.task_state.current_in_progress_task_id = member.task_id
-    refused = json.loads(objective_work_profiles(**acceptance))
+    refused = tool_json(objective_work_profiles(**acceptance))
     assert refused == {"error": "No objective could be resolved from the supplied context."}
     assert manager.get_objective(team.objective_id).model_dump(mode="json") == before
     assert len(store.get_all()) == schedule_count
@@ -1031,7 +1057,7 @@ def test_one_time_profile_rejects_policy_state_drift_before_acceptance(
     manager = _manager(tmp_path, policy=True)
     task, objective = _objective(manager)
     _agent, schedule_store = _tool_agent(manager, task.task_id, monkeypatch)
-    proposal = yaml.safe_load(
+    proposal = tool_yaml(
         propose_objective_work_profile(
             profile_name="drifted-window",
             cadence_cron="0 */4 * * *",
@@ -1049,12 +1075,12 @@ def test_one_time_profile_rejects_policy_state_drift_before_acceptance(
         )
     )
     assert "error" not in proposal, proposal
-    enabled = yaml.safe_load(
+    enabled = tool_yaml(
         objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the daily operator profile instead.", profile_name="daily", confirmed=True)
     )
     assert enabled["profile_name"] == "daily"
 
-    rejected = yaml.safe_load(
+    rejected = tool_yaml(
         objective_work_profiles(action="apply", proposal_id=proposal["proposal_id"], proposal_digest=proposal["proposal_digest"], confirmation_summary="Accept the stale proposal.", confirmed=True)
     )
     assert "changed after this profile was proposed" in rejected["error"]
@@ -1073,7 +1099,7 @@ def test_objective_work_policy_reconfiguration_is_canonical_user_scoped(
     manager = _manager(tmp_path, policy=True)
     task, objective = _objective(manager)
     _agent, schedule_store = _tool_agent(manager, task.task_id, monkeypatch)
-    enabled = yaml.safe_load(
+    enabled = tool_yaml(
         objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the daily profile for this user's Objective.", profile_name="daily", confirmed=True)
     )
     assert enabled["owner_canonical_user_id"] == "objective-user"
@@ -1081,18 +1107,18 @@ def test_objective_work_policy_reconfiguration_is_canonical_user_scoped(
     task_info = manager.get_task_info(task.task_id)
     task_info.meta.gateway_context.canonical_user_id = "another-user"
     task_info.meta.gateway_context.task_context = _signed("another-user")
-    denied = yaml.safe_load(
+    denied = tool_yaml(
         objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Attempt a cross-user reconfiguration.", profile_name="focused", confirmed=True)
     )
     # Another person's Objective is out of view: refused as if it did not exist.
     no_objective = "No objective could be resolved from the supplied context."
     assert denied["error"] == no_objective
-    status_denied = yaml.safe_load(objective_work_sessions(action="status", objective_id=objective.objective_id))
-    disable_denied = yaml.safe_load(
+    status_denied = tool_yaml(objective_work_sessions(action="status", objective_id=objective.objective_id))
+    disable_denied = tool_yaml(
         objective_work_sessions(action="disable", objective_id=objective.objective_id, confirmed=True)
     )
-    start_denied = yaml.safe_load(objective_work_sessions(action="start", objective_id=objective.objective_id))
-    suggest_denied = yaml.safe_load(objective_work_sessions(action="suggest", objective_id=objective.objective_id))
+    start_denied = tool_yaml(objective_work_sessions(action="start", objective_id=objective.objective_id))
+    suggest_denied = tool_yaml(objective_work_sessions(action="suggest", objective_id=objective.objective_id))
     assert status_denied["error"] == no_objective
     assert disable_denied["error"] == no_objective
     assert start_denied["error"] == no_objective
@@ -1116,13 +1142,13 @@ def test_objective_work_schedule_replacement_uses_a_held_access_permit(
     manager = _manager(tmp_path, policy=True, focused_profile=True)
     task, objective = _objective(manager)
     _agent, schedule_store = _tool_agent(manager, task.task_id, monkeypatch)
-    first = yaml.safe_load(
+    first = tool_yaml(
         objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the daily profile.", profile_name="daily", confirmed=True)
     )
     assert "error" not in first, first
 
     with caplog.at_level(logging.INFO, logger="custom_agents.schedule_management"):
-        replaced = yaml.safe_load(
+        replaced = tool_yaml(
             objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the focused profile.", profile_name="focused", confirmed=True)
         )
 
@@ -1141,7 +1167,7 @@ def test_profile_yaml_export_is_inert_and_round_trips_as_a_policy_layer(
     task, _objective_record = _objective(manager)
     _tool_agent(manager, task.task_id, monkeypatch)
 
-    rendered = json.loads(
+    rendered = tool_json(
         objective_work_profiles(action="export", profile_name="daily", save=True, confirmed=True)
     )
 
@@ -1208,7 +1234,7 @@ def test_a_failed_objective_work_schedule_replacement_restores_controls_and_keep
     manager = _manager(tmp_path, policy=True, focused_profile=True)
     task, objective = _objective(manager)
     _agent, schedule_store = _tool_agent(manager, task.task_id, monkeypatch)
-    first = yaml.safe_load(
+    first = tool_yaml(
         objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the daily profile.", profile_name="daily", confirmed=True)
     )
     assert "error" not in first, first
@@ -1231,7 +1257,7 @@ def test_a_failed_objective_work_schedule_replacement_restores_controls_and_keep
         raise RuntimeError("Injected Objective link failure")
 
     monkeypatch.setattr(manager, "link_schedule_to_objective", fail_link)
-    replaced = yaml.safe_load(
+    replaced = tool_yaml(
         objective_work_sessions(action="enable", objective_id=objective.objective_id, confirmation_summary="Use the focused profile.", profile_name="focused", confirmed=True)
     )
 
@@ -1254,7 +1280,7 @@ def test_failed_objective_schedule_install_keeps_a_concurrent_operator_stop(tmp_
     task, objective = _objective(manager)
     _agent, store = _tool_agent(manager, task.task_id, monkeypatch)
     if not first_install:
-        first = yaml.safe_load(
+        first = tool_yaml(
             objective_work_sessions(
                 action="enable", objective_id=objective.objective_id, confirmation_summary="Use daily sessions.",
                 profile_name="daily", confirmed=True,
@@ -1280,7 +1306,7 @@ def test_failed_objective_schedule_install_keeps_a_concurrent_operator_stop(tmp_
         raise RuntimeError("Injected Objective link failure after an operator stop")
 
     monkeypatch.setattr(manager, "link_schedule_to_objective", stop_then_fail)
-    result = yaml.safe_load(
+    result = tool_yaml(
         objective_work_sessions(
             action="enable", objective_id=objective.objective_id, confirmation_summary="Use focused sessions.",
             profile_name="focused", confirmed=True,
@@ -1403,14 +1429,14 @@ def test_the_team_leads_pause_and_resume_follow_the_work_policy(
     manager, task, objective = _policy_objective(tmp_path)
     _tool_agent(manager, task.task_id, monkeypatch)
 
-    paused = json.loads(objectives(action="update_status", status="paused", objective_id=objective.objective_id))
+    paused = tool_json(objectives(action="update_status", status="paused", objective_id=objective.objective_id))
 
     assert paused["objective"]["status"] == "paused"
     assert "lifecycle_warnings" not in paused
     assert _policy(manager, objective.objective_id).disabled_by_objective_control is True
     assert _event_types(manager, objective.objective_id)[-1] == ObjectiveEventType.WORK_SESSION_POLICY_DISABLED
 
-    resumed = json.loads(objectives(action="update_status", status="active", objective_id=objective.objective_id))
+    resumed = tool_json(objectives(action="update_status", status="active", objective_id=objective.objective_id))
 
     assert resumed["objective"]["status"] == "active"
     policy = _policy(manager, objective.objective_id)

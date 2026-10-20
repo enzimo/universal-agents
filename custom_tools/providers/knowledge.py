@@ -17,8 +17,10 @@ from typing import Any, Optional
 
 from strands import tool
 
+from access_control.identity import ISSUER_GATEWAY
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.runtime_context import active_task_context, get_agent_ref
+from custom_tools.tool_results import failed
 from knowledge_base.records import CODE_DISABLED, KnowledgeActor, KnowledgeError, KnowledgePage, SearchHit
 from knowledge_base.service import DraftInput, KnowledgeService, PageView, WriteResult
 from knowledge_base.vocabulary import ActorKind
@@ -31,8 +33,12 @@ _PENDING_MESSAGE = (
 )
 
 
+def _error_payload(code: str, message: str) -> dict[str, Any]:
+    return {"ok": False, "error_code": code, "message": message, "error": message}
+
+
 def _error(code: str, message: str) -> str:
-    return json.dumps({"ok": False, "error_code": code, "message": message, "error": message})
+    return json.dumps(_error_payload(code, message))
 
 
 def knowledge_service(agent: Any) -> KnowledgeService:
@@ -76,26 +82,35 @@ def knowledge_actor(agent: Any) -> KnowledgeActor:
 
     task_id, _meta = active_task_context(agent)
     context = verified_task_context(agent)
+    person_id = str(getattr(context, "person_id", "") or "") if context is not None else ""
+    work_id = str(getattr(context, "context_id", "") or "") if context is not None else ""
+    # A person's request is a context the gateway signed for a person; the
+    # scheduler signs scheduled work (and escalations from system work).
+    is_request = context is not None and context.issuer == ISSUER_GATEWAY and bool(person_id)
     return KnowledgeActor(
         kind=ActorKind.AGENT,
         actor_id=str(getattr(agent, "id", "") or ""),
         team_id=str(getattr(agent, "team_id", "") or ""),
         agent_type=str(getattr(agent, "named_agent_type", "") or ""),
         display_name=str(getattr(agent, "name", "") or ""),
-        work_person_id=str(getattr(context, "person_id", "") or "") if context is not None else "",
+        work_person_id=person_id,
         task_id=str(task_id or ""),
-        work_id=str(getattr(context, "context_id", "") or "") if context is not None else "",
+        work_id=work_id,
+        request_id=work_id if is_request else "",
+        conflict_checks=bool(getattr(agent, "_request_conflict_checks", True)),
     )
 
 
-def _run(action: Any) -> str:
+def _run(action: Any) -> str | dict[str, Any]:
+    """The JSON of a knowledge action's result, or a failed result (custom_tools.tool_results)."""
+
     agent = get_agent_ref()
     if agent is None:
-        return _error("agent_ref_missing", "Agent reference not set")
+        return failed(_error_payload("agent_ref_missing", "Agent reference not set"))
     try:
         return json.dumps(action(knowledge_service(agent), knowledge_actor(agent)), default=str)
     except KnowledgeError as error:
-        return json.dumps(error.payload(), default=str)
+        return failed(error.payload())
 
 
 def _by(kind: str, agent_type: str) -> str:
@@ -146,7 +161,7 @@ def _write_payload(result: WriteResult) -> dict[str, Any]:
 
 
 @tool
-def knowledge_search(query: str = "", space: str = "all", page_type: str = "", tag: str = "", limit: int = 8, offset: int = 0) -> str:
+def knowledge_search(query: str = "", space: str = "all", page_type: str = "", tag: str = "", limit: int = 8, offset: int = 0) -> str | dict[str, Any]:
     """
     Search the shared knowledge base before researching something the team may already know.
 
@@ -177,7 +192,7 @@ def knowledge_search(query: str = "", space: str = "all", page_type: str = "", t
 
 
 @tool
-def knowledge_read(page: str, revision: int = 0) -> str:
+def knowledge_read(page: str, revision: int = 0) -> str | dict[str, Any]:
     """
     Read one knowledge page with the pages that link to it and its open notes.
 
@@ -234,7 +249,7 @@ def knowledge_write(
     tags: Optional[list[str]] = None,
     base_revision: int = 0,
     change_summary: str = "",
-) -> str:
+) -> str | dict[str, Any]:
     """
     Create a knowledge page, or edit one you have read.
 
@@ -268,7 +283,7 @@ def knowledge_write(
 
 
 @tool
-def knowledge_add_note(page: str, note: str) -> str:
+def knowledge_add_note(page: str, note: str) -> str | dict[str, Any]:
     """
     Add a short note to a knowledge page without rewriting it.
 
@@ -285,7 +300,7 @@ def knowledge_add_note(page: str, note: str) -> str:
 
 
 @tool
-def knowledge_history(page: str, limit: int = 10) -> str:
+def knowledge_history(page: str, limit: int = 10) -> str | dict[str, Any]:
     """
     List a knowledge page's revisions, newest first.
 
@@ -316,7 +331,7 @@ def knowledge_history(page: str, limit: int = 10) -> str:
 
 
 @tool
-def knowledge_archive(page: str, base_revision: int, reason: str) -> str:
+def knowledge_archive(page: str, base_revision: int, reason: str) -> str | dict[str, Any]:
     """
     Archive a knowledge page that is wrong or no longer useful. Archived pages
     leave search results but keep every revision, and an edit restores them.

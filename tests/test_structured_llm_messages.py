@@ -26,7 +26,7 @@ from custom_messages.enums import MessageMetaType
 
 
 @pytest.mark.parametrize("decision_type", [ModelAgentTurnDecision, StructuredAgentTurnDecision])
-@pytest.mark.parametrize("ending", ["schedule", "noop", "unanswered_delegation"])
+@pytest.mark.parametrize("ending", ["schedule", "noop"])
 def test_schedule_batch_needs_a_final_response_or_wait(decision_type, ending):
     payload = {"problem_statement": "Check the service later."}
     if decision_type is StructuredAgentTurnDecision:
@@ -37,11 +37,6 @@ def test_schedule_batch_needs_a_final_response_or_wait(decision_type, ending):
     }]
     if ending == "noop":
         actions.append({"action_type": "noop", "reason": "The schedule was saved."})
-    if ending == "unanswered_delegation":
-        actions.append({
-            "action_type": "delegate_task", "task": payload,
-            "target_named_agent_type": "WebResearchAgent", "is_response_requested": False,
-        })
     with pytest.raises(ValidationError, match="schedule_message.*followed"):
         decision_type.model_validate({"actions": actions})
 

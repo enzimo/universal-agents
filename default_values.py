@@ -699,6 +699,11 @@ class AgentDefaultValues:
         "Whether same-role replacement agents may claim persisted active/deferred runtime state.",
         onboarding_overridable=False,
     )
+    request_conflict_checks: DefaultValue[bool] = default_value(
+        True,
+        "Whether a person's request is refused a change to a record another of their requests changed while it ran.",
+        onboarding_overridable=False,
+    )
     max_tool_calls_per_task: DefaultValue[Optional[int]] = default_value(
         150,
         "Cumulative tool calls allowed across one ordinary local task-processing invocation.",

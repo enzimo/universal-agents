@@ -1360,7 +1360,6 @@ async def _handle_task_request(
             self, task_request, msg_header, normalized_meta, conversation_admitted=True,
         )
         return
-
     if not await apply_redispatch_notice(self, task_request.task_id, normalized_meta):
         return
     # Delegated work: tell the requester this worker holds the task, so it

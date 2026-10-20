@@ -67,6 +67,7 @@ from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
 from storage.access_repository import AccessRepository
 from tests.broker_access_support import context_signer, forget_task_context_keys, use_scheduler_key
 from tests.test_internal_improvement_runtime import _Manager, _Worker
+from tests.tool_result_support import tool_json
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "target" / "debug" / "ua-cedar-authorizer"
@@ -247,7 +248,7 @@ def test_it_records_and_sees_only_the_schedule_its_context_names(world) -> None:
     assert json.loads(record_scheduled_run(schedule_id=person_schedule, outcome="success")).get("recorded") is not True
     assert json.loads(list_scheduled_jobs(schedule_id=person_schedule)).get("schedules") in (None, [])
     # A change to its own (system) schedule needs a person.
-    changed = json.loads(update_scheduled_job(schedule_id=schedule_id, interval_seconds=60))
+    changed = tool_json(update_scheduled_job(schedule_id=schedule_id, interval_seconds=60))
     assert changed.get("updated") is not True and "approval_required" not in json.dumps(changed)
 
 
@@ -440,7 +441,10 @@ def test_the_owner_has_no_roles_unless_the_gateway_recorded_them_as_active(world
 
 
 @pytest.mark.asyncio
-async def test_the_team_leads_admission_signs_the_escalation_for_the_owner(tmp_path, monkeypatch) -> None:
+# A delegated escalation has the worker's task as parent; a worker_result
+# report is its own task with none (custom_agents.worker_result_reports).
+@pytest.mark.parametrize("parent_task_id", ["worker_task_1", None])
+async def test_the_team_leads_admission_signs_the_escalation_for_the_owner(tmp_path, monkeypatch, parent_task_id) -> None:
     from custom_agents import task_message_runtime
     from custom_messages.enums import SystemScheduleKind
     from tests.test_turn_action_outbox import _make_agent
@@ -471,7 +475,7 @@ async def test_the_team_leads_admission_signs_the_escalation_for_the_owner(tmp_p
     try:
         await task_message_runtime._handle_task_request(
             lead,
-            Task(task_id="escalation_1", parent_task_id="worker_task_1", task_type=MessageMetaType.REQUEST),
+            Task(task_id="escalation_1", parent_task_id=parent_task_id, task_type=MessageMetaType.REQUEST),
             MessageHeader(from_agent_id="worker_1", response_routing_key="worker_1"),
             escalation,
         )

@@ -407,3 +407,77 @@ def test_sign_in_tools_match_the_catalog_and_have_a_sign_in_page(catalog):
         for method in sign_in.methods:
             has_page = get_auth_flow(sign_in.provider, method) is not None
             assert has_page or method in FORM_AUTH_METHODS.get(sign_in.provider, set()), (tool_id, method)
+
+
+def _function_tool_catalog(tmp_path, functions_yaml: str):
+    """A catalog of one fn:notes tool whose functions are the given YAML lines."""
+
+    from access_catalog.catalog import ToolCatalog
+
+    path = tmp_path / "notes.yaml"
+    path.write_text(
+        "tools:\n  - tool_id: fn:notes\n    provider: notes\n    display_name: Notes\n    functions:\n" + functions_yaml,
+        encoding="utf-8",
+    )
+    catalog = ToolCatalog()
+    catalog.load_file(path)
+    return catalog
+
+
+def test_record_kinds_name_the_calls_that_change_records(tmp_path):
+    from custom_messages.enums import ChangeRecordKind
+
+    catalog = _function_tool_catalog(
+        tmp_path,
+        "      note:\n"
+        "        argument: action\n"
+        "        values: {list: read, edit: write, tag: write}\n"
+        "        record_kinds: {edit: memory_fact, tag: none}\n"
+        "      note_file: {level: write, record_kind: file}\n"
+        "      note_search: read\n",
+    )
+
+    assert catalog.record_kind("note", {"action": "Edit"}) is ChangeRecordKind.MEMORY_FACT
+    assert catalog.record_kind("note", {"action": "tag"}) is None
+    assert catalog.record_kind("note", {"action": "list"}) is None
+    assert catalog.record_kind("note_file") is ChangeRecordKind.FILE
+    assert catalog.record_kind("note_search") is None
+    assert catalog.record_kind("unknown_function") is None
+    # Levels are decided as before.
+    assert catalog.resolve_function("note_file").level is WRITE
+
+
+@pytest.mark.parametrize(
+    ("functions_yaml", "message"),
+    [
+        # A changing operation in a tool that has record kinds must name one (or none).
+        (
+            "      note_file: {level: write, record_kind: file}\n      note_delete: full\n",
+            r"without a record kind.*note_delete",
+        ),
+        (
+            "      note:\n        argument: action\n        values: {edit: write, drop: full}\n"
+            "        record_kinds: {edit: file}\n",
+            r"without a record kind.*note\.drop",
+        ),
+        ("      note_file: {level: write, record_kind: page}\n", "unknown record kind"),
+        ("      note_file: {level: write, records: file}\n", "unknown keys"),
+        ("      note_file: {record_kind: file}\n", "missing keys"),
+        (
+            "      note:\n        argument: action\n        values: {edit: write}\n        record_kinds: {move: file}\n",
+            "values it does not take",
+        ),
+        ("      note:\n        argument: action\n        values: {edit: write}\n        level: write\n", "unknown keys"),
+    ],
+)
+def test_the_loader_refuses_unclear_record_kinds(tmp_path, functions_yaml, message):
+    from access_catalog.catalog import CatalogError
+
+    with pytest.raises(CatalogError, match=message):
+        _function_tool_catalog(tmp_path, functions_yaml)
+
+
+def test_tools_without_record_kinds_need_none(tmp_path):
+    catalog = _function_tool_catalog(tmp_path, "      note_file: write\n      note_delete: full\n")
+
+    assert catalog.record_kind("note_file") is None

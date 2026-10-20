@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from tests.tool_result_support import tool_json
 
 
 from custom_agents.scheduled_runtime import (
@@ -87,7 +88,7 @@ def test_schedule_inspection_pages_metadata_and_exact_large_detail(tmp_path):
     set_agent_ref(agent)
     ids = []
     for index in range(23):
-        result = json.loads(
+        result = tool_json(
             create_scheduled_job(
                 instruction=f"Task {index}: " + "large work description " * 5000,
                 schedule_name=f"schedule {index}",
@@ -96,30 +97,30 @@ def test_schedule_inspection_pages_metadata_and_exact_large_detail(tmp_path):
         )
         ids.append(result["schedule_id"])
     first_raw = list_scheduled_jobs()
-    first = json.loads(first_raw)
+    first = tool_json(first_raw)
     assert first["returned"] == 20
     assert first["next_offset"] == 20
     assert len(first_raw) < 25000
-    second = json.loads(list_scheduled_jobs(offset=first["next_offset"]))
+    second = tool_json(list_scheduled_jobs(offset=first["next_offset"]))
     assert second["returned"] == 3
     assert second["next_offset"] is None
     assert {
         item["schedule_id"] for item in first["schedules"] + second["schedules"]
     } == set(ids)
-    detail = json.loads(
+    detail = tool_json(
         list_scheduled_jobs(schedule_id=ids[0], details_max_chars=999999)
     )["schedules"][0]["detail"]
     assert len(detail["text"]) == 4000
     assert detail["next_offset"] == 4000
-    next_detail = json.loads(
+    next_detail = tool_json(
         list_scheduled_jobs(schedule_id=ids[0], details_offset=4000)
     )["schedules"][0]["detail"]
     assert next_detail["sha256"] == detail["sha256"]
-    counts = json.loads(get_schedule_telemetry())
+    counts = tool_json(get_schedule_telemetry())
     assert counts["schedules"] is None
     assert counts["summary"]["total"] == 23
     assert len(json.dumps(counts)) < 1500
-    targeted = json.loads(
+    targeted = tool_json(
         get_schedule_telemetry(include_schedules=True, schedule_id=ids[0])
     )
     assert targeted["summary"]["total"] == 1
@@ -129,9 +130,9 @@ def test_schedule_inspection_pages_metadata_and_exact_large_detail(tmp_path):
         str(tmp_path / "schedule.db"), canonical_user_id="someone_else"
     )
     set_agent_ref(other_agent)
-    assert json.loads(list_scheduled_jobs(schedule_id=ids[0]))["schedules"] == []
+    assert tool_json(list_scheduled_jobs(schedule_id=ids[0]))["schedules"] == []
     assert (
-        json.loads(get_schedule_telemetry(schedule_id=ids[0]))["summary"]["total"] == 0
+        tool_json(get_schedule_telemetry(schedule_id=ids[0]))["summary"]["total"] == 0
     )
 
 
@@ -406,7 +407,7 @@ def test_schedule_tools_create_pause_resume_disable_and_remove(tmp_path: Path):
     agent = _FakeAgent(db_path)
     set_agent_ref(agent)
 
-    created = json.loads(
+    created = tool_json(
         create_scheduled_job(
             instruction="Reply with the exact phrase scheduled tool ok.",
             schedule_name="tool schedule",
@@ -417,13 +418,13 @@ def test_schedule_tools_create_pause_resume_disable_and_remove(tmp_path: Path):
     assert created["schedule_name"] == "tool schedule"
     assert agent._scheduler_wake.was_set is True
 
-    listing = json.loads(list_scheduled_jobs())
+    listing = tool_json(list_scheduled_jobs())
     assert listing["returned"] == 1
     assert listing["schedules"][0]["schedule_id"] == schedule_id
     assert listing["schedules"][0]["schedule_name"] == "tool schedule"
     assert listing["schedules"][0]["notify_policy"] == "on_change"
     assert "schedule_memory" not in listing["schedules"][0]
-    detail = json.loads(list_scheduled_jobs(schedule_id=schedule_id))["schedules"][0]["detail"]
+    detail = tool_json(list_scheduled_jobs(schedule_id=schedule_id))["schedules"][0]["detail"]
     assert "session_sched" in detail["text"]
     stored = agent._schedule_store.get_scheduled_message(schedule_id)
     assert stored is not None
@@ -444,17 +445,17 @@ def test_schedule_tools_create_pause_resume_disable_and_remove(tmp_path: Path):
     assert agent.task_manager.history_entries[-1][0] == "task_current"
     assert "Created dedicated conversation" in agent.task_manager.history_entries[-1][1]
 
-    paused = json.loads(call_tool_on_agent_loop(agent, pause_scheduled_job, schedule_id, duration_minutes=30))
+    paused = tool_json(call_tool_on_agent_loop(agent, pause_scheduled_job, schedule_id, duration_minutes=30))
     assert paused["schedule_id"] == schedule_id
     assert paused["paused"] is True
 
-    resumed = json.loads(call_tool_on_agent_loop(agent, resume_scheduled_job, schedule_id))
+    resumed = tool_json(call_tool_on_agent_loop(agent, resume_scheduled_job, schedule_id))
     assert resumed["resumed"] is True
 
-    disabled = json.loads(call_tool_on_agent_loop(agent, disable_scheduled_job, schedule_id))
+    disabled = tool_json(call_tool_on_agent_loop(agent, disable_scheduled_job, schedule_id))
     assert disabled["disabled"] is True
 
-    removed = json.loads(call_tool_on_agent_loop(agent, remove_scheduled_job, schedule_id))
+    removed = tool_json(call_tool_on_agent_loop(agent, remove_scheduled_job, schedule_id))
     assert removed["removed"] is True
 
 
@@ -463,7 +464,7 @@ def test_schedule_tools_hide_jobs_owned_by_another_canonical_user(tmp_path: Path
     owner_agent = _FakeAgent(db_path, canonical_user_id="usr_sched_a")
     set_agent_ref(owner_agent)
 
-    created = json.loads(
+    created = tool_json(
         create_scheduled_job(
             instruction="Private schedule.",
             schedule_name="private schedule",
@@ -475,8 +476,8 @@ def test_schedule_tools_hide_jobs_owned_by_another_canonical_user(tmp_path: Path
     other_agent = _FakeAgent(db_path, canonical_user_id="usr_sched_b")
     set_agent_ref(other_agent)
 
-    listed = json.loads(list_scheduled_jobs())
-    disabled = json.loads(disable_scheduled_job(schedule_id))
+    listed = tool_json(list_scheduled_jobs())
+    disabled = tool_json(disable_scheduled_job(schedule_id))
 
     assert listed == {"total": 0, "returned": 0, "offset": 0, "next_offset": None, "schedules": []}
     assert disabled == {
@@ -493,7 +494,7 @@ def test_update_scheduled_job_mutates_fields_and_reports_to_manager(tmp_path: Pa
     db_path = str(tmp_path / "task_history.db")
     agent = _FakeAgent(db_path)
     set_agent_ref(agent)
-    created = json.loads(
+    created = tool_json(
         create_scheduled_job(
             instruction="Original scheduled instruction.",
             schedule_name="original schedule",
@@ -503,7 +504,7 @@ def test_update_scheduled_job_mutates_fields_and_reports_to_manager(tmp_path: Pa
     schedule_id = created["schedule_id"]
     expires_at = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
 
-    updated = json.loads(
+    updated = tool_json(
         call_tool_on_agent_loop(
             agent,
             update_scheduled_job,
@@ -550,7 +551,7 @@ def test_update_scheduled_job_mutates_schedule_memory_policy(tmp_path: Path):
     db_path = str(tmp_path / "task_history.db")
     agent = _FakeAgent(db_path)
     set_agent_ref(agent)
-    created = json.loads(
+    created = tool_json(
         create_scheduled_job(
             instruction="Watch source for updates.",
             schedule_name="watch source",
@@ -562,7 +563,7 @@ def test_update_scheduled_job_mutates_schedule_memory_policy(tmp_path: Path):
     )
     schedule_id = created["schedule_id"]
 
-    updated = json.loads(
+    updated = tool_json(
         call_tool_on_agent_loop(
             agent,
             update_scheduled_job,
@@ -590,7 +591,7 @@ def test_record_scheduled_run_updates_bounded_memory_and_notification_decision(
     db_path = str(tmp_path / "task_history.db")
     agent = _FakeAgent(db_path)
     set_agent_ref(agent)
-    created = json.loads(
+    created = tool_json(
         create_scheduled_job(
             instruction="Check match state.",
             schedule_name="match monitor",
@@ -604,7 +605,7 @@ def test_record_scheduled_run_updates_bounded_memory_and_notification_decision(
     task_info.meta.requester_type = RequesterType.TIMER_REQUESTER
     task_info.meta.gateway_context.scheduled_job_id = schedule_id
 
-    no_change = json.loads(
+    no_change = tool_json(
         record_scheduled_run(
             outcome="no_change",
             state_summary="Score unchanged at 2-0.",
@@ -614,7 +615,7 @@ def test_record_scheduled_run_updates_bounded_memory_and_notification_decision(
     assert no_change["recorded"] is True
     assert no_change["should_notify"] is False
 
-    changed = json.loads(
+    changed = tool_json(
         record_scheduled_run(
             outcome="changed",
             state_summary="Netherlands extended lead to 3-0.",
@@ -648,7 +649,7 @@ def test_record_scheduled_run_never_undoes_a_change_made_after_its_read(
 
     agent = _FakeAgent(str(tmp_path / "task_history.db"))
     set_agent_ref(agent)
-    schedule_id = json.loads(
+    schedule_id = tool_json(
         create_scheduled_job(instruction="Check match state.", schedule_name="match monitor", interval_seconds=60)
     )["schedule_id"]
     task_info = agent.task_manager._task_info
@@ -666,7 +667,7 @@ def test_record_scheduled_run_never_undoes_a_change_made_after_its_read(
         return found
 
     monkeypatch.setattr(schedule_tools, "_owned_or_denial", read_then_person_acts)
-    result = json.loads(record_scheduled_run(outcome="no_change", state_summary="Score unchanged."))
+    result = tool_json(record_scheduled_run(outcome="no_change", state_summary="Score unchanged."))
 
     if concurrent == "remove":
         assert result == {"schedule_id": schedule_id, "recorded": False, "error": schedule_tools.SCHEDULE_NOT_FOUND}
@@ -710,7 +711,7 @@ def test_schedule_telemetry_reports_counts_timing_and_scheduler_identity(
     agent = _FakeAgent(db_path)
     set_agent_ref(agent)
 
-    created = json.loads(
+    created = tool_json(
         create_scheduled_job(
             instruction="Check the project status and summarize the next action.",
             schedule_name="status poll",
@@ -719,7 +720,7 @@ def test_schedule_telemetry_reports_counts_timing_and_scheduler_identity(
     )
     schedule_id = created["schedule_id"]
 
-    telemetry = json.loads(get_schedule_telemetry(include_schedules=True))
+    telemetry = tool_json(get_schedule_telemetry(include_schedules=True))
 
     assert telemetry["agent"]["agent_id"] == "manager_id"
     assert telemetry["summary"]["total"] == 1
@@ -1394,7 +1395,7 @@ def test_notify_user_records_run_notes_only_on_a_schedule_the_task_may_record(tm
     db_path = str(tmp_path / "task_history.db")
     owner = _FakeAgent(db_path)
     set_agent_ref(owner)
-    schedule_id = json.loads(
+    schedule_id = tool_json(
         create_scheduled_job(instruction="Check match state.", schedule_name="match monitor", interval_seconds=60)
     )["schedule_id"]
     someone_else = _FakeAgent(db_path, canonical_user_id="usr_sched_b")
@@ -1435,7 +1436,7 @@ def test_a_persons_system_timer_records_notes_with_both_tools(tmp_path: Path):
     agent.task_manager._task_info.meta.gateway_context.scheduled_job_id = timer.schedule_id
 
     noted = _record_schedule_notification_if_active(agent, message="Memory reviewed.", notification_id="note_timer", reason="")
-    recorded = json.loads(record_scheduled_run(outcome="no_change", state_summary="Nothing to change."))
+    recorded = tool_json(record_scheduled_run(outcome="no_change", state_summary="Nothing to change."))
 
     assert noted == {"recorded": True, "schedule_id": timer.schedule_id}
     assert recorded["recorded"] is True

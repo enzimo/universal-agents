@@ -282,6 +282,9 @@ def _project_agent(
             "same_role_runtime_takeover_enabled",
             AGENT_DEFAULTS.same_role_runtime_takeover_enabled.value,
         ),
+        "request_conflict_checks": bool(
+            agent_cfg.get("request_conflict_checks", AGENT_DEFAULTS.request_conflict_checks.value)
+        ),
         "max_tool_calls_per_task": agent_cfg.get(
             "max_tool_calls_per_task", AGENT_DEFAULTS.max_tool_calls_per_task.value
         ),

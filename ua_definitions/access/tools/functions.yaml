@@ -8,6 +8,14 @@
 # A function whose level depends on an argument lists the argument and a level
 # per value; any other value needs full.
 #
+# record_kind (record_kinds per argument value): the kind of stored record an
+# operation changes, when another request may change the same record at once
+# (custom_messages.enums.ChangeRecordKind). In each model step the tool
+# executor runs these calls first, one at a time, and the step's other calls
+# get "not run" once one of them does not go through
+# (custom_agents.sdk.strands.changes_first). In a tool where any operation
+# names one, every changing operation must name one, or none.
+#
 # owner_scope: platform marks platform objects (settings, access, capabilities,
 # restarts): only administrators hold full on them, and agents may only propose.
 # owner_scope: administrators marks team settings every person shares (model
@@ -80,8 +88,8 @@ tools:
     tool_sets: [agent_runtime]
     functions:
       file_read: read
-      file_write: write
-      file_move: write
+      file_write: {level: write, record_kind: file}
+      file_move: {level: write, record_kind: file}
     # A person sends a file into another person's folder (decision D15): the
     # recipient or an administrator approves, and the gateway applies it.
     changes:
@@ -239,10 +247,13 @@ tools:
       memory:
         argument: action
         values: {list: read, create: write, replace: write, delete: full, undo: write}
+        record_kinds: {create: memory_fact, replace: memory_fact, delete: memory_fact, undo: memory_fact}
+      # Topic tags are not ordered with other changes yet.
       topic_tags:
         argument: action
         values: {list: read, tag_thread: write, tag_turn: write, untag: write, find: read}
-      resolve_memory_review_job: write
+        record_kinds: {tag_thread: none, tag_turn: none, untag: none}
+      resolve_memory_review_job: {level: write, record_kind: none}
 
   # The shared knowledge base (knowledge_base.service): every agent searches
   # and reads it and adds to it. In work for a person, team-space changes are
@@ -257,9 +268,9 @@ tools:
       knowledge_search: read
       knowledge_read: read
       knowledge_history: read
-      knowledge_write: write
-      knowledge_add_note: write
-      knowledge_archive: write
+      knowledge_write: {level: write, record_kind: knowledge_page}
+      knowledge_add_note: {level: write, record_kind: knowledge_page}
+      knowledge_archive: {level: write, record_kind: knowledge_page}
 
   # KnowledgeCuratorAgent's tools (custom_tools/providers/knowledge_curation.py).
   # A contribution is reachable only in work for its own person; decisions are
@@ -275,13 +286,15 @@ tools:
       knowledge_activity_report: read
       knowledge_problems: read
       list_open_knowledge_notes: read
-      publish_contribution: write
-      reject_contribution: write
-      resolve_knowledge_note: write
-      freeze_knowledge_page: write
-      unfreeze_knowledge_page: write
-      merge_knowledge_pages: write
-      revert_knowledge_page: write
+      # Notes and contributions are part of a page's knowledge state, just
+      # like knowledge_add_note and pending knowledge_write changes above.
+      publish_contribution: {level: write, record_kind: knowledge_page}
+      reject_contribution: {level: write, record_kind: knowledge_page}
+      resolve_knowledge_note: {level: write, record_kind: knowledge_page}
+      freeze_knowledge_page: {level: write, record_kind: knowledge_page}
+      unfreeze_knowledge_page: {level: write, record_kind: knowledge_page}
+      merge_knowledge_pages: {level: write, record_kind: knowledge_page}
+      revert_knowledge_page: {level: write, record_kind: knowledge_page}
 
   - tool_id: fn:heartbeat
     provider: heartbeat
@@ -290,11 +303,11 @@ tools:
     tool_sets: [team_lead_runtime]
     functions:
       list_heartbeat_items: read
-      add_heartbeat_item: write
-      update_heartbeat_item: write
-      remove_heartbeat_item: full
-      enable_heartbeat_item: write
-      disable_heartbeat_item: write
+      add_heartbeat_item: {level: write, record_kind: heartbeat_item}
+      update_heartbeat_item: {level: write, record_kind: heartbeat_item}
+      remove_heartbeat_item: {level: full, record_kind: heartbeat_item}
+      enable_heartbeat_item: {level: write, record_kind: heartbeat_item}
+      disable_heartbeat_item: {level: write, record_kind: heartbeat_item}
 
   - tool_id: fn:objectives
     provider: objectives
@@ -304,22 +317,27 @@ tools:
     # objectives, objective_work_sessions and objective_work_profiles each take
     # an action (custom_tools.providers.objectives); removing a reusable
     # profile stays full. Functions with many inputs of their own stay apart.
+    # Profiles (proposals, exported files, installed profiles) and isolated
+    # recovery runs, which only create records, are not Objective changes.
     functions:
       objectives:
         argument: action
         values: {get: read, list: read, update_progress: write, update_status: write}
+        record_kinds: {update_progress: objective, update_status: objective}
       objective_work_sessions:
         argument: action
         values: {suggest: read, enable: write, disable: write, status: read, start: write}
+        record_kinds: {enable: objective, disable: objective, start: objective}
       objective_work_profiles:
         argument: action
         values: {list: read, export: write, apply: write, remove: full}
-      propose_objective_work_profile: write
-      record_objective_work_checkpoint: write
-      create_objective: write
-      start_objective_task: write
-      activate_plan_execution: write
-      start_isolated_recovery: write
+        record_kinds: {apply: objective, export: none, remove: none}
+      propose_objective_work_profile: {level: write, record_kind: none}
+      record_objective_work_checkpoint: {level: write, record_kind: objective}
+      create_objective: {level: write, record_kind: objective}
+      start_objective_task: {level: write, record_kind: objective}
+      activate_plan_execution: {level: write, record_kind: objective}
+      start_isolated_recovery: {level: write, record_kind: none}
 
   # The person's own schedules: each call is decided here and the tool checks
   # that the schedule belongs to the person the task works for. A change to a
@@ -330,15 +348,16 @@ tools:
     display_name: Schedules
     tool_sets: [standard]
     functions:
-      authorize_scheduled_job_access: full
-      configure_scheduled_worker: full
+      # Gives a schedule access; access changes are not ordered with other changes.
+      authorize_scheduled_job_access: {level: full, record_kind: none}
+      configure_scheduled_worker: {level: full, record_kind: schedule}
       prepare_scheduled_job_access: read
-      create_scheduled_job: write
-      update_scheduled_job: write
-      remove_scheduled_job: full
-      disable_scheduled_job: write
-      resume_scheduled_job: write
-      pause_scheduled_job: write
+      create_scheduled_job: {level: write, record_kind: schedule}
+      update_scheduled_job: {level: write, record_kind: schedule}
+      remove_scheduled_job: {level: full, record_kind: schedule}
+      disable_scheduled_job: {level: write, record_kind: schedule}
+      resume_scheduled_job: {level: write, record_kind: schedule}
+      pause_scheduled_job: {level: write, record_kind: schedule}
 
   # Changes to schedules the runtime manages (memory review, heartbeat,
   # Objective work sessions), staged by the schedule tools and applied with
@@ -628,14 +647,17 @@ tools:
     changes:
       model_choice: write
 
-  # Asking a person to approve a staged change is not the change itself.
+  # apply_change both waits for approval and applies the exact plan. In
+  # particular, system schedule tools only stage their changes; this is the
+  # call that changes their records. Every plan application runs first so a
+  # pause or refusal cannot be followed by calls that assume it succeeded.
   - tool_id: fn:changes
     provider: changes
     display_name: Approving staged changes
     description: Apply a staged change after a person approves it (or with agreement when authorization is off).
     tool_sets: [team_lead_runtime]
     functions:
-      apply_change: write
+      apply_change: {level: write, record_kind: staged_change}
 
   # Code runs in the sandbox, reaching only the folders its agent and person
   # may use (custom_agents.code_access). The network comes from fn:internet.
@@ -679,6 +701,9 @@ tools:
           install: write
           run: write
           delete: write
+        # Environments themselves and the code run in them are not ordered
+        # with other changes yet; writing and deleting files are.
+        record_kinds: {write_file: file, delete: file, create: none, install: none, run: none}
 
   # Decided by the sandbox launcher for every command (decision D14): with it
   # the command may open TCP connections. Standard for every role, so code

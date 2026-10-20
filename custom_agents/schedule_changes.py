@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Optional
+from custom_agents.change_followups import after_saved_change
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -493,8 +494,31 @@ class _Commit:
         schedule_id = self.request.schedule_id
         before = schedule_snapshot(self.schedule)
         result = getattr(self, f"_{self.request.action}")(permit)
-        after = None if self.request.action == "remove" else schedule_snapshot(self.store.get_scheduled_message(schedule_id))
+        result = {"schedule_id": schedule_id, **result}
         flag = RESULT_FLAGS[self.request.action]
+        if result.get(flag) and not (
+            self.request.action == "update" and "schedule" not in result
+        ):
+            with after_saved_change(
+                result,
+                record_id=schedule_id,
+                step="reading the saved schedule for its report",
+                logger=logger,
+            ):
+                after = (
+                    result["schedule"]
+                    if self.request.action == "update"
+                    else None
+                    if self.request.action == "remove"
+                    else schedule_snapshot(
+                        self.store.get_scheduled_message(schedule_id)
+                    )
+                )
+                result[REPORT_KEY] = {
+                    "before": before,
+                    "after": after,
+                    "details": self.changes,
+                }
         logger.info(
             "Schedule changed by an agent tool. event=schedule_changed_by_agent schedule_id=%s action=%s "
             "management_class=%s applied=%s authority_mode=%s",
@@ -504,7 +528,7 @@ class _Commit:
             bool(result.get(flag)),
             permit.authority_mode.value if permit is not None else "owner",
         )
-        return {"schedule_id": schedule_id, **result, REPORT_KEY: {"before": before, "after": after, "details": self.changes}}
+        return result
 
     def _update(self, permit: Optional[ScheduleMutationPermit]) -> dict[str, Any]:
         assert self.candidate is not None and self.request.update is not None
@@ -527,25 +551,42 @@ class _Commit:
             system_mutation_operation=ScheduleMutationOperation.UPDATE,
             system_mutation_request_binding=self.binding,
         )
-        pruned = self.store.prune_expired()
-        after = self.store.get_scheduled_message(self.request.schedule_id)
-        # The update ran with the owner's own request or a person's approval,
-        # the authority a worker-policy re-save needs, so the saved policy
-        # follows; otherwise the next run would wait for the same confirmation.
-        follow_authorized_change(
-            self.store.worker_records,
-            str(self.schedule.claim_team_id or ""),
-            self.schedule,
-            after,
-            source="schedule_update",
-        )
-        return {
-            "updated": after is not None,
-            "removed_by_expiration": after is None,
-            "changes": self.changes,
-            "schedule": schedule_snapshot(after),
-            "pruned_expired_rows": pruned,
-        }
+        # update() has committed. Cleanup, policy attestation and the report
+        # use separate transactions and cannot undo that saved change.
+        result: dict[str, Any] = {"updated": True, "changes": self.changes}
+        with after_saved_change(
+            result,
+            record_id=self.request.schedule_id,
+            step="removing expired schedules",
+            logger=logger,
+        ):
+            result["pruned_expired_rows"] = self.store.prune_expired()
+        with after_saved_change(
+            result,
+            record_id=self.request.schedule_id,
+            step="reading the updated schedule",
+            logger=logger,
+        ):
+            after = self.store.get_scheduled_message(self.request.schedule_id)
+            result["removed_by_expiration"] = after is None
+            result["schedule"] = schedule_snapshot(after)
+            # The update ran with the owner's own request or a person's approval,
+            # the authority a worker-policy re-save needs, so the saved policy
+            # follows; otherwise the next run would wait for the same confirmation.
+            with after_saved_change(
+                result,
+                record_id=self.request.schedule_id,
+                step="refreshing the scheduled worker's approval",
+                logger=logger,
+            ):
+                follow_authorized_change(
+                    self.store.worker_records,
+                    str(self.schedule.claim_team_id or ""),
+                    self.schedule,
+                    after,
+                    source="schedule_update",
+                )
+        return result
 
     def _pause(self, permit: Optional[ScheduleMutationPermit]) -> dict[str, Any]:
         paused = self.store.set_paused_until(

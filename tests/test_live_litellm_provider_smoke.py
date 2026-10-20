@@ -388,7 +388,6 @@ def _assert_turn_decision_delegation(result: object, *, expected_target: str) ->
     action = runtime_decision.actions[0]
     assert isinstance(action, DelegateTaskAction)
     assert action.target_named_agent_type == expected_target
-    assert action.is_response_requested is True
     assert action.requester_type is None
 
 

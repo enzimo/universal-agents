@@ -66,6 +66,9 @@ class TurnRuntimeSettings:
     # TeamArchitect gets the full turn answer; specialists get the one without
     # credential-form and signup actions (structured_llm_messages.ModelWorkerTurnDecision).
     is_team_lead: bool
+    # Waits one task may start before it is stopped (task_wait_limit.MAX_WAITS_PER_TASK);
+    # None (test doubles) checks nothing.
+    max_waits_per_task: Optional[int] = None
 
 
 class ClearActiveExecutionContextOperation(Protocol):
@@ -246,6 +249,21 @@ class ReleaseTurnStartNotesOperation(Protocol):
     def __call__(self, notes: TurnStartNotes) -> None: ...
 
 
+class RecordTurnWorkOperation(Protocol):
+    def __call__(
+        self,
+        task_id: str,
+        details: Dict[str, Any],
+        *,
+        agent_name: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> Optional[TaskHistoryEntry]: ...
+
+
+class CountStartedWaitsOperation(Protocol):
+    def __call__(self, task_id: str) -> int: ...
+
+
 class CountRecoverablePausesOperation(Protocol):
     def __call__(self, task_id: str) -> int: ...
 
@@ -395,6 +413,9 @@ class TurnTaskOperations:
     read_partial_tool_call_limit: ReadPartialToolCallLimitOperation
     read_runtime_resume_directive: ReadRuntimeResumeDirectiveOperation
     release_turn_start_notes: ReleaseTurnStartNotesOperation
+    # Saves what a turn did when its task stays open (custom_agents.turn_work_notes).
+    record_turn_work: RecordTurnWorkOperation
+    count_started_waits: CountStartedWaitsOperation
     count_recoverable_pauses: CountRecoverablePausesOperation
     get_task_info: GetTaskInfoOperation
     is_isolated_recovery_task: IsIsolatedRecoveryTaskOperation

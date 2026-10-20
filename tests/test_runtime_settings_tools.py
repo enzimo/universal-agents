@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import yaml
 import pytest
+from tests.tool_result_support import tool_json
 
 from assistant_gateway.config import GatewayInstanceConfig
 
@@ -89,7 +90,7 @@ def _agreement() -> ChangeApproval:
 def _apply_settings_change(change_id: str, confirmed: bool = False) -> str:
     """Apply through apply_change and return the settings service's own result."""
 
-    payload = json.loads(asyncio.run(apply_change._tool_func(change_id, "test change", _ToolCall(), confirmed=confirmed)))
+    payload = tool_json(asyncio.run(apply_change._tool_func(change_id, "test change", _ToolCall(), confirmed=confirmed)))
     if payload.get("status") in {"applied", "failed"}:
         return json.dumps(payload["result"])
     return json.dumps({"error": payload.get("message") or payload.get("reason"), "reason_code": payload["status"]})
@@ -283,6 +284,14 @@ def test_worker_eligibility_does_not_unlock_operator_controls(tmp_path, path, va
     config_path = _write_config(tmp_path)
     with pytest.raises(ValueError, match="operator-only"):
         RuntimeSettingsService(_fake_agent(config_path)).stage([{"path": path, "value": value}])
+
+
+def test_agents_cannot_turn_off_checks_between_a_persons_requests(tmp_path):
+    config_path = _write_config(tmp_path)
+    with pytest.raises(ValueError, match="operator-only: Checks between a person's separate requests"):
+        RuntimeSettingsService(_fake_agent(config_path)).stage(
+            [{"path": "agent.request_conflict_checks", "value": False}]
+        )
 
 
 @pytest.mark.parametrize("change_after_plan,reason", [
@@ -1342,8 +1351,8 @@ def test_runtime_settings_with_authorization_on_wait_for_a_person_then_apply_onc
         request = requests.service.store.get_request(call.reasons[0]["access_request_id"])
         requests.decide(request.request_id, PersonPrincipal("user_1", "test_team", ("owner",)), AccessReviewChoice.APPROVE)
         call.response = {"kind": "access_request_decision", "status": "granted"}
-        applied = json.loads(asyncio.run(apply_change._tool_func(plan["change_id"], "Capture dumps", call)))
-        again = json.loads(asyncio.run(apply_change._tool_func(plan["change_id"], "Capture dumps", call)))
+        applied = tool_json(asyncio.run(apply_change._tool_func(plan["change_id"], "Capture dumps", call)))
+        again = tool_json(asyncio.run(apply_change._tool_func(plan["change_id"], "Capture dumps", call)))
     finally:
         _agent_ctx.set(None)
 
@@ -1384,7 +1393,7 @@ def test_runtime_settings_denied_change_is_not_applied(tmp_path: Path) -> None:
             requests.decide(request_id, PersonPrincipal("user_1", "test_team", ("owner",)), AccessReviewChoice.APPROVE_READ)
         requests.decide(request_id, PersonPrincipal("user_1", "test_team", ("owner",)), AccessReviewChoice.DENY)
         call.response = {"kind": "access_request_decision", "status": "denied"}
-        result = json.loads(asyncio.run(apply_change._tool_func(plan["change_id"], "Enable heartbeat", call)))
+        result = tool_json(asyncio.run(apply_change._tool_func(plan["change_id"], "Enable heartbeat", call)))
     finally:
         _agent_ctx.set(None)
 
@@ -1825,8 +1834,8 @@ def test_runtime_restart_with_authorization_off_needs_the_persons_agreement(tmp_
         plan = json.loads(
             plan_runtime_restart._tool_func(scope=RESTART_SCOPE_MANAGER, reason="apply the heartbeat settings")
         )
-        unconfirmed = json.loads(asyncio.run(apply_change._tool_func(plan["change_id"], "reload", _ToolCall())))
-        applied = json.loads(asyncio.run(apply_change._tool_func(plan["change_id"], "reload", _ToolCall(), confirmed=True)))
+        unconfirmed = tool_json(asyncio.run(apply_change._tool_func(plan["change_id"], "reload", _ToolCall())))
+        applied = tool_json(asyncio.run(apply_change._tool_func(plan["change_id"], "reload", _ToolCall(), confirmed=True)))
     finally:
         _agent_ctx.set(None)
 

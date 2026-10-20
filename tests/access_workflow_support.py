@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from concurrent.futures import ThreadPoolExecutor
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +21,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from tests.tool_result_support import tool_json
 from strands.interrupt import Interrupt, InterruptException
 
 from access_control.changes import ChangeApproval
@@ -165,10 +165,10 @@ def run_tool(agent: Any, tool: Any, *args: Any, **kwargs: Any) -> dict[str, Any]
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return json.loads(contextvars.copy_context().run(call))
+        return tool_json(contextvars.copy_context().run(call))
     # Inside an async test: run the tool's own event loop in another thread.
     with ThreadPoolExecutor(max_workers=1) as pool:
-        return json.loads(pool.submit(contextvars.copy_context().run, call).result())
+        return tool_json(pool.submit(contextvars.copy_context().run, call).result())
 
 
 def proposal(**updates: Any) -> dict[str, Any]:

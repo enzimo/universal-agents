@@ -435,6 +435,11 @@
           "title": "Prompt Skill Description Limit",
           "type": "integer"
         },
+        "request_conflict_checks": {
+          "default": true,
+          "title": "Request Conflict Checks",
+          "type": "boolean"
+        },
         "restart_executing_task_grace_seconds": {
           "anyOf": [
             {

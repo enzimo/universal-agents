@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError
+from custom_agents.task_wait_limit import TaskWaitLimitReached
 
 import asyncio
 import hashlib
@@ -111,6 +112,16 @@ from custom_messages.enums import (
     TaskHistoryType,
 )
 from reply_routing_trace import is_reply_routing_trace_enabled
+from custom_agents.turn_work_notes import (
+    ENDED_BY_OPEN,
+    ENDED_BY_TOOL_LIMIT,
+    ENDED_BY_WAIT,
+    decision_starts_wait,
+    leaves_task_open,
+    note_details,
+    sent_items,
+    tool_calls_from_messages,
+)
 
 
 async def _apply_objective_work_invocation_limits(
@@ -2054,7 +2065,7 @@ class LLMTurnExecutor:
                 after_action_report=turn.after_action_report,
                 error=e,
             )
-            if isinstance(e, (ProviderTimeoutError, UnroutableTaskInterruptError)):
+            if isinstance(e, (ProviderTimeoutError, UnroutableTaskInterruptError, TaskWaitLimitReached)):
                 # The task owner records and reports this classified failure once.
                 raise
             if self._is_provider_connectivity_error(e):
@@ -2718,6 +2729,123 @@ class LLMTurnExecutor:
                 decision = self.effects.turn_decision_from_comms_message(comms_message)
         return TurnDecisionOutcome(decision, structured_output_details)
 
+    async def _stop_at_wait_limit(self, turn: _TurnState, decision: Any) -> None:
+        """Refuse a wait past ``MAX_WAITS_PER_TASK`` before anything is sent (``task_wait_limit``)."""
+
+        limit = self.settings.max_waits_per_task
+        content = turn.msg_content
+        task_id = turn.active_task_id
+        if not (
+            limit
+            and task_id
+            and isinstance(content, Task)
+            and content.task_type == MessageMetaType.REQUEST
+            and decision_starts_wait(decision)
+        ):
+            return
+        waits = await self.tasks.runtime.run(self.tasks.count_started_waits, task_id)
+        if waits < limit:
+            return
+        self.logger.warning(
+            "A task would wait again after reaching its wait limit; stopping it. "
+            "event=task_wait_limit_reached agent_id=%s task_id=%s waits=%s limit=%s",
+            self.settings.id,
+            task_id,
+            waits,
+            limit,
+        )
+        raise TaskWaitLimitReached(task_id=task_id, waits=waits, limit=limit)
+
+    async def prepare_turn_decision(
+        self, *, msg_content: ContentType, msg_header: MessageHeader, msg_meta: MessageMeta,
+        task_id: Optional[str], decision: Any, strands_agent: Any, decision_tool_name: str = "",
+    ) -> None:
+        """Check and save a completed invocation before either path sends actions.
+
+        Live SDK interrupt resumes use their retained model, which may differ
+        from the agent's current model after another task ran in between.
+        """
+
+        turn = _TurnState(msg_content=msg_content, msg_header=msg_header, msg_meta=msg_meta)
+        turn.active_task_id = task_id
+        turn.turn_decision_tool_name = decision_tool_name
+        await self._stop_at_wait_limit(turn, decision)
+        await self._record_turn_work(turn, decision=decision, strands_agent=strands_agent)
+
+    async def _record_turn_work(
+        self, turn: _TurnState, *, decision: Any, ended_by: Optional[str] = None, strands_agent: Any = None
+    ) -> None:
+        """Save what this turn did when it leaves its task open (``turn_work_notes``).
+
+        Only a task request's own turn: answering a question about another
+        task, or a protocol message, has no later turn that continues it. A
+        decision that finishes the task saves nothing, and neither does a turn
+        that called no tools and sent nothing (for example a check-back wake
+        that only keeps waiting).
+        """
+
+        content = turn.msg_content
+        task_id = turn.active_task_id
+        if not (
+            task_id
+            and isinstance(content, Task)
+            and content.task_type == MessageMetaType.REQUEST
+        ):
+            return
+        if decision is not None and not leaves_task_open(decision):
+            return
+        started_wait = decision is not None and decision_starts_wait(decision)
+        model = self.model() if strands_agent is None else strands_agent
+        tool_calls = tool_calls_from_messages(
+            list(getattr(model, "messages", None) or []),
+            exclude_tool_names=(turn.turn_decision_tool_name,),
+        )
+        sent = sent_items(decision) if decision is not None else []
+        if not tool_calls and not sent:
+            return
+        details = note_details(
+            tool_calls=tool_calls,
+            sent=sent,
+            started_wait=started_wait,
+            ended_by=ended_by or (ENDED_BY_WAIT if started_wait else ENDED_BY_OPEN),
+        )
+        try:
+            entry = await self.tasks.runtime.run(
+                partial(
+                    self.tasks.record_turn_work,
+                    task_id,
+                    details,
+                    agent_name=self.settings.name,
+                    agent_id=self.settings.id,
+                )
+            )
+        except Exception:  # noqa: BLE001 - the turn's own result still counts; the note only helps its next turn
+            self.logger.exception(
+                "Could not save what a turn did before its task waited; its next turn may repeat work. "
+                "event=turn_work_note_failed agent_id=%s task_id=%s",
+                self.settings.id,
+                task_id,
+            )
+            return
+        if entry is None:
+            self.logger.warning(
+                "Could not save what a turn did before its task waited; its next turn may repeat work. "
+                "event=turn_work_note_failed agent_id=%s task_id=%s reason=not_saved",
+                self.settings.id,
+                task_id,
+            )
+            return
+        self.logger.info(
+            "Saved what a turn did before its task waited. event=turn_work_note_saved "
+            "agent_id=%s task_id=%s ended_by=%s started_wait=%s tool_calls=%s sent=%s",
+            self.settings.id,
+            task_id,
+            details["ended_by"],
+            started_wait,
+            len(tool_calls),
+            len(sent),
+        )
+
     async def _complete_turn(self, turn: _TurnState) -> ContentType:
         if turn.work_session is not None:
             work_yield_response = await _finalize_objective_work_invocation(
@@ -2760,6 +2888,8 @@ class LLMTurnExecutor:
             turn.tool_call_limit_handler is not None
             and turn.tool_call_limit_handler.limit_error is not None
         ):
+            # The budget pause may be resumed; keep this turn's work for it.
+            await self._record_turn_work(turn, decision=None, ended_by=ENDED_BY_TOOL_LIMIT)
             raise turn.tool_call_limit_handler.limit_error
         await self.effects.record_tool_result_budget_events(
             msg_content=turn.msg_content, result=turn.result
@@ -2767,6 +2897,13 @@ class LLMTurnExecutor:
         self.effects.record_model_invocation_success(task_id=turn.active_task_id)
         outcome = self.decode_result(
             result=turn.result, msg_content=turn.msg_content, msg_meta=turn.msg_meta
+        )
+        # Saved before the outbox sends anything, so a reply cannot resume the
+        # task before its next turn can see what this one did.
+        await self.prepare_turn_decision(
+            msg_content=turn.msg_content, msg_header=turn.msg_header, msg_meta=turn.msg_meta,
+            task_id=turn.active_task_id, decision=outcome.decision, strands_agent=self.model(),
+            decision_tool_name=turn.turn_decision_tool_name,
         )
         # The outbox releases what this turn read when it records the batch;
         # a failure before that keeps it for the task's next turn.
