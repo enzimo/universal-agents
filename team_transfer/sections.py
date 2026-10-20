@@ -18,7 +18,7 @@ before everything).
 One release back (owner's decision 2026-10-05): a version reads its own
 section versions and the ones the previous release exported. For a section
 that changed since that release, ``SECTION_UPGRADES`` maps ``(section,
-previous version)`` to a pure function that turns those records into this
+source version, target version)`` to a pure function that turns those records into this
 version's. Steps are pruned by release, not by section: when a release ships,
 delete every step whose source version is older than what that release
 exports (a section that did not change keeps no step). Anything older, or
@@ -55,10 +55,10 @@ if TYPE_CHECKING:
 SectionRecords = list[dict[str, Any]]
 SectionUpgrade = Callable[[SectionRecords], SectionRecords]
 
-# (section name, source version) -> conversion to this release's version. Keep only the steps
+# (section name, source version, target version) -> one explicit conversion. Keep only the steps
 # from the previous release's versions; delete older ones. Empty while no
 # section has changed since the previous release.
-SECTION_UPGRADES: dict[tuple[str, int], SectionUpgrade] = {}
+SECTION_UPGRADES: dict[tuple[str, int, int], SectionUpgrade] = {}
 
 
 class RecordOutcome(StrEnum):
@@ -293,7 +293,7 @@ def upgrade_records(
         raise TransferFileError(problem)
     if stored == version:
         return list(document.records)
-    return SECTION_UPGRADES[(document.section, stored)](list(document.records))
+    return SECTION_UPGRADES[(document.section, stored, version)](list(document.records))
 
 
 def readable_version_problem(
@@ -309,9 +309,10 @@ def readable_version_problem(
     releases; the transfer guide owns the release-specific paths.
     """
 
-    if stored == version or (stored < version and (section, stored) in SECTION_UPGRADES):
+    if stored == version or (stored < version and (section, stored, version) in SECTION_UPGRADES):
         return ""
-    accepted = sorted({version, *(source for name, source in SECTION_UPGRADES if name == section and source < version)})
+    accepted = sorted({version, *(source for name, source, target in SECTION_UPGRADES
+                                  if name == section and source < version and target == version)})
     readable = f"version {version} only"
     if len(accepted) > 1:
         readable = "versions " + ", ".join(str(source) for source in accepted[:-1]) + f" and {accepted[-1]}"

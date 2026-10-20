@@ -820,7 +820,7 @@ class ScheduleStore:
         system_mutation_permit: Optional[ScheduleMutationPermit] = None,
         system_mutation_operation: ScheduleMutationOperation = ScheduleMutationOperation.UPDATE,
         system_mutation_request_binding: Optional[dict[str, Any]] = None,
-    ) -> None:
+    ) -> "ScheduledMessage":
         """Save a change made to ``base``, a copy of the schedule read earlier, without overwriting anything newer.
 
         Refused with ``ScheduleWriteConflict`` when the schedule is gone (it
@@ -836,7 +836,8 @@ class ScheduleStore:
         notes is given as ``memory_edit`` and applied to the notes as stored
         (no I/O). The claim is always kept. A system-managed schedule needs
         the exact permit for its current state, checked in the same
-        transaction.
+        transaction. Returns the exact saved snapshot from that transaction,
+        including its assigned timing revision, for any later rollback.
         """
 
         prepare_schedule_for_add(candidate, default_cron_timezone=self.default_cron_timezone)
@@ -876,10 +877,12 @@ class ScheduleStore:
                 remaining = candidate.repeat_count
             else:
                 remaining = row.get("remaining_count")
-            return RowWrite(columns=_definition_columns(written, remaining_count=remaining), result=written.next_fire_at)
+            return RowWrite(columns=_definition_columns(written, remaining_count=remaining), result=written)
 
         write = self._repository.write_locked(schedule_id, decide)
-        self._logger.info("Schedule %s changed, next fire at %s", schedule_id, write.result)
+        saved: ScheduledMessage = write.result
+        self._logger.info("Schedule %s changed, next fire at %s", schedule_id, saved.next_fire_at)
+        return saved
 
     def add_if_absent(
         self,

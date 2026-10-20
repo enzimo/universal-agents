@@ -670,4 +670,4 @@ __all__ = [
 # V6 adds agent.request_conflict_checks. V5 records (v0.9.4 to v0.9.6) keep the
 # same shape and carry only values that differ from the defaults, so the step
 # passes them on unchanged and the new setting keeps its default (on).
-SECTION_UPGRADES[(SettingsSection.name, 5)] = lambda records: records
+SECTION_UPGRADES[(SettingsSection.name, 5, SettingsSection.schema_version)] = lambda records: records

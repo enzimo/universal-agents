@@ -898,9 +898,9 @@ __all__ = ["SchedulesSection"]
 # V4 added optional Task.replied_message and V5 adds timing_revision, whose
 # initial value is zero. Already-supported V3 payloads carry neither field;
 # their records are otherwise unchanged and the current model fills both.
-SECTION_UPGRADES[(SchedulesSection.name, 3)] = lambda records: records
+SECTION_UPGRADES[(SchedulesSection.name, 3, SchedulesSection.schema_version)] = lambda records: records
 
 # V4 exports have no timing_revision. ScheduledMessage reads their timing as
 # revision zero; the first explicit timing edit increments it. Keep the V3
 # conversion above for the already-supported frozen transfer fixture too.
-SECTION_UPGRADES[(SchedulesSection.name, 4)] = lambda records: records
+SECTION_UPGRADES[(SchedulesSection.name, 4, SchedulesSection.schema_version)] = lambda records: records

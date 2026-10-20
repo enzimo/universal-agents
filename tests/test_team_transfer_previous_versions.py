@@ -48,13 +48,14 @@ def test_previous_release_sections_read_and_validate_with_current_record_models(
 
     sections = {section.name: section for section in TRANSFER_SECTIONS}
     fixtures = json.loads(FIXTURES.read_text())
-    for name, version in SECTION_UPGRADES:
+    for name, version, target in SECTION_UPGRADES:
         # The schedule section changed twice while retaining the frozen
         # source fixture and the version exported by the last stable release.
         allowed = {fixtures[name]["schema_version"]}
         if name == "schedules":
             allowed.add(4)
         assert version in allowed, f"the conversion step from {name} version {version} has no supported release fixture"
+        assert target == sections[name].schema_version
     for name, raw in fixtures.items():
         section = sections[name]
         document = SectionDocumentV1.model_validate(raw)
@@ -108,13 +109,13 @@ def test_the_refusal_says_which_versions_this_version_reads_and_what_to_do(monke
     newer = readable_version_problem("notes", 4, 3)
     assert "reads version 3 only. The file was exported by a newer release: import it with that release" in newer
 
-    monkeypatch.setitem(SECTION_UPGRADES, ("notes", 2), lambda records: records)
+    monkeypatch.setitem(SECTION_UPGRADES, ("notes", 2, 3), lambda records: records)
     assert readable_version_problem("notes", 2, 3) == ""
     assert "reads versions 2 and 3." in readable_version_problem("notes", 1, 3)
 
 
 def test_only_explicit_source_versions_are_read_when_a_section_changes_twice(monkeypatch):
-    monkeypatch.setitem(SECTION_UPGRADES, ("notes", 2), lambda records: records)
+    monkeypatch.setitem(SECTION_UPGRADES, ("notes", 2, 4), lambda records: records)
     previous = SectionDocumentV1(section="notes", schema_version=2, records=[{"value": "kept"}])
     assert upgrade_records(previous, 4) == [{"value": "kept"}]
     assert "reads versions 2 and 4." in readable_version_problem("notes", 3, 4)
