@@ -28,7 +28,8 @@ once, when delegated work seems slow or stuck, and for every
 A person's later message in a busy chat is guidance for the request already
 running there, including after a reply timeout, a gateway restart or while a
 credential form is open. The gateway holds unconfirmed guidance for that
-request and reports when it was unused. Separate work starts through **New
+request in order, keeping newer messages held until earlier ones are accepted
+or end, and reports when a message was unused. Separate work starts through **New
 Chat**, `/new`, or a message after the request finishes. When several tasks
 ask questions in the same chat, the gateway asks them one at a time and sends
 each answer to its named question.

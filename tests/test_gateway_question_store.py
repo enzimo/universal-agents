@@ -26,6 +26,8 @@ from assistant_gateway.domain.request_state import (
     PendingQueryStatus,
     ThreadRequestRunning,
 )
+from assistant_gateway.application.delivery_service import GatewayDeliveryService
+from assistant_gateway.application.request_service import GatewayRequestService
 from storage.config import StorageSettings, resolve_storage_settings
 from storage.gateway_state_repository import create_gateway_state_repository
 
@@ -314,6 +316,89 @@ def test_held_guidance_and_its_request_commit_together_and_settle_once(settings)
     assert restarted.release_held_guidance("corr_guidance", status="rejected") is False
     assert restarted.get_request("corr_guidance").status == "accepted"
     assert restarted.list_held_guidance() == []
+
+
+def test_person_removal_deletes_only_their_held_guidance_in_the_same_transaction(settings) -> None:
+    repo = _open(settings)
+    repo.create_session(
+        session_key="session_bob",
+        conversation_id="conv_bob",
+        manager_agent_id="manager_1",
+        owner_canonical_user_id="bob",
+    )
+    held_by_person = {}
+    for person_id, session_key in (("alice", SESSION), ("bob", "session_bob")):
+        held = HeldGuidanceRecord(
+            correlation_id=f"guidance_{person_id}",
+            target_correlation_id=f"request_{person_id}",
+            session_key=session_key,
+            conversation_id=f"conv_{person_id}",
+            steering_json=f'{{"guidance_text":"Private report for {person_id}"}}',
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        repo.record_request(
+            correlation_id=held.correlation_id,
+            session_key=session_key,
+            request_kind="task_steering",
+            request_text=f"Private report for {person_id}",
+            conversation_id=held.conversation_id,
+            followup_to_task_id=None,
+            status="held",
+        )
+        repo.hold_guidance(held)
+        held_by_person[person_id] = held
+
+    repo.forget_person_records("alice")
+    restarted = create_gateway_state_repository(settings, logger=logging.getLogger("test"))
+    assert restarted.get_session(SESSION) is None
+    assert restarted.get_request("guidance_alice") is None
+    assert restarted.get_held_guidance("guidance_alice") is None
+    assert restarted.list_held_guidance() == [held_by_person["bob"]]
+    assert restarted.get_session("session_bob") is not None
+
+
+@pytest.mark.parametrize("action", ["immediate", "defer", "correlated", "continuation", "coordination", "task_status", "unknown_task_status"])
+@pytest.mark.parametrize("separate_conversation", [False, True])
+def test_a_sibling_task_cannot_change_a_running_request_or_its_conversation(settings, action: str, separate_conversation: bool) -> None:
+    repo = _open(settings)
+    _running_request(repo, "corr_root")
+    before = repo.get_request("corr_root")
+    session_before = repo.get_session(SESSION)
+    conversation_before = repo.get_session_conversation("conv_alpha")
+    requests = GatewayRequestService(repository=repo, unit_of_work_factory=repo)
+    delivery = GatewayDeliveryService(repository=repo, unit_of_work_factory=repo)
+    common = {
+        "correlation_id": "corr_root", "session_key": SESSION,
+        "conversation_id": "conv_scheduled" if separate_conversation else "conv_alpha", "last_task_id": "task_scheduled",
+        "finished_task_id": "task_scheduled",
+    }
+    if action == "immediate":
+        delivery.record_immediate_outcome(**common)
+    elif action == "defer":
+        delivery.defer(
+            **common, origin_kind="autonomous", payload={}, rendered_text="Timer result",
+            available_after=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+        [deferred] = repo.get_due_deliveries()
+        assert deferred.correlation_id is None
+        delivery.mark_deferred_delivery_delivered(delivery_id=deferred.delivery_id, correlation_id=deferred.correlation_id)
+    elif action == "correlated":
+        requests.transition_with_session_lineage(**common, status="completed", manager_agent_id="manager_1")
+    elif action == "continuation":
+        requests.record(
+            correlation_id="corr_root", session_key=SESSION, request_kind="secure_credential_collection_result",
+            request_text="Scheduled form result", conversation_id="conv_other",
+            followup_to_task_id="task_scheduled", status="waiting_for_credential_result",
+        )
+    elif action == "coordination":
+        requests.update_coordination("corr_root", status="waiting_for_steering", active_task_id="task_scheduled")
+    else:
+        requests.update_task_status("corr_root", "waiting_for_credential", task_id="task_scheduled" if action == "task_status" else None)
+    assert repo.get_request("corr_root") == before
+    assert repo.get_session(SESSION) == session_before
+    assert repo.get_session_conversation("conv_alpha") == conversation_before
+    if separate_conversation and action in ("immediate", "defer", "correlated"):
+        assert repo.get_session_conversation("conv_scheduled").last_task_id == "task_scheduled"
 
 
 def test_simultaneous_messages_admit_only_one_request_in_the_thread(settings) -> None:

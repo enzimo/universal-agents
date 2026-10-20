@@ -63,6 +63,17 @@ class RequestRecord:
     active_task_id: str | None = None
     run_state: str | None = None
 
+    def matches_task(self, task_id: str | None) -> bool:
+        """A tracked chat request changes only for its admitted task.
+
+        Other rows describe controls, guidance or repeating schedules rather
+        than one running chat request, so they have no fixed admission task.
+        A schedule action may share a tracked request's correlation, but that
+        never makes the schedule's tasks replies to the original request.
+        """
+
+        return self.run_state is None or self.active_task_id == task_id
+
 
 @dataclass(frozen=True)
 class HeldGuidanceRecord:

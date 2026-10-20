@@ -449,6 +449,156 @@ async def test_an_answer_the_gateway_could_not_send_leaves_the_question_open(
 
 
 @pytest.mark.asyncio
+async def test_cancelling_before_answer_publication_keeps_the_question_open(tmp_path: Path) -> None:
+    chat = _Chat(tmp_path)
+    first, second = await _two_requests_ask(chat)
+    entered = asyncio.Event()
+    publish = chat.lead.publish_durable
+
+    async def wait_before_send(envelope, *, routing_key):
+        entered.set()
+        await asyncio.Event().wait()
+
+    chat.lead.publish_durable = wait_before_send
+    answer = asyncio.create_task(chat.gateway.application.reply_to_pending_query(
+        session_key=chat.session.session_key,
+        task_query_id=first.task_query_id,
+        response_text="The shared reports folder",
+    ))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+    finally:
+        answer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await answer
+        chat.lead.publish_durable = publish
+
+    assert chat.lead.answer_ids() == []
+    assert chat.open_question_ids() == [first.task_query_id, second.task_query_id]
+    assert chat.store.get_pending_query(second.task_query_id).was_shown is False
+    chat.finish_each_answered_task()
+    await chat.person_says("The shared reports folder")
+    assert chat.lead.answer_ids() == [first.task_query_id]
+
+
+@pytest.mark.asyncio
+async def test_failed_reply_channel_registration_keeps_the_answer_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chat = _Chat(tmp_path)
+    first, second = await _two_requests_ask(chat)
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("Reply wait could not be registered")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(chat.gateway._manager_client, "register_response_channel", refuse)
+        with pytest.raises(RuntimeError, match="could not be registered"):
+            await chat.gateway.application.reply_to_pending_query(
+                session_key=chat.session.session_key,
+                task_query_id=first.task_query_id,
+                response_text="The shared reports folder",
+            )
+    assert chat.lead.answer_ids() == []
+    assert chat.open_question_ids() == [first.task_query_id, second.task_query_id]
+    chat.finish_each_answered_task()
+    await chat.person_says("The shared reports folder")
+    assert chat.lead.answer_ids() == [first.task_query_id]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_after_answer_publication_does_not_send_the_answer_twice(tmp_path: Path) -> None:
+    chat = _Chat(tmp_path)
+    first, _ = await _two_requests_ask(chat)
+    sent = asyncio.Event()
+
+    async def answer_sent(envelope):
+        sent.set()
+
+    chat.lead.on_answer = answer_sent
+    answer = asyncio.create_task(chat.gateway.application.reply_to_pending_query(
+        session_key=chat.session.session_key,
+        task_query_id=first.task_query_id,
+        response_text="The shared reports folder",
+    ))
+    try:
+        await asyncio.wait_for(sent.wait(), 10)
+    finally:
+        answer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await answer
+    response = await chat.gateway.application.reply_to_pending_query(
+        session_key=chat.session.session_key,
+        task_query_id=first.task_query_id,
+        response_text="The shared reports folder",
+    )
+    assert response.text == ALREADY_ANSWERED_TEXT
+    assert chat.lead.answer_ids() == [first.task_query_id]
+    assert chat.store.get_pending_query(first.task_query_id).status == "answered"
+
+
+@pytest.mark.asyncio
+async def test_questions_sharing_a_schedule_correlation_have_separate_reply_waits(tmp_path: Path) -> None:
+    """Two schedule actions created in one request keep that request's correlation."""
+    chat = _Chat(tmp_path)
+    chat.record_request("corr_schedules", "Two recurring reports")
+    first = _question("task_first_schedule", REPORT_QUESTION)
+    second = _question("task_second_schedule", TRIP_QUESTION)
+    await chat.lead_sends("corr_schedules", first)
+    await chat.lead_sends("corr_schedules", second)
+    sent = [asyncio.Event(), asyncio.Event()]
+
+    async def answer_sent(envelope):
+        index = 0 if envelope.msg_content.task_query_id == first.task_query_id else 1
+        sent[index].set()
+
+    chat.lead.on_answer = answer_sent
+    replies = []
+    try:
+        async with asyncio.timeout(10):
+            for index, question in enumerate((first, second)):
+                replies.append(asyncio.create_task(chat.gateway.application.reply_to_pending_query(
+                    session_key=chat.session.session_key,
+                    task_query_id=question.task_query_id,
+                    response_text=f"Answer {index}",
+                )))
+                await sent[index].wait()
+                while not chat.store.get_pending_query(second.task_query_id).was_shown:
+                    await asyncio.sleep(0)
+            await chat.lead_sends("corr_schedules", _finished(second.parent_task_id, "Second finished"))
+            assert (await replies[1]).text == "Second finished"
+            assert not replies[0].done()
+            await chat.lead_sends("corr_schedules", _finished(first.parent_task_id, "First finished"))
+            assert (await replies[0]).text == "First finished"
+    finally:
+        for reply in replies:
+            reply.cancel()
+        await asyncio.gather(*replies, return_exceptions=True)
+    assert chat.lead.answer_ids() == [first.task_query_id, second.task_query_id]
+    assert chat.open_question_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_a_sibling_question_answer_keeps_the_original_request_and_its_steering_state(tmp_path: Path) -> None:
+    chat = _Chat(tmp_path)
+    chat.store.record_request(
+        correlation_id="corr_shared", session_key=chat.session.session_key,
+        request_kind="interactive", request_text="Original request",
+        conversation_id=chat.session.conversation_id, followup_to_task_id=None,
+        active_task_id="task_original", run_state="running", status="waiting_for_steering",
+    )
+    question = _question("task_scheduled", REPORT_QUESTION)
+    await chat.lead_sends("corr_shared", question)
+    before = chat.store.get_request("corr_shared")
+    chat.finish_each_answered_task()
+    result = await chat.person_says("The shared reports folder")
+
+    assert result[0].text == "Done with task_scheduled"
+    assert chat.store.get_request("corr_shared") == before
+    assert chat.lead.answer_ids() == [question.task_query_id]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
 async def test_a_question_that_could_not_be_shown_still_waits_to_be_shown(
     tmp_path: Path, failure_type

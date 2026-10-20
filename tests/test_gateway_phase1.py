@@ -2865,10 +2865,10 @@ async def test_gateway_send_user_message_threads_followups(tmp_path: Path):
         response = _response_envelope(
             correlation_id=correlation_id,
             conversation_id="conv_phase1",
-            task_id=f"task_{len(published)}",
+            task_id=envelope.msg_content.task_id,
             answer=f"answer_{len(published)}",
         )
-        await gateway._manager_client.get_response_channel(correlation_id).put(response)
+        await gateway._manager_client.handle_response(response)
 
     gateway._manager_client.publish_durable = fake_publish  # type: ignore[method-assign]
 
@@ -2881,7 +2881,7 @@ async def test_gateway_send_user_message_threads_followups(tmp_path: Path):
     assert published[1].msg_content.problem_statement == "follow up"
     assert published[0].msg_meta.conversation_id is not None
     assert published[1].msg_meta.conversation_id == "conv_phase1"
-    assert published[1].msg_meta.followup_to_task_id == "task_1"
+    assert published[1].msg_meta.followup_to_task_id == published[0].msg_content.task_id
     assert published[0].msg_meta.gateway_context is not None
     assert (
         published[0].msg_meta.gateway_context.canonical_user_id
@@ -2905,11 +2905,11 @@ async def test_gateway_app_user_does_not_get_configured_canonical_user_without_b
     async def fake_publish(envelope: MessageEnvelope, routing_key: str) -> None:
         published.append(envelope)
         correlation_id = envelope.msg_meta.msg_correlation_id
-        await gateway._manager_client.get_response_channel(correlation_id).put(
+        await gateway._manager_client.handle_response(
             _response_envelope(
                 correlation_id=correlation_id,
                 conversation_id="conv_app",
-                task_id="task_app",
+                task_id=envelope.msg_content.task_id,
                 answer="ok",
             )
         )
@@ -2963,11 +2963,11 @@ async def test_newuser_command_binds_channel_and_gateway_uses_canonical_user(
     async def fake_publish(envelope: MessageEnvelope, routing_key: str) -> None:
         published.append(envelope)
         correlation_id = envelope.msg_meta.msg_correlation_id
-        await gateway._manager_client.get_response_channel(correlation_id).put(
+        await gateway._manager_client.handle_response(
             _response_envelope(
                 correlation_id=correlation_id,
                 conversation_id="conv_app",
-                task_id="task_app",
+                task_id=envelope.msg_content.task_id,
                 answer="ok",
             )
         )
@@ -3029,11 +3029,11 @@ async def test_web_only_invited_user_is_named_from_canonical_profile(
     ) -> None:
         published.append(envelope)
         correlation_id = envelope.msg_meta.msg_correlation_id
-        await gateway._manager_client.get_response_channel(correlation_id).put(
+        await gateway._manager_client.handle_response(
             _response_envelope(
                 correlation_id=correlation_id,
                 conversation_id="conv_alice_web",
-                task_id="task_alice_web",
+                task_id=envelope.msg_content.task_id,
                 answer="Hello Alice",
             )
         )
@@ -3584,11 +3584,11 @@ async def test_admin_can_disable_and_enable_user_without_deleting_history(
     async def fake_publish(envelope: MessageEnvelope, routing_key: str) -> None:
         published.append(envelope)
         correlation_id = envelope.msg_meta.msg_correlation_id
-        await gateway._manager_client.get_response_channel(correlation_id).put(
+        await gateway._manager_client.handle_response(
             _response_envelope(
                 correlation_id=correlation_id,
                 conversation_id="member_conversation",
-                task_id="member_task",
+                task_id=envelope.msg_content.task_id,
                 answer="ok",
             )
         )
@@ -4445,10 +4445,10 @@ async def test_gateway_send_user_message_can_target_specific_conversation(
         response = _response_envelope(
             correlation_id=correlation_id,
             conversation_id="conv_extra",
-            task_id="task_new_extra",
+            task_id=envelope.msg_content.task_id,
             answer="answer_extra",
         )
-        await gateway._manager_client.get_response_channel(correlation_id).put(response)
+        await gateway._manager_client.handle_response(response)
 
     gateway._manager_client.publish_durable = fake_publish  # type: ignore[method-assign]
 
@@ -4467,7 +4467,7 @@ async def test_gateway_send_user_message_can_target_specific_conversation(
     )
     assert (
         gateway.state_store.get_session_conversation("conv_extra").last_task_id
-        == "task_new_extra"
+        == published[0].msg_content.task_id
     )
 
 

@@ -116,8 +116,9 @@ class GatewayResponseCoordinator:
         correlation_id: str,
         session_key: str,
         query_handler: QueryHandler | None,
+        response_task_id: str | None = None,
     ) -> GatewayResponse:
-        queue = self._manager_client.get_response_channel(correlation_id)
+        queue = self._manager_client.get_response_channel(correlation_id, task_id=response_task_id)
         timeout_seconds = self._settings.request_timeout_seconds
         timeout_label = f"{timeout_seconds:g}"
         while True:
@@ -127,9 +128,10 @@ class GatewayResponseCoordinator:
                     timeout=timeout_seconds,
                 )
             except asyncio.TimeoutError as exc:
-                self._request_service.update_status(
+                self._request_service.update_task_status(
                     correlation_id,
                     "timed_out",
+                    task_id=response_task_id,
                 )
                 raise TimeoutError(
                     "Timed out after "
@@ -154,7 +156,7 @@ class GatewayResponseCoordinator:
                     conversation_id=conversation_id,
                     last_task_id=content.task_id,
                     manager_agent_id=manager_agent_id,
-                    finishes_request=True,
+                    finished_task_id=content.task_id,
                 )
                 await self._questions.task_finished(
                     correlation_id=correlation_id, task_id=content.task_id

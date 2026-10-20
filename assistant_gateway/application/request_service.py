@@ -61,6 +61,17 @@ class GatewayRequestService:
     ) -> None:
         """Record a request row; ``run_state="running"`` may raise ``ThreadRequestRunning``."""
 
+        existing = self._repository.get_request(correlation_id)
+        if existing is not None and run_state is None and not existing.matches_task(followup_to_task_id):
+            # Question and secure-form answers retain the transport
+            # correlation. A sibling schedule's continuation must not
+            # replace the original request's status, text or conversation.
+            self._logger.debug(
+                "A continuation keeps its own task. event=gateway_sibling_continuation "
+                "correlation_id=%s request_task_id=%s reply_task_id=%s",
+                correlation_id, existing.active_task_id, followup_to_task_id,
+            )
+            return
         self._repository.record_request(
             correlation_id=correlation_id,
             session_key=session_key,
@@ -78,6 +89,14 @@ class GatewayRequestService:
         return self._repository.get_request(correlation_id)
 
     def update_status(self, correlation_id: str, status: str) -> None:
+        self._repository.update_request_status(correlation_id, status)
+
+    def update_task_status(self, correlation_id: str, status: str, *, task_id: str | None) -> None:
+        """A task's status changes only its own tracked request, including when no id was supplied."""
+
+        record = self._repository.get_request(correlation_id)
+        if record is not None and not record.matches_task(task_id):
+            return
         self._repository.update_request_status(correlation_id, status)
 
     def update_coordination(
@@ -190,7 +209,7 @@ class GatewayRequestService:
         conversation_id: str | None,
         last_task_id: str | None,
         manager_agent_id: str | None,
-        finishes_request: bool = False,
+        finished_task_id: str | None = None,
     ) -> None:
         """Atomically update request state and its session task lineage.
 
@@ -200,6 +219,16 @@ class GatewayRequestService:
         """
 
         with self._unit_of_work_factory.request_unit_of_work() as unit_of_work:
+            record = unit_of_work.request.get_request(correlation_id)
+            if record is not None and not record.matches_task(finished_task_id or last_task_id):
+                # A separate schedule conversation can keep its own history,
+                # but cannot change the original thread's current task.
+                if conversation_id and conversation_id != record.conversation_id:
+                    unit_of_work.session.register_conversation_session(
+                        session_key=session_key, conversation_id=conversation_id, last_task_id=last_task_id
+                    )
+                unit_of_work.commit()
+                return
             if last_task_id:
                 unit_of_work.request.update_request_coordination(
                     correlation_id,
@@ -217,6 +246,6 @@ class GatewayRequestService:
                 last_task_id=last_task_id,
                 manager_agent_id=manager_agent_id,
             )
-            if finishes_request:
+            if finished_task_id is not None:
                 unit_of_work.request.finish_request(correlation_id)
             unit_of_work.commit()

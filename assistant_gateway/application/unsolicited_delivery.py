@@ -199,6 +199,7 @@ class GatewayUnsolicitedDeliveryApplication:
             return
         rendered_text = self._presentation.render_envelope(envelope)
         finishes_request = self._is_final_reply(envelope.msg_content)
+        finished_task_id = envelope.msg_content.task_id if finishes_request and isinstance(envelope.msg_content, Task) else None
         try:
             delivery_event = self._projection.project(
                 envelope=envelope,
@@ -208,7 +209,9 @@ class GatewayUnsolicitedDeliveryApplication:
         except DeliveryPersonMismatch:
             # Logged by the projection: never deliver to the wrong person. The
             # request still ended; leaving it running would hold the thread.
-            if finishes_request and prepared.correlation_id:
+            if finished_task_id is not None and prepared.correlation_id and (
+                prepared.request_record is None or prepared.request_record.matches_task(finished_task_id)
+            ):
                 self._requests.finish(prepared.correlation_id)
                 self._request_finished()
             return
@@ -257,7 +260,7 @@ class GatewayUnsolicitedDeliveryApplication:
                 session_key=delivery_event.session_key,
                 conversation_id=delivery_event.conversation_id,
                 last_task_id=last_task_id,
-                finishes_request=finishes_request,
+                finished_task_id=finished_task_id,
             )
             await self._finish_questions_of(envelope, correlation_id=prepared.correlation_id)
             if finishes_request:
@@ -287,7 +290,7 @@ class GatewayUnsolicitedDeliveryApplication:
                 if prepared.request_record is not None
                 else None
             ),
-            finishes_request=finishes_request,
+            finished_task_id=finished_task_id,
         )
         await self._finish_questions_of(envelope, correlation_id=prepared.correlation_id)
         if finishes_request:

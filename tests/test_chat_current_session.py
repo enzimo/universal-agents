@@ -208,9 +208,10 @@ def _move(tmp_path: Path, backend: Backend, monkeypatch: pytest.MonkeyPatch, con
 # -- the gateway, as a chat app uses it ------------------------------------------------
 
 
-def _reply(request: MessageEnvelope, task_id: str) -> MessageEnvelope:
+def _reply(request: MessageEnvelope) -> MessageEnvelope:
+    assert isinstance(request.msg_content, Task)
     return MessageEnvelope(
-        msg_content=Task(task_id=task_id, task_type=MessageMetaType.RESPONSE, answer=TaskAnswer(answer="Done.")),
+        msg_content=Task(task_id=request.msg_content.task_id, task_type=MessageMetaType.RESPONSE, answer=TaskAnswer(answer="Done.")),
         msg_meta=MessageMeta(
             msg_correlation_id=request.msg_meta.msg_correlation_id,
             conversation_id=request.msg_meta.conversation_id,
@@ -234,10 +235,7 @@ class _Manager:
             await self.answer(envelope)
 
     async def answer(self, envelope: MessageEnvelope) -> None:
-        correlation_id = envelope.msg_meta.msg_correlation_id
-        await self.gateway._manager_client.get_response_channel(correlation_id).put(
-            _reply(envelope, f"task_{len(self.published)}")
-        )
+        await self.gateway._manager_client.handle_response(_reply(envelope))
 
     async def wait_for(self, count: int) -> MessageEnvelope:
         async with asyncio.timeout(WAIT_SECONDS):
@@ -372,7 +370,7 @@ async def test_a_reply_that_arrives_after_new_leaves_the_chat_in_the_new_session
             await first
     finally:
         first.cancel()
-    assert repository.get_session(earlier).last_task_id == "task_1", "the reply is recorded with its own session"
+    assert repository.get_session(earlier).last_task_id == request.msg_content.task_id, "the reply is recorded with its own session"
     assert _current(repository) == newer, "the late reply moved the chat back to the earlier session"
 
     manager.hold = False

@@ -325,6 +325,7 @@ class GatewayClarificationCore:
                 to_routing_path=manager_id,
                 response_routing_key=self._settings.response_route,
                 agent_signature="",
+                idempotency_key=f"question_answer:{task_query.task_query_id}",
             ),
         )
         self._requests.record(
@@ -393,18 +394,20 @@ class GatewayClarificationApplication:
         correlation_id = question.correlation_id
         if self._manager.manager_id is None:
             # Nothing is sent, so the question stays open for a later answer.
-            async with self._manager.response_channel(correlation_id):
+            async with self._manager.response_channel(correlation_id, task_id=question.parent_task_id):
                 await self._responses.queue_manager_unavailable(correlation_id)
                 return await self._responses.await_terminal_response(
                     correlation_id=correlation_id,
                     session_key=session_key,
                     query_handler=None,
+                    response_task_id=question.parent_task_id,
                 )
         if not self._questions.claim_answer(task_query_id):
             # Another message answered it, or it ended, since the check.
             return self._not_sent(self._questions.get(task_query_id) or question)
-        async with self._manager.response_channel(correlation_id):
-            try:
+        published = False
+        try:
+            async with self._manager.response_channel(correlation_id, task_id=question.parent_task_id):
                 await self._core.reply_to_task_query(
                     stored_task_query(question),
                     correlation_id=correlation_id,
@@ -413,26 +416,31 @@ class GatewayClarificationApplication:
                     conversation_id=question.conversation_id,
                     replied_message=replied_message,
                 )
-            except Exception:
+                published = True
+                self._logger.info(
+                    "Sent a person's answer to its question. event=gateway_question_answered "
+                    "task_query_id=%s parent_task_id=%s correlation_id=%s session_key=%s",
+                    task_query_id,
+                    question.parent_task_id,
+                    correlation_id,
+                    session_key,
+                )
+                # Waiting or cancellation after publication cannot send the
+                # answer again. Different tasks sharing this correlation
+                # have separate reply queues.
+                await self._questions.show_next(session_key)
+                return await self._responses.await_terminal_response(
+                    correlation_id=correlation_id,
+                    session_key=session_key,
+                    query_handler=None,
+                    response_task_id=question.parent_task_id,
+                )
+        except BaseException:
+            # Channel acquisition and cancellation can both fail before the
+            # transport sends anything. Neither consumes the person's answer.
+            if not published:
                 self._questions.release_answer(question)
-                raise
-            self._logger.info(
-                "Sent a person's answer to its question. event=gateway_question_answered "
-                "task_query_id=%s parent_task_id=%s correlation_id=%s session_key=%s",
-                task_query_id,
-                question.parent_task_id,
-                correlation_id,
-                session_key,
-            )
-            # Publication consumed this answer. Waiting may store a new
-            # question, or time out while the lead continues; neither permits
-            # sending the answer again.
-            await self._questions.show_next(session_key)
-            return await self._responses.await_terminal_response(
-                correlation_id=correlation_id,
-                session_key=session_key,
-                query_handler=None,
-            )
+            raise
 
     def _not_sent(self, question: PendingQueryRecord) -> GatewayResponse:
         """Refuse a message for a question that is no longer open.

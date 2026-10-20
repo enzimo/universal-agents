@@ -178,7 +178,8 @@ async def test_late_and_repeated_pause_replies_over_nats(tmp_path):
 @pytest.mark.integration
 @pytest.mark.live
 @pytest.mark.nats
-async def test_two_questions_in_one_chat_are_answered_in_order_over_nats(tmp_path):
+@pytest.mark.parametrize("shared_correlation", [False, True])
+async def test_two_questions_in_one_chat_are_answered_in_order_over_nats(tmp_path, shared_correlation):
     """Two requests ask in one chat; a restart keeps both; each answer reaches its own."""
 
     from assistant_gateway.application.pending_questions import QUESTION_WAITS_IN_LINE_TEXT
@@ -238,7 +239,11 @@ async def test_two_questions_in_one_chat_are_answered_in_order_over_nats(tmp_pat
         parent_task_id=new_id("task"),
         message="Which week should the trip be?",
     )
-    asks = {report.task_query_id: (new_id("correlation"), report), trip.task_query_id: (new_id("correlation"), trip)}
+    first_correlation = new_id("correlation")
+    asks = {
+        report.task_query_id: (first_correlation, report),
+        trip.task_query_id: (first_correlation if shared_correlation else new_id("correlation"), trip),
+    }
 
     async with LiveNatsClient(team_id, transport=config.transport) as manager:
         replies = await manager.subscribe_route(config.manager.manager_agent_id)
@@ -278,19 +283,21 @@ async def test_two_questions_in_one_chat_are_answered_in_order_over_nats(tmp_pat
             gateway = make_gateway()
             await gateway._manager_client.connect()
 
-            for text, expected in (("The shared reports folder", report), ("The second week of June", trip)):
-                answer = asyncio.create_task(
-                    ChannelBridge(gateway.application).handle_inbound(
-                        ChannelInboundMessage(
-                            channel_name="telegram",
-                            user_id="100200300",
-                            chat_id="100200300",
-                            session_key=session.session_key,
-                            text=text,
+            waiting = []
+            try:
+                for text, expected in (("The shared reports folder", report), ("The second week of June", trip)):
+                    answer = asyncio.create_task(
+                        ChannelBridge(gateway.application).handle_inbound(
+                            ChannelInboundMessage(
+                                channel_name="telegram",
+                                user_id="100200300",
+                                chat_id="100200300",
+                                session_key=session.session_key,
+                                text=text,
+                            )
                         )
                     )
-                )
-                try:
+                    waiting.append((answer, expected, text))
                     reply = await replies.get(timeout=10)
                     correlation_id, _ = asks[expected.task_query_id]
                     assert reply.msg_content.query_type == MessageMetaType.RESPONSE
@@ -301,6 +308,11 @@ async def test_two_questions_in_one_chat_are_answered_in_order_over_nats(tmp_pat
                         # The next question is shown once the first is answered.
                         next_shown = await asyncio.wait_for(delivered.get(), timeout=10)
                         assert next_shown.text == trip.message
+                # The tasks finish in the opposite order to the questions.
+                # A shared correlation must not give either answer the
+                # sibling task's final reply.
+                for answer, expected, text in reversed(waiting):
+                    correlation_id, _ = asks[expected.task_query_id]
                     await manager.publish(
                         config.manager.response_queue_name,
                         envelope(
@@ -314,10 +326,12 @@ async def test_two_questions_in_one_chat_are_answered_in_order_over_nats(tmp_pat
                     )
                     result = await asyncio.wait_for(answer, timeout=10)
                     assert result[0].text == f"Done: {text}"
-                finally:
-                    if not answer.done():
-                        answer.cancel()
-                        await asyncio.gather(answer, return_exceptions=True)
+                    if expected is trip:
+                        assert not waiting[0][0].done()
+            finally:
+                for answer, _, _ in waiting:
+                    answer.cancel()
+                await asyncio.gather(*(answer for answer, _, _ in waiting), return_exceptions=True)
             assert gateway.state_store.list_open_pending_queries(session.session_key) == []
         finally:
             await gateway._manager_client.close()

@@ -2435,11 +2435,32 @@ request finishes before accepting is reported as unused. A publication failure
 whose outcome is uncertain leaves the request active; starting another chat
 remains an explicit action by the person.
 
+Held guidance is sent oldest first for each request. An earlier copy that is
+in flight or unconfirmed blocks newer copies, both for direct sends and the
+retry loop. The saved copies determine this order across gateway processes;
+an acceptance removes its copy and lets the next one proceed. Person removal
+deletes held guidance in the same transaction as that person's sessions and
+requests, so no private delivery copy waits for background cleanup.
+
+The initial chat wait is task-specific too. Every request-state change checks
+the task admitted for the tracked request before changing its status, task id
+or conversation. A sibling schedule's final reply, question answer or secure
+form result still reaches its person, but cannot finish or rewrite that
+request, including after a timeout or during a form wait. Deferred sibling
+deliveries retain their transport correlation in the payload, while their
+request-state reference is empty so later delivery cannot finish the root.
+
 Agent questions are stored by `task_query_id` in `gateway_questions`, with their
 own request and task identities. Several questions in one chat wait in order,
 and the person sees one at a time. An answer names the question selected before
-the send, and a conditional status update refuses a second answer. A newer
-question from the same task replaces that task's previous open question. An
+the send, and a conditional status update refuses a second answer. An
+answer attempt that fails or is cancelled before publication releases its
+claim; cancellation after publication never sends it again. Reply waits are
+keyed by both correlation and parent task: separate schedule actions from
+one request share a correlation, and one task's reply must not satisfy a
+sibling task's wait. Repeated publication of an answer uses its question id
+as the durable effect key. A newer question from the same task replaces that
+task's previous open question. An
 answer, expiry or final task reply makes room for the next question. Closed
 questions remain recorded so redelivery cannot reopen them. The obsolete
 one-question-per-session table is removed; questions open in that older format

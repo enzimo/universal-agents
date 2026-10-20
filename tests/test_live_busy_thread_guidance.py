@@ -33,9 +33,10 @@ from custom_agents.structured_llm_messages import (
 from custom_messages.contracts.credentials_v1 import SecureCredentialCollectionRequest
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.task_v1 import Task, TaskSteering
+from custom_messages.contracts.routing_v1 import MessageHeader
 from custom_messages.enums import MessageMetaType, TaskSteeringStatus, TaskSteeringType
 from id_generation import new_id
-from live_nats_client import resolve_live_transport_settings
+from live_nats_client import LiveNatsClient, resolve_live_transport_settings
 from tests.test_live_multi_agent_state_boundaries import _agent, _start_agent, _stop_agents
 
 
@@ -437,11 +438,11 @@ async def test_message_after_a_guidance_status_timeout_is_guidance(tmp_path: Pat
 
         team.hold_steering_status = True
         first = await asyncio.wait_for(team.send("BRAVO-GUIDANCE", session_key=session), WAIT_SECONDS)
-        second = team.send("BRAVO-MORE-GUIDANCE", session_key=session)
-        await _wait_until(
-            lambda: bool(team.steering_with("BRAVO-MORE-GUIDANCE"))
-            or bool(team.root_tasks_named("BRAVO-MORE-GUIDANCE"))
-        )
+        second = await asyncio.wait_for(team.send("BRAVO-MORE-GUIDANCE", session_key=session), WAIT_SECONDS)
+        assert team.steering_with("BRAVO-MORE-GUIDANCE") == []
+        assert team.root_tasks_named("BRAVO-MORE-GUIDANCE") == []
+        held = team.gateway.request_repository.get_held_guidance(second.correlation_id)
+        assert held is not None and held.target_correlation_id == correlation_b
         logger.warning(
             "after guidance status timeout: task_b=%s correlation_b=%s first_reply=%r steering=%s new_requests=%s",
             task_b,
@@ -451,12 +452,50 @@ async def test_message_after_a_guidance_status_timeout_is_guidance(tmp_path: Pat
             [task.task_id for task in team.root_tasks_named("BRAVO-MORE-GUIDANCE")],
         )
         await team.release_held_statuses()
+        await team.gateway._thread_guidance.retry_held()
+        await _wait_until(lambda: bool(team.steering_with("BRAVO-MORE-GUIDANCE")))
         hold_b.set()
-        await _settle(bravo, second)
+        await _settle(bravo)
 
         assert team.root_tasks_named("BRAVO-MORE-GUIDANCE") == []
         assert set(team.steering_with("BRAVO-MORE-GUIDANCE")) == {(task_b, correlation_b)}
         assert team.lead_model.unexpected == []
+
+
+async def test_a_timer_result_with_the_same_correlation_keeps_the_original_request_running(tmp_path: Path) -> None:
+    hold = asyncio.Event()
+    turn = _Turn("ORIGINAL-REQUEST", _answer("Original request finished"), release=hold)
+    async with _team(tmp_path, turn) as team:
+        delivered = []
+        team.gateway._event_output.emit = _recording_emit(team.gateway._event_output.emit, delivered)
+        session = team.gateway.application.start_new_session().session_key
+        original = team.send("ORIGINAL-REQUEST", session_key=session)
+        try:
+            await asyncio.wait_for(turn.started.wait(), WAIT_SECONDS)
+            root = team.published_tasks[0]
+            correlation = root.msg_meta.msg_correlation_id
+            before = team.gateway.state_store.get_request(correlation)
+            async with LiveNatsClient(team.config.gateway.team_id, transport=team.config.transport) as timer:
+                await timer.publish(
+                    team.config.manager.response_queue_name,
+                    MessageEnvelope(
+                        msg_content=Task(task_id=new_id("timer_task"), task_type=MessageMetaType.RESPONSE, answer="Timer finished"),
+                        msg_header=MessageHeader(from_agent_id=team.config.manager.manager_agent_id),
+                        msg_meta=root.msg_meta,
+                    ),
+                )
+                await _wait_until(lambda: "Timer finished" in delivered)
+            assert not original.done()
+            assert team.gateway.state_store.get_request(correlation) == before
+            hold.set()
+            response = await asyncio.wait_for(original, WAIT_SECONDS)
+            assert response.task_id == root.msg_content.task_id
+            assert response.text == "Original request finished"
+            assert team.gateway.state_store.get_request(correlation).run_state == "finished"
+        finally:
+            hold.set()
+            original.cancel()
+            await asyncio.gather(original, return_exceptions=True)
 
 
 async def test_late_guidance_acknowledgment_is_recorded_and_next_message_is_guidance(

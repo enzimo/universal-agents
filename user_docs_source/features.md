@@ -35,6 +35,8 @@ and while a credential form is open. The gateway saves the guidance before
 sending it. If the team lead has not started that request yet or cannot confirm
 receipt, the message stays held for the same request. You receive a notice if
 the request finishes before accepting it.
+Messages reach the request in the order they were saved; newer guidance waits
+while an earlier message is still unconfirmed.
 
 Use **New Chat** or `/new` to start separate work. Once a request finishes,
 your next message in its chat starts another request.

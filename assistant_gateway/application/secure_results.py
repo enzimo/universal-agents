@@ -72,7 +72,9 @@ class SecureResultPublisher:
 
         manager_id = self._manager_client.manager_id
         if manager_id is None:
-            self._request_service.update_status(correlation_id, REQUEST_STATUS_MANAGER_UNAVAILABLE)
+            self._request_service.update_task_status(
+                correlation_id, REQUEST_STATUS_MANAGER_UNAVAILABLE, task_id=parent_task_id
+            )
             self._logger.warning(
                 "A secure page result could not be sent because the manager route is unavailable. "
                 "event=gateway_secure_result_manager_unavailable correlation_id=%s session_key=%s "

@@ -236,6 +236,20 @@ class GatewayThreadGuidance:
     async def _attempt(self, held: HeldGuidanceRecord) -> _Attempt:
         if held.correlation_id in self._in_flight:
             return _Attempt(GuidanceDelivery.UNCONFIRMED)
+        # Reserve before the first await. Direct sends, retries and presence
+        # wakeups must not register the same reply wait concurrently.
+        self._in_flight.add(held.correlation_id)
+        try:
+            # The durable held copies decide order across gateway processes
+            # too. A timeout or an older in-flight send never lets newer
+            # instructions pass it; acceptance removes the older copy.
+            if await self._earlier_held(held):
+                return _Attempt(GuidanceDelivery.UNCONFIRMED)
+            return await self._send_attempt(held)
+        finally:
+            self._in_flight.discard(held.correlation_id)
+
+    async def _send_attempt(self, held: HeldGuidanceRecord) -> _Attempt:
         target = await asyncio.to_thread(self._requests.get, held.target_correlation_id)
         if target is None or target.run_state != RUN_STATE_RUNNING:
             return _Attempt(GuidanceDelivery.REQUEST_FINISHED)
@@ -245,11 +259,7 @@ class GatewayThreadGuidance:
         envelope = await asyncio.to_thread(self._envelope, held, target, manager_id)
         if envelope is None:
             return _Attempt(GuidanceDelivery.REQUEST_FINISHED)
-        self._in_flight.add(held.correlation_id)
-        try:
-            status_envelope = await self._publish_and_wait(held, envelope, target)
-        finally:
-            self._in_flight.discard(held.correlation_id)
+        status_envelope = await self._publish_and_wait(held, envelope, target)
         if status_envelope is None:
             return _Attempt(GuidanceDelivery.UNCONFIRMED, target_task_id=target.active_task_id)
         return self._classify(status_envelope, manager_id, target_task_id=target.active_task_id)

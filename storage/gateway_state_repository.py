@@ -2500,8 +2500,9 @@ class _RelationalGatewayStateRepository:
                 UPDATE gateway_requests
                    SET status = {self._dialect.bind}, active_task_id = {self._dialect.bind}
                  WHERE correlation_id = {self._dialect.bind}
+                   AND (run_state IS NULL OR active_task_id = {self._dialect.bind})
                 """,
-                (status, normalized_task_id, correlation_id),
+                (status, normalized_task_id, correlation_id, normalized_task_id),
             )
             conn.commit()
 
@@ -4406,6 +4407,7 @@ class _RelationalGatewayStateRepository:
     _PERSON_SESSION_TABLES = (
         "gateway_session_conversations",
         "gateway_requests",
+        "gateway_held_guidance",
         "gateway_credential_collections",
         "gateway_deliveries",
         "gateway_attachments",

@@ -447,3 +447,127 @@ async def test_uncertain_request_publication_keeps_later_messages_on_that_reques
     steering = transport.operational[0][0].msg_content
     assert steering.target_task_id == running.active_task_id
     assert steering.target_correlation_id == running.correlation_id
+
+
+@pytest.mark.asyncio
+async def test_newer_guidance_waits_for_an_older_in_flight_publication(tmp_path: Path) -> None:
+    class DelayedFirstGuidance(_SteeringTransport):
+        def __init__(self):
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def publish_operational(self, envelope, *, routing_key):
+            if envelope.msg_content.guidance_text == "First guidance":
+                self.entered.set()
+                await self.release.wait()
+            await super().publish_operational(envelope, routing_key=routing_key)
+
+    transport = DelayedFirstGuidance()
+    gateway = UserGateway(_config(tmp_path), manager_transport=transport)
+    transport.gateway = gateway
+    session = gateway.application.start_new_session()
+    first = asyncio.create_task(_send_task_steering(
+        gateway, "First guidance", session_key=session.session_key, target_task_id="task_running"
+    ))
+    try:
+        async with asyncio.timeout(10):
+            await transport.entered.wait()
+            second = await gateway.application.send_user_message(
+                "Second guidance", session_key=session.session_key
+            )
+            assert transport.operational == []
+            # The timer must obey the same ordering as a direct send.
+            await gateway._thread_guidance.retry_held()
+            assert transport.operational == []
+            transport.release.set()
+            await first
+            await gateway._thread_guidance.retry_held()
+    finally:
+        transport.release.set()
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+
+    assert [envelope.msg_content.guidance_text for envelope, _ in transport.operational] == [
+        "First guidance", "Second guidance"
+    ]
+    assert gateway.request_repository.get_held_guidance(second.correlation_id) is None
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_older_guidance_keeps_its_order_after_gateway_restart(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    path = str(tmp_path / "gateway.db")
+    first_transport = _StaleSteeringThenTaskTransport()
+    first_gateway = UserGateway(config, state_store=GatewayStateStore(path), manager_transport=first_transport)
+    first_transport.gateway = first_gateway
+    session = first_gateway.application.start_new_session()
+    first = await _send_task_steering(
+        first_gateway, "First guidance", session_key=session.session_key, target_task_id="task_running"
+    )
+    assert first_gateway.request_repository.get_held_guidance(first.correlation_id) is not None
+
+    next_transport = _StaleSteeringThenTaskTransport()
+    next_gateway = UserGateway(config, state_store=GatewayStateStore(path), manager_transport=next_transport)
+    next_transport.gateway = next_gateway
+    second = await next_gateway.application.send_user_message("Second guidance", session_key=session.session_key)
+    await next_gateway._thread_guidance.retry_held()
+
+    assert next_transport.operational
+    assert all(envelope.msg_content.guidance_text == "First guidance" for envelope in next_transport.operational)
+    assert next_gateway.request_repository.get_held_guidance(second.correlation_id) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("root_status", ["open_wait", "timed_out", "waiting_for_credential", "waiting_for_credential_result"])
+async def test_sibling_schedule_final_never_finishes_the_original_chat_request(tmp_path: Path, root_status: str) -> None:
+    class CaptureRoot(_SteeringTransport):
+        def __init__(self):
+            super().__init__()
+            self.root = None
+            self.started = asyncio.Event()
+
+        async def publish_durable(self, envelope, *, routing_key):
+            self.root = envelope
+            self.started.set()
+
+    transport = CaptureRoot()
+    gateway = UserGateway(_config(tmp_path), manager_transport=transport)
+    transport.gateway = gateway
+    session = gateway.application.start_new_session()
+    original = asyncio.create_task(gateway.application.send_user_message(
+        "Save a timer and delegate the rest", session_key=session.session_key
+    ))
+    try:
+        async with asyncio.timeout(10):
+            await transport.started.wait()
+            root = transport.root
+            correlation = root.msg_meta.msg_correlation_id
+            root_id = root.msg_content.task_id
+            if root_status != "open_wait":
+                original.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await original
+                gateway.state_store.update_request_status(correlation, root_status)
+            before = gateway.state_store.get_request(correlation)
+
+            def response(task_id, text):
+                return MessageEnvelope(
+                    msg_content=Task(task_id=task_id, task_type=MessageMetaType.RESPONSE, answer=text),
+                    msg_header=MessageHeader(from_agent_id="manager_agent_1"),
+                    msg_meta=root.msg_meta,
+                )
+
+            await gateway._manager_client.handle_response(response("task_scheduled", "Timer result"))
+            after = gateway.state_store.get_request(correlation)
+            assert after == before
+            assert after.run_state == RUN_STATE_RUNNING
+            if root_status == "open_wait":
+                assert not original.done()
+            await gateway._manager_client.handle_response(response(root_id, "Original result"))
+            if root_status == "open_wait":
+                assert (await original).text == "Original result"
+            assert gateway.state_store.get_request(correlation).run_state == "finished"
+    finally:
+        original.cancel()
+        await asyncio.gather(original, return_exceptions=True)

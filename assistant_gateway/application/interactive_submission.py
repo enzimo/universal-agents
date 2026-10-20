@@ -477,7 +477,7 @@ class GatewayInteractiveSubmissionService:
         request = thread.request
         session = thread.session
         manager_id = self._manager.manager_id
-        async with self._manager.response_channel(correlation_id):
+        async with self._manager.response_channel(correlation_id, task_id=task.task_id):
             self._log_resolved_request(
                 request=request,
                 session=session,
@@ -503,6 +503,7 @@ class GatewayInteractiveSubmissionService:
                     correlation_id=correlation_id,
                     session_key=session.session_key,
                     query_handler=request.query_handler,
+                    response_task_id=task.task_id,
                 )
             envelope = MessageEnvelope(
                 msg_content=task,
@@ -555,6 +556,7 @@ class GatewayInteractiveSubmissionService:
                 correlation_id=correlation_id,
                 session_key=session.session_key,
                 query_handler=request.query_handler,
+                response_task_id=task.task_id,
             )
 
     async def _publish_request(
