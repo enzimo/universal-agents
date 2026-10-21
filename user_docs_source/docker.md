@@ -127,13 +127,33 @@ so rebuilding later may include newer distribution fixes.
 Docker's `SecretsUsedInArgOrEnv` naming warning for that selector is unrelated
 to an APT version failure. Never pass actual credentials through build arguments.
 
-Photon iMessage requires Node.js 24 or newer. The Dockerfiles always include
+Photon iMessage requires Node.js 24.5 or newer. The Dockerfiles always include
 the small Photon sidecar source tree, but they install its npm dependencies only
 when Node.js is enabled with `--nodejs` / `INSTALL_NODEJS=true`. Browser
 onboarding disables the Photon setup option when a compatible Node.js runtime
 is absent. Maintained images install the official Node.js 24.20.0 archive for
 their architecture, verify its pinned SHA-256 checksum, and use Node's native
 WebSocket implementation for Spectrum's inbound Fusor stream.
+
+### Certificate trust
+
+All image stages, including the MCP image, disable the compromised
+`emSign ECC Root CA - G3` certificate in Debian's system store and rebuild both
+the CA bundle and hashed certificate directory. The shared fingerprint list is
+`data/security/distrusted_roots.json`. Other roots, including other emSign
+certificates, remain trusted. Rebuild and recreate existing containers to apply
+this change.
+
+Python's certifi and uv have separate bundles, updated through their pinned
+dependencies. Pip's vendored bundle is another independent store; correcting
+Debian's store does not replace it.
+
+Photon removes the same root from Node's effective default certificates before
+loading Spectrum. It retains private CAs supplied through `NODE_EXTRA_CA_CERTS`.
+An explicit `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` bundle must be readable, contain
+valid certificates and exclude the distrusted root, or Photon refuses startup.
+Photon also refuses OpenSSL CA mode, whose roots Node cannot enumerate safely;
+use bundled or system CA mode with `NODE_EXTRA_CA_CERTS` for private roots.
 
 ### Where the bundle's settings come from
 
@@ -216,6 +236,11 @@ contains `instance_config.yaml`, `team.env`, `control/`, `dbs/`, `state/`, and
 `workspaces/` ([Instance Folders](configuration.md#instance-folders)). An
 instance created by an earlier version still has a `workspace/` folder; the
 container refuses to start until you run the move commands it prints.
+
+Stopping the container during browser onboarding also stops any model
+connection tests in progress. You do not need to wait for a slow provider to
+answer before stopping. Onboarding accepts two model connection tests at a
+time; if both are running, wait for one to finish before starting another.
 
 ### NATS 2.15 upgrades
 

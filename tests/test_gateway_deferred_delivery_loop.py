@@ -23,6 +23,7 @@ from assistant_gateway.application.deferred_delivery import (
 )
 from assistant_gateway.application.delivery_service import GatewayDeliveryService
 from storage.gateway_state_repository import SqliteGatewayStateRepository
+from tests.sqlite_lock_support import hold_exclusive_lock, release_exclusive_lock
 
 LOCK_HELD_SECONDS = 0.8
 TICK_SECONDS = 0.02
@@ -51,25 +52,13 @@ def _hold_database_lock(db_path: Path) -> sqlite3.Connection:
     """Take the exclusive file lock every new connection must wait for.
 
     This stands in for SQLite's close-time checkpoint (or any other exclusive
-    holder) in another process.
+    holder) in another process. The holder's release does no disk work, so the
+    lock lasts ``LOCK_HELD_SECONDS`` on any disk (``tests.sqlite_lock_support``).
     """
 
-    from storage.sqlite_connection import close_held_open_databases
-
-    # Exclusive locking mode cannot start while any connection to the file is
-    # open, so the idle connection this process holds is closed first: the
-    # lock stands for another process that has none of ours.
-    close_held_open_databases()
-    holder = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
-    holder.execute("PRAGMA locking_mode=EXCLUSIVE")
-    holder.execute("BEGIN EXCLUSIVE")
+    holder = hold_exclusive_lock(db_path)
     holder.execute("DELETE FROM gateway_deliveries WHERE 0")
     return holder
-
-
-def _release(holder: sqlite3.Connection) -> None:
-    holder.execute("COMMIT")
-    holder.close()
 
 
 @pytest.mark.asyncio
@@ -94,7 +83,7 @@ async def test_release_due_keeps_the_event_loop_running_while_the_database_is_lo
         clock=_Clock(),
     )
     holder = _hold_database_lock(db_path)
-    release_timer = threading.Timer(LOCK_HELD_SECONDS, _release, args=(holder,))
+    release_timer = threading.Timer(LOCK_HELD_SECONDS, release_exclusive_lock, args=(holder,))
 
     ticks: list[float] = []
 

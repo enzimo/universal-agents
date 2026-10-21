@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 from dataclasses import dataclass
 import logging
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
 import time
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Iterator
 from urllib import parse as urllib_parse
 import uuid
 
@@ -35,7 +37,8 @@ from assistant_gateway.onboarding_engine import (
     normalize_onboarding_answers,
     write_onboarded_instance,
 )
-from assistant_gateway.onboarding_web.provider_test import test_provider_connection
+from assistant_gateway.onboarding_web.provider_process import ProviderChecks, ProviderChecksBusy
+from assistant_gateway.onboarding_web.provider_test import ProviderTestResult
 from assistant_gateway.onboarding_web.settings_import import (
     ImportedSettings,
     OnboardingImportError,
@@ -84,7 +87,7 @@ GIT_COMMAND_TIMEOUT_SECONDS = 30
 MAX_SKILLS_REPOSITORIES = MAX_EXTERNAL_SKILL_REPOSITORIES
 MAX_XAI_DEVICE_LOGIN_SESSIONS = 8
 XAI_DEVICE_LOGIN_RETENTION_SECONDS = 10 * 60
-MIN_PHOTON_NODE_MAJOR = 24
+MIN_PHOTON_NODE_VERSION = (24, 5)
 NODE_VERSION_CHECK_TIMEOUT_SECONDS = 2
 
 
@@ -125,15 +128,16 @@ def nodejs_available() -> bool:
         )
         return False
     try:
-        major = int(completed.stdout.strip().removeprefix("v").split(".", 1)[0])
-    except ValueError:
+        parts = completed.stdout.strip().removeprefix("v").split(".")
+        version = (int(parts[0]), int(parts[1]))
+    except (ValueError, IndexError):
         LOGGER.warning(
             "Node.js availability probe returned an invalid version node_bin=%s version=%r",
             node_bin,
             completed.stdout.strip(),
         )
         return False
-    return major >= MIN_PHOTON_NODE_MAJOR
+    return version >= MIN_PHOTON_NODE_VERSION
 
 
 @dataclass(frozen=True)
@@ -279,6 +283,7 @@ class OnboardingWebService:
         self.completion_event: asyncio.Event | None = None
         self.last_completion: dict[str, Any] | None = None
         self.xai_device_logins: dict[str, XAIDeviceLoginSession] = {}
+        self.provider_checks = ProviderChecks()
         # Let's Begin > Import a team export (assistant_gateway.onboarding_web.team_import).
         self.team_import = TeamImport(
             self._instance_layout, on_imported=self._record_team_import, logger=self.logger
@@ -345,6 +350,8 @@ class OnboardingWebService:
         app.router.add_get("/download/team.env", self._handle_download_team_env)
         self.team_import.add_routes(app)
         app.router.add_get("/{path:.*}", self._handle_asset)
+        # Stop blocking provider requests before aiohttp waits for their handlers.
+        app.on_shutdown.append(self.provider_checks.close)
         app.on_cleanup.append(self._cleanup_xai_device_logins)
         app.on_cleanup.append(self.team_import.close)
         return app
@@ -465,19 +472,16 @@ class OnboardingWebService:
                 "refresh_skew_seconds": xai_settings.refresh_skew_seconds,
                 "refresh_timeout_seconds": xai_settings.refresh_timeout_seconds,
             }
-        result = await asyncio.to_thread(
-            test_provider_connection,
-            provider=str(payload.get("provider") or ""),
-            endpoint=str(payload.get("endpoint") or ""),
-            token=str(payload.get("token") or ""),
-            model=str(payload.get("model") or ""),
-            reasoning_effort=str(payload.get("reasoning_effort") or ""),
-            reasoning_summary=payload.get("reasoning_summary"),
-            litellm_api_mode=str(payload.get("litellm_api_mode") or "chat_completions"),
-            stream=payload.get("stream"),
-            xai_oauth=raw_xai_oauth,
-            instance_root=instance_root,
-        )
+        try:
+            result = await self._run_provider_check(payload, raw_xai_oauth, instance_root)
+        except ProviderChecksBusy as exc:
+            return web.json_response({"status": "error", "message": str(exc)}, status=429)
+        except ValidationError:
+            # Validation exceptions include the rejected input. Keep keys and
+            # other submitted values out of aiohttp's exception log.
+            return web.json_response(
+                {"status": "error", "message": "The model connection test has invalid fields."}, status=400
+            )
         if not result.ok:
             endpoint_host, endpoint_path = _provider_endpoint_log_fields(
                 str(payload.get("endpoint") or "")
@@ -504,6 +508,22 @@ class OnboardingWebService:
                 "sample": result.sample,
             },
             status=status,
+        )
+
+    async def _run_provider_check(
+        self, payload: dict[str, Any], raw_xai_oauth: dict[str, Any] | None, instance_root: str
+    ) -> ProviderTestResult:
+        return await self.provider_checks.run(
+            provider=str(payload.get("provider") or ""),
+            endpoint=str(payload.get("endpoint") or ""),
+            token=str(payload.get("token") or ""),
+            model=str(payload.get("model") or ""),
+            reasoning_effort=str(payload.get("reasoning_effort") or ""),
+            reasoning_summary=payload.get("reasoning_summary"),
+            litellm_api_mode=str(payload.get("litellm_api_mode") or "chat_completions"),
+            stream=payload.get("stream"),
+            xai_oauth=raw_xai_oauth,
+            instance_root=instance_root,
         )
 
     async def _handle_xai_device_login_start(self, request: web.Request) -> web.Response:
@@ -1187,9 +1207,49 @@ async def start_onboarding_web_service(settings: OnboardingWebSettings) -> tuple
     return service, site
 
 
+@contextlib.contextmanager
+def _stop_on_signals(stop: asyncio.Event) -> Iterator[None]:
+    """Set ``stop`` on SIGTERM or SIGINT while the onboarding page runs.
+
+    ``docker stop`` sends SIGTERM, which tini passes on to this process. Without
+    a handler the signal ended the process at once: the page was not shut down
+    and the container reported exit code 143 for a normal stop. The agents
+    handle their stop signals the same way (``strands_main``).
+    """
+
+    loop = asyncio.get_running_loop()
+    installed: list[signal.Signals] = []
+
+    def _received(received: signal.Signals) -> None:
+        LOGGER.info(
+            "Stopping the onboarding page. event=onboarding_web_stop_signal_received signal=%s", received.name
+        )
+        stop.set()
+
+    for handled in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(handled, _received, handled)
+        except (NotImplementedError, RuntimeError, ValueError) as exc:
+            LOGGER.warning(
+                "Could not install the onboarding page's stop handler. "
+                "event=onboarding_web_stop_signal_handler_unavailable signal=%s error=%s",
+                handled.name,
+                exc,
+            )
+        else:
+            installed.append(handled)
+    try:
+        yield
+    finally:
+        for handled in installed:
+            loop.remove_signal_handler(handled)
+
+
 async def run_onboarding_web(settings: OnboardingWebSettings) -> None:
     service = OnboardingWebService(settings)
     app = service.build_app()
+    # Set when onboarding finishes and restarts into the runtime, or when the
+    # process is asked to stop (_stop_on_signals); either way the page shuts down.
     completion_event = asyncio.Event()
     service.completion_event = completion_event
     site = await start_aiohttp_site(
@@ -1203,7 +1263,8 @@ async def run_onboarding_web(settings: OnboardingWebSettings) -> None:
     LOGGER.info("Open this URL in your browser: %s", service.onboarding_browser_url())
     LOGGER.info("If Docker is running on another machine, set NETWORK_PUBLIC_ORIGIN to that machine's http(s) origin.")
     # LOGGER.info("Web onboarding bound to %s", site.base_url)
-    try:
-        await completion_event.wait()
-    finally:
-        await site.stop()
+    with _stop_on_signals(completion_event):
+        try:
+            await completion_event.wait()
+        finally:
+            await site.stop()

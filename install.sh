@@ -390,11 +390,11 @@ install_native() {
   install -m 755 "$sealbox_dir/target/release/sealbox-cli" "$bin_dir/sealbox-cli"
   install -m 755 "$sealbox_dir/target/release/sealbox-server" "$bin_dir/sealbox-server"
 
-  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && node -e 'const [major] = process.versions.node.split(".").map(Number); process.exit(major >= 24 ? 0 : 1)'; then
+  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 24 || (major === 24 && minor >= 5) ? 0 : 1)'; then
     log "Installing Photon/iMessage sidecar dependencies"
     npm --prefix "$app_dir/assistant_gateway/interactive_apps/photon_sidecar" ci --omit=dev
   else
-    warn "Node.js 24+ was not found. Native Photon/iMessage support will remain unavailable."
+    warn "Node.js 24.5+ was not found. Native Photon/iMessage support will remain unavailable."
   fi
 
   native_config="$install_home/native-install.env"

@@ -52,7 +52,7 @@ from custom_tools.runtime_context import set_agent_ref
 from docker.launch_headless import pop_runtime_restart_request
 from storage.config import StorageSettings
 from tests.broker_access_support import context_signer, context_verify_keys
-from tests.knowledge_support import knowledge_storage
+from tests.knowledge_support import BACKENDS, knowledge_storage
 
 ROOT = Path(__file__).resolve().parents[1]
 CEDAR_BINARY = ROOT / "target" / "debug" / "ua-cedar-authorizer"
@@ -60,7 +60,6 @@ TEAM = "team_restart"
 LEAD_ID = "agent_team_lead"
 SPECIALIST_ID = "agent_specialist"
 # PostgreSQL runs when LIVE_TEST_POSTGRES_DSN names a server (knowledge_storage).
-BACKENDS = ("sqlite", "postgres")
 
 pytestmark = pytest.mark.skipif(not CEDAR_BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
 

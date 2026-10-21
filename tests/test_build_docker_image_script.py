@@ -583,9 +583,12 @@ def test_dockerfiles_build_and_validate_rust_runtime_tools() -> None:
         assert "verify_authorization" not in content
         assert "ua_definitions/authorization" not in content
         assert "test -f /app/ua_definitions/access/starter_profiles.yaml" in content
-    # Nothing under data/ is needed in the image any more.
+    # Include only release trust metadata; instance data stays out of images.
     assert "data/*" in dockerignore.splitlines()
-    assert "!data/" not in dockerignore
+    assert "!data/\n" not in dockerignore
+    assert [line for line in dockerignore.splitlines() if line.startswith("!data/")] == [
+        "!data/security/", "!data/security/distrusted_roots.json",
+    ]
 
 
 def test_bundle_dockerfile_uses_configured_bitwarden_file_url() -> None:
@@ -753,6 +756,13 @@ def test_docker_sqlite_install_uses_repository_candidate_or_explicit_pin(
     cleanup = fake_bin / "rm"
     cleanup.write_text("#!/bin/sh\nexit 0\n")
     cleanup.chmod(0o755)
+    # This harness exercises package selection, never the host trust store.
+    # test_system_certificate_store runs the real helper in isolated folders.
+    python = fake_bin / "python"
+    python.write_text(
+        '#!/bin/sh\n[ "$#" -eq 1 ] && [ "$1" = /app/docker/distrust_compromised_roots.py ]\n'
+    )
+    python.chmod(0o755)
     result = subprocess.run(
         ["sh", "-c", run], text=True, capture_output=True,
         env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -760,6 +770,7 @@ def test_docker_sqlite_install_uses_repository_candidate_or_explicit_pin(
              "SQLITE_VERSION": default_version if version is None else version,
              "INSTALL_POSTGRES": "false", "INSTALL_NODEJS": "false"},
     )
+    assert result.returncode == (100 if version == "unavailable" else 0), result.stderr
     calls = [json.loads(line) for line in capture.read_text().splitlines()]
     packages = [arg for arg in calls[-1] if arg.startswith(("sqlite3", "libsqlite3"))]
     suffix = f"={version}" if version else ""
@@ -768,7 +779,6 @@ def test_docker_sqlite_install_uses_repository_candidate_or_explicit_pin(
         if install_sqlite == "true" else []
     )
     assert len(calls) == 3  # A failed explicit pin must not retry without it.
-    assert result.returncode == (100 if version == "unavailable" else 0), result.stderr
 
 
 def test_dockerfiles_make_database_packages_optional() -> None:

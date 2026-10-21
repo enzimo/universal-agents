@@ -838,21 +838,44 @@ async def test_live_unacked_work_redelivers_after_nats_server_restart() -> None:
     team_id = _team("nats_restart")
     route = new_id("agent")
     work_max_age_seconds = 120.0
+    ack_wait_seconds = 0.75
+    max_deliver = 4
     first = _adapter(
-        team_id, ack_wait_seconds=0.75, max_deliver=4,
+        team_id, ack_wait_seconds=ack_wait_seconds, max_deliver=max_deliver,
         work_max_age_seconds=work_max_age_seconds,
     )
+    # The first receiver is still handling the task when the server restarts:
+    # its handler does not return, so it asks for no other message. A handler
+    # that returned without acknowledging would ask again and be handed the
+    # same task after every acknowledgement wait. A stopping server keeps
+    # serving until it has closed all its streams, which takes seconds on a
+    # shared test server with a few hundred streams on a slow disk, so those
+    # deliveries could use up the delivery limit before the restart and leave
+    # none for the receiver after it.
+    first_deliveries: asyncio.Queue[InboundDelivery] = asyncio.Queue()
+    never_finished = asyncio.Event()
+
+    async def hold(delivery: InboundDelivery) -> None:
+        await first_deliveries.put(delivery)
+        await never_finished.wait()  # first.close() cancels it
+
     try:
         await first.connect(reconcile_topology=True)
-        queue = await _subscribe_queue(
-            first,
+        await first.subscribe_route(
             name="restart-first",
             routing_key=route,
+            handler=hold,
             durable_name=first.mapper.durable_name(f"agent_{route}"),
+            consumer_role="test",
         )
         await _publish(first, route, _task(route, "survive nats restart"))
-        first_delivery = await asyncio.wait_for(queue.get(), timeout=5)
+        first_delivery = await asyncio.wait_for(first_deliveries.get(), timeout=5)
         assert first_delivery.redelivery_count == 0
+        # Let every acknowledgement wait of the delivery limit run out before
+        # the restart, as a slow server stop does: the holder is not handed
+        # the task again, so all remaining deliveries stay for the next receiver.
+        await asyncio.sleep(ack_wait_seconds * max_deliver + 0.5)
+        assert first_deliveries.empty()
 
         await _restart_nats_container()
         with contextlib.suppress(Exception):
@@ -860,7 +883,7 @@ async def test_live_unacked_work_redelivers_after_nats_server_restart() -> None:
         await _wait_for_nats(team_id, work_max_age_seconds=work_max_age_seconds)
 
         second = _adapter(
-            team_id, ack_wait_seconds=0.75, max_deliver=4,
+            team_id, ack_wait_seconds=ack_wait_seconds, max_deliver=max_deliver,
             work_max_age_seconds=work_max_age_seconds,
         )
         try:

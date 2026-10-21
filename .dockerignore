@@ -40,6 +40,9 @@ LLM_OVERRIDES.yaml
 *.token
 artifacts
 data/*
+!data/security/
+data/security/*
+!data/security/distrusted_roots.json
 dbs
 deleteme
 docker-instance

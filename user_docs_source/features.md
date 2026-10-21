@@ -1124,7 +1124,9 @@ disappears once it is fixed:
   off, or people whose work goes to their own model provider.
 
 When new problems appear, administrators also get one Inbox notice that
-links to the page. The page only reads; it never changes anything.
+links to the page. The notice stays in the Inbox after the problems are
+fixed; the page always shows the current state. The page only reads; it
+never changes anything.
 
 ## Deterministic code and managed services
 

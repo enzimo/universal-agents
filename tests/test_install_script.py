@@ -131,8 +131,8 @@ def test_native_mode_contract_includes_required_local_services() -> None:
     assert "sealbox-cli" in content
     assert "sealbox-server" in content
     assert 'cargo build --locked --release --manifest-path "$sealbox_dir/Cargo.toml"' in content
-    assert "Node.js 24+ was not found" in content
-    assert "major >= 24" in content
+    assert "Node.js 24.5+ was not found" in content
+    assert "major === 24 && minor >= 5" in content
     assert "${INTERNAL_WEBSITE_BIND_PORT:-18090}" in content
     assert "docker/launch_headless.py" in content
 

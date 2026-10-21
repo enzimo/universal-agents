@@ -2711,6 +2711,20 @@ in headers.
 Onboarding completion opens the existing authenticated Status page through
 **Open Status**. It does not request private agent data before sign-in.
 
+Onboarding owns the lifetime of its model connection checks
+(`assistant_gateway/onboarding_web/provider_process.py`). Each check runs the
+shared synchronous provider test in a child process, with a typed JSON request
+on stdin. Keys never enter process arguments or temporary files. At most two
+checks run at once; another request receives HTTP 429 until a check ends. This
+limit matters because onboarding is reachable before sign-in.
+
+On SIGTERM or SIGINT the page cancels those checks before waiting for HTTP
+handlers to finish. It terminates and reaps each child, using SIGKILL with a
+warning if a child ignores SIGTERM for one second. Why: canceling a thread
+leaves its blocking provider request running, and `asyncio.run` waits for that
+thread. The page could then outlast Docker's ten-second stop grace even though
+the signal was handled. Normal provider tests retain their existing timeouts.
+
 The gateway gives people the places to decide; it never decides access itself.
 The access Inbox (`assistant_gateway/access_inbox.py`) lists access and change
 requests with notices, announces each waiting request once in a chat where the
@@ -3203,7 +3217,13 @@ schedules for administrators, receive loops that stopped), whether TeamLead
 reports, and its own configuration and receive loops. A source that does not answer is listed and shown as a
 problem, because silence must not look like health. Every five minutes the
 gateway sends administrators one Inbox notice per new set of problems
-(`status_problems`), linking to the page. Why: conditions such as an
+(`status_problems`), linking to the page. A notice records what
+administrators were told and stays when its problems go away, so the first
+check after a start waits for the gateway's onboarding key hand-over
+(`StatusPage.run`, `assistant_gateway/onboarding_account_keys.py`). Checked
+alongside it, every new instance's first start reported the model key typed
+during onboarding as missing, a moment before the hand-over saved it.
+Why: conditions such as an
 environment variable silently overriding a saved setting or key, a rejected
 model key, or an MCP server that stopped answering were only in logs or only
 known to one process.
@@ -3528,6 +3548,21 @@ frozen previous-section fixtures cover conversions and refused edits. PostgreSQL
 and Sealbox acceptance require those services; file-store tests do not prove
 their deployment behavior. Browser checks cover unsaved edits, confirmation
 invalidation, selection changes and the validate/import sequence.
+
+## Certificate trust
+
+Certificate trust spans independent stores. Python certifi and uv use their
+pinned patched bundles. Docker stages run the standard-library-only
+`docker/distrust_compromised_roots.py` against Debian's system bundle and hashed
+certificate directory. Photon applies the same DER SHA-256 list from
+`data/security/distrusted_roots.json` through Node's default-certificate API
+before importing Spectrum. This preserves other public and private roots;
+explicit gRPC bundles bypass defaults and are checked separately at startup.
+Photon refuses OpenSSL CA mode and custom OpenSSL default stores whose roots
+Node cannot enumerate, rather than silently replacing an incomplete list.
+Tests rebuild a real isolated Debian store, exercise OpenSSL verification, and
+connect Node TLS through a temporary private CA. Image builds and a live Photon
+account remain separate deployment checks.
 
 ## Where to look next
 

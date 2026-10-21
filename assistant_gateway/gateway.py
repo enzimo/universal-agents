@@ -434,7 +434,9 @@ def _access_maintenance_tasks(
     submitted fields or page URLs;
     the Inbox loop (authorization on) sends announcements and decision
     messages; the Status page loop tells administrators about new problems
-    (``assistant_gateway.status_page``). With authorization on, administrators
+    (``assistant_gateway.status_page``), from its first check after the
+    hand-over, so a model key onboarding handed over is never reported
+    missing. With authorization on, administrators
     also hear about blocks naming an operation an update removed, which now
     block their whole tool (``access_control.stale_blocks``).
     """
@@ -448,11 +450,15 @@ def _access_maintenance_tasks(
         store=access_inbox.access_store,
         catalog=access_inbox.catalog,
     )
+    handover_task = asyncio.create_task(handover.run(stop_event), name="gateway_onboarding_key_handover")
     tasks = [
-        asyncio.create_task(handover.run(stop_event), name="gateway_onboarding_key_handover"),
+        handover_task,
         asyncio.create_task(tool_setups.recover_unwatched(), name="gateway_tool_setup_recovery"),
         asyncio.create_task(credential_workflow.recover_collections(), name="gateway_credential_collection_recovery"),
-        asyncio.create_task(status_page.run(stop_event), name="gateway_status_page_loop"),
+        # Its first check waits for the hand-over, which saves the model keys from onboarding.
+        asyncio.create_task(
+            status_page.run(stop_event, first_check_after=(handover_task,)), name="gateway_status_page_loop"
+        ),
     ]
     if config.authorization.enabled:
         tasks.append(asyncio.create_task(access_inbox.run(stop_event), name="gateway_access_inbox_loop"))

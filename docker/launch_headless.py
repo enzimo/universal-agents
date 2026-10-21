@@ -138,6 +138,7 @@ from runtime_settings.code_sandbox_contract import (
     ENV_CODE_SANDBOX_MODE,
 )
 from docker.nats_service import (
+    LOCAL_NATS_ENABLED_ENV,
     apply_local_nats_env,
     local_nats_enabled_from_env,
     start_local_nats,
@@ -2630,8 +2631,13 @@ def main() -> int:
             env=inherited_env, logger=LOGGER, cwd=REPO_ROOT
         )
     else:
-        LOGGER.warning(
-            "Local NATS startup disabled by environment; using configured NATS endpoint(s): %s",
+        # A configured choice, not a fault: the bundle launcher (docker/run_bundle.py)
+        # starts NATS itself and turns this off on every start, and an operator
+        # turns it off to use their own NATS.
+        LOGGER.info(
+            "Not starting a local NATS server (%s=false); using the configured NATS server. "
+            "event=local_nats_not_started nats_servers=%s",
+            LOCAL_NATS_ENABLED_ENV,
             inherited_env.get("NATS_SERVERS") or inherited_env.get("NATS_URL"),
         )
     run_nats_consumer_preflight(config_path=config_path, env=inherited_env)

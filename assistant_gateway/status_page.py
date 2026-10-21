@@ -28,7 +28,12 @@ Sources, each producing ``StatusFindingV1`` items:
 A source that cannot be asked is listed in ``unavailable_sources`` and, for
 the broker, shown as a problem: silence must not look like health.
 ``notify_new_problems`` sends administrators one Inbox notice per new set of
-problems, linking to the page; the page itself never changes anything.
+problems, linking to the page; the page itself never changes anything. A
+notice records what administrators were told and is not withdrawn when its
+problems go away; the page shows the current state. So the loop's first check
+waits for the gateway's start-up work that changes what it would find
+(``StatusPage.run``), instead of reporting a condition that start-up is about
+to fix.
 """
 
 from __future__ import annotations
@@ -157,9 +162,23 @@ class StatusPage:
                 ",".join(item.finding_id for item in problems),
             )
 
-    async def run(self, stop_event: asyncio.Event) -> None:
-        """Check for new problems every ``NOTIFY_INTERVAL_SECONDS`` until the gateway stops."""
+    async def run(self, stop_event: asyncio.Event, *, first_check_after: Sequence[asyncio.Task[Any]] = ()) -> None:
+        """Check for new problems every ``NOTIFY_INTERVAL_SECONDS`` until the gateway stops.
 
+        The first check waits for ``first_check_after``: start-up work that
+        changes what the check finds. The gateway passes its onboarding key
+        hand-over, which saves the model keys typed during onboarding
+        (``assistant_gateway.onboarding_account_keys``). Checked alongside it,
+        every new instance's first start told administrators "No key is saved"
+        for a key saved a moment later, and that notice stayed (module
+        docstring). The wait ends however the work ends; a hand-over that fails
+        logs its own error, and the check then reports what is still missing.
+        It lasts at most the hand-over's wait for the broker, and only on a
+        start where onboarding left keys waiting.
+        """
+
+        if first_check_after:
+            await asyncio.wait(first_check_after)
         while not stop_event.is_set():
             try:
                 await self.notify_new_problems()

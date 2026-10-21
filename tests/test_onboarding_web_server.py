@@ -26,11 +26,15 @@ from runtime_settings.governance import REMOVED_TOOL_POLICY_KEYS
         ("v20.19.2", False),
         ("v22.22.0", False),
         ("v23.11.1", False),
-        ("v24.0.0", True),
+        ("v24.0.0", False),
+        ("v24.4.9", False),
+        ("v24.5.0", True),
         ("v25.1.0", True),
+        ("v24", False),
+        ("invalid", False),
     ],
 )
-def test_nodejs_available_requires_node_24(
+def test_nodejs_available_requires_node_24_5(
     monkeypatch: pytest.MonkeyPatch,
     version: str,
     expected: bool,
@@ -1340,16 +1344,16 @@ async def test_provider_test_handler_forwards_reasoning_request_options(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_test_provider_connection(**kwargs: object) -> provider_test.ProviderTestResult:
-        captured.update(kwargs)
+    async def fake_test_provider_connection(check) -> provider_test.ProviderTestResult:
+        captured.update(check.model_dump())
         return provider_test.ProviderTestResult(
             ok=True,
-            provider=str(kwargs["provider"]),
+            provider=check.provider,
             message="Connection test succeeded.",
         )
 
     monkeypatch.setattr(
-        "assistant_gateway.onboarding_web.server.test_provider_connection",
+        "assistant_gateway.onboarding_web.provider_process.run_provider_check",
         fake_test_provider_connection,
     )
     service = OnboardingWebService(
@@ -1384,17 +1388,15 @@ async def test_provider_test_handler_logs_sanitized_failure(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    def fake_test_provider_connection(
-        **kwargs: object,
-    ) -> provider_test.ProviderTestResult:
+    async def fake_test_provider_connection(check) -> provider_test.ProviderTestResult:
         return provider_test.ProviderTestResult(
             ok=False,
-            provider=str(kwargs["provider"]),
+            provider=check.provider,
             message="Could not reach the configured API Base URL: [Errno 111] Connection refused",
         )
 
     monkeypatch.setattr(
-        "assistant_gateway.onboarding_web.server.test_provider_connection",
+        "assistant_gateway.onboarding_web.provider_process.run_provider_check",
         fake_test_provider_connection,
     )
     service = OnboardingWebService(
@@ -1812,3 +1814,108 @@ async def test_sharing_off_makes_everything_private_and_a_fixed_service_is_refus
     assert handover is not None and set(handover.sharing.values()) == {"private"}
     assert refused.status == 400
     assert "not services the team can share or keep private: cli:google" in refused_text
+
+
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGINT"])
+@pytest.mark.parametrize("pending_checks", [0, 2], ids=["idle", "checking-providers"])
+def test_the_onboarding_page_stops_cleanly_when_the_container_stops(
+    tmp_path: Path, signal_name: str, pending_checks: int
+) -> None:
+    """Stop before Docker's 10 s grace even with several providers that never answer."""
+
+    import concurrent.futures
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import os
+    import queue
+    import re
+    import signal
+    import socket
+    import sys
+    import threading
+    import time
+    import urllib.request
+
+    arrived: queue.Queue[None] = queue.Queue()
+    release_provider = threading.Event()
+
+    class Provider(BaseHTTPRequestHandler):
+        def do_POST(self):
+            arrived.put(None)
+            release_provider.wait(45)
+            self.close_connection = True
+
+        def log_message(self, *args):
+            pass
+
+    provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    provider_thread = threading.Thread(target=provider.serve_forever, daemon=True)
+    provider_thread.start()
+    clients = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, pending_checks))
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    repo = Path(__file__).resolve().parents[1]
+    process = subprocess.Popen(
+        [
+            sys.executable, str(repo / "assistant_cli.py"), "onboard-web",
+            "--instance-root", str(tmp_path / "instance"), "--host", "127.0.0.1", "--port", str(port),
+        ],
+        cwd=repo,
+        env={**os.environ, "TMPDIR": str(tmp_path)},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    def request_check() -> None:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/provider-test",
+            data=json.dumps({
+                "provider": "OpenAI Compatible", "model": "test-model", "token": "test-provider-key",
+                "endpoint": f"http://127.0.0.1:{provider.server_port}/v1",
+            }).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        # Shutdown closes the request, so either a response or a disconnect is expected.
+        try:
+            with urllib.request.urlopen(request, timeout=45) as response:
+                response.read()
+        except OSError:
+            pass
+
+    try:
+        deadline = time.monotonic() + 90
+        while True:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as response:
+                    if response.status == 200:
+                        break
+            except OSError:
+                pass
+            assert process.poll() is None, "the onboarding page stopped before it was ready"
+            assert time.monotonic() < deadline, "the onboarding page did not become ready"
+            time.sleep(0.2)
+        checks = [clients.submit(request_check) for _ in range(pending_checks)]
+        for _ in checks:
+            arrived.get(timeout=30)
+        process.send_signal(getattr(signal, signal_name))
+        output, _ = process.communicate(timeout=5)
+        for check in checks:
+            check.result(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+        release_provider.set()
+        provider.shutdown()
+        provider.server_close()
+        provider_thread.join(timeout=5)
+        clients.shutdown(wait=True)
+    assert process.returncode == 0, output[-3000:]
+    assert f"event=onboarding_web_stop_signal_received signal={signal_name}" in output
+    stopped = re.findall(r"event=onboarding_provider_process_stopped pid=(\d+)", output)
+    assert len(stopped) == pending_checks
+    for child_pid in stopped:
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(child_pid), 0)

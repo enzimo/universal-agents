@@ -60,6 +60,7 @@ import http from "node:http";
 import crypto from "node:crypto";
 import { once } from "node:events";
 import { isSupportedNodeVersion } from "./spectrum-runtime.mjs";
+import { configureTrustStore } from "./trust-store.mjs";
 
 const projectId = process.env.PHOTON_PROJECT_ID;
 const projectSecret = process.env.PHOTON_PROJECT_SECRET;
@@ -94,8 +95,18 @@ if (!projectId || !projectSecret || !sharedToken) {
 if (!isSupportedNodeVersion()) {
   console.error(
     `photon-sidecar: Node ${process.versions.node} is unsupported; ` +
-      "Photon requires Node.js 24 or newer."
+      "Photon requires Node.js 24.5 or newer."
   );
+  process.exit(3);
+}
+
+try {
+  const removed = configureTrustStore();
+  if (removed) {
+    console.error(`photon-sidecar: removed ${removed} distrusted TLS root(s).`);
+  }
+} catch (error) {
+  console.error(`photon-sidecar: could not secure TLS trust store: ${error.message}`);
   process.exit(3);
 }
 

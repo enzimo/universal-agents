@@ -209,13 +209,13 @@ async def test_browser_provider_test_rejects_store_outside_instance(
 ) -> None:
     provider_test_called = False
 
-    def fail_if_called(*args: object, **kwargs: object) -> object:
+    async def fail_if_called(*args: object, **kwargs: object) -> object:
         nonlocal provider_test_called
         provider_test_called = True
         raise AssertionError("provider test must not run with an outside auth store")
 
     monkeypatch.setattr(
-        "assistant_gateway.onboarding_web.server.test_provider_connection",
+        "assistant_gateway.onboarding_web.provider_process.run_provider_check",
         fail_if_called,
     )
     service = OnboardingWebService(

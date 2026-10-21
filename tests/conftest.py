@@ -13,6 +13,21 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from live_provider_safety import sanitize_provider_failure  # noqa: E402
+from tests.postgres_marker_guard import unmarked_postgres_cases  # noqa: E402
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Refuse PostgreSQL cases that no profile would ever run (see postgres_marker_guard)."""
+
+    missing = unmarked_postgres_cases(items)
+    if missing:
+        listed = "\n  ".join(missing[:20])
+        raise pytest.UsageError(
+            f"{len(missing)} PostgreSQL test case(s) lack the postgres marker, so the PostgreSQL CI "
+            "job never selects them. Parametrize the backend with "
+            "pytest.param(\"postgres\", marks=[pytest.mark.live, pytest.mark.postgres]) or reuse "
+            f"tests.knowledge_support.BACKENDS:\n  {listed}"
+        )
 
 
 @pytest.hookimpl(hookwrapper=True)
