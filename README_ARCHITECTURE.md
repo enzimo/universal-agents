@@ -1565,8 +1565,11 @@ the use in the same transaction as the guarded update (`access_grant_uses`,
 person inside itself (`apply_change`, `set_up_tools`, the access workflow and
 proposal tools) pauses with a Strands interrupt, and Strands runs the call
 again from its start when it resumes, this hook included. The resumed call
-keeps its use and takes no second one. A sibling call of the same step, a
-later call (also one whose model server repeats the tool use id) and the fresh
+keeps its use and takes no second one. Before keeping that use, consumption
+rechecks the grant's active status under the access store's write lock. A
+revocation committed before consumption takes that lock refuses the resumed call. A
+sibling call of the same step, a later call (also one whose model server
+repeats the tool use id) and the fresh
 call a task makes after a restart all find the grant used: a paused call lives
 only in its process, so a restart never resumes it, and its use stays spent.
 The use is still taken at the decision, before the call runs, because that
