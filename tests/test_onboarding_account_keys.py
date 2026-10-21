@@ -28,6 +28,7 @@ from custom_messages.contracts.access_v2 import AccessNoticeKind, AccessNoticeV1
 from runtime_settings.instance_layout import InstanceLayout
 from secure_tool_broker.credential_catalog import load_catalog
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+from secure_tool_broker.model_key_page import model_key_reports, team_model_key_store
 from access_catalog.catalog import CatalogSource
 from access_control.account_sharing import TeamAccountSharing
 from custom_messages.contracts.access_v2 import AccountSharing
@@ -49,6 +50,10 @@ def instance(tmp_path: Path) -> Path:
 @pytest.fixture
 def broker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     isolate_credentials(tmp_path, monkeypatch)
+    # One model key store and report record per broker process; each test is a
+    # fresh broker, so its routes must not keep an earlier test's store.
+    team_model_key_store.cache_clear()
+    model_key_reports.cache_clear()
     held = fake_sealbox(monkeypatch)
     running, stop = start_broker(build_gate(tmp_path), monkeypatch)
     running.sealbox = held  # type: ignore[attr-defined]
@@ -188,9 +193,7 @@ def test_a_hand_over_file_that_is_not_valid_is_kept_and_reported(instance: Path,
 async def test_onboarding_model_keys_become_the_teams_keys_only_for_an_administrator(instance: Path, broker, caplog) -> None:
     from custom_messages.contracts.access_v2 import OnboardingModelKeyV1
     from model_providers.endpoints import EndpointKind
-    from secure_tool_broker.model_key_page import team_model_key_store
 
-    team_model_key_store.cache_clear()
     model_key = OnboardingModelKeyV1(
         address="https://openrouter.ai/api/v1", kind=EndpointKind.OPENAI_COMPATIBLE, model_id="deepseek/x", value="sk-onboarding-key-001"
     )
@@ -347,3 +350,125 @@ def test_the_hand_over_file_merges_sharing_choices(instance: Path) -> None:
     handover = read_handover(instance)
     assert handover is not None and handover.keys == {"http:exa": EXA_KEY}
     assert handover.sharing == {"http:exa": AccountSharing.PRIVATE, "model_keys": AccountSharing.SHARED}
+
+
+# -- the first Status check after onboarding (assistant_gateway.status_page) --------------
+
+
+class _SlowLinking:
+    """The gateway's broker client; linking takes as long as the real hand-over (0.1-1.1 s were measured)."""
+
+    def __init__(self, client: HttpGatewaySecureBroker, seconds: float, events: list[str]) -> None:
+        self._client = client
+        self._seconds = seconds
+        self._events = events
+
+    def __getattr__(self, name: str):
+        return getattr(self._client, name)
+
+    async def link_onboarding_account_keys(self, request):
+        await asyncio.sleep(self._seconds)
+        try:
+            return await self._client.link_onboarding_account_keys(request)
+        finally:
+            self._events.append("hand-over sent")
+
+
+async def _first_start_with_a_model_key(instance: Path, running, *, roles: tuple[str, ...]):
+    """The gateway's start-up access work after onboarding left a model key; returns the events and stored notices."""
+
+    from types import SimpleNamespace
+
+    from assistant_gateway import gateway as gateway_module
+    from assistant_gateway.config import GatewayInstanceConfig
+    from assistant_gateway.status_page import StatusPage
+    from custom_messages.contracts.access_v2 import OnboardingModelKeyV1
+    from custom_messages.contracts.control_v1 import AgentStatus
+    from custom_messages.enums import MessageMetaType
+    from model_providers.endpoints import EndpointKind
+    from storage.access_repository import AccessRepository
+
+    address ="https://openrouter.ai/api/v1"
+    config = GatewayInstanceConfig.create(
+        instance_name="first-start", instance_root=str(instance), team_id=TEST_TEAM, timezone="UTC"
+    )
+    config.llm.provider, config.llm.model_id, config.llm.litellm_api_base = "litellm", "deepseek/x", address
+    config.authorization.enabled = False
+    model_key = OnboardingModelKeyV1(
+        address=address, kind=EndpointKind.OPENAI_COMPATIBLE, model_id="deepseek/x", value="sk-onboarding-key-001"
+    )
+    write_handover(instance, team_id=TEST_TEAM, person_id="owner-1", keys={}, model_keys=[model_key])
+    client = _gateway_broker(running)
+    events: list[str] = []
+
+    async def model_key_status() -> dict:
+        saved = team_model_key_store(TEST_TEAM).get("https://openrouter.ai") is not None
+        events.append(f"checked, key {'saved' if saved else 'not saved'}")
+        return await client.get_model_key_status()
+
+    lead = AgentStatus(
+        self_id="lead-1", team_id=TEST_TEAM, named_agent_type="TeamArchitect", name="Nova", is_paused=False,
+        agent_role="lead", is_team_lead=True, status_type=MessageMetaType.RESPONSE,
+    )
+    notices = AccessRepository(config.manager_storage_settings)
+    page = StatusPage(
+        config=config, model_key_status=model_key_status, agent_statuses=lambda: [lead],
+        send_notice_once=notices.create_notice_if_absent,
+    )
+
+    async def nothing_to_recover() -> int:
+        return 0
+
+    inbox = SimpleNamespace(
+        person=lambda person_id: SimpleNamespace(roles=roles) if person_id == "owner-1" else None,
+        send_notice=lambda notice: None,
+        access_store=lambda: running.gate.links,
+        catalog=lambda: running.gate.catalog,
+    )
+    idle = SimpleNamespace(recover_unwatched=nothing_to_recover, recover_collections=nothing_to_recover)
+    stop = asyncio.Event()
+    # The gateway's start-up access work, started as the gateway starts it.
+    tasks = gateway_module._access_maintenance_tasks(
+        SimpleNamespace(instance_root=str(instance), manager=config.manager, authorization=config.authorization),
+        access_inbox=inbox,
+        broker=_SlowLinking(client, 0.3, events),
+        tool_setups=idle,
+        credential_workflow=idle,
+        status_page=page,
+        stop_event=stop,
+    )
+    try:
+
+        async def first_check() -> None:
+            while not any(event.startswith("checked") for event in events):
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(first_check(), timeout=20)
+    finally:
+        stop.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    stored = notices.notices_for(TEST_TEAM, person_id="owner-1", roles=("admin",))
+    return events, [notice for notice, _read in stored]
+
+
+@pytest.mark.asyncio
+async def test_the_first_status_check_waits_for_the_model_key_from_onboarding(instance: Path, broker) -> None:
+    """A new administrator's first start: no "No key is saved" notice for the key onboarding handed over."""
+
+    events, notices = await _first_start_with_a_model_key(instance, broker, roles=("owner",))
+
+    assert [notice.title for notice in notices] == []
+    assert events == ["hand-over sent", "checked, key saved"]
+    assert not InstanceLayout.at(instance).onboarding_account_keys_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_key_the_hand_over_could_not_save_is_reported_after_it(instance: Path, broker) -> None:
+    """The wait ends however the hand-over ends: a key still missing afterwards is a problem."""
+
+    events, notices = await _first_start_with_a_model_key(instance, broker, roles=("member",))
+
+    assert events == ["hand-over sent", "checked, key not saved"]
+    [notice] = notices
+    assert notice.kind is AccessNoticeKind.STATUS_PROBLEMS and "No key is saved for openrouter.ai" in notice.summary
+    assert InstanceLayout.at(instance).onboarding_account_keys_path.exists(), "kept for the next start"

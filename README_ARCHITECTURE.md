@@ -3200,7 +3200,13 @@ schedules for administrators, receive loops that stopped), whether TeamLead
 reports, and its own configuration and receive loops. A source that does not answer is listed and shown as a
 problem, because silence must not look like health. Every five minutes the
 gateway sends administrators one Inbox notice per new set of problems
-(`status_problems`), linking to the page. Why: conditions such as an
+(`status_problems`), linking to the page. A notice records what
+administrators were told and stays when its problems go away, so the first
+check after a start waits for the gateway's onboarding key hand-over
+(`StatusPage.run`, `assistant_gateway/onboarding_account_keys.py`). Checked
+alongside it, every new instance's first start reported the model key typed
+during onboarding as missing, a moment before the hand-over saved it.
+Why: conditions such as an
 environment variable silently overriding a saved setting or key, a rejected
 model key, or an MCP server that stopped answering were only in logs or only
 known to one process.
