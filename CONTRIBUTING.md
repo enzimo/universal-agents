@@ -167,7 +167,8 @@ Keep SQLite timing tests independent of disk speed. A test that holds a
 database lock for a set time takes it with `tests/sqlite_lock_support.py`,
 whose connection neither flushes its commit nor checkpoints the write-ahead log
 when it closes. A plain connection does both while it still holds the lock, and
-on a slow CI disk that outlasted the stores' 2.5-second lock wait.
+on a slow CI disk that outlasted the stores' 2.5-second lock wait. Likewise, set
+up files before timing an operation: a new file's first write flushes to disk.
 
 The access tests start the evaluator (`target/debug/ua-cedar-authorizer
 serve-access`) as a real process. After changing the Cedar files in

@@ -270,6 +270,8 @@ def test_a_slow_open_and_a_slow_statement_are_logged_without_their_values(tmp_pa
     with connect_sqlite(db_path) as conn:
         conn.execute("CREATE TABLE people(name TEXT)")
         conn.commit()
+    # On a slow disk the setup itself is slow and logged; only the lines below count.
+    caplog.clear()
 
     monkeypatch.setattr(sqlite_connection, "SLOW_SQLITE_OPERATION_SECONDS", 0.0)
     with caplog.at_level(logging.WARNING, logger="storage.sqlite_connection"):
@@ -285,8 +287,13 @@ def test_a_slow_open_and_a_slow_statement_are_logged_without_their_values(tmp_pa
 
 
 def test_fast_operations_are_not_logged(tmp_path, caplog):
+    path = str(tmp_path / "fast.db")
+    # A new file's switch to WAL flushes to disk and is rightly logged on a slow
+    # disk, so the file is created first; opening it again writes nothing.
+    connect_sqlite(path).close()
+    caplog.clear()
     with caplog.at_level(logging.WARNING, logger="storage.sqlite_connection"):
-        with connect_sqlite(str(tmp_path / "fast.db")) as conn:
+        with connect_sqlite(path) as conn:
             conn.execute("SELECT 1").fetchone()
     assert "_slow" not in caplog.text
 
