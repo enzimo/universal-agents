@@ -135,6 +135,7 @@ WEB_CHAT_MODULE_ASSETS = (
     "settings_support.mjs",
     "settings_controls.mjs",
     "team_controls.mjs",
+    "file_retention_controls.mjs",
     "memory_controls.mjs",
     "status_page.mjs",
     "knowledge_page.mjs",

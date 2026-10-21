@@ -245,7 +245,9 @@ def _install_objective_work_schedule(
         if existing_schedule is None:
             store.add(schedule, system_mutation_permit=permit)
         else:
-            store.update(schedule, base=existing_schedule, system_mutation_permit=permit)
+            # Roll back only the snapshot this write saved. The store assigns
+            # a timing revision, so the input copy is not the saved version.
+            schedule = store.update(schedule, base=existing_schedule, system_mutation_permit=permit)
         schedule_persisted = True
         policy = agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.objective_work_coordinator.set_schedule,

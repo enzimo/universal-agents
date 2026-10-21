@@ -247,7 +247,6 @@ async def _finalize_objective_work_invocation(
             "limits": await runtime.run(
                 coordinator.checkpoint_invocation_limits, session
             ),
-            "callback_handler": checkpoint_callback,
             "invocation_state": dict(invoke_kwargs.get("invocation_state") or {}),
         }
         checkpoint_kwargs["invocation_state"].pop(
@@ -268,6 +267,7 @@ async def _finalize_objective_work_invocation(
                 checkpoint_prompt,
                 tool_stop=tool_stop,
                 invoke_kwargs=checkpoint_kwargs,
+                callback_handler=checkpoint_callback,
                 logger=logger,
             )
             checkpoint_usage, checkpoint_cycles = _objective_work_invocation_usage(
@@ -607,7 +607,16 @@ class _TurnState:
     result: Any = None
     content: ContentType | None = None
     after_action_report: Any = None
+    # Keywords for Strands' invoke_async; only ones it declares
+    # (sdk.strands.turn_tool_stop). Every call of the turn reuses them.
     invoke_kwargs: dict[str, Any] = field(init=False)
+    # The turn's callback handler; the Strands agent's own during each call.
+    callback_handler: Callable[..., None] = field(init=False)
+    # The turn's count of fresh reinvocations after the provider rejected its
+    # input as too large (context_recovery.decide_provider_context_retry). It
+    # outlives each call; reductions inside one call count in that call's
+    # Strands request_state instead (filtered_tool_result_context).
+    context_retry_budget: dict[str, Any] = field(default_factory=dict)
     tool_call_limit_handler: ToolCallLimitCallbackHandler | None = None
     partial_finalization_requested: bool = False
     runtime_instruction_parts: list[str] = field(init=False)
@@ -1442,17 +1451,21 @@ class LLMTurnExecutor:
         *,
         task_id: Optional[str],
         error: BaseException,
-        invocation_state: Dict[str, Any],
+        budget_state: Dict[str, Any],
         provider_retry_attempt: int,
         tool_call_limit_handler: Any,
     ) -> tuple[bool, bool, ProviderContextRetryDecision]:
-        """Resolve context retry policy and fail immediately for a handled denial."""
+        """Resolve context retry policy and fail immediately for a handled denial.
+
+        ``budget_state`` is the turn's own count of reinvocations
+        (``_TurnState.context_retry_budget``).
+        """
 
         tool_calls_started = self._model_failover_tool_activity_started(
             tool_call_limit_handler
         )
         decision = decide_provider_context_retry(
-            invocation_state,
+            budget_state,
             recovery_enabled=self._should_recover_context_overflow(),
             is_context_overflow=self._is_provider_context_overflow_error(error),
             tool_calls_started=tool_calls_started,
@@ -2436,8 +2449,7 @@ class LLMTurnExecutor:
                 task_id=turn.active_task_id,
             )
         )
-        callback_handler = CompositeCallbackHandler(*callbacks)
-        turn.invoke_kwargs["callback_handler"] = callback_handler
+        turn.callback_handler = CompositeCallbackHandler(*callbacks)
         turn.span_attributes = {
             "team_id": self.settings.team_id or "",
             "agent_id": self.settings.id,
@@ -2482,6 +2494,7 @@ class LLMTurnExecutor:
                         strands_prompt_input,
                         tool_stop=self._require_tool_stop(turn),
                         invoke_kwargs=turn.invoke_kwargs,
+                        callback_handler=turn.callback_handler,
                         logger=self.logger,
                     )
                     late_guidance = (
@@ -2594,7 +2607,7 @@ class LLMTurnExecutor:
         ) = await self._resolve_provider_context_retry(
             task_id=turn.active_task_id,
             error=invoke_error,
-            invocation_state=turn.invoke_kwargs["invocation_state"],
+            budget_state=turn.context_retry_budget,
             provider_retry_attempt=turn.provider_retry_attempt,
             tool_call_limit_handler=turn.tool_call_limit_handler,
         )
@@ -2881,6 +2894,7 @@ class LLMTurnExecutor:
                 msg_meta=turn.msg_meta,
                 strands_agent=self.model(),
                 invoke_kwargs=turn.invoke_kwargs,
+                callback_handler=turn.callback_handler,
                 full_prompt=turn.full_prompt,
                 start_notes=turn.start_notes,
             )

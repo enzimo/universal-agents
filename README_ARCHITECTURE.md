@@ -321,9 +321,19 @@ each. They run in parallel on as many workers as the team allows:
   `cancel_delegated_task` (tool `fn:worker_pools`).
 
 Agents can inspect their current user's unfinished queue with `list_task_queue`
-and manage another task through `control_task_queue`. Cancellation retains
-history and stops attached work; resume refuses unresolved approvals, questions,
-delegation and runtime review. Pause notices identify the task and affected
+and manage another task of the request they work on through
+`control_task_queue` (`custom_tools/providers/task_queue.py`). A turn controls
+only its own request (owner's decision 2026-10-19): the target's stored signed
+context id must equal the turn's verified one (`access_runtime.request_id_of`,
+`verified_context_id`), checked before any state check, so stop is limited too.
+For another request the tool refuses and the person is told to ask in that
+request's thread or to stop it with `/stop task` or Settings → Tasks. Why: a
+person often has several requests open at once, one lead model turn running
+while the others wait for workers or people, and a model turn for one request
+must not end or wake another request the person is waiting on; people's own
+stops go through the manager without a model turn and stay immediate.
+Cancellation retains history and stops attached work; resume refuses unresolved
+approvals, questions, delegation and runtime review. Pause notices identify the task and affected
 worker. Settings also pages finished task results across agents, including
 stopped workers, ten records at a time. Runtime Controls sorts schedules by next
 fire time, with undated schedules last.
@@ -401,6 +411,47 @@ run time and the run notes' content, which runs change by themselves, so a
 schedule that runs often can still be paused. Before, saves replaced whole rows with copies read earlier,
 which could bring back a deleted schedule, undo a pause, or make a run happen
 twice.
+
+The agent schedule tools bind their changes to the same digest
+(`custom_agents.schedule_changes`). `list_scheduled_jobs`, `create_scheduled_job`
+and every change that went through return each schedule's `record_digest`;
+`update_scheduled_job`, `pause_scheduled_job`, `resume_scheduled_job`,
+`disable_scheduled_job` and `remove_scheduled_job` require it back as
+`expected_record_digest`. The change is built only while the stored schedule
+still has that digest, and the store checks it again in its write transaction.
+A model that read a schedule before another request changed it gets
+`changed_since_read` (`custom_messages.enums.ChangeRefusal`) and reads it again,
+instead of overwriting the newer change; a change to a schedule the runtime
+manages is then refused before it is staged, and approvals keep their own
+digests and exact permits. Claims, the remaining count, a repeating schedule's
+next run time and the run notes are not in the digest, so scheduler runs never
+make a read stale. The stored schedule's `timing_revision` increments on an
+explicit timing change and participates in the digest. This lets a delayed
+retime detect another explicit retime without treating a normal scheduler
+advance as an edit. Replacements preserve or increment the stored revision;
+they cannot reset it from an older copy. Before 2026-10-20 a tool change started from the schedule as
+it was when the call ran, and only a change racing that call was refused.
+
+`ScheduleStore.update` returns the exact snapshot saved by its transaction.
+Objective work-session rollback uses that snapshot as its base, including the
+assigned timing revision. It can reverse its own failed reconfiguration while
+keeping later run notes, and still refuses to undo a person's later stop or edit.
+
+A model's `schedule_message` turn action only creates a schedule. Its payload
+has no schedule id: the runtime names the new schedule before the turn-action
+outbox saves the action, and the outbox creates it with
+`ScheduleStore.add(create_only=True)`, which never changes a stored schedule
+(`schedule_installation.create_schedule_from_turn_action`). Running the saved action
+again after a restart finds its own schedule and creates no second one. Before,
+the action took a schedule id and replaced the stored schedule with that id,
+owner included, so one person's request (a worker's as well as the lead's)
+could overwrite another person's schedule. Existing schedules change only
+through the schedule tools above. Trusted installers keep the replace path: the
+gateway and InternalImprovementAgent send `ScheduledMessage` messages whose
+`install_mode` decides what happens to a stored schedule
+(`scheduled_runtime.handle_scheduled_message`), and runtime code (Objective work
+schedules, retries after provider limits, after-action review schedules, team
+transfer imports) calls the store directly.
 
 The comparison includes a one-time reminder's due time and the run-note policy,
 so a stale reschedule or notification edit is refused too. Explicitly moving a
@@ -649,17 +700,60 @@ A failed completion therefore leaves the Objective deleting and retryable;
 there is no later metadata write after the record becomes deleted, because
 repeated deletion commands return immediately for a completed deletion.
 
-Every Objective change loads the stored record, changes it and saves it inside
-one operation of the team lead's task operation lane
-(`ObjectiveCoordinator.change_objective` in
-`custom_agents/task_manager_objectives.py`). The store writes whole records, so
-a copy kept from an earlier operation and saved later would erase whatever was
-stored in between. Until 2026-10-17 this happened: a person's pause or resume
-erased the work-session policy's own event every time, and the team lead's
-status tool could erase a progress update or a schedule linked by a parallel
-tool call. A static test keeps every other module from saving Objective
-records, and a lane refuses an operation submitted from inside one of its own
-operations (`NestedTaskOperation`) instead of waiting for itself.
+Every Objective change runs inside one operation of the team lead's task
+operation lane (`ObjectiveCoordinator.change_objective` in
+`custom_agents/task_manager_objectives.py`), and the store applies it to the
+stored row inside one write transaction (`ObjectiveRepository.change_objective`
+in `storage/objective_repository.py`: `BEGIN IMMEDIATE` in SQLite, the row
+locked with `SELECT ... FOR UPDATE` in PostgreSQL). It reads the row, applies
+the change and writes the row back; a new Objective is only inserted, and an
+insert never replaces a stored one. Nothing writes a whole copy read earlier.
+Until 2026-10-17 copies kept across lane operations erased the work-session
+policy's own event on every pause or resume, and a progress update or a
+schedule linked by a parallel tool call. Until 2026-10-20 the store still
+replaced the whole record from whatever copy a writer held: an older copy that
+changed only the desired outcome put back an older title, and a task link
+saved by one team lead process (an old one and its replacement share the
+store) erased the success criterion another had just marked met. A change to a
+deleted Objective finds no row and stays undone.
+
+Two kinds of Objective change differ in what they check:
+
+- **Agent edits** (`objectives(action="update_progress")` and
+  `objectives(action="update_status")`) name the version the agent read
+  (`expected_version`). The version (`objective_version` in
+  `custom_messages/records/objectives.py`) is a digest of the fields an agent
+  decides on: title, desired outcome, why, horizon, priority, completion
+  policy, success criteria (without their timestamps), constraints, non-goals
+  and whether the person must confirm. The store checks it in the write
+  transaction and refuses a change from an older read with
+  `changed_since_read`; the tool returns that as a failed result and the
+  agent reads the Objective again. `get`, `list`, `create_objective` and
+  every change return the current version.
+  Progress text, focus and lifecycle status are outside the version: it does
+  not reject two changes to the same such field. Each change updates only its
+  supplied fields on the stored row, under current lifecycle rules. Agent
+  status changes check a person's deletion inside that write transaction;
+  a deletion that began after the tool read the record cannot be reopened.
+- **Trusted bookkeeping** (a task linked when it arrives or as a subtask, the
+  review when a linked task ends, a continuation task, plans following their
+  tasks, recovery tasks, work-session events, linked schedules and heartbeat
+  items, the link flags a lifecycle change records) merges its fields into
+  the stored row and names no version, so it is never refused and never
+  erases an edit. The version leaves out exactly these fields, the status and
+  what is recorded with it (satisfaction, confirmation, deletion), owners and
+  timestamps; otherwise every linked task change would refuse the team
+  lead's next edit. Every record field is in one of the two lists
+  (`OBJECTIVE_VERSION_FIELDS`, `OBJECTIVE_BOOKKEEPING_FIELDS`), which a test
+  checks.
+
+The version is computed, not stored, so the saved record and the team
+transfer's Objective section are unchanged; it stays the same across restarts
+and custody changes. A person's Runtime controls keep their own check, the
+digest of the whole record the page showed (below). A static test keeps every
+module but the coordinator, the store and the team import from writing
+Objective records, and a lane refuses an operation submitted from inside one
+of its own operations (`NestedTaskOperation`) instead of waiting for itself.
 
 A lifecycle change (`custom_agents/objective_lifecycle.py`) is one such
 operation for both a person's Runtime controls and the team lead's
@@ -741,6 +835,34 @@ knowledge base), plus task history:
   metadata, including onboarding progress. The Settings
   memory controls get the same view without metadata (`pinned_memory_reply`).
   A Signal chat id is a phone number, so it never reaches a model or a reply.
+  Several requests can change the same memory, and a model's change can arrive
+  long after it read the fact (`storage/pinned_memory_repository.py`):
+  - **A change names the version it read.** A fact's revision digest
+    (`record_digest`) covers its bank, owner, number, internal UUID and last
+    change time. The agent `memory` tool's replace and delete require it, and
+    the Settings page sends it. The store compares it with the fact in the
+    same write transaction as the change, so a change based on an older read
+    is refused (`changed_since_read`) and changes nothing. Deleted numbers are
+    given to new facts; because the digest includes the UUID, a delayed change
+    never reaches the new fact that took the number. People's slash commands
+    name facts by the number they see now. Facts in prompt context carry no
+    digest (it would add 64 characters per fact to every model call), so
+    agents list a bank before changing it.
+  - **Undo reverses only the current state.** An event is undone only while
+    the fact is still as that event left it: it still holds what a create or
+    replace saved, or it is still gone after a delete or expiry, with nothing
+    done to it since. Otherwise undo is refused (`changed_since_read`), so
+    undoing an older change never restores an earlier copy over a later edit.
+    Changes can still be undone one after another, latest first.
+  - A write returns its fact snapshot and event id from the same transaction.
+    Another request can change or reuse the number immediately after commit;
+    the receipt still identifies the change that just happened. A repeated
+    create with the same source key returns the existing fact without a new
+    event.
+  - **Writers take turns.** Every change takes the store's write lock before
+    it reads (`BEGIN IMMEDIATE`, or a transaction advisory lock in PostgreSQL),
+    so simultaneous creates get different numbers. Removing expired facts on a
+    read takes the lock only when there is something to remove.
 - The memory graph stores episodes, entities, claims, evidence, handoffs, and
   semantic retrieval data.
 - The knowledge base (`knowledge_base/`, `storage/knowledge_repository.py`) stores
@@ -942,6 +1064,35 @@ startup failures. MCP tools follow their separate registration path and cannot b
 named in these lists.
 
 The topology owner establishes JetStream streams before consumers validate them.
+The gateway (or a team lead started without an instance configuration) creates
+or updates the team's streams when it connects; the manager, the startup agents
+and every worker only check, once, that they exist with the expected settings
+(`custom_transport.nats_topology`). The headless launcher starts all of them at
+the same moment, so whenever the streams were missing or out of date (a new
+team, an upgrade that adds or changes a stream, and with
+`transport.storage: memory` every start of the container's own NATS server)
+a manager whose check came first stopped, and every service stopped with it;
+slow storage delays the gateway's start enough to make that order likely. The
+launcher therefore runs the gateway's own stream setup, with the gateway's
+configuration and environment, as its last step before starting any service
+(`docker.launch_headless.prepare_message_streams`,
+`event=nats_streams_prepared`). The gateway repeats it when it connects and
+finds nothing to change. Nothing waits or polls: a participant that still finds
+no streams (for example after they were removed from NATS while the runtime
+ran) fails at once with "start the topology owner first", and a setup the
+broker refuses stops the launch with `event=nats_streams_prepare_failed`.
+This preparation owns the already-started NATS, Sealbox and OpenShell
+services until the supervisor takes over. Loading the effective gateway
+configuration also reads `team.env` overrides that the launcher's initial
+configuration load has not seen. Invalid overrides therefore refuse startup
+with the same event and stop those services. Interruption or an unexpected
+failure also cleans them up before propagating; every stop is attempted even
+if sandbox cleanup or another stop fails. Cleanup failures are logged as
+`event=nats_streams_prepare_cleanup_failed` without replacing the original
+preparation failure.
+In-app restarts keep the streams they started with, because transport settings
+are operator-owned and change only with a new launch.
+
 Each agent owns one model execution slot across turn preparation, invocation,
 and completion. Parent recovery waits for that owner; queued tasks cannot claim
 the slot during an active turn. Control and status messages remain responsive.
@@ -1131,7 +1282,7 @@ signed-in Web Chat session and sends each message as that person.
 
 Agents keep temporary files in `scratch/` of their task folder. When the
 internal-improvement maintenance schedule fires, trusted code in the manager
-deletes files there older than `tool_policy.scratch_retention_days` (14 by
+deletes files there older than `tool_policy.scratch_retention_days` (21 by
 default, 0 turns it off) from every person's and the agents' `scratch/`,
 walking folders without following links, and gives InternalImprovementAgent
 the counts (`custom_agents/scratch_retention.py`). The maintenance run itself
@@ -1280,10 +1431,13 @@ owns (`custom_tools/tool_stop.py`). The turn passes it to Strands as the
 invocation's `cancel_signal` and to the tools through `invocation_state`.
 Strands' own `agent.cancel_signal` cannot carry the stop: Strands clears it as
 soon as the invocation ends, and a stopped turn ends before a tool thread looks.
-Every turn also passes `callback_handler` to Strands as an extra keyword, so
-Strands hands tools the turn's `invocation_state` one level down; tools read
-it through `custom_tools.runtime_context.caller_invocation_state`, which
-handles both shapes.
+A turn calls Strands only with the keywords `Agent.invoke_async` declares
+(`custom_agents/sdk/strands/turn_tool_stop.py`). Strands treats any other
+keyword as deprecated and then hands tools and hooks the turn's values one
+level down. The turn's callback handler is therefore the Strands agent's own
+handler for the length of each call, and each call gets a fresh copy of the
+turn's `invocation_state`, so Strands' per-call bookkeeping (`request_state`
+and its cycle ids) never carries from one call of the turn into the next.
 
 A stop sets the signal before it cancels the turn. The process supervisor then
 ends the running command's whole process group (SIGTERM, then SIGKILL a second
@@ -1402,7 +1556,24 @@ manager storage (`storage/access_repository.py`).
 
 Every function tool call is decided the same way by one Strands
 `BeforeToolCallEvent` hook that runs last (`custom_agents/access_runtime.py`),
-so an earlier cancellation cannot use up a one-time grant. It skips calls the
+so an earlier cancellation cannot use up a one-time grant. A one-time use
+belongs to the call that took it. The hook gives each call a stable id
+(`call_operation_id`: a hash of the agent id, the `tracking_id` Strands gives
+the model step's message, and the tool use id), and the store records it with
+the use in the same transaction as the guarded update (`access_grant_uses`,
+`AccessRepository.consume`). This matters because a tool that waits for a
+person inside itself (`apply_change`, `set_up_tools`, the access workflow and
+proposal tools) pauses with a Strands interrupt, and Strands runs the call
+again from its start when it resumes, this hook included. The resumed call
+keeps its use and takes no second one. A sibling call of the same step, a
+later call (also one whose model server repeats the tool use id) and the fresh
+call a task makes after a restart all find the grant used: a paused call lives
+only in its process, so a restart never resumes it, and its use stays spent.
+The use is still taken at the decision, before the call runs, because that
+guarded update is what stops two sibling calls from both passing on one use.
+A use is never given back, also when the call then fails. The broker gate,
+folder decisions and code access decide each request once and take a use
+without a call id. It skips calls the
 broker decides, Strands' structured-output tool (the turn answer), and names the
 agent has no tool for: nothing runs for those, and Strands answers "Unknown
 tool", which the runtime guardrails extend with a hint when the name is a turn
@@ -1502,6 +1673,29 @@ requests naming one operation are refused (`AccessService.operation_refusal`),
 because operation names are fragile (sending mail is both `gmail_send` and
 `command:gmail.send`); blocks may still name one.
 
+Agents' restrictions and revocations stay inside the request (owner's decision
+2026-10-19). `AccessRequests.restrict` decides whether TeamLead may restrict
+with the request and person of its task, and stores the block bound to both
+(`lifetime: task`, `task_id` = the request's signed context id, and
+`for_person_id`), so it counts only in that request, ends with it
+(`end_task_grants`) and stays behind in a team transfer like other task
+grants. `AccessRequests.revoke` ends only what the agent's type gave for its
+current request and person (`AccessRequests.in_agent_reach`): a grant bound to
+that exact request for the same person's work. Lasting grants and blocks bound
+to no request are never in an agent's reach. Parts of the same entry bound to
+another request stay. `GrantV1` lets a block name a person only when it is
+bound to one request. Why: a person often has several requests open at once,
+and they may share worker types, so a team-wide restriction or an entry-wide
+revocation from one request changed the person's other requests, and the
+lead's type could end access it handed down for another person. People's and
+administrators' blocks (`AccessRequests.block`, approved proposals) name no
+person and stay team-wide and immediate; TeamLead asks for a lasting one with
+`propose_access_change`. Restrictions made before this rule stay team-wide,
+and only an administrator removes them (`unblock`). Scheduled-worker setup
+reconciles lasting grants separately after checking the schedule's owner. It
+ends only grants the lead's type gave for that exact schedule and person when
+the saved requirements no longer need them; a person's grants stay.
+
 One entry per tool (`access_control/grant_entries.py`): an agent's access to one
 tool for one person's work is one entry. A new grant that covers an existing
 one replaces it in the same transaction, and what was handed on from the old
@@ -1518,7 +1712,8 @@ removing the set left working. A person's decision stores its grants and its
 outcome in one transaction, so a grant it replaces ends only if the outcome is
 stored (see "Each request is decided once" below). Removing access removes the whole entry
 (`AccessService.revoke_by_person`, `AccessRequests.revoke`, proposals'
-removals). Why: people saw several independent grants for one tool, assumed the
+removals); an agent's revocation removes the entry's grants for its current
+request and person (see above). Why: people saw several independent grants for one tool, assumed the
 broadest replaced the others, and removing one could leave another working.
 
 Folders are access targets too (`access_control/folders.py`). A folder is named
@@ -1907,6 +2102,33 @@ outcomes until the next model invocation consumes them. Duplicate notes are
 matched at their boundaries, so a shorter requester correction is retained.
 Interrupt replies include their steering event id, keeping distinct replies
 separate even when one ends at a paragraph boundary inside an earlier reply.
+
+A restart's approval covers the tasks the restart interrupts
+(`custom_agents/runtime_restart_service.py`). The plan records the runtime
+state and, from it, the tasks the restart would interrupt or delay: every
+request execution root the manager holds, whatever its state, and for an `all` restart
+the work other agents report running. Work on a task the manager delegated
+counts as that task. Locally runnable plan-step and recovery tasks are grouped
+under that same root too: they have no `parent_task_id`, but the manager's
+execution graph records which request owns them. Finishing one step and
+queuing its replacement must not become newly interrupted work. The plan
+digest covers everything the person is shown;
+`runtime_state_digest`, which the supervisor's request and receipt record,
+covers the restart's processes and that set of tasks. Applying captures the
+state again and refuses only when the restart would interrupt a task outside
+the set, such as a new message or a scheduled run; tasks finishing, waiting or
+changing state keep the approval, because the person already agreed to
+interrupt each of them. The digest used to cover every task's state, the
+current task and other agents' queue counts, so any scheduled run, heartbeat
+item, finished worker or new message made an approved restart unusable, and
+with background work running a restart could rarely be applied. A refusal uses
+the approval up, as for any plan that no longer applies, and names the new
+tasks, so TeamArchitect stages a fresh plan that lists them. Plans need schema
+3: plans staged under the earlier rule are refused rather than converted,
+because their approval text promised the stricter rule. The review lists the
+tasks in one line of at most 1000 characters, naming them while they fit and
+always giving the exact count; a busy manager used to produce a longer line,
+which could not be shown for review at all.
 
 An installed MCP server is one team tool, `mcp:<name>`, in the `mcp_servers`
 tool set that members hold as a standard set (`access_catalog/catalog.py`,
@@ -2418,10 +2640,57 @@ question to a person uses the preserved gateway reply route. Steering that
 names a task applies only to that task. Accepted guidance and duplicate keys
 are saved with its history, and guidance survives a restart until the model
 turn records its decision.
-An explicitly addressed receiver answers `STALE` for a missing task so the
-gateway can submit the person's message as new work. A schedule action must
+An explicitly addressed receiver answers `STALE` for a missing task. The gateway
+holds guidance for that request until the lead admits its task, and retries
+with the same idempotency key. Guidance never becomes another root request.
+A schedule action must
 be followed by a final response or a waiting action; saving a timer does not
 finish its originating request.
+
+Each gateway thread runs one interactive request at a time. The gateway saves
+the request's task id at admission and keeps its running state independently
+of response waits. A timeout, gateway restart or credential form therefore
+does not make a later message new work. The later message is saved as guidance
+for that request before publication. A final reply ends the running state,
+including when quiet hours delay showing the reply. Held guidance that its
+request finishes before accepting is reported as unused. A publication failure
+whose outcome is uncertain leaves the request active; starting another chat
+remains an explicit action by the person.
+
+Held guidance is sent oldest first for each request. An earlier copy that is
+in flight or unconfirmed blocks newer copies, both for direct sends and the
+retry loop. The saved copies determine this order across gateway processes;
+an acceptance removes its copy and lets the next one proceed. Person removal
+deletes held guidance in the same transaction as that person's sessions and
+requests, so no private delivery copy waits for background cleanup.
+
+The initial chat wait is task-specific too. Every request-state change checks
+the task admitted for the tracked request before changing its status, task id
+or conversation. A sibling schedule's final reply, question answer or secure
+form result still reaches its person, but cannot finish or rewrite that
+request, including after a timeout or during a form wait. Deferred sibling
+deliveries retain their transport correlation in the payload, while their
+request-state reference is empty so later delivery cannot finish the root.
+
+Agent questions are stored by `task_query_id` in `gateway_questions`, with their
+own request and task identities. Several questions in one chat wait in order,
+and the person sees one at a time. An answer names the question selected before
+the send, and a conditional status update refuses a second answer. An
+answer attempt that fails or is cancelled before publication releases its
+claim; cancellation after publication never sends it again. Reply waits are
+keyed by both correlation and parent task: separate schedule actions from
+one request share a correlation, and one task's reply must not satisfy a
+sibling task's wait. Repeated publication of an answer uses its question id
+as the durable effect key. A newer question from the same task replaces that
+task's previous open question. An
+answer, expiry or final task reply makes room for the next question. Closed
+questions remain recorded so redelivery cannot reopen them. The obsolete
+one-question-per-session table is removed; questions open in that older format
+end at upgrade and their tasks reach their normal waiting limits.
+Before upgrading from a version without running-request state, operators must
+finish or stop active interactive work and answer or close pending questions.
+Older request rows are not inferred into the new running state, so leaving
+their tasks active would bypass the new busy-thread protection.
 
 Delivery receipts use the durable team-lead route, so they can wait for a
 replacement lead before discovery completes. Repeated publication of one
@@ -2502,15 +2771,51 @@ resolution, session continuity, attachment admission, clarification routing,
 quiet hours, deferred delivery, and receipts. An agent response and a delivered
 user message are separate facts.
 
+Each chat (channel, account, chat and thread) has one current session
+(`gateway_channel_sessions`), where the person's next message goes. Only the
+person's own chat traffic changes it: a chat's first message, `/new`,
+`/switch_session`, and a message that names a session
+(`GatewaySessionService`, `upsert_session`). Saving a session for any other
+reason does not mean the person is using it, so those writes use
+`upsert_session_without_switching_chat` and never move the chat. A reply
+records its task on the session it was asked in, which may no longer be
+current: the person can start another session while a request runs, because
+Telegram handles several updates at once. A team import writes every session
+it carries, in key order, and an older session that a schedule still delivers
+through can sort after the person's current one. When every session save also
+made its session current, both put the person's next message into an old
+session. Scheduled deliveries do not read the current session; they use the
+session saved with the schedule.
+
 Web Chat saves a send's files only after the send passes every check: the
 conversation it names is the sender's, its request id has not been answered
 already (a browser retry gets the first send's answer), and every file passes
 the upload checks (`inbound_attachments.check_inbound_attachment_bytes`; all
 files are checked before any is saved). Saved uploads go to `state/uploads`
 under the checked conversation's own key, and their records take that
-conversation's owner. Nothing deletes upload records except removing their
-owner, so a file saved for a refused send would stay as a stray, and in another
-person's conversation it would count as theirs.
+conversation's owner. A file saved for a refused send would otherwise stay as
+a stray until the cleanup below, and in another person's conversation it would
+count as theirs.
+
+The gateway deletes uploads older than the internal website's
+`attachments.retention_days` (90 by default, 0 keeps them) when it starts and
+every six hours after (`assistant_gateway/upload_retention.py`). Its database
+query selects only paths under `state/uploads`; the same attachment table
+also holds outgoing copies in `scratch/sent/`, whose records stay available
+under their separate scratch retention. It deletes the old upload records
+first, oldest first and in batches, then their files, so a
+failure leaves a file without a record, never a record without its file. Then
+it deletes every file in `state/uploads` older than the cutoff, which also
+removes files left without a record, and the folders left empty. It shares the
+link-safe folder walk with the scratch cleanup (`old_file_cleanup.py`). The
+gateway is the only writer of `state/uploads`; agents work on their own copies.
+Administrators change both retention numbers in Settings → Team → File
+Retention (`assistant_gateway/file_retention.py`). That is a `runtime_settings`
+change in the gateway's own controls, so `PersonChangeCheck` decides who may.
+The save changes only those two fields of `instance_config.yaml`, keeps a
+backup as the configuration editor does, and is refused when the file changed
+meanwhile. Upload retention applies from the next cleanup; scratch retention
+applies after a restart, because the manager reads its settings when it starts.
 
 A person can answer one earlier chat message with the channel's reply feature.
 That message often belongs to another conversation than the one the chat
@@ -2657,6 +2962,25 @@ names none (it may say `none`), so a new action cannot change records without
 running first. The executor uses two
 private Strands names, guarded by `tests/test_changes_first_executor.py` on the
 locked SDK version.
+
+A heartbeat item changes in one write transaction on its stored row
+(`storage/heartbeat_repository.py`: `BEGIN IMMEDIATE` in SQLite, the row locked
+with `SELECT ... FOR UPDATE` in PostgreSQL). An update sets only the fields it
+was given on the row it reads there. Until 2026-10-20 an update read the item
+on one connection and wrote title, instruction, target agent type and
+Objective from that read on another, so two updates of different fields at the
+same time lost one of them. The heartbeat tools return each item's `version`
+(`heartbeat_item_version`, a digest of its title, instruction, target agent
+type and Objective) from `list_heartbeat_items` and `add_heartbeat_item` and
+every change, and `update_heartbeat_item`, `remove_heartbeat_item`,
+`enable_heartbeat_item` and `disable_heartbeat_item` require it as
+`expected_version`. The store checks it in the same transaction and refuses a
+change from an older read with `changed_since_read` (a failed tool result);
+the agent lists the item again. Runs (their start, success and failure times),
+conversation resets and turning the item on or off write the same row but are
+not in the version, so they never refuse an agent's change; an Objective's
+lifecycle change switches its linked items as trusted code, without a version.
+The version is computed, not stored, so the stored item is unchanged.
 
 Knowledge curation changes follow this rule too, including publishing or
 rejecting contributions and resolving notes: these change the page's knowledge
@@ -2977,7 +3301,29 @@ credentials, the public origin, the website listener) in memory
 PostgreSQL address is applied by the storage resolvers
 (`TEAM_BUNDLED_POSTGRES_ADDRESS`). Writers load the file as stored
 (`load_saved`), change only their own fields and save, so no deployment detail
-or stale in-memory value is ever written back. The bundle used to run every
+or stale in-memory value is ever written back. Every instance-config writer
+uses `config_file_updates.replace_config_file`: it holds the shared
+`file_locking.exclusive_file_lock` while checking the source revision, making
+any backup and replacing the file atomically. Loaded models retain the hash
+of the exact bytes parsed. A stale model refuses to save; a new model creates
+an absent file unless its caller supplies the destination revision for an
+intentional replacement. This covers retention, manager-route and diagnostic
+changes, the configuration editor, runtime settings plans, schema upgrades,
+onboarding and team transfer. Editor saves and restores require the revision
+returned by GET; an older open editor must reload. Approved runtime plans
+still require their exact source digest, and a failed receipt can restore a
+backup only while the applied revision is still current. The separate lock
+file survives atomic replacement and excludes threads and processes; lock
+failure refuses the write. External hand edits cannot participate in an
+advisory lock, so stop runtime writers before editing the file directly.
+Onboarding keeps the destination revision read before reconciliation, even
+when validation builds a fresh model. Bootstrap renders controls and reads
+source files first, then accepts the checked settings write before changing
+control files, merging the environment or handing over credentials. A stale
+configuration therefore changes none of those auxiliary files. Later transfer
+batches likewise save checked settings before refreshing model defaults.
+
+The bundle used to run every
 process from a copy written at container start; settings saved while the
 runtime ran then waited for a container restart. For the same reason the
 launcher, on each in-app restart, recomputes the environment variables it
@@ -3007,6 +3353,39 @@ runs `env_secrets.py check-container-env`, which refuses a container
 environment that sets both `<NAME>` and `<NAME>_FILE`. That check covers the
 container's own environment only, because the environments the launchers build
 may hold a `team.env` value next to its file form on purpose.
+
+Maintained images keep only compiled `.pyc` files
+(`docker/strip_python_sources.sh`), so no program may be started by its `.py`
+path. The container entrypoint finds its programs with `python_program_path`,
+the Python launchers (`docker/run_bundle.py`, `docker/launch_headless.py`)
+with `docker.python_entrypoints.resolve_python_entrypoint`, and the code
+sandbox its helper in `custom_tools.code_sandbox`; each falls back to the
+`.pyc`. The strip script's `required_entrypoints` lists every such program and
+stops the build when one has no compiled file, and
+`tests/test_docker_python_entrypoints.py` builds a stripped tree with that
+script and checks that the launchers name programs only through the resolver
+and that each one is listed. The build is where a packaging mistake has to
+fail: one launcher call that named its `.py` file only logged a warning at
+start-up, and nobody noticed it for several releases.
+
+Before any agent creates a JetStream consumer, the launcher runs the read-only
+consumer report (`run_nats_consumer_preflight`,
+`scripts/reconcile_nats_consumers.py`). A report that finishes exits 0 and logs
+its own findings, such as consumer usage near the account's limit; a report
+that cannot run is one error, `event=nats_consumer_preflight_not_run`, with a
+`reason`, so the two never look alike. Neither stops start-up: the report only
+informs, it neither changes nor protects anything, and agents report their own
+NATS errors. Making it a start-up gate would let a slow or briefly unreachable
+NATS server, or an external server that refuses consumer listing, stop the
+whole team. Because start-up waits for it, the report's first connection fails
+fast: nats-py retries a failed first connection about 60 times, two seconds
+apart, even with `allow_reconnect=False`, so the report sets
+`max_reconnect_attempts=1` (two tries per server; 0 would mean retry forever)
+and records the server's own error from `error_cb`, since nats-py then raises
+only a generic `NoServersError`. The launcher's 30-second limit stays as the
+backstop for a server that accepts connections and stops answering. Long-running
+services keep nats-py's retries, so they wait for a NATS server that is still
+starting.
 
 The Docker bundle can supervise NATS, optional PostgreSQL, the manager, startup
 specialists, gateway, website, activity collector, secure broker, and execution
@@ -3083,9 +3462,14 @@ inspect | review | import | import-credentials | finish-import`; guide:
 - **Fresh first batch, same ids.** Import creates the instance (the same first
   steps as onboarding, `assistant_gateway.instance_secrets`) and keeps team,
   person, schedule and grant ids. Person schedules are signed again with the
-  new gateway key. Later batches require its receipt and the exact same signed
+  new gateway key. Chat sessions keep their keys, and each chat continues in
+  the session that was current when the team was exported: the import saves
+  sessions without switching chats and then gives each chat that has no
+  current session its exported one (`team_transfer.schedule_writers`).
+  Later batches require its receipt and the exact same signed
   export. Imported identities are skipped and existing destination records
-  kept. Account links match by team, owner and tool, since a newer link has a
+  kept; a chat that already has a current session keeps it, and the plan
+  lists the imported session that was current in the export. Account links match by team, owner and tool, since a newer link has a
   new ID; a file holding two for one tool and owner (from a store before the
   one-active-link index) has the older refused with the newer named. All
   active destination chat bindings, including removed people's, participate in

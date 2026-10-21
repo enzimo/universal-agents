@@ -502,8 +502,13 @@ class NatsTransportAdapter:
             return True
         return False
 
-    def _topology(self):
+    def _topology(self) -> NatsStreamTopology:
         return NatsStreamTopology(self.config, self.mapper)
+
+    def stream_names(self) -> tuple[str, ...]:
+        """The JetStream streams this team's topology defines, for log lines."""
+
+        return tuple(spec.name for spec in self._topology().specifications())
 
     async def reconcile_streams(self) -> None:
         if self._js is not None:

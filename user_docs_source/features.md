@@ -27,6 +27,32 @@ there, within your own authority. `/webchat?view=access` opens it directly, and
 `/webchat?view=access#agent=<type>` opens it at one agent type. See
 [The Access page](permissions.md#the-access-page).
 
+### Messages while your request is running
+
+A message in a busy chat gives guidance to the request already running there.
+This also applies after a reply wait times out, after the gateway restarts,
+and while a credential form is open. The gateway saves the guidance before
+sending it. If the team lead has not started that request yet or cannot confirm
+receipt, the message stays held for the same request. You receive a notice if
+the request finishes before accepting it.
+Messages reach the request in the order they were saved; newer guidance waits
+while an earlier message is still unconfirmed.
+
+Use **New Chat** or `/new` to start separate work. Once a request finishes,
+your next message in its chat starts another request.
+
+If several tasks ask questions in one chat, the questions wait in order.
+You see one question at a time, and your plain reply answers that question.
+The next appears after the previous answer, expiry or task completion. A
+second send for an already answered question is refused.
+
+Before upgrading from a version without the saved running-request state,
+finish or stop all active interactive work and answer or close pending
+questions. The gateway does not infer which older requests are still running,
+so an older request left active would lack busy-chat protection. The old
+one-question-per-chat table is removed, and its pending questions are not
+carried forward.
+
 ### Inspect and clear tasks across agents
 
 Open **Settings → Tasks** in Web Chat to see your current, queued and waiting
@@ -113,6 +139,12 @@ In chat apps other than Web Chat, `/usermem list` shows your personal memories
 and `/coremem list` the team's; `/help` lists their add, replace and delete
 forms, and the same rules apply as in Settings. You can also just ask the
 assistant "What do you remember about me?" or "Forget that".
+
+The assistant changes or deletes a memory only as it last read it. If the
+memory changed in the meantime, for example from another chat or in Settings,
+the assistant's change is refused and nothing changes; the assistant reads
+the memory again before it decides. In the same way, undoing a change works
+only while it is the memory's latest change.
 
 ### Knowledge base
 
@@ -403,6 +435,12 @@ anything until you choose an explicit scope:
   work in its other conversation lanes.
 - `/stop all` cancels all current nonterminal work owned by you across sessions
   and conversations.
+
+Your own stops apply at once, whatever an agent is doing. Agents cannot stop
+your other requests: while TeamLead works on one request it may pause, resume
+or stop only that request's own tasks. If you ask it about another request, it
+tells you to ask in that request's thread, or to stop it yourself with
+`/stop task <task_id>` or **Settings → Tasks**.
 
 Stopping work also ends the commands an agent is running for it, such as a
 build, a test run or a script, and the background processes those commands
@@ -710,8 +748,12 @@ runtime manages, such as the heartbeat launcher or memory-review maintenance,
 it stages the exact change and a team administrator approves it in the Inbox
 before it happens (with authorization off, you agree in the conversation).
 The approval covers only that change to that schedule as it was when staged;
-if the schedule runs or changes first, the agent stages it again. Your own
-reminders change at once, and only you and agents working for you see them.
+if the schedule's settings change first, the agent stages it again (its regular
+runs do not count). Your own reminders change at once, and only you and agents
+working for you see them. An agent changes a schedule only as it last read it:
+if another of your requests changed the schedule meanwhile, nothing is changed
+and the agent reads it again first. See
+[How agents create and change schedules](scheduled-workers.md#how-agents-create-and-change-schedules).
 Pausing or cancelling an Objective does not provide an indirect bypass: its
 lifecycle cascade skips linked system schedules. See
 [Schedules the runtime manages](scheduled-workers.md#schedules-the-runtime-manages).
@@ -828,10 +870,18 @@ need to reconnect rather than pretending the count is known.
 
 After you review that state, Team Architect asks you to approve the exact
 restart in the Inbox (with authorization off, it asks for your agreement in the
-chat). Applying re-reads the running state first. If tasks, queues, or relevant
-agent execution state changed, the restart is refused and Team Architect must
-show a fresh plan. Approving a settings change or a skill never approves a
-restart.
+chat). The request lists the tasks the restart may interrupt or delay: every
+task Team Architect holds, whether running, queued or waiting, and for an `all`
+restart also the work other agents are running. Work an agent does on a task
+Team Architect handed it counts as that task.
+The next plan step or a recovery task for that request is covered too.
+
+Your approval covers those tasks. Applying re-reads the running state first.
+If some listed tasks finished or changed state in the meantime, the restart
+still goes ahead. If a new task arrived that the restart would interrupt, such
+as another message or a scheduled run, the restart is refused and Team
+Architect must ask you again with a fresh plan that lists it. Approving a
+settings change or a skill never approves a restart.
 
 The supervisor acts only on restart requests that record their approval: your
 approved request, your agreement with authorization off, or the authenticated
@@ -989,6 +1039,15 @@ Architect works for you, it sees your Objectives and the team's Objectives
 (ones created by work that runs for no person, such as a system timer), and
 never another person's. The team's Objectives change only in work for an
 administrator or in work that runs for no person.
+
+Two of your requests can work on the same Objective at once. When one of them
+changes what the Objective asks for (for example marks a success criterion
+met), Team Architect's other request can't overwrite that change with a
+decision made from what it read earlier: its change is refused, it reads the
+Objective again and decides on what it says now. Recording progress or linking
+work preserves unrelated fields and does not make that version stale. Progress
+text, current focus and lifecycle status follow their own current-state rules;
+the version check does not reject two changes to the same progress field.
 
 Heartbeat items linked to an Objective follow the same ownership rules. A
 shared heartbeat runs for its launcher's person and skips an Objective that
@@ -1154,6 +1213,12 @@ preserve context per chat, topic, thread, or sender.
 The configured default delivery target is used for proactive messages such as
 scheduled reminders and heartbeat updates. You can ask in plain English for
 simple reminders, recurring checks, and pause/resume changes.
+
+If two of your requests change the same heartbeat item at the same time, both
+changes are kept. A change Team Architect decided on from an older look at the
+item (for example turning off an item whose instruction another request just
+rewrote) is not made: it looks at the item again and decides on what it says
+now.
 
 If an enabled job remains overdue and unclaimed for two minutes, the runtime
 queues a review for the TeamLead, including the schedule ID and required agent

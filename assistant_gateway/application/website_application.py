@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from assistant_gateway.application.file_retention_page import FileRetention, FileRetentionPage
 from custom_messages.contracts.access_v2 import ChangeApprovalRecordV1
 from custom_messages.contracts.control_v1 import KnowledgeCommandPayload, KnowledgeCommandResultPayload
 from custom_messages.contracts.status_v1 import StatusReportV1
@@ -1078,6 +1079,21 @@ class AccountsApplication(Protocol):
         """
 
 
+@runtime_checkable
+class FileRetentionApplication(Protocol):
+    """Settings > Team > File Retention (``assistant_gateway.file_retention.GatewayFileRetention``)."""
+
+    def page(self, *, person_id: str) -> FileRetentionPage:
+        """The saved numbers of days, and whether this person may change them."""
+
+    def save(self, *, person_id: str, upload_days: object, scratch_days: object) -> FileRetention:
+        """Save both numbers.
+
+        Raises ``FileRetentionRefused``, ``FileRetentionInvalid`` or ``FileRetentionConflict``;
+        nothing is saved then.
+        """
+
+
 class WebsiteGatewayApplication(GatewayApplication, Protocol):
     """Core channel use cases plus explicit Website-only capability facets."""
 
@@ -1120,3 +1136,7 @@ class WebsiteGatewayApplication(GatewayApplication, Protocol):
     @property
     def accounts(self) -> AccountsApplication:
         """Return the Settings Accounts tab: whose account agents use for each service."""
+
+    @property
+    def file_retention(self) -> FileRetentionApplication:
+        """Return Settings > Team > File Retention: how long uploads and scratch files are kept."""

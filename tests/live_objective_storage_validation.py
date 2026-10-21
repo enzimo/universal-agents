@@ -241,12 +241,17 @@ def _run_validation(*, config_path: str | None = None) -> dict[str, Any]:
     )
     installed_profile = profile_application["installed_profile"]
 
-    paused = json.loads(objectives(action="update_status", status="paused", objective_id=objective.objective_id))
+    version = json.loads(objectives(action="get", objective_id=objective.objective_id))["version"]
+    paused = json.loads(
+        objectives(action="update_status", expected_version=version, status="paused", objective_id=objective.objective_id)
+    )
     assert paused["objective"]["status"] == "paused"
     assert schedule_store.get_scheduled_message(schedule_id).enabled is False
     assert heartbeat_store.get_item(heartbeat_item.heartbeat_item_id).enabled is False
 
-    resumed = json.loads(objectives(action="update_status", status="active", objective_id=objective.objective_id))
+    resumed = json.loads(
+        objectives(action="update_status", expected_version=version, status="active", objective_id=objective.objective_id)
+    )
     assert resumed["objective"]["status"] == "active"
     assert schedule_store.get_scheduled_message(schedule_id).enabled is True
     assert heartbeat_store.get_item(heartbeat_item.heartbeat_item_id).enabled is True

@@ -3050,6 +3050,7 @@ def test_onboard_copies_embedding_and_voice_defaults_into_instance_config(
         assistant_purpose=None,
         assistant_response_style=None,
         assistant_autonomy=None,
+        expected_config_revision=None,
     ):
         captured["config"] = config
         captured["assistant_purpose"] = assistant_purpose
@@ -3372,6 +3373,45 @@ def test_onboard_rerun_reconciles_existing_config_and_writes_report(
     assert "Onboarding reconciliation report:" in output
     assert "Mode: updated" in output
     assert f"Detailed report: {report_paths[-1]}" in output
+
+
+@pytest.mark.parametrize("environment_secrets", [False, True])
+def test_onboard_rerun_refuses_a_configuration_changed_after_reconciliation_read(
+    monkeypatch, tmp_path, environment_secrets
+):
+    import assistant_cli
+    from config_file_updates import ConfigFileConflict
+
+    _clear_onboarding_runtime_env(monkeypatch)
+    parser = build_parser()
+    instance_root = tmp_path / "instance"
+    argv = ["onboard", "--instance-name", "mybot", "--instance-root", str(instance_root), "--non-interactive"]
+    if environment_secrets:
+        argv.append("--secrets-from-environment")
+    template = OnboardingTemplate(
+        team_id="team_default", manager_storage_backend="sqlite",
+        manager_storage_sqlite_path="data/task_history.db", manager_storage_postgres_dsn=None,
+        timezone="UTC", model_provider="litellm", model_id="gemini-3.1-flash-lite-preview", reasoning_effort="",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        assistant_cli, "_resolve_onboarding_seed",
+        lambda _args: GatewayOnboardingSeed(template=template, source_env_file_path=None),
+    )
+    _onboard(parser.parse_args(argv))
+    config_path = instance_root / "instance_config.yaml"
+    reconcile = assistant_cli._reconcile_existing_onboarding_config
+
+    def reconcile_after_another_writer_saves(existing, proposed, args):
+        other = GatewayInstanceConfig.load(config_path)
+        other.gateway.request_timeout_seconds = 1234.0
+        other.save()
+        return reconcile(existing, proposed, args)
+
+    monkeypatch.setattr(assistant_cli, "_reconcile_existing_onboarding_config", reconcile_after_another_writer_saves)
+    with pytest.raises(ConfigFileConflict, match="settings file changed"):
+        _onboard(parser.parse_args(argv))
+    assert GatewayInstanceConfig.load(config_path).gateway.request_timeout_seconds == 1234.0
 
 
 def test_onboard_applies_the_same_base_config_sections_as_the_web_onboarding(

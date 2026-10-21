@@ -8,7 +8,8 @@ caller decides the ``ScheduleView`` through ``access_control.ownership``.
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from custom_agents.schedule_store import ScheduleStore, owner_canonical_user_id_for_schedule
+from custom_agents.schedule_changes import RECORD_DIGEST_KEY
+from custom_agents.schedule_store import ScheduleStore, owner_canonical_user_id_for_schedule, schedule_record_digest
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 
 
@@ -55,10 +56,15 @@ def list_schedule_payloads(
 
 
 def schedule_payload(scheduled_message: ScheduledMessage) -> dict[str, Any]:
-    """Everything an exact-ID detail page may show about one schedule."""
+    """Everything an exact-ID detail page may show about one schedule.
+
+    ``record_digest`` is the version read; a change sends it back
+    (``custom_agents.schedule_changes``). Summaries keep it.
+    """
 
     return {
         "schedule_id": scheduled_message.schedule_id,
+        RECORD_DIGEST_KEY: schedule_record_digest(scheduled_message),
         "schedule_name": scheduled_message.schedule_name,
         "management_class": scheduled_message.management_class.value,
         "system_schedule_kind": (

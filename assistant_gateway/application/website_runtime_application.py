@@ -25,6 +25,7 @@ from assistant_gateway.application.session_service import GatewaySessionService
 from assistant_gateway.application.task_progress import GatewayTaskProgressService
 from assistant_gateway.application.website_application import (
     AccountsApplication,
+    FileRetentionApplication,
     KnowledgeApplication,
     StatusApplication,
     WebIdentityApplication,
@@ -64,6 +65,7 @@ class WebsiteRuntimeApplication(GatewayRuntimeApplication):
         status: StatusApplication,
         knowledge: KnowledgeApplication,
         accounts: AccountsApplication,
+        file_retention: FileRetentionApplication,
     ) -> None:
         super().__init__(
             settings=settings,
@@ -90,6 +92,7 @@ class WebsiteRuntimeApplication(GatewayRuntimeApplication):
         self.status = status
         self.knowledge = knowledge
         self.accounts = accounts
+        self.file_retention = file_retention
 
     @property
     def identity(self) -> WebIdentityApplication:

@@ -298,7 +298,7 @@ startup policies are preserved.
    while the instance is running:
 
    ```bash
-   python scripts/upgrade_local_schedules.py --config /path/to/instance_config.yaml --team-id YOUR_TEAM
+   python -m scripts.upgrade_local_schedules --config /path/to/instance_config.yaml --team-id YOUR_TEAM
    ```
 
    The report separates recurring schedules from saved review jobs, which are
@@ -317,7 +317,7 @@ startup policies are preserved.
 3. Apply after resolving any reported blockers:
 
    ```bash
-   python scripts/upgrade_local_schedules.py --config /path/to/instance_config.yaml --team-id YOUR_TEAM --apply --runtime-stopped --backup /path/to/local-schedules-before-upgrade.json
+   python -m scripts.upgrade_local_schedules --config /path/to/instance_config.yaml --team-id YOUR_TEAM --apply --runtime-stopped --backup /path/to/local-schedules-before-upgrade.json
    ```
 
    Supply `--env /path/to/debug.env` if the configuration needs environment values.
@@ -348,8 +348,8 @@ Capture the full preview, including stderr, then summarize it with this standalo
 Python script. Run the second command even if preview exits with status 1:
 
 ```bash
-python scripts/upgrade_local_schedules.py --config /data/instance_config.yaml --team-id team_ua > /tmp/local-schedule-upgrade.log 2>&1
-python scripts/summarize_local_schedule_upgrade.py /tmp/local-schedule-upgrade.log
+python -m scripts.upgrade_local_schedules --config /data/instance_config.yaml --team-id team_ua > /tmp/local-schedule-upgrade.log 2>&1
+python -m scripts.summarize_local_schedule_upgrade /tmp/local-schedule-upgrade.log
 ```
 
 Read `look_at_first` for unexpired claims, missing or invalid expiry dates, saved
@@ -372,7 +372,7 @@ deliveries.
 With the updated code, preview the additional operation:
 
 ```bash
-python scripts/upgrade_local_schedules.py --config /data/instance_config.yaml --team-id team_ua --retire-expired-review-claims
+python -m scripts.upgrade_local_schedules --config /data/instance_config.yaml --team-id team_ua --retire-expired-review-claims
 ```
 
 Check `expired_claim_retirement.eligible_count` and that no other blockers remain.
@@ -380,7 +380,7 @@ After stopping all team runtimes, finishing old NATS deliveries, and taking a fu
 database backup, apply with a new backup filename:
 
 ```bash
-python scripts/upgrade_local_schedules.py --config /data/instance_config.yaml --team-id team_ua --retire-expired-review-claims --apply --runtime-stopped --backup /data/local-schedules-before-upgrade.json
+python -m scripts.upgrade_local_schedules --config /data/instance_config.yaml --team-id team_ua --retire-expired-review-claims --apply --runtime-stopped --backup /data/local-schedules-before-upgrade.json
 ```
 
 This changes eligible claims from `claimed` to inactive `expired`, preserves their
@@ -660,6 +660,25 @@ MemReviewAgent. The runtime manages these timers, so a lead-authored change to
 their policy is staged and applied only after a person approves the exact change
 (see [Schedules the runtime manages](#schedules-the-runtime-manages)). Other
 protected system timers keep their purpose-specific workflows.
+
+## How agents create and change schedules
+
+- An agent creates a schedule with `create_scheduled_job` or with the
+  `schedule_message` action of its answer. The action only creates a new
+  schedule. It cannot name or replace an existing one, so one person's request
+  can never overwrite another person's schedule this way.
+- To change a schedule, the agent sends back the `record_digest` it last read
+  (from `list_scheduled_jobs`, `create_scheduled_job` or its last change to the
+  schedule) as `expected_record_digest`. This applies to `update_scheduled_job`,
+  `pause_scheduled_job`, `resume_scheduled_job`, `disable_scheduled_job` and
+  `remove_scheduled_job`.
+- If the schedule changed in the meantime, for example because another of your
+  requests edited or paused it, nothing is changed. The agent gets
+  `changed_since_read`, reads the schedule again and decides again from what it
+  says now. A change it bases on an old read can no longer undo a newer one.
+- Regular runs do not count as a change: run notes, claims, the next run time of
+  a repeating schedule and the number of runs left. A one-time reminder's time
+  does count, because only people set it.
 
 ## Schedules the runtime manages
 

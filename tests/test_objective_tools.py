@@ -26,6 +26,7 @@ from custom_tools.providers.schedules import (
     list_scheduled_jobs,
 )
 from custom_tools.runtime_context import set_agent_ref
+from custom_messages.records.objectives import objective_version
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
@@ -119,6 +120,12 @@ def _add_person_task(
     return task
 
 
+def _v(manager: TaskManager, objective_id: str) -> str:
+    """The version an agent reads with the Objective (``objectives(action="get")`` returns it)."""
+
+    return objective_version(manager.get_objective(objective_id))
+
+
 def _add_current_task(manager: TaskManager) -> Task:
     task = _add_person_task(manager, "task_root", "objective-user", conversation_id="conversation_1")
     manager.task_state.current_in_progress_task_id = task.task_id
@@ -168,9 +175,10 @@ def test_objective_tools_create_list_get_update_and_complete(tmp_path: Path) -> 
     fetched = tool_json(objectives(action="get"))
     assert fetched["objective_id"] == objective_id
     assert "## Objective" in fetched["markdown"]
+    assert fetched["version"] == created["version"] == listed["objectives"][0]["version"]
 
     updated = tool_json(
-        objectives(action="update_progress", progress_summary="Tool objective progress updated.", current_focus="Complete tool-level tests.", criterion_updates_json=json.dumps(
+        objectives(action="update_progress", expected_version=fetched["version"], progress_summary="Tool objective progress updated.", current_focus="Complete tool-level tests.", criterion_updates_json=json.dumps(
                 [
                     {
                         "criterion_id": "criterion_tools",
@@ -185,11 +193,15 @@ def test_objective_tools_create_list_get_update_and_complete(tmp_path: Path) -> 
     )
     assert updated["objective"]["success_criteria"][0]["status"] == "met"
 
-    blocked_completion = tool_json(objectives(action="update_status", status="satisfied"))
+    # Marking the criterion met changed what the version covers.
+    assert updated["version"] != fetched["version"]
+    blocked_completion = tool_json(
+        objectives(action="update_status", status="satisfied", expected_version=updated["version"])
+    )
     assert "requires user confirmation" in blocked_completion["error"]
 
     completed = tool_json(
-        objectives(action="update_status", status="satisfied", user_confirmation_summary="User confirmed tool objective completion.", satisfied_by_current_task=True)
+        objectives(action="update_status", expected_version=updated["version"], status="satisfied", user_confirmation_summary="User confirmed tool objective completion.", satisfied_by_current_task=True)
     )
     assert completed["objective"]["status"] == "satisfied"
     assert completed["objective"]["satisfied_by_task_id"] == task.task_id
@@ -317,7 +329,7 @@ def test_objective_links_schedule_and_heartbeat_lifecycle(tmp_path: Path) -> Non
         heartbeat_item_id
     ]
 
-    paused = tool_json(objectives(action="update_status", status="paused", objective_id=objective_id))
+    paused = tool_json(objectives(action="update_status", expected_version=_v(manager, objective_id), status="paused", objective_id=objective_id))
     assert paused["objective"]["status"] == "paused"
     assert agent._schedule_store.get_scheduled_message(schedule_id).enabled is False
     heartbeat_store = HeartbeatStore(
@@ -326,7 +338,7 @@ def test_objective_links_schedule_and_heartbeat_lifecycle(tmp_path: Path) -> Non
     )
     assert heartbeat_store.get_item(heartbeat_item_id).enabled is False
 
-    resumed = tool_json(objectives(action="update_status", status="active", objective_id=objective_id))
+    resumed = tool_json(objectives(action="update_status", expected_version=_v(manager, objective_id), status="active", objective_id=objective_id))
     assert resumed["objective"]["status"] == "active"
     assert agent._schedule_store.get_scheduled_message(schedule_id).enabled is True
     assert heartbeat_store.get_item(heartbeat_item_id).enabled is True
@@ -376,7 +388,7 @@ def test_objective_lifecycle_cannot_disable_linked_system_schedule(
         managed_by_objective=True,
     )
 
-    paused = tool_json(objectives(action="update_status", status="paused", objective_id=objective_id))
+    paused = tool_json(objectives(action="update_status", expected_version=_v(manager, objective_id), status="paused", objective_id=objective_id))
 
     restored = agent._schedule_store.get_scheduled_message(schedule_id)
     assert paused["objective"]["status"] == "paused"
@@ -472,11 +484,11 @@ def test_a_member_sees_their_own_and_the_teams_objectives_only(_people_and_objec
     assert tool_json(objectives(action="get", task_id=tasks["b"].task_id))["error"] == _NO_OBJECTIVE
 
     refused = tool_json(
-        objectives(action="update_progress", objective_id=b.objective_id, progress_summary="Changed by A.")
+        objectives(action="update_progress", expected_version=_v(manager, b.objective_id), objective_id=b.objective_id, progress_summary="Changed by A.")
     )
     assert refused["error"] == _NO_OBJECTIVE
     assert manager.get_objective(b.objective_id).progress_summary != "Changed by A."
-    assert tool_json(objectives(action="update_progress", objective_id=a.objective_id, progress_summary="Mine."))[
+    assert tool_json(objectives(action="update_progress", expected_version=_v(manager, a.objective_id), objective_id=a.objective_id, progress_summary="Mine."))[
         "objective"
     ]["progress_summary"] == "Mine."
     assert tool_json(start_objective_task(work_brief="Continue B.", objective_id=b.objective_id))["error"] == _NO_OBJECTIVE
@@ -490,7 +502,7 @@ def test_a_member_reads_but_does_not_change_the_teams_objectives(_people_and_obj
     team = made["team"]
     _act_as(manager, tasks["a"])
 
-    paused = tool_json(objectives(action="update_status", objective_id=team.objective_id, status="paused", summary="A pauses it."))
+    paused = tool_json(objectives(action="update_status", expected_version=_v(manager, team.objective_id), objective_id=team.objective_id, status="paused", summary="A pauses it."))
     assert paused["error"] == _NO_OBJECTIVE
     assert manager.get_objective(team.objective_id).status.value == "active"
     continued = tool_json(start_objective_task(work_brief="Continue the team's.", objective_id=team.objective_id))
@@ -503,13 +515,13 @@ def test_an_administrator_and_system_work_change_the_teams_objectives(_people_an
 
     _act_as(manager, tasks["admin"])
     assert _listed() == {team.objective_id}  # administrators see no one else's
-    paused = tool_json(objectives(action="update_status", objective_id=team.objective_id, status="paused", summary="Admin pauses it."))
+    paused = tool_json(objectives(action="update_status", expected_version=_v(manager, team.objective_id), objective_id=team.objective_id, status="paused", summary="Admin pauses it."))
     assert paused["objective"]["status"] == "paused"
     assert tool_json(objectives(action="get", objective_id=a.objective_id))["error"] == _NO_OBJECTIVE
 
     _act_as(manager, tasks["system"])
     assert _listed(include_closed=True) == {team.objective_id}
-    progressed = tool_json(objectives(action="update_progress", objective_id=team.objective_id, progress_summary="System work."))
+    progressed = tool_json(objectives(action="update_progress", expected_version=_v(manager, team.objective_id), objective_id=team.objective_id, progress_summary="System work."))
     assert progressed["objective"]["progress_summary"] == "System work."
     assert tool_json(objectives(action="get", objective_id=a.objective_id))["error"] == _NO_OBJECTIVE
 
@@ -520,7 +532,7 @@ def test_a_task_without_a_verified_identity_reaches_no_objective(_people_and_obj
 
     with caplog.at_level("WARNING", logger="custom_tools.providers._runtime"):
         assert _listed(include_closed=True) == set()
-        refused = tool_json(objectives(action="update_progress", objective_id=made["team"].objective_id, progress_summary="?"))
+        refused = tool_json(objectives(action="update_progress", expected_version=_v(manager, made["team"].objective_id), objective_id=made["team"].objective_id, progress_summary="?"))
     assert refused["error"] == _NO_OBJECTIVE
     assert "event=task_identity_unverified" in caplog.text
 
@@ -539,7 +551,7 @@ def test_a_task_names_only_its_own_persons_tasks_as_a_source(_people_and_objecti
     )
     assert "was not found among this person's tasks" in continued["error"]
     noted = tool_json(
-        objectives(action="update_progress", objective_id=a.objective_id, task_id=tasks["b"].task_id, progress_summary="x")
+        objectives(action="update_progress", expected_version=_v(manager, a.objective_id), objective_id=a.objective_id, task_id=tasks["b"].task_id, progress_summary="x")
     )
     assert "was not found among this person's tasks" in noted["error"]
     assert len(manager.objective_repository.list_objectives(limit=100, owner_agent_id=manager.durable_manager_scope_id())) == count_before
@@ -582,10 +594,11 @@ def test_a_finished_tasks_plan_stays_its_persons_after_a_team_lead_restart(_peop
 def _break_objective_saves(monkeypatch: pytest.MonkeyPatch, manager: TaskManager) -> None:
     """Every Objective write fails, as when the database is locked or the disk is full."""
 
-    def fail(objective) -> None:
+    def fail(*_args, **_kwargs) -> None:
         raise sqlite3.OperationalError("disk I/O error")
 
-    monkeypatch.setattr(manager.objective_repository, "save_objective", fail)
+    monkeypatch.setattr(manager.objective_repository, "insert_objective", fail)
+    monkeypatch.setattr(manager.objective_repository, "change_objective", fail)
 
 
 def _not_saved(objective_id: str) -> str:
@@ -607,11 +620,11 @@ def test_objective_changes_that_were_not_saved_are_reported(
 
     with caplog.at_level("ERROR", logger="test_objective_tools"):
         progressed = tool_json(
-            objectives(action="update_progress", objective_id=objective_id, progress_summary="Half done.")
+            objectives(action="update_progress", expected_version=_v(manager, objective_id), objective_id=objective_id, progress_summary="Half done.")
         )
     assert progressed == {"error": _not_saved(objective_id)}
     assert f"event=objective_save_failed objective_id={objective_id}" in caplog.text
-    closed = tool_json(objectives(action="update_status", status="cancelled", objective_id=objective_id))
+    closed = tool_json(objectives(action="update_status", expected_version=_v(manager, objective_id), status="cancelled", objective_id=objective_id))
     assert closed == {"error": _not_saved(objective_id)}
     stored = manager.get_objective(objective_id)
     assert (stored.progress_summary, stored.status.value) == (None, "active")
@@ -718,7 +731,7 @@ def test_the_status_tool_keeps_changes_stored_while_it_switches_links(tmp_path: 
 
     agent._schedule_store.set_enabled = switch_while_others_write
 
-    paused = tool_json(objectives(action="update_status", status="paused", objective_id=objective_id))
+    paused = tool_json(objectives(action="update_status", expected_version=_v(manager, objective_id), status="paused", objective_id=objective_id))
 
     assert paused["objective"]["status"] == "paused"
     stored = manager.get_objective(objective_id)
@@ -736,7 +749,7 @@ def test_the_status_tool_refuses_deletion_statuses(tmp_path: Path, status: str) 
     set_agent_ref(agent)
     objective_id, schedule_id = _recurring_objective_with_schedule(manager, agent)
 
-    refused = tool_json(objectives(action="update_status", status=status, objective_id=objective_id))
+    refused = tool_json(objectives(action="update_status", expected_version=_v(manager, objective_id), status=status, objective_id=objective_id))
 
     assert refused["error"].startswith("Only the person can delete an Objective")
     assert "deleted" not in refused["allowed_statuses"] and "deleting" not in refused["allowed_statuses"]
@@ -752,7 +765,7 @@ def test_the_status_tool_leaves_an_objective_its_person_is_deleting(tmp_path: Pa
     objective_id, _schedule_id = _recurring_objective_with_schedule(manager, agent)
     manager.update_objective_status(objective_id, "deleting", summary="Deletion requested.")
 
-    refused = tool_json(objectives(action="update_status", status="active", objective_id=objective_id))
+    refused = tool_json(objectives(action="update_status", expected_version=_v(manager, objective_id), status="active", objective_id=objective_id))
 
     assert refused["error"].endswith("is being deleted by its person, so it can no longer change.")
     assert manager.get_objective(objective_id).status.value == "deleting"
@@ -767,7 +780,7 @@ def test_the_status_tool_reports_a_linked_heartbeat_item_that_is_gone(tmp_path: 
     heartbeat_item_id = tool_json(add_heartbeat_item(instruction="Check.", title="Check"))["heartbeat_item_id"]
     HeartbeatStore(db_path=manager._db_path, storage_settings=manager.storage_settings).remove_item(heartbeat_item_id)
 
-    paused = tool_json(objectives(action="update_status", status="paused", objective_id=objective_id))
+    paused = tool_json(objectives(action="update_status", expected_version=_v(manager, objective_id), status="paused", objective_id=objective_id))
 
     assert paused["objective"]["status"] == "paused"
     assert paused["lifecycle_warnings"] == [
@@ -798,7 +811,7 @@ def test_the_status_tool_reports_a_schedule_it_could_not_switch(tmp_path: Path, 
     store.set_enabled = unavailable
 
     with caplog.at_level("WARNING", logger="custom_agents.objective_lifecycle"):
-        paused = tool_json(objectives(action="update_status", status="paused", objective_id=objective_id))
+        paused = tool_json(objectives(action="update_status", expected_version=_v(manager, objective_id), status="paused", objective_id=objective_id))
 
     assert paused["objective"]["status"] == "paused"
     assert paused["lifecycle_warnings"] == [
@@ -825,16 +838,20 @@ def test_the_status_tool_warns_when_switched_links_are_not_recorded(
     agent = _FakeAgent(manager)
     set_agent_ref(agent)
     objective_id, schedule_id = _recurring_objective_with_schedule(manager, agent)
-    save = manager.objective_repository.save_objective
+    real_change = manager.objective_repository.change_objective
 
-    def fail_when_recording_links(record) -> None:
-        if any(link.disabled_by_objective_pause for link in record.schedule_links):
-            raise sqlite3.OperationalError("disk I/O error")
-        save(record)
+    def fail_when_recording_links(objective_id, *, change, **kwargs):
+        def change_then_fail(record) -> bool:
+            changed = change(record)
+            if changed and any(link.disabled_by_objective_pause for link in record.schedule_links):
+                raise sqlite3.OperationalError("disk I/O error")
+            return changed
 
-    monkeypatch.setattr(manager.objective_repository, "save_objective", fail_when_recording_links)
+        return real_change(objective_id, change=change_then_fail, **kwargs)
 
-    paused = tool_json(objectives(action="update_status", status="paused", objective_id=objective_id))
+    monkeypatch.setattr(manager.objective_repository, "change_objective", fail_when_recording_links)
+
+    paused = tool_json(objectives(action="update_status", expected_version=_v(manager, objective_id), status="paused", objective_id=objective_id))
 
     assert paused["objective"]["status"] == "paused"
     assert paused["lifecycle_warnings"] == [

@@ -161,27 +161,41 @@ class HeartbeatStore:
         instruction: Optional[str] = None,
         target_agent_type: Optional[str] = None,
         objective_id: Optional[str] = None,
+        expected_version: Optional[str] = None,
     ) -> Optional[HeartbeatItemRecord]:
-        existing = self.get_item(heartbeat_item_id)
-        if existing is None:
-            return None
-        updated = self._repository.update_item(
-            heartbeat_item_id,
-            title=title if title is not None else existing.title,
-            instruction=instruction if instruction is not None else existing.instruction,
-            target_agent_type=target_agent_type if target_agent_type is not None else existing.target_agent_type,
-            objective_id=objective_id if objective_id is not None else existing.objective_id,
-            updated_at=utc_now_iso(),
-        )
-        if not updated:
-            return None
-        return self.get_item(heartbeat_item_id)
+        """Change the given fields of the stored item (None leaves a field as it is); None when it is gone.
 
-    def set_item_enabled(self, heartbeat_item_id: str, enabled: bool) -> Optional[HeartbeatItemRecord]:
+        The repository sets them on the stored row in one write transaction,
+        so another update's fields are kept. ``expected_version`` is the
+        version an agent read (``heartbeat_item_version``); the change is
+        refused with ``ChangeRefused`` (``changed_since_read``) when the item
+        changed since.
+        """
+
+        return self._repository.update_item(
+            heartbeat_item_id,
+            title=title,
+            instruction=instruction,
+            target_agent_type=target_agent_type,
+            objective_id=objective_id,
+            updated_at=utc_now_iso(),
+            expected_version=expected_version,
+        )
+
+    def set_item_enabled(
+        self, heartbeat_item_id: str, enabled: bool, *, expected_version: Optional[str] = None
+    ) -> Optional[HeartbeatItemRecord]:
+        """Turn the item on or off; None when it is gone.
+
+        An agent passes the version it read; an Objective's lifecycle change
+        switching its linked items is trusted and passes none.
+        """
+
         updated = self._repository.set_item_enabled(
             heartbeat_item_id,
             enabled,
             updated_at=utc_now_iso(),
+            expected_version=expected_version,
         )
         if not updated:
             return None
@@ -208,8 +222,10 @@ class HeartbeatStore:
             if self.start_new_item_conversation(item.heartbeat_item_id) is not None
         )
 
-    def remove_item(self, heartbeat_item_id: str) -> bool:
-        return self._repository.remove_item(heartbeat_item_id)
+    def remove_item(self, heartbeat_item_id: str, *, expected_version: Optional[str] = None) -> bool:
+        """Delete the item; False when it is gone. An agent passes the version it read."""
+
+        return self._repository.remove_item(heartbeat_item_id, expected_version=expected_version)
 
     def mark_item_run_started(self, heartbeat_item_id: str) -> None:
         timestamp = utc_now_iso()

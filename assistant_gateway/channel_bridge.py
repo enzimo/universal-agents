@@ -68,12 +68,12 @@ class ChannelBridge:
                 )
             ]
 
-        has_pending_query = (
-            await self.application.has_pending_query(resolved_session_key)
+        waiting_question_id = (
+            await self.application.waiting_question_id(resolved_session_key)
             if resolved_session_key
-            else False
+            else None
         )
-        if inbound_attachments and has_pending_query:
+        if inbound_attachments and waiting_question_id:
             return [
                 self.translator.render_outbound(
                     inbound=inbound,
@@ -104,7 +104,7 @@ class ChannelBridge:
             )
         action = self.translator.translate_inbound(
             inbound,
-            has_pending_query=has_pending_query,
+            has_pending_query=waiting_question_id is not None,
         )
         if inbound_attachments:
             logger.info(
@@ -134,13 +134,16 @@ class ChannelBridge:
                 )
             ]
 
-        if action.action_type == "reply_to_query":
+        if (
+            action.action_type == "reply_to_query"
+            and resolved_session_key
+            and waiting_question_id
+        ):
+            # The answer names the question found above, so a question shown
+            # after this message arrived is never answered by it.
             response = await self.application.reply_to_pending_query(
-                session_key=(
-                    action.session_key
-                    or resolved_session_key
-                    or self.application.default_session_key
-                ),
+                session_key=resolved_session_key,
+                task_query_id=waiting_question_id,
                 response_text=action.text or "",
                 replied_message=inbound.replied_message,
             )

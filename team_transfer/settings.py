@@ -204,8 +204,13 @@ class SettingsSection:
 
         config: GatewayInstanceConfig = context.scratch[_CONFIG_KEY]
         if context.existing:
+            # Planning validates a new model; preserve the destination revision
+            # from which its unchanged fields came, rather than treating it as new.
+            config.save(
+                context.layout.instance_config_path,
+                expected_revision=context.scratch["settings.original_config"].source_revision,
+            )
             _refresh_unchanged_model_defaults(context, config)
-            config.save(context.layout.instance_config_path)
         else:
             bootstrap_instance(config)
         if not config.launch.secrets_from_environment:
@@ -670,4 +675,4 @@ __all__ = [
 # V6 adds agent.request_conflict_checks. V5 records (v0.9.4 to v0.9.6) keep the
 # same shape and carry only values that differ from the defaults, so the step
 # passes them on unchanged and the new setting keeps its default (on).
-SECTION_UPGRADES[(SettingsSection.name, 5)] = lambda records: records
+SECTION_UPGRADES[(SettingsSection.name, 5, SettingsSection.schema_version)] = lambda records: records

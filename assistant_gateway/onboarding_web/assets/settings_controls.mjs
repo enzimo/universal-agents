@@ -38,6 +38,7 @@ import {
   createAttentionCount, createSettingsClient, failureMessage, nameWithCount, setStatusLine, showCountBadge,
 } from "./settings_support.mjs";
 import { createTeamControls } from "./team_controls.mjs";
+import { createFileRetentionControls } from "./file_retention_controls.mjs";
 
 export const SETTINGS_VIEWS = Object.freeze({
   INBOX: "inbox", ACCESS: "access", ACCOUNTS: "accounts", TEAM: "team", TASKS: "tasks", MEMORIES: "memories",
@@ -137,6 +138,7 @@ export function createSettingsControls({
     proceduresContainer: byId("settings-procedures"),
     status: byId("settings-team-status"),
     refreshButton: byId("settings-team-refresh"),
+    retention: createFileRetentionControls({ container: byId("settings-file-retention"), client, browser }),
     client, getSessionKey, teamActivity, browser,
   });
   const memories = createMemoryControls({

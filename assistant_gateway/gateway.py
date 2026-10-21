@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
 from access_control.identity import ISSUER_GATEWAY, ContextSigner
 from assistant_gateway.access_commands import GatewayAccessCommands
 from assistant_gateway.account_sharing import GatewayAccountSharing
 from assistant_gateway.status_page import StatusPage
+from assistant_gateway.file_retention import GatewayFileRetention
+from assistant_gateway.inbound_attachments import resolve_inbound_attachment_cache_dir
+from assistant_gateway.upload_retention import UploadRetention
 from assistant_gateway.application.knowledge_pages import GatewayKnowledgePages
 from assistant_gateway.access_inbox import (
     GatewayAccessInbox,
@@ -121,6 +125,8 @@ from assistant_gateway.application.request_context import (
     GatewayRequestContextService,
     GatewayRequestContextSettings,
 )
+from assistant_gateway.application.pending_questions import GatewayPendingQuestions
+from custom_messages.contracts.control_v1 import AgentStatus
 from assistant_gateway.application.request_service import (
     GatewayRequestService,
 )
@@ -143,6 +149,10 @@ from assistant_gateway.application.session_service import (
 from assistant_gateway.application.task_progress import (
     GatewayTaskProgressService,
     GatewayTaskProgressSettings,
+)
+from assistant_gateway.application.thread_guidance import (
+    GatewayThreadGuidance,
+    GatewayThreadGuidanceSettings,
 )
 from assistant_gateway.application.transcript_service import (
     GatewayTranscriptService,
@@ -452,6 +462,26 @@ def _access_maintenance_tasks(
     return tasks
 
 
+def _file_retention(
+    config: GatewayInstanceConfig, *, records: DeliveryRepository, person_changes: PersonChangeCheck
+) -> tuple[UploadRetention, GatewayFileRetention]:
+    """The chat upload cleanup and the Settings > Team > File Retention service it follows.
+
+    Uploads older than their retention are deleted at start and every few hours
+    (``upload_retention``); administrators change the days, and scratch
+    retention, in Settings (``file_retention``).
+    """
+
+    uploads = UploadRetention(
+        records=records,
+        uploads_dir=resolve_inbound_attachment_cache_dir(config),
+        retention_days=config.interactive_apps.internal_website.attachments.retention_days,
+    )
+    return uploads, GatewayFileRetention(
+        config_path=config.config_path, person_changes=person_changes, uploads=uploads
+    )
+
+
 async def _report_stale_blocks(access_inbox: GatewayAccessInbox, team_id: str) -> None:
     """Tell administrators once about each block on an operation the catalog no longer has."""
 
@@ -461,6 +491,19 @@ async def _report_stale_blocks(access_inbox: GatewayAccessInbox, team_id: str) -
         await asyncio.to_thread(report_stale_blocks, access_inbox.catalog(), access_inbox.access_store(), team_id)
     except Exception:  # noqa: BLE001 - the blocks still apply to their whole tool; only the notice is missing
         logger.exception("Could not check blocks against the tool catalog. event=stale_block_check_failed team_id=%s", team_id)
+
+
+def _agent_presence_observer(
+    presence: GatewayTeamPresence,
+    guidance: GatewayThreadGuidance,
+) -> Callable[[AgentStatus, datetime | None, str], None]:
+    """Connect presence recording and held-guidance wakeups during composition."""
+
+    def record(status: AgentStatus, reported_at: datetime | None, source: str) -> None:
+        presence.record_agent_presence(status, reported_at, source)
+        guidance.lead_reported(status, reported_at, source)
+
+    return record
 
 
 class UserGateway:
@@ -602,7 +645,16 @@ class UserGateway:
         self._request_service = GatewayRequestService(
             repository=self.request_repository,
             unit_of_work_factory=self.state_store,
+            logger=logger,
+        )
+        # Agent questions wait in line per chat and expire after the same
+        # time the gateway waits for a request's reply.
+        self._pending_questions = GatewayPendingQuestions(
+            repository=self.request_repository,
+            sessions=self.session_repository,
+            event_output=self._event_output,
             clock=self._clock,
+            timeout_seconds=float(config.manager.request_timeout_seconds),
             logger=logger,
         )
         self._delivery_service = GatewayDeliveryService(
@@ -813,6 +865,7 @@ class UserGateway:
                 requester_timezone=config.user.timezone,
             ),
             requests=self._request_service,
+            questions=self._pending_questions,
             sessions=self.session_repository,
             projection=self._delivery_projection,
             presentation=self._delivery_presentation,
@@ -822,6 +875,7 @@ class UserGateway:
             event_output=self._event_output,
             clock=self._clock,
             logger=logger,
+            on_request_finished=lambda: self._thread_guidance.wake(),
         )
         self._local_responses = GatewayLocalResponseFactory(
             settings=GatewayLocalResponseSettings(
@@ -829,6 +883,21 @@ class UserGateway:
                 response_route=config.manager.response_queue_name,
             ),
             id_generator=self._id_generator,
+        )
+        # A busy thread's later messages are guidance for its running request.
+        self._thread_guidance = GatewayThreadGuidance(
+            settings=GatewayThreadGuidanceSettings(
+                response_route=config.manager.response_queue_name,
+            ),
+            requests=self._request_service,
+            sessions=self.session_repository,
+            manager=self._manager_client,
+            request_context=self._request_context_service,
+            local_responses=self._local_responses,
+            render_envelope=self._delivery_presentation.render_envelope,
+            event_output=self._event_output,
+            clock=self._clock,
+            logger=logger,
         )
         signed_in = SignedInPerson(sessions=self.session_repository, request_context=self._request_context_service)
         self.team_presence = GatewayTeamPresence(
@@ -847,6 +916,9 @@ class UserGateway:
             access_requests=lambda: self.access_inbox.requests(),
         )
         self.procedures = GatewayInstalledProcedures(config, person_changes=person_changes, signed_in=signed_in)
+        self.upload_retention, self.file_retention = _file_retention(
+            config, records=self.delivery_repository, person_changes=person_changes
+        )
         # Access reviews and notices (Phase 4 access model); its loop runs
         # with authorization on (_access_maintenance_tasks).
         self.access_inbox = build_gateway_access_inbox(
@@ -915,7 +987,6 @@ class UserGateway:
         # An approved access proposal opens its account link forms for the
         # approver; the waiting task resumes once they end.
         self.access_inbox.tool_setups = self._credential_workflow.tool_setups
-        pending_query_timeout_seconds = float(config.manager.request_timeout_seconds)
         self._clarification_core = GatewayClarificationCore(
             settings=GatewayClarificationSettings(
                 instance_name=config.instance_name,
@@ -924,15 +995,11 @@ class UserGateway:
                 request_timezone=config.user.timezone,
                 default_session_key=config.user.default_session_key,
                 default_owner_canonical_user_id=config.user.canonical_user_id,
-                pending_timeout_seconds=(
-                    pending_query_timeout_seconds
-                    if pending_query_timeout_seconds > 0
-                    else None
-                ),
                 parent_probe_timeout_seconds=TASK_PROGRESS_STATUS_TIMEOUT_SECONDS,
                 manager_unavailable_text=transition_settings.unavailable_notice(),
             ),
             requests=self._request_service,
+            questions=self._pending_questions,
             sessions=self._session_service,
             session_repository=self.session_repository,
             request_context=self._request_context_service,
@@ -957,21 +1024,23 @@ class UserGateway:
             manager_client=self._manager_client,
             request_service=self._request_service,
             session_repository=self.session_repository,
-            id_generator=self._id_generator,
             credential_workflow=self._credential_workflow,
             credential_handoffs=self._credential_handoffs,
-            resolve_pending_query=self._clarification_core.resolve_pending_query,
+            questions=self._pending_questions,
             reply_to_task_query=self._clarification_core.reply_to_task_query,
             render_envelope=self._delivery_presentation.render_envelope,
             resolve_attachments=self._delivery_attachments.resolve,
             manager_unavailable_text=transition_settings.unavailable_notice,
+            on_request_finished=self._thread_guidance.wake,
             logger=logger,
         )
         self._clarification_application = GatewayClarificationApplication(
             core=self._clarification_core,
-            requests=self._request_service,
+            questions=self._pending_questions,
             manager=self._manager_client,
             responses=self._response_coordinator,
+            local_responses=self._local_responses,
+            logger=logger,
         )
         self._operational_controls = GatewayOperationalControlApplication(
             settings=GatewayOperationalControlSettings(
@@ -1005,12 +1074,13 @@ class UserGateway:
             unmatched_credential_handler=(
                 self._response_coordinator.handle_unmatched_credential_request
             ),
+            late_guidance_status_handler=self._thread_guidance.handle_late_status,
         )
         self._manager_client.bind_inbound_handlers(
             on_unsolicited=self.inbound_messages.handle,
             on_manager_available=self.manager_transitions.handle_available,
             on_manager_unavailable=self.manager_transitions.handle_unavailable,
-            on_agent_presence=self.team_presence.record_agent_presence,
+            on_agent_presence=_agent_presence_observer(self.team_presence, self._thread_guidance),
         )
         self._interactive_submission_service = GatewayInteractiveSubmissionService(
             settings=GatewayInteractiveSubmissionSettings(
@@ -1024,6 +1094,7 @@ class UserGateway:
             requests=self._request_service,
             manager=self._manager_client,
             responses=self._response_coordinator,
+            guidance=self._thread_guidance,
             progress=self._task_progress_service,
             local_responses=self._local_responses,
             id_generator=self._id_generator,
@@ -1200,6 +1271,7 @@ class UserGateway:
                 enabled=config.agent.knowledge.enabled,
             ),
             accounts=self.account_sharing,
+            file_retention=self.file_retention,
         )
         self._activity_source = (
             activity_source or HttpGatewayActivitySource.from_gateway_config(config)
@@ -1238,10 +1310,18 @@ class UserGateway:
         self._started = True
         self._stop_event.clear()
         self.manager_transitions.start()
+        # Message routing, not an optional service: held guidance must reach
+        # its request (or the person must hear it did not) in every mode.
+        self._background_tasks = [
+            asyncio.create_task(
+                self._thread_guidance.run(self._stop_event),
+                name="gateway_held_guidance_loop",
+            )
+        ]
 
         if start_services:
             await self._maintenance_schedules.ensure_all()
-            self._background_tasks = [
+            self._background_tasks += [
                 asyncio.create_task(
                     self._deferred_delivery_application.run(self._stop_event),
                     name="gateway_delivery_loop",
@@ -1249,6 +1329,10 @@ class UserGateway:
                 asyncio.create_task(
                     self._manager_client.manager_liveness_loop(self._stop_event),
                     name="gateway_manager_liveness_loop",
+                ),
+                asyncio.create_task(
+                    self.upload_retention.run(self._stop_event),
+                    name="gateway_upload_retention_loop",
                 ),
             ]
             self._background_tasks.extend(

@@ -290,8 +290,8 @@ async def test_an_attachment_only_reply_keeps_the_replied_message() -> None:
     sent: list[dict] = []
 
     class _Application:
-        async def has_pending_query(self, _session_key):
-            return False
+        async def waiting_question_id(self, _session_key):
+            return None
 
         @staticmethod
         def is_task_progress_status_request(_text, _attachments=None):
@@ -373,11 +373,12 @@ async def test_the_replied_report_reaches_the_manager_on_the_request(tmp_path: P
     session = application.resolve_session(channel_name="telegram", user_id=str(PERSON_ID), chat_id="-100123")
     if clarification:
         query = TaskQuery(query_type=MessageMetaType.REQUEST, parent_task_id="task_paused", message="Which report?")
-        gateway.state_store.upsert_pending_query(
+        gateway.state_store.add_pending_query(
             session_key=session.session_key, correlation_id="corr_question", task_query_id=query.task_query_id,
             parent_task_id=query.parent_task_id, conversation_id=session.conversation_id, query_text=query.message,
             query_payload_json=query.model_dump_json(),
         )
+        gateway.state_store.mark_pending_query_shown(query.task_query_id)
 
     if rich:
         update = _rich_update()

@@ -277,7 +277,8 @@ class _Writer:
         )
 
         if kind is ObjectiveKind.OBJECTIVE:
-            self.objectives.save_objective(self._owned(ObjectiveRecord.model_validate(document)))
+            # A record already present was skipped while planning, so this only adds new ones.
+            self.objectives.insert_objective(self._owned(ObjectiveRecord.model_validate(document)))
         elif kind is ObjectiveKind.WORK_PROFILE:
             self.work.save_installed_profile(self._owned(ObjectiveWorkInstalledProfile.model_validate(document)))
         else:

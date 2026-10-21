@@ -13,6 +13,15 @@ access hook decides ``memory(action="delete")`` at full as it did
 (``custom_tools.action_inputs``). usermem and topic tags always belong to the
 person the task works for, from its signed context
 (``custom_tools.providers._user_scope``); no input names another person.
+
+A memory change can arrive long after the model read the fact, and another
+request may have changed the fact, or deleted it and given its number to a new
+fact, meanwhile. So ``replace`` and ``delete`` take the fact's
+``record_digest`` from the result the model read (a list, or its own create
+or replace), and the store acts only on that exact version
+(``storage.pinned_memory_repository``). A change refused because the fact is
+no longer that version, and an undo refused because the fact changed after
+the event, are failed results with the shared reason ``changed_since_read``.
 """
 
 from __future__ import annotations
@@ -25,6 +34,7 @@ from strands import tool
 
 from access_control.ownership import PRIVATE_UPDATE
 from custom_agents.pinned_memory_runtime import PINNED_MEMORY_BANKS, PinnedMemoryCommand
+from custom_messages.enums import ChangeRefusal
 from custom_tools.action_inputs import actions, input_problem
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.providers._user_scope import (
@@ -39,7 +49,7 @@ from custom_tools.providers.memory_review_inspection import review_job_in_scope
 from custom_tools.runtime_context import get_agent_ref
 from custom_tools.tool_results import failed
 from storage.conversation_repository import normalize_topic_tag
-from storage.pinned_memory_repository import USERMEM_BANK
+from storage.pinned_memory_repository import USERMEM_BANK, PinnedMemoryConflictError
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +62,8 @@ _FACT_DETAILS = ("tags", "valid_from_utc", "invalid_after_utc", "metadata")
 MEMORY_ACTIONS = actions(
     list=((), ("start", "end", "sort")),
     create=(("fact_text",), _FACT_DETAILS),
-    replace=(("memory_id",), ("fact_text", *_FACT_DETAILS)),
-    delete=(("memory_id",), ()),
+    replace=(("memory_id", "record_digest"), ("fact_text", *_FACT_DETAILS)),
+    delete=(("memory_id", "record_digest"), ()),
     undo=(("event_id",), ()),
 )
 TOPIC_TAGS_ACTIONS = actions(
@@ -72,11 +82,25 @@ def _memory_error(error_code: str, message: str) -> dict[str, Any]:
     return failed({"ok": False, "error_code": error_code, "message": message, "error": message})
 
 
+def _changed_since_read(action: str, bank: str, memory_id: Optional[int], error: PinnedMemoryConflictError) -> dict[str, Any]:
+    """The failed result of a change or undo refused because the fact is no longer the version it was based on."""
+
+    if action == "undo":
+        message = f"{error} Nothing was undone. List {bank} again to see the fact as it is now."
+    else:
+        message = (
+            f"{bank} #{memory_id} changed after you read it, so nothing was changed. List {bank} again and, "
+            "if the change is still right, send it with the fact's current record_digest."
+        )
+    return _memory_error(ChangeRefusal.CHANGED_SINCE_READ.value, message)
+
+
 @tool
 def memory(
     action: MemoryAction,
     bank: MemoryBank,
     memory_id: Optional[int] = None,
+    record_digest: Optional[str] = None,
     fact_text: Optional[str] = None,
     tags: Optional[List[str]] = None,
     valid_from_utc: Optional[str] = None,
@@ -91,21 +115,31 @@ def memory(
 
     coremem holds facts every person on the team sees; usermem holds durable
     facts about the person this task works for. Each fact has a numeric
-    memory_id, and each change returns an event_id that undo reverses.
+    memory_id and a record_digest that names its current version; each change
+    returns an event_id that undo reverses. A deleted fact's number is given
+    to the next new fact.
 
     Actions:
     - `list`: the active facts; `start` and `end` pick rows (1 to 50 by default), `sort` orders them.
     - `create`: add one fact (`fact_text`), optionally with `tags`, `valid_from_utc`, `invalid_after_utc`
       and `metadata`.
     - `replace`: change fact `memory_id`: any of `fact_text`, `tags`, `valid_from_utc`, `invalid_after_utc`
-      and `metadata`; `invalid_after_utc="never"` clears its expiry.
-    - `delete`: remove fact `memory_id`.
-    - `undo`: reverse a create, replace, delete or expiry by its `event_id`.
+      and `metadata`; `invalid_after_utc="never"` clears its expiry. Needs `record_digest`.
+    - `delete`: remove fact `memory_id`. Needs `record_digest`.
+    - `undo`: reverse a create, replace, delete or expiry by its `event_id`, while the fact is still as that
+      change left it.
+
+    `record_digest` is the fact's record_digest in the result you based the change on: a `list`, or your own
+    create or replace. Facts shown in your instructions carry none; list them first. If the fact changed
+    after you read it (another request edited it, or deleted it and its number now names another fact),
+    the change is refused with `changed_since_read` and nothing changes: list again and decide with the
+    current fact.
 
     Args:
         action: What to do; see Actions.
         bank: coremem for the team's facts, usermem for the person's.
         memory_id: The fact to replace or delete.
+        record_digest: The record_digest of fact memory_id as you read it (replace and delete).
         fact_text: The fact, as one durable statement.
         tags: Topic tags for the fact.
         valid_from_utc: When the fact starts to hold, ISO 8601 UTC.
@@ -122,6 +156,7 @@ def memory(
         return _memory_error("agent_ref_missing", "Agent reference not set")
     inputs = {
         "memory_id": memory_id,
+        "record_digest": record_digest,
         "fact_text": fact_text,
         "tags": tags,
         "valid_from_utc": valid_from_utc,
@@ -158,11 +193,14 @@ def memory(
             sort=sort or "memory_id",
             range_start=start or 1,
             range_end=end or 50,
+            expected_record_digest=record_digest or None,
         )
         result = _pinned_memory_service_for_agent(agent).execute(
             command, context=_pinned_memory_context_for_agent(agent, canonical_user_id=person)
         )
         return json.dumps(result, default=str)
+    except PinnedMemoryConflictError as exc:
+        return _changed_since_read(action, bank, memory_id, exc)
     except Exception as exc:  # noqa: BLE001 - the model gets the reason and may try again
         return _memory_error("pinned_memory_error", str(exc))
 

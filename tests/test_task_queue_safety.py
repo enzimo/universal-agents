@@ -135,6 +135,7 @@ async def test_access_resume_clears_old_blocker_before_final_review(
         task.task_id,
         sdk,
         {},
+        lambda **_: None,
         "prompt",
         task,
         MessageHeader(from_agent_id="gateway"),

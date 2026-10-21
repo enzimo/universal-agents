@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Mapping
 import os
 from pathlib import Path
 import signal
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -1741,3 +1744,538 @@ def test_launch_refuses_to_start_when_the_manager_database_cannot_be_set_up(
         code, steps = _launch_until_after_preparation(tmp_path, monkeypatch, locked)
     assert code == 2 and steps == ["run lock", "prepare"]
     assert "event=manager_database_prepare_failed" in caplog.text and "database is locked" in caplog.text
+
+
+def _source_stripped_app(tmp_path: Path, *, with_consumer_check: bool = True) -> Path:
+    """An app folder as images leave it: compiled programs, no Python sources."""
+
+    root = tmp_path / "app"
+    (root / "scripts").mkdir(parents=True)
+    if with_consumer_check:
+        (root / "scripts" / "reconcile_nats_consumers.pyc").write_bytes(b"compiled")
+    return root
+
+
+def _record_consumer_check_runs(monkeypatch, outcome) -> list[tuple[list[str], dict]]:
+    import docker.launch_headless as lh
+
+    runs: list[tuple[list[str], dict]] = []
+
+    def fake_run(command, **kwargs):
+        runs.append((list(command), kwargs))
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return subprocess.CompletedProcess(command, outcome)
+
+    monkeypatch.setattr(lh.subprocess, "run", fake_run)
+    return runs
+
+
+def test_the_consumer_check_runs_its_compiled_program_in_a_source_stripped_image(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    import docker.launch_headless as lh
+
+    app_root = _source_stripped_app(tmp_path)
+    monkeypatch.setattr(lh, "REPO_ROOT", app_root)
+    runs = _record_consumer_check_runs(monkeypatch, 0)
+    config_path = tmp_path / "instance_config.yaml"
+
+    with caplog.at_level("INFO", logger="docker.launch_headless"):
+        lh.run_nats_consumer_preflight(config_path=config_path, env={"NATS_URL": "nats://127.0.0.1:4222"})
+
+    [(command, kwargs)] = runs
+    assert command[1:] == [
+        str(app_root / "scripts" / "reconcile_nats_consumers.pyc"),
+        "--config",
+        str(config_path),
+    ]
+    assert kwargs["cwd"] == app_root
+    # A check that finished reports what it found in its own log (for example
+    # event=nats_consumer_capacity_high) and start-up continues; the launcher
+    # adds nothing, as before.
+    assert [record for record in caplog.records if record.levelno >= 30] == []
+
+
+@pytest.mark.parametrize(
+    ("case", "outcome", "reason", "detail"),
+    [
+        ("program missing", None, "program_missing", "reconcile_nats_consumers.pyc"),
+        ("cannot start", PermissionError(13, "Permission denied"), "start_failed", "Permission denied"),
+        ("too slow", subprocess.TimeoutExpired(["python"], 30), "timed_out", "30 seconds"),
+        ("stopped with an error", 1, "exited_with_error", "status 1"),
+    ],
+)
+def test_a_consumer_check_that_cannot_run_is_logged_as_an_error_with_its_reason(
+    tmp_path: Path, monkeypatch, caplog, case: str, outcome, reason: str, detail: str
+) -> None:
+    import docker.launch_headless as lh
+
+    app_root = _source_stripped_app(tmp_path, with_consumer_check=outcome is not None)
+    monkeypatch.setattr(lh, "REPO_ROOT", app_root)
+    runs = _record_consumer_check_runs(monkeypatch, outcome)
+
+    with caplog.at_level("INFO", logger="docker.launch_headless"):
+        # Returns normally: agents still start without the check.
+        lh.run_nats_consumer_preflight(config_path=tmp_path / "instance_config.yaml", env={})
+
+    [record] = [record for record in caplog.records if record.levelno >= 30]
+    assert record.levelname == "ERROR", case
+    message = record.getMessage()
+    assert "event=nats_consumer_preflight_not_run" in message
+    assert f"reason={reason}" in message
+    assert detail in message
+    assert len(runs) == (0 if outcome is None else 1)
+
+
+def test_an_unreachable_nats_server_is_reported_quickly_with_its_connection_error(
+    tmp_path: Path, caplog, capfd
+) -> None:
+    import socket
+    import time
+
+    import docker.launch_headless as lh
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        server = f"nats://127.0.0.1:{sock.getsockname()[1]}"
+    config_path = _make_config(tmp_path).save(tmp_path / "instance" / "instance_config.yaml")
+    env = {key: value for key, value in os.environ.items() if not key.startswith("NATS_")}
+    env.update({"TEAM_LOCAL_NATS_ENABLED": "false", "NATS_SERVERS": server, "NATS_URL": server})
+
+    started = time.monotonic()
+    with caplog.at_level("INFO", logger="docker.launch_headless"):
+        # Runs the real check program; nothing listens on the port.
+        lh.run_nats_consumer_preflight(config_path=config_path, env=env)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < lh.CONSUMER_CHECK_TIMEOUT_SECONDS / 2
+    [record] = [record for record in caplog.records if record.levelno >= 30]
+    assert "event=nats_consumer_preflight_not_run reason=exited_with_error" in record.getMessage()
+    check_log = capfd.readouterr().err
+    assert "event=nats_consumer_reconciliation_failed" in check_log
+    assert "Could not connect to NATS: ConnectionRefusedError" in check_log
+
+
+# --- the message streams exist before any service checks them ----------------
+
+# Stand-ins for the started services. The gateway creates the team's streams
+# only after the manager's single check, the order slow storage produced; the
+# manager runs the same check every participant runs when it connects.
+_STREAM_CHECK_CHILD = '''
+import asyncio
+import sys
+import time
+from pathlib import Path
+
+repo_root, role, config_path, folder = sys.argv[1:]
+sys.path.insert(0, repo_root)
+folder = Path(folder)
+
+from assistant_gateway.config import GatewayInstanceConfig
+from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
+from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
+from custom_transport.nats_topology import NatsTopologyMismatch
+from custom_transport.subjects import NatsSubjectMapper
+
+
+def wait_for(name, seconds):
+    deadline = time.monotonic() + seconds
+    while not (folder / name).exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+async def ignore(_envelope):
+    return None
+
+
+async def gateway(config):
+    wait_for("manager.checked", 10)
+    runtime = NatsGatewayManagerRuntime.from_gateway_config(config)
+    await runtime.connect(on_response=ignore, on_operational=ignore, on_presence=ignore)
+    (folder / "gateway.connected").touch()
+    await asyncio.sleep(60)
+
+
+async def manager(config):
+    transport = config.transport
+    adapter = NatsTransportAdapter(
+        config=NatsTransportConfig(
+            servers=list(transport.nats_servers or [transport.nats_url]),
+            subject_prefix=transport.subject_prefix,
+            storage=transport.storage,
+            replicas=transport.replicas,
+            duplicate_window_seconds=transport.duplicate_window_seconds,
+            work_max_age_seconds=transport.work_max_age_seconds,
+            presence_max_age_seconds=transport.presence_max_age_seconds,
+            user=transport.nats_user,
+            password=transport.nats_password,
+        ),
+        mapper=NatsSubjectMapper(team_id=config.manager.team_id, subject_prefix=transport.subject_prefix),
+    )
+    try:
+        await adapter.connect()
+    except NatsTopologyMismatch as exc:
+        (folder / "manager.checked").write_text(str(exc))
+        sys.exit(1)
+    (folder / "manager.checked").write_text("ok")
+    await adapter.close()
+    wait_for("gateway.connected", 20)
+
+
+config = GatewayInstanceConfig.load_for_process(config_path)
+if role == "gateway":
+    asyncio.run(gateway(config))
+elif role == "manager":
+    asyncio.run(manager(config))
+else:
+    time.sleep(60)
+'''
+
+
+def _delete_streams(nats_url: str, settings, mapper) -> None:
+    import asyncio
+
+    import nats
+    from nats.js.errors import NotFoundError
+
+    async def delete() -> None:
+        connection = await nats.connect(servers=[nats_url], user=settings.nats_user, password=settings.nats_password)
+        try:
+            jetstream = connection.jetstream()
+            for name in (mapper.work_stream_name(), mapper.presence_stream_name(), mapper.dead_letter_stream_name()):
+                try:
+                    await jetstream.delete_stream(name)
+                except NotFoundError:
+                    pass
+        finally:
+            await connection.close()
+
+    asyncio.run(delete())
+
+
+def _prepare_launch(tmp_path: Path, monkeypatch, *, team_id: str, env: Mapping[str, str]) -> Path:
+    """Let the launcher's main run to its services; the steps that start other tools are left out."""
+
+    import docker.launch_headless as lh
+    from access_control.identity import ISSUER_GATEWAY, ISSUER_SCHEDULER, generate_signing_key
+
+    config = GatewayInstanceConfig.create(
+        instance_name="streamtest", instance_root=str(tmp_path / "instance"), team_id=team_id, timezone="UTC"
+    )
+    config_path = config.save(tmp_path / "instance" / "instance_config.yaml")
+    for name, value in {
+        "ACCESS_GATEWAY_SIGNING_KEY": generate_signing_key(ISSUER_GATEWAY)[0],
+        "ACCESS_SCHEDULER_SIGNING_KEY": generate_signing_key(ISSUER_SCHEDULER)[0],
+        "SECURE_TOOL_BROKER_TOKEN": "root",
+        **env,
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(sys, "argv", ["launch_headless.py", "--config", str(config_path)])
+    for name, replacement in {
+        "validate_runtime_layout": lambda _config: None,
+        "use_process_timezone": lambda _env: None,
+        "run_nats_consumer_preflight": lambda **_kwargs: None,
+        "ensure_managed_sealbox_service": lambda _config, env: None,
+        "ensure_openshell_gateway": lambda _config, env: None,
+        "ensure_openshell_sandbox": lambda _config, env: None,
+        "validate_memory_graph_embedding_preflight": lambda *_args, **_kwargs: None,
+    }.items():
+        monkeypatch.setattr(lh, name, replacement)
+    monkeypatch.setattr(lh.signal, "signal", lambda *_args: None)
+    return config_path
+
+
+def test_launch_sets_up_the_message_streams_with_the_gateway_environment_just_before_the_services(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import docker.launch_headless as lh
+
+    _prepare_launch(
+        tmp_path, monkeypatch, team_id="team_test", env={"TEAM_LOCAL_NATS_ENABLED": "false", "NATS_PASSWORD": "nats"}
+    )
+    steps: list[tuple[str, Mapping[str, str]]] = []
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: steps.append(("streams", env)))
+    monkeypatch.setattr(lh, "run_supervised", lambda **kwargs: steps.append(("services", kwargs)) or 0)
+
+    assert lh.main() == 0
+    assert [name for name, _ in steps] == ["streams", "services"]
+    (_, stream_env), (_, services) = steps
+    assert stream_env is services["gateway_env"], "the gateway's own settings and NATS credentials"
+    assert stream_env["NATS_PASSWORD"] == "nats"
+
+
+def test_launch_refuses_to_start_and_stops_nats_when_the_streams_cannot_be_set_up(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    import docker.launch_headless as lh
+    from nats.errors import NoServersError
+
+    _prepare_launch(tmp_path, monkeypatch, team_id="team_test", env={"TEAM_LOCAL_NATS_ENABLED": "true"})
+    nats_process = SimpleNamespace(pid=4222, terminated=False, poll=lambda: None)
+    monkeypatch.setattr(lh, "start_local_nats", lambda **_kwargs: nats_process)
+    stopped: list[str] = []
+    monkeypatch.setattr(lh, "terminate_process", lambda _process, name: stopped.append(name))
+
+    def unreachable(_path, _env):
+        raise NoServersError()
+
+    monkeypatch.setattr(lh, "prepare_message_streams", unreachable)
+    monkeypatch.setattr(lh, "run_supervised", lambda **_kwargs: pytest.fail("no service may start"))
+
+    with caplog.at_level("ERROR", logger="docker.launch_headless"):
+        assert lh.main() == 2
+    assert stopped == ["nats"]
+    assert "event=nats_streams_prepare_failed error_type=NoServersError" in caplog.text
+
+
+@pytest.mark.parametrize("setting", ["NATS_MAX_DELIVER", "INTERNAL_WEBSITE_BIND_PORT"])
+def test_invalid_team_env_settings_stop_managed_processes_before_any_service_starts(
+    tmp_path: Path, monkeypatch, caplog, setting: str
+) -> None:
+    import docker.launch_headless as lh
+
+    monkeypatch.delenv(setting, raising=False)
+    config_path = _prepare_launch(
+        tmp_path, monkeypatch, team_id="team_test", env={"TEAM_LOCAL_NATS_ENABLED": "true"}
+    )
+    env_path = tmp_path / "team.env"
+    env_path.write_text(f"{setting}=invalid\n", encoding="utf-8")
+    config = GatewayInstanceConfig.load_saved(config_path)
+    config.launch.env_file_path = str(env_path)
+    config.save(config_path)
+    # The first load has no team.env yet. Preparation must use the effective
+    # environment and clean up the services that have started in between.
+    GatewayInstanceConfig.load_for_process(config_path)
+    processes: list[subprocess.Popen[bytes]] = []
+    events: list[str] = []
+    sandbox = object()
+
+    def start_process() -> subprocess.Popen[bytes]:
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        processes.append(process)
+        return process
+
+    terminate = lh.terminate_process
+
+    def stop_process(process, name):
+        events.append(name)
+        terminate(process, name)
+
+    def cleanup_sandbox(value, *, env):
+        assert value is sandbox
+        events.append("sandbox")
+
+    monkeypatch.setattr(lh, "start_local_nats", lambda **_kwargs: start_process())
+    monkeypatch.setattr(
+        lh, "ensure_managed_sealbox_service", lambda *_args, **_kwargs: SimpleNamespace(process=start_process())
+    )
+    monkeypatch.setattr(
+        lh, "ensure_openshell_gateway", lambda *_args, **_kwargs: SimpleNamespace(process=start_process())
+    )
+    monkeypatch.setattr(lh, "ensure_openshell_sandbox", lambda *_args, **_kwargs: sandbox)
+    monkeypatch.setattr(lh, "cleanup_openshell_sandbox", cleanup_sandbox)
+    monkeypatch.setattr(lh, "terminate_process", stop_process)
+    monkeypatch.setattr(lh, "run_supervised", lambda **_kwargs: pytest.fail("no service may start"))
+
+    try:
+        with caplog.at_level("ERROR", logger="docker.launch_headless"):
+            assert lh.main() == 2
+        assert len(processes) == 3
+        assert all(process.poll() is not None for process in processes)
+        assert events == ["sandbox", "Sealbox service", "OpenShell gateway", "nats"]
+        assert "event=nats_streams_prepare_failed error_type=MessageStreamConfigurationError" in caplog.text
+        assert "invalid literal for int()" in caplog.text
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+
+
+@pytest.mark.parametrize(
+    ("failure", "cleanup_failure"),
+    [
+        (RuntimeError("unexpected setup failure"), None),
+        (ValueError("unexpected topology failure"), None),
+        (KeyboardInterrupt(), "sandbox"),
+        (asyncio.CancelledError(), "Sealbox service"),
+    ],
+)
+def test_preparation_preserves_unexpected_failures_and_interrupts_after_attempting_every_cleanup(
+    tmp_path: Path, monkeypatch, caplog, failure: BaseException, cleanup_failure: str | None
+) -> None:
+    import docker.launch_headless as lh
+
+    events: list[str] = []
+
+    def prepare(_path, _env):
+        raise failure
+
+    def step(name: str):
+        events.append(name)
+        if name == cleanup_failure:
+            raise RuntimeError("fixture cleanup failure")
+
+    monkeypatch.setattr(lh, "prepare_message_streams", prepare)
+    monkeypatch.setattr(lh, "terminate_process", lambda _process, name: step(name))
+    processes = tuple((name, object()) for name in ("nats", "OpenShell gateway", "Sealbox service"))
+
+    with caplog.at_level("ERROR", logger="docker.launch_headless"):
+        with pytest.raises(type(failure)) as raised:
+            lh.prepare_message_streams_before_services(
+                tmp_path / "instance_config.yaml",
+                {},
+                external_processes=processes,
+                before_external_shutdown=lambda: step("sandbox"),
+            )
+
+    assert raised.value is failure
+    assert events == ["sandbox", "Sealbox service", "OpenShell gateway", "nats"]
+    assert "event=nats_streams_prepare_failed" not in caplog.text
+    assert ("event=nats_streams_prepare_cleanup_failed" in caplog.text) == (cleanup_failure is not None)
+
+
+@pytest.mark.live
+@pytest.mark.nats
+def test_a_manager_that_checks_at_once_finds_the_streams_a_late_gateway_creates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The real launcher on a new team, whose streams nothing has created yet."""
+
+    import docker.launch_headless as lh
+    from custom_transport.subjects import NatsSubjectMapper
+    from id_generation import new_id
+    from live_nats_client import resolve_live_transport_settings
+
+    settings = resolve_live_transport_settings()
+    nats_url = settings.nats_servers[0]
+    team_id = new_id("team_streams").lower()
+    config_path = _prepare_launch(
+        tmp_path,
+        monkeypatch,
+        team_id=team_id,
+        env={
+            "TEAM_LOCAL_NATS_ENABLED": "false",
+            "NATS_URL": nats_url,
+            "NATS_SERVERS": nats_url,
+            "NATS_USER": settings.nats_user or "",
+            "NATS_PASSWORD": settings.nats_password or "",
+        },
+    )
+    folder = tmp_path / "markers"
+    folder.mkdir()
+    child = tmp_path / "stream_check_child.py"
+    child.write_text(_STREAM_CHECK_CHILD, encoding="utf-8")
+
+    def command(role: str) -> list[str]:
+        return [sys.executable, str(child), str(lh.REPO_ROOT), role, str(config_path), str(folder)]
+
+    for name, replacement in {
+        "should_start_execution_controller": lambda _config: False,
+        "should_start_adapter_host": lambda _config, gateway_args: False,
+        "build_manager_command": lambda _config: command("manager"),
+        "build_startup_agent_commands": lambda _config: [],
+        "build_activity_collector_command": lambda _path: command("activity"),
+        "build_gateway_command": lambda _path, _args: command("gateway"),
+        "build_secure_tool_broker_command": lambda _path: command("broker"),
+    }.items():
+        monkeypatch.setattr(lh, name, replacement)
+
+    try:
+        code = lh.main()
+        checked = (folder / "manager.checked").read_text()
+    finally:
+        _delete_streams(nats_url, settings, NatsSubjectMapper(team_id=team_id))
+
+    assert checked == "ok", checked
+    assert code == 0, "the manager's own clean exit ended the run"
+    assert (folder / "gateway.connected").exists()
+
+
+def _stream_setup_case(tmp_path: Path, *, team_id: str, storage: str = "file") -> tuple[Path, dict[str, str]]:
+    from live_nats_client import resolve_live_transport_settings
+
+    settings = resolve_live_transport_settings()
+    config = GatewayInstanceConfig.create(
+        instance_name="streamtest", instance_root=str(tmp_path / "instance"), team_id=team_id, timezone="UTC"
+    )
+    config.transport.storage = storage
+    env = {
+        "NATS_URL": settings.nats_servers[0],
+        "NATS_USER": settings.nats_user or "",
+        "NATS_PASSWORD": settings.nats_password or "",
+    }
+    return config.save(tmp_path / "instance" / "instance_config.yaml"), env
+
+
+@pytest.mark.live
+@pytest.mark.nats
+def test_stream_setup_creates_the_streams_participants_check_and_a_repeat_changes_nothing(tmp_path: Path) -> None:
+    import asyncio
+
+    import nats
+
+    from custom_transport.nats_adapter import NatsTransportAdapter
+    from custom_transport.subjects import NatsSubjectMapper
+    from docker.launch_headless import prepare_message_streams
+    from id_generation import new_id
+    from live_nats_client import nats_transport_config_from_env, resolve_live_transport_settings
+
+    team_id = new_id("team_streams").lower()
+    mapper = NatsSubjectMapper(team_id=team_id)
+    config_path, env = _stream_setup_case(tmp_path, team_id=team_id)
+    settings = resolve_live_transport_settings()
+
+    async def created_times() -> dict[str, object]:
+        connection = await nats.connect(servers=[env["NATS_URL"]], user=settings.nats_user, password=settings.nats_password)
+        try:
+            jetstream = connection.jetstream()
+            names = (mapper.work_stream_name(), mapper.presence_stream_name(), mapper.dead_letter_stream_name())
+            return {name: (await jetstream.stream_info(name)).created for name in names}
+        finally:
+            await connection.close()
+
+    async def participant_check() -> None:
+        participant = NatsTransportAdapter(config=nats_transport_config_from_env(), mapper=mapper)
+        await participant.connect()
+        await participant.close()
+
+    try:
+        names = prepare_message_streams(config_path, env)
+        assert names == (mapper.work_stream_name(), mapper.presence_stream_name(), mapper.dead_letter_stream_name())
+        asyncio.run(participant_check())
+        first = asyncio.run(created_times())
+        assert prepare_message_streams(config_path, env) == names
+        assert asyncio.run(created_times()) == first, "the second setup found nothing to change"
+    finally:
+        _delete_streams(env["NATS_URL"], settings, mapper)
+
+
+@pytest.mark.live
+@pytest.mark.nats
+def test_stream_setup_fails_clearly_for_a_stream_the_broker_will_not_change(tmp_path: Path) -> None:
+    from custom_transport.subjects import NatsSubjectMapper
+    from docker.launch_headless import MESSAGE_STREAM_PREPARE_ERRORS, prepare_message_streams
+    from id_generation import new_id
+    from live_nats_client import resolve_live_transport_settings
+
+    team_id = new_id("team_streams").lower()
+    memory_path, env = _stream_setup_case(tmp_path / "memory", team_id=team_id, storage="memory")
+    file_path, _env = _stream_setup_case(tmp_path / "file", team_id=team_id, storage="file")
+    try:
+        prepare_message_streams(memory_path, env)
+        # JetStream cannot move an existing stream from memory to file storage.
+        with pytest.raises(MESSAGE_STREAM_PREPARE_ERRORS, match="(?i)storage"):
+            prepare_message_streams(file_path, env)
+    finally:
+        _delete_streams(env["NATS_URL"], resolve_live_transport_settings(), NatsSubjectMapper(team_id=team_id))
+
+
+def test_stream_setup_connects_to_nothing_without_jetstream(tmp_path: Path) -> None:
+    from docker.launch_headless import prepare_message_streams
+
+    config_path = _make_config(tmp_path).save(tmp_path / "instance" / "instance_config.yaml")
+    # A port nothing listens on: a connection attempt would retry for minutes.
+    env = {"NATS_URL": "nats://127.0.0.1:9", "NATS_JETSTREAM_ENABLED": "false"}
+    assert prepare_message_streams(config_path, env) == ()

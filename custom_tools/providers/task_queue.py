@@ -1,4 +1,14 @@
-"""Own-queue tools using the runtime's state and cancellation operations."""
+"""Own-queue tools using the runtime's state and cancellation operations.
+
+Every agent holds them (``fn:task_queue``). A turn works on one request, the
+task's signed context; a person often has several requests open at once, one
+lead model turn running while the others wait for workers or for people. So a
+turn may pause, resume or stop only tasks of its own request (owner's decision
+2026-10-19): for any other request the tool refuses and tells the person to do
+it in that request's thread, or to stop it themselves (``/stop task`` or
+Settings -> Tasks, which the manager applies at once without a model turn).
+Listing still shows all of the person's unfinished tasks with this agent.
+"""
 
 from access_control.ownership import (
     PRIVATE_DELETE,
@@ -7,11 +17,14 @@ from access_control.ownership import (
     private_access,
 )
 import json
+import logging
 from datetime import datetime, timezone
 from functools import partial
+from typing import Any
 
 from strands import tool
 
+from custom_agents.access_runtime import request_id_of, verified_context_id
 from custom_agents.control_runtime import stop_task_execution
 from custom_agents.runtime_task_controls import QUEUE_PAUSE_EVENT
 from custom_messages.enums import ProgressState
@@ -19,6 +32,15 @@ from custom_tools.provider_contract import ToolProvider
 from custom_tools.providers._user_scope import _private_user_scope
 from custom_tools.runtime_context import get_agent_ref
 from id_generation import new_id
+
+logger = logging.getLogger(__name__)
+
+# The refusal for a task of another request; the model relays it to the person.
+OTHER_REQUEST_REFUSAL = (
+    "Task {task_id} belongs to another of the person's requests. While working on one request you can pause, "
+    "resume or stop only that request's own tasks. Tell the person to ask for it in that request's own thread, "
+    "or to stop it themselves with /stop task {task_id} or in Settings -> Tasks."
+)
 
 
 def _owned_root(agent, task_id, owner, action):
@@ -39,10 +61,33 @@ def _owned_root(agent, task_id, owner, action):
     return info
 
 
-def _prepare_control(agent, task_id, owner, action, reason):
+def _require_same_request(agent: Any, info: Any, request_id: str | None, action: str) -> None:
+    """Refuse a task of another request: this turn controls only its own (module docstring).
+
+    ``request_id`` is the verified request of the running turn; a task with
+    no request of its own, or none to compare with, is refused too.
+    """
+    task_request_id = request_id_of(info.meta)
+    if request_id is not None and task_request_id == request_id:
+        return
+    task_id = info.task.task_id
+    logger.info(
+        "A queue control for another request was refused. event=task_queue_other_request_refused "
+        "agent_id=%s task_id=%s action=%s request_id=%s task_request_id=%s",
+        getattr(agent, "id", None),
+        task_id,
+        action,
+        request_id,
+        task_request_id,
+    )
+    raise PermissionError(OTHER_REQUEST_REFUSAL.format(task_id=task_id))
+
+
+def _prepare_control(agent, task_id, owner, request_id, action, reason):
     """Validate and transition under the manager's serialized storage boundary."""
     manager = agent.task_manager
     info = _owned_root(agent, task_id, owner, action)
+    _require_same_request(agent, info, request_id, action)
     graph = manager.get_execution_graph_task_infos(task_id)
     if manager.is_terminal_state(info.state):
         raise ValueError("This task has already finished.")
@@ -109,8 +154,10 @@ def _prepare_control(agent, task_id, owner, action, reason):
 async def list_task_queue(offset: int = 0, limit: int = 20) -> str:
     """Inspect this agent's unfinished tasks for the current user, including blockers and delegated children.
 
-    Use task IDs with get_task_history_window before stopping duplicates or
-    resuming work. Paging is bounded to 20 tasks per call.
+    Use task IDs with get_task_history_window to explain what each task is
+    doing or waiting for. Tasks of the person's other requests are listed too,
+    but only the person can stop, pause or resume those. Paging is bounded to
+    20 tasks per call.
     """
     from custom_agents.manager_control_runtime import (
         _runtime_work_roots,
@@ -145,12 +192,14 @@ async def list_task_queue(offset: int = 0, limit: int = 20) -> str:
 
 @tool
 async def control_task_queue(task_id: str, action: str, reason: str) -> str:
-    """Pause, resume or stop another task in this agent's own queue for the current user.
+    """Pause, resume or stop another task of the request you are working on, in this agent's own queue.
 
-    Inspect list_task_queue and task history first. Stop cancels attached work
-    and preserves history. To consolidate confirmed duplicates, stop redundant
-    tasks and resume the retained task if it has no blocker. Resume never grants
-    access, answers a pending question or bypasses a runtime budget pause.
+    A task of the person's other requests is refused: tell the person to ask
+    for it in that request's own thread, or to stop it with /stop task
+    <task_id> or in Settings -> Tasks. Inspect list_task_queue and task history
+    first. Stop cancels attached work and preserves history. Resume never
+    grants access, answers a pending question or bypasses a runtime budget
+    pause.
     """
     agent = get_agent_ref()
     if agent is None:
@@ -162,9 +211,11 @@ async def control_task_queue(task_id: str, action: str, reason: str) -> str:
         return json.dumps(
             {"error": "Choose pause, resume or stop and provide a reason."}
         )
+    # The request this turn works on, from its verified signed context.
+    request_id = verified_context_id(agent)
     try:
         info = await agent.task_manager.operations_runtime.run(
-            partial(_prepare_control, agent), task_id, owner, action, reason
+            partial(_prepare_control, agent), task_id, owner, request_id, action, reason
         )
         if action == "stop":
             result = await stop_task_execution(

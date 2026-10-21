@@ -140,7 +140,7 @@ tools:
   - tool_id: fn:task_queue
     provider: task_queue
     display_name: Task queue
-    description: See and pause, resume, or stop this agent's own tasks.
+    description: See this agent's tasks for the person, and pause, resume or stop those of the current request.
     tool_sets: [agent_runtime, standard]
     functions:
       list_task_queue: read

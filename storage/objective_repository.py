@@ -1,4 +1,21 @@
-"""Backend-neutral repository boundary for durable objective persistence."""
+"""Backend-neutral repository boundary for durable objective persistence.
+
+How an Objective is written: ``insert_objective`` stores a new record and
+refuses one that exists; ``change_objective`` changes a stored record inside
+one write transaction (``BEGIN IMMEDIATE`` in SQLite, the row locked with
+``FOR UPDATE`` in PostgreSQL): it reads the stored row, checks the version the
+writer read when it names one, applies the change and writes the row back.
+
+Why: this store used to replace the whole record with whatever copy a writer
+held (an upsert). A copy read before another change and saved after it erased
+that change, even in a field the writer never touched: an older copy with a
+new desired outcome put back the old title, and a task link saved by one team
+lead process erased the criterion another had just marked met. Now no write
+starts from a copy older than the stored row. Trusted bookkeeping (task links,
+reviews, events) merges its fields into the stored row and is never refused;
+an agent's edit names the version it read (``objective_version``) and is
+refused with ``changed_since_read`` when the fields it decided on changed.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +26,13 @@ from storage.sql_dialect import SQLITE, POSTGRES, SqlDialect
 import logging
 import sqlite3
 from dataclasses import dataclass
-from typing import List, Optional, Protocol
+from typing import Any, Callable, List, Optional, Protocol
 
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
 
-from custom_messages.records.objectives import ObjectiveRecord
+from custom_messages.enums import ChangeRefusal
+from custom_messages.records.objectives import ObjectiveRecord, objective_version
+from storage.change_ledger import ChangeRefused
 
 from .config import StorageSettings
 from .postgres_connection import (
@@ -45,6 +64,13 @@ class ObjectiveListRecord:
     promoted_from_task_id: Optional[str]
     created_at: Optional[str]
     updated_at: Optional[str]
+    # ``objective_version`` of the stored record; an agent names it to change the Objective.
+    version: str
+
+
+# Edits a stored Objective in place inside the write transaction; returns
+# False when there is nothing to save. It must not write other stores.
+ObjectiveChange = Callable[[ObjectiveRecord], bool]
 
 
 @dataclass(frozen=True)
@@ -64,7 +90,16 @@ class ObjectiveView:
 
 
 class ObjectiveRepository(Protocol):
-    def save_objective(self, objective: ObjectiveRecord) -> None: ...
+    def insert_objective(self, objective: ObjectiveRecord) -> None: ...
+
+    def change_objective(
+        self,
+        objective_id: str,
+        *,
+        owner_agent_id: str,
+        change: ObjectiveChange,
+        expected_version: Optional[str] = None,
+    ) -> Optional[ObjectiveRecord]: ...
 
     def get_objective(
         self,
@@ -127,6 +162,7 @@ class _RelationalObjectiveRepository:
     """Shared record operations for durable objective persistence."""
 
     _dialect: SqlDialect
+    _logger: logging.Logger
 
     _TERMINAL_STATUSES = {
         "satisfied",
@@ -136,6 +172,10 @@ class _RelationalObjectiveRepository:
         "deleted",
     }
 
+
+    def _connect(self) -> Any:
+        """A connection to this backend's database (each backend opens its own)."""
+        raise NotImplementedError
 
     @staticmethod
     def _objective_record_id(objective: ObjectiveRecord) -> str:
@@ -271,60 +311,120 @@ class _RelationalObjectiveRepository:
                 updated,
             )
 
-    def save_objective(self, objective: ObjectiveRecord) -> None:
+    # The columns a write sets from the record, in order (``_column_values``).
+    _WRITTEN_COLUMNS = (
+        "owner_agent_id",
+        "owner_agent_name",
+        "team_id",
+        "owner_named_agent_type",
+        "owner_canonical_user_id",
+        "title",
+        "status",
+        "horizon",
+        "priority",
+        "current_plan_id",
+        "root_conversation_id",
+        "created_by_task_id",
+        "promoted_from_task_id",
+        "objective_data",
+        "updated_at",
+    )
+
+    @staticmethod
+    def _column_values(objective: ObjectiveRecord) -> tuple[Any, ...]:
+        return (
+            objective.owner_agent_id,
+            objective.owner_agent_name,
+            objective.team_id,
+            objective.owner_named_agent_type,
+            objective.owner_canonical_user_id,
+            objective.title,
+            objective.status.value,
+            objective.horizon.value,
+            objective.priority.value,
+            objective.current_plan_id,
+            objective.root_conversation_id,
+            objective.created_by_task_id,
+            objective.promoted_from_task_id,
+            objective.model_dump_json(),
+            objective.updated_at,
+        )
+
+    def insert_objective(self, objective: ObjectiveRecord) -> None:
+        """Store a new Objective; an Objective with the same owner and id makes the insert fail.
+
+        For creation and the team import into a fresh instance only. Every
+        change to a stored Objective goes through ``change_objective``.
+        """
+
+        columns = ("objective_record_id", "objective_id", *self._WRITTEN_COLUMNS, "created_at")
+        binds = ", ".join(self._dialect.bind for _ in columns)
         with self._connect() as conn:
             conn.execute(
-                f"""
-                INSERT INTO objectives
-                    (
-                        objective_record_id, objective_id, owner_agent_id,
-                        owner_agent_name, team_id, owner_named_agent_type,
-                        owner_canonical_user_id,
-                        title, status, horizon, priority, current_plan_id,
-                        root_conversation_id, created_by_task_id,
-                        promoted_from_task_id, objective_data, created_at,
-                        updated_at
-                    )
-                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
-                ON CONFLICT(objective_record_id) DO UPDATE SET
-                    owner_agent_id = excluded.owner_agent_id,
-                    owner_agent_name = excluded.owner_agent_name,
-                    team_id = excluded.team_id,
-                    owner_named_agent_type = excluded.owner_named_agent_type,
-                    owner_canonical_user_id = excluded.owner_canonical_user_id,
-                    title = excluded.title,
-                    status = excluded.status,
-                    horizon = excluded.horizon,
-                    priority = excluded.priority,
-                    current_plan_id = excluded.current_plan_id,
-                    root_conversation_id = excluded.root_conversation_id,
-                    created_by_task_id = excluded.created_by_task_id,
-                    promoted_from_task_id = excluded.promoted_from_task_id,
-                    objective_data = excluded.objective_data,
-                    updated_at = excluded.updated_at
-                """,
+                f"INSERT INTO objectives ({', '.join(columns)}) VALUES ({binds})",
                 (
                     self._objective_record_id(objective),
                     objective.objective_id,
-                    objective.owner_agent_id,
-                    objective.owner_agent_name,
-                    objective.team_id,
-                    objective.owner_named_agent_type,
-                    objective.owner_canonical_user_id,
-                    objective.title,
-                    objective.status.value,
-                    objective.horizon.value,
-                    objective.priority.value,
-                    objective.current_plan_id,
-                    objective.root_conversation_id,
-                    objective.created_by_task_id,
-                    objective.promoted_from_task_id,
-                    objective.model_dump_json(),
+                    *self._column_values(objective),
                     objective.created_at,
-                    objective.updated_at,
                 ),
             )
             conn.commit()
+
+    def change_objective(
+        self,
+        objective_id: str,
+        *,
+        owner_agent_id: str,
+        change: ObjectiveChange,
+        expected_version: Optional[str] = None,
+    ) -> Optional[ObjectiveRecord]:
+        """Change the stored Objective in one write transaction (module docstring).
+
+        Returns the record after the change, the stored record unchanged when
+        ``change`` returns False, or None when there is no such Objective (a
+        deleted row stays deleted). With ``expected_version`` the change is
+        refused with ``ChangeRefused`` (``changed_since_read``) unless the
+        stored record still has that ``objective_version``. An error raised by
+        ``change`` leaves the row as it was. The owner and id never change.
+        """
+
+        owner_agent_id = self._require_owner_agent_id(owner_agent_id)
+        record_id = f"{owner_agent_id}::{objective_id}"
+        lock = " FOR UPDATE" if self._dialect is POSTGRES else ""
+        with self._connect() as conn:
+            conn.begin_write()
+            row = conn.execute(
+                f"SELECT objective_data FROM objectives WHERE objective_record_id = {self._dialect.bind}{lock}",
+                (record_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            objective = ObjectiveRecord.model_validate_json(row[0])
+            if expected_version is not None and objective_version(objective) != expected_version:
+                self._logger.info(
+                    "Refused an Objective change made from an older read. "
+                    "event=objective_change_refused objective_id=%s reason=%s",
+                    objective_id,
+                    ChangeRefusal.CHANGED_SINCE_READ.value,
+                )
+                raise ChangeRefused(
+                    ChangeRefusal.CHANGED_SINCE_READ,
+                    f"Objective {objective_id} changed since you read it, so nothing was changed. "
+                    "Read it again, check that your change still fits, and pass its new version.",
+                    {"objective_id": objective_id},
+                )
+            if not change(objective):
+                return objective
+            if (objective.objective_id, objective.owner_agent_id) != (objective_id, owner_agent_id):
+                raise ValueError("An Objective change cannot move the record to another id or owner.")
+            assignments = ", ".join(f"{column} = {self._dialect.bind}" for column in self._WRITTEN_COLUMNS)
+            conn.execute(
+                f"UPDATE objectives SET {assignments} WHERE objective_record_id = {self._dialect.bind}",
+                (*self._column_values(objective), record_id),
+            )
+            conn.commit()
+        return objective
 
     def get_objective(
         self,
@@ -531,7 +631,7 @@ class _RelationalObjectiveRepository:
                    owner_named_agent_type, owner_canonical_user_id,
                    title, status, horizon, priority,
                    current_plan_id, root_conversation_id, created_by_task_id,
-                   promoted_from_task_id, created_at, updated_at
+                   promoted_from_task_id, created_at, updated_at, objective_data
             FROM objectives
             WHERE owner_agent_id = {self._dialect.bind}
             """
@@ -577,6 +677,7 @@ class _RelationalObjectiveRepository:
                 promoted_from_task_id=row[13],
                 created_at=row[14],
                 updated_at=row[15],
+                version=objective_version(ObjectiveRecord.model_validate_json(row[16])),
             )
             for row in rows
         ]

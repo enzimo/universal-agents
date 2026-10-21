@@ -21,6 +21,8 @@ KNOWLEDGE_WRITE_LOCK_KEY = 7_302_211_551
 ACCESS_STORE_WRITE_LOCK_KEY = 7_302_211_552
 # Creating the change ledger's tables (storage.change_ledger), from every store that uses them.
 CHANGE_LEDGER_SCHEMA_LOCK_KEY = 7_302_211_553
+# Team and personal memory facts (storage.pinned_memory_repository).
+PINNED_MEMORY_WRITE_LOCK_KEY = 7_302_211_554
 
 
 def ensure_storage_parent_dir(path: Optional[str]) -> None:

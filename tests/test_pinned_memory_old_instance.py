@@ -29,6 +29,7 @@ from custom_agents.pinned_memory_source import SourceOptions, resolve_export_sou
 from custom_agents.pinned_memory_transfer import PinnedMemoryExportV1
 from custom_messages.contracts.access_v2 import PersonStanding
 from storage.pinned_memory_repository import COREMEM_BANK, SqlitePinnedMemoryRepository
+from storage.sqlite_connection import close_held_open_databases
 from tests.pinned_memory_support import new_instance, record_people, repository, run_cli
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -113,6 +114,11 @@ def test_export_reads_a_main_era_instance_mounted_read_only_elsewhere(tmp_path: 
     out = tmp_path / "new_data" / "memories.json"
     out.parent.mkdir()
 
+    # This case models a stopped instance mounted read-only. Close its held
+    # WAL writer before changing permissions, as process shutdown would. A
+    # live in-process writer can retain a writable -shm mapping after chmod;
+    # SQLite readers may update that mapping's runtime read marks.
+    close_held_open_databases()
     document = _export_read_only(old_root, out, caplog)
 
     printed = capsys.readouterr().out
@@ -124,6 +130,25 @@ def test_export_reads_a_main_era_instance_mounted_read_only_elsewhere(tmp_path: 
     if not os.access(database.parent, os.W_OK):  # root ignores the read-only modes
         assert "mode=immutable" in caplog.text
     _import_and_check(tmp_path, out, capsys)
+
+
+def test_export_of_a_running_source_preserves_its_database_and_wal(tmp_path: Path, caplog) -> None:
+    old_root = tmp_path / "old"
+    old_root.mkdir()
+    shutil.copy(MAIN_ERA_CONFIG, old_root / "instance_config.yaml")
+    _write_old_memories(old_root / "workspace" / "dbs" / "task_history.db")
+    before = {name: digest for name, digest in _fingerprint(old_root).items() if not name.endswith("-shm")}
+
+    with caplog.at_level(logging.INFO):
+        run_cli("export", "--config", str(old_root / "instance_config.yaml"), "--out", str(tmp_path / "memories.json"))
+
+    # A reader can update SQLite's shared-memory read marks while a writer
+    # remains open. Persisted facts and WAL contents must stay unchanged.
+    after = {name: digest for name, digest in _fingerprint(old_root).items() if not name.endswith("-shm")}
+    assert after == before
+    exported = PinnedMemoryExportV1.model_validate_json((tmp_path / "memories.json").read_text())
+    assert len(exported.facts) == 3
+    assert "mode=read_only" in caplog.text
 
 
 def _write_yaml(path: Path, data: dict) -> Path:

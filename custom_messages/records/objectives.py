@@ -282,6 +282,86 @@ class ObjectiveRecord(BaseModel):
     )
 
 
+# What an Objective's version covers: the fields an agent decides on and edits
+# (``objective_version``). An agent's change names the version it read, and the
+# store refuses it with ``changed_since_read`` when these fields changed since
+# (``storage.objective_repository.ObjectiveRepository.change_objective``).
+OBJECTIVE_VERSION_FIELDS = frozenset(
+    {
+        "objective_id",
+        "title",
+        "desired_outcome",
+        "why",
+        "horizon",
+        "priority",
+        "completion_policy",
+        "success_criteria",
+        "constraints",
+        "non_goals",
+        "requires_user_confirmation",
+    }
+)
+# What the version leaves out: what the runtime records as work happens, and
+# who holds the record. Linked tasks, plans, recovery tasks, schedules and
+# heartbeat items, the event log, progress and current focus, the status with
+# what is recorded with it (satisfaction, confirmation, deletion), owners and
+# timestamps. These change whenever a linked task arrives or ends, so a version
+# that covered them would refuse every agent edit made while work runs. Changes
+# to them merge into the stored record instead (trusted bookkeeping). Every
+# field is in exactly one of the two sets (tests/test_objective_versions.py).
+OBJECTIVE_BOOKKEEPING_FIELDS = frozenset(
+    {
+        "message_class",
+        "status",
+        "progress_summary",
+        "current_focus",
+        "owner_agent_id",
+        "owner_agent_name",
+        "owner_canonical_user_id",
+        "team_id",
+        "owner_named_agent_type",
+        "root_conversation_id",
+        "created_by_task_id",
+        "promoted_from_task_id",
+        "current_plan_id",
+        "plan_ids",
+        "related_task_ids",
+        "recovery_task_ids",
+        "schedule_links",
+        "heartbeat_links",
+        "event_log",
+        "user_confirmation_summary",
+        "satisfied_by_task_id",
+        "satisfied_at",
+        "deletion_operation_id",
+        "deletion_requested_at",
+        "deleted_at",
+        "deletion_summary",
+        "created_at",
+        "updated_at",
+    }
+)
+
+
+def objective_version(objective: ObjectiveRecord) -> str:
+    """The version an agent reads with an Objective and names when it changes it.
+
+    A digest of ``OBJECTIVE_VERSION_FIELDS`` (success criteria without their
+    timestamps), never a timestamp or a counter: it changes exactly when what
+    an agent decided on changes, it needs no stored column, and it stays the
+    same across restarts, custody changes and the team transfer.
+    """
+
+    from custom_messages.contracts.common_v1 import contract_sha256
+
+    document = objective.model_dump(mode="json", include=set(OBJECTIVE_VERSION_FIELDS))
+    document["success_criteria"] = [
+        {key: value for key, value in criterion.items() if key != "updated_at"}
+        for criterion in document["success_criteria"]
+    ]
+    return contract_sha256(document)
+
+
 class ObjectiveWorkBudget(BaseModel):
     """Immutable budget snapshot for one objective work session."""
 

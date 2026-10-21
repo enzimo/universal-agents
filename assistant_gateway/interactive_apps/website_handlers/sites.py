@@ -170,11 +170,15 @@ class WebsiteSitesHandlers:
     ) -> GatewayApplicationResponse:
         """Answer a pending question in the session, or send a new message as ``person``."""
 
-        if not self.application.is_task_progress_status_request(
-            text
-        ) and await self.application.has_pending_query(session_key):
+        waiting_question_id = (
+            None
+            if self.application.is_task_progress_status_request(text)
+            else await self.application.waiting_question_id(session_key)
+        )
+        if waiting_question_id is not None:
             return await self.application.reply_to_pending_query(
                 session_key=session_key,
+                task_query_id=waiting_question_id,
                 response_text=text,
             )
         route = {

@@ -129,6 +129,7 @@ def test_saved_schedule_update_stays_successful_when_a_followup_fails(
         update_scheduled_job,
         {
             "schedule_id": created["schedule_id"],
+            "expected_record_digest": created["record_digest"],
             "instruction": "Saved instruction.",
         },
     )
@@ -163,6 +164,7 @@ def test_expiring_a_schedule_is_a_successful_change(tmp_path):
         update_scheduled_job,
         {
             "schedule_id": created["schedule_id"],
+            "expected_record_digest": created["record_digest"],
             "expires_at_utc": "2000-01-01T00:00:00+00:00",
         },
     )

@@ -14,10 +14,7 @@ clears:
 
 - The turn passes its event to Strands as the invocation's ``cancel_signal``
   (Strands checks it at its own checkpoints) and puts the ``ToolStop`` in
-  ``invocation_state``, where tools find it with ``tool_stop_for``. A real
-  turn's invocation_state reaches tools one level down
-  (``runtime_context.caller_invocation_state``), which ``tool_stop_for``
-  handles.
+  ``invocation_state``, where tools find it with ``tool_stop_for``.
 - Tools that run commands wrap each call in ``tracked_tool_call``: the call is
   counted while it runs, its task is fixed for its whole run (so a call that
   outlives its turn never picks up the next task's person), and the process
@@ -57,7 +54,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from custom_tools.runtime_context import bind_tool_call_task, caller_invocation_state, get_agent_ref
+from custom_tools.runtime_context import bind_tool_call_task, get_agent_ref
 
 logger = logging.getLogger(__name__)
 
@@ -347,7 +344,7 @@ class ToolStop:
 def tool_stop_for(tool_context: Any) -> ToolStop | None:
     """The ToolStop of the turn a tool call belongs to, from its Strands tool context."""
 
-    state = caller_invocation_state(getattr(tool_context, "invocation_state", None))
+    state = getattr(tool_context, "invocation_state", None) or {}
     stop = state.get(TOOL_STOP_STATE_KEY)
     return stop if isinstance(stop, ToolStop) else None
 

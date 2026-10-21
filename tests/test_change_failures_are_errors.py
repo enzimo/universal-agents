@@ -52,6 +52,9 @@ from custom_tools.providers.schedules import (
 )
 from custom_tools.runtime_context import set_agent_ref
 
+# A schedule version as list_scheduled_jobs returns it (record_digest).
+SCHEDULE_VERSION = "0" * 64
+
 CHANGES: list[tuple[Any, dict[str, Any]]] = [
     (memory, {"action": "create", "bank": "coremem", "fact_text": "Ships on Fridays."}),
     (memory, {"action": "replace", "bank": "coremem", "memory_id": 1, "fact_text": "Ships on Mondays."}),
@@ -68,10 +71,10 @@ CHANGES: list[tuple[Any, dict[str, Any]]] = [
     (merge_knowledge_pages, {"source": "team/a", "target": "team/b", "body": "Merged.", "base_revision": 1, "source_revision": 1}),
     (revert_knowledge_page, {"page": "team/notes", "to_revision": 1, "base_revision": 2, "reason": "Restore."}),
     (add_heartbeat_item, {"instruction": "Check the build."}),
-    (update_heartbeat_item, {"heartbeat_item_id": "hb_1", "title": "Build"}),
-    (remove_heartbeat_item, {"heartbeat_item_id": "hb_1"}),
-    (enable_heartbeat_item, {"heartbeat_item_id": "hb_1"}),
-    (disable_heartbeat_item, {"heartbeat_item_id": "hb_1"}),
+    (update_heartbeat_item, {"heartbeat_item_id": "hb_1", "expected_version": "v1", "title": "Build"}),
+    (remove_heartbeat_item, {"heartbeat_item_id": "hb_1", "expected_version": "v1"}),
+    (enable_heartbeat_item, {"heartbeat_item_id": "hb_1", "expected_version": "v1"}),
+    (disable_heartbeat_item, {"heartbeat_item_id": "hb_1", "expected_version": "v1"}),
     (objectives, {"action": "update_progress", "objective_id": "obj_1", "progress_summary": "Half done."}),
     (objectives, {"action": "update_status", "objective_id": "obj_1", "status": "paused", "summary": "Waiting."}),
     (record_objective_work_checkpoint, {"observe": "o", "orient": "o", "decide": "d", "act": "a", "health": "ok"}),
@@ -83,11 +86,11 @@ CHANGES: list[tuple[Any, dict[str, Any]]] = [
     (objective_work_sessions, {"action": "start", "objective_id": "obj_1"}),
     (objective_work_profiles, {"action": "apply", "proposal_id": "p_1", "proposal_digest": "d", "confirmation_summary": "Yes."}),
     (create_scheduled_job, {"instruction": "Check the build.", "interval_seconds": 3600}),
-    (update_scheduled_job, {"schedule_id": "sched_1", "interval_seconds": 60}),
-    (remove_scheduled_job, {"schedule_id": "sched_1"}),
-    (disable_scheduled_job, {"schedule_id": "sched_1"}),
-    (resume_scheduled_job, {"schedule_id": "sched_1"}),
-    (pause_scheduled_job, {"schedule_id": "sched_1", "duration_minutes": 30}),
+    (update_scheduled_job, {"schedule_id": "sched_1", "expected_record_digest": SCHEDULE_VERSION, "interval_seconds": 60}),
+    (remove_scheduled_job, {"schedule_id": "sched_1", "expected_record_digest": SCHEDULE_VERSION}),
+    (disable_scheduled_job, {"schedule_id": "sched_1", "expected_record_digest": SCHEDULE_VERSION}),
+    (resume_scheduled_job, {"schedule_id": "sched_1", "expected_record_digest": SCHEDULE_VERSION}),
+    (pause_scheduled_job, {"schedule_id": "sched_1", "expected_record_digest": SCHEDULE_VERSION, "duration_minutes": 30}),
     (configure_scheduled_worker, {"schedule_id": "sched_1", "target_agent_type": "Worker", "expected_revision": 0}),
 ]
 

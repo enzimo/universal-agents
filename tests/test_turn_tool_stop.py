@@ -28,7 +28,6 @@ from custom_agents.control_runtime import _interrupt_active_execution
 from custom_agents.sdk.strands.turn import LLMTurnExecutor
 from custom_agents.sdk.strands.turn_tool_stop import (
     TASK_STOPPED_REASON,
-    attach_tool_stop,
     invoke_with_tool_stop,
 )
 from custom_agents.strands_agent import UniversalAgent
@@ -82,6 +81,7 @@ def make_host(sdk: Agent) -> Host:
                 "go",
                 tool_stop=tool_stop,
                 invoke_kwargs=turn_invoke_kwargs(content.task_id),
+                callback_handler=lambda **_: None,
                 logger=LOGGER,
             )
             return Task(task_id=content.task_id, task_type=MessageMetaType.RESPONSE, answer="done")
@@ -283,7 +283,9 @@ async def test_an_invocation_that_fails_while_a_tool_call_runs_stops_it_first() 
             raise RuntimeError("hook failed")
 
     with pytest.raises(RuntimeError, match="hook failed"):
-        await invoke_with_tool_stop(BrokenModel(), "go", tool_stop=stop, invoke_kwargs=turn_invoke_kwargs(), logger=LOGGER)
+        await invoke_with_tool_stop(
+            BrokenModel(), "go", tool_stop=stop, invoke_kwargs=turn_invoke_kwargs(), callback_handler=lambda **_: None, logger=LOGGER
+        )
 
     assert saw_stop.is_set()
     assert stop.running() == ()
@@ -302,27 +304,13 @@ async def test_a_turn_whose_commands_were_stopped_is_not_retried_inline() -> Non
     assert raised.value is error
 
 
-def test_a_resumed_turn_replaces_the_earlier_turns_stop_in_place() -> None:
-    earlier, resumed = ToolStop(agent_id="a", task_id="t"), ToolStop(agent_id="a", task_id="t")
-    state: dict = {"request_state": {"kept": True}}
-    kwargs: dict = {"invocation_state": state}
-    attach_tool_stop(kwargs, earlier)
-
-    attach_tool_stop(kwargs, resumed)
-
-    assert kwargs["cancel_signal"] is resumed.event
-    assert kwargs["invocation_state"] is state
-    assert state[TOOL_STOP_STATE_KEY] is resumed and state["request_state"] == {"kept": True}
-
-
 @pytest.mark.asyncio
 async def test_a_stop_ends_a_command_of_a_turn_run_by_the_production_turn_executor(work_dir: Path, caplog) -> None:
     """The invocation keywords come from the real LLMTurnExecutor._prepare_invocation.
 
-    They include the per-turn callback_handler, which makes Strands hand the
-    tool the turn's invocation_state one level down. The first version of the
-    fix read only the top level, found no stop on every real turn, and left
-    the command running.
+    A test that called Strands with keywords no real turn uses once passed
+    while every real turn ran its commands without a stop. These are the
+    keywords a real turn passes, and only ones ``invoke_async`` declares.
     """
 
     from collections import deque
@@ -352,8 +340,9 @@ async def test_a_stop_ends_a_command_of_a_turn_run_by_the_production_turn_execut
     pid = await wait_for_pid(pid_file)
     [stop] = stops
 
-    assert {"callback_handler", "cancel_signal", "invocation_state", "structured_output_model", "structured_output_prompt"} <= set(production_kwargs)
+    assert set(production_kwargs) == {"cancel_signal", "invocation_state", "structured_output_model", "structured_output_prompt"}
     assert production_kwargs["cancel_signal"] is stop.event
+    assert production_kwargs["invocation_state"][TOOL_STOP_STATE_KEY] is stop
     assert [call.tool_name for call in stop.running()] == ["shell"]
     host = SimpleNamespace(
         id="independent",
@@ -384,7 +373,9 @@ async def test_a_turn_that_ends_normally_leaves_its_background_processes_running
     kwargs.pop("structured_output_model")
     kwargs.pop("structured_output_prompt")
 
-    await invoke_with_tool_stop(shell_agent([command], work_dir), "go", tool_stop=stop, invoke_kwargs=kwargs, logger=LOGGER)
+    await invoke_with_tool_stop(
+        shell_agent([command], work_dir), "go", tool_stop=stop, invoke_kwargs=kwargs, callback_handler=lambda **_: None, logger=LOGGER
+    )
     pid = await wait_for_pid(pid_file)
     await asyncio.sleep(0.5)
 
@@ -513,7 +504,7 @@ async def test_a_resumed_turn_stopped_after_its_model_call_ends_background_proce
 
     now = datetime.now(timezone.utc).isoformat()
     session = StrandsInterruptedTurnSession(
-        task.task_id, SimpleNamespace(invoke_async=invoke), {}, "prompt", task,
+        task.task_id, SimpleNamespace(invoke_async=invoke), {}, lambda **_: None, "prompt", task,
         MessageHeader(from_agent_id="gateway"), MessageMeta(), now,
         [TaskSteeringInterruptRecord(interrupt_id="interrupt_1", reason={"access_request_id": "areq_1"})],
     )

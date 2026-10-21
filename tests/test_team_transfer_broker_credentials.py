@@ -291,7 +291,7 @@ def test_previous_credential_schema_is_converted_inside_the_broker(monkeypatch):
         called.append(True)
         return [{**record, "name": "github.sign_in"} for record in records]
 
-    monkeypatch.setitem(SECTION_UPGRADES, ("broker_credentials", 1), upgrade)
+    monkeypatch.setitem(SECTION_UPGRADES, ("broker_credentials", 1, api.BROKER_CREDENTIALS_SCHEMA_VERSION), upgrade)
     request = api.CredentialImportRequestV1(team_id=TEST_TEAM, encryption_key_b64=KEY_B64,
         ciphertext_b64=base64.b64encode(encrypt_with_key(canonical_json(document.model_dump(mode="json")), KEY)).decode())
     converted = api.decrypt_records(request)

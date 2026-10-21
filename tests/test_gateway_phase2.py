@@ -28,7 +28,8 @@ class FakeGatewayApplication:
         self.scheduled_jobs: list[GatewayScheduledJob] = []
         self.started_sessions: list[str] = []
         self.status_requests: list[str] = []
-        self.pending_query_session_keys: set[str] = set()
+        # Session key to the id of the question waiting there.
+        self.waiting_questions: dict[str, str] = {}
         self.sessions: dict[str, GatewaySession] = {
             "session_1": GatewaySession(
                 session_key="session_1",
@@ -96,9 +97,11 @@ class FakeGatewayApplication:
     async def decide_access_review(self, _request):
         return None
 
-    async def reply_to_pending_query(self, *, session_key: str, response_text: str, replied_message=None):
+    async def reply_to_pending_query(
+        self, *, session_key: str, task_query_id: str, response_text: str, replied_message=None
+    ):
+        assert self.waiting_questions.pop(session_key) == task_query_id
         self.query_replies.append((session_key, response_text))
-        self.pending_query_session_keys.discard(session_key)
         return GatewayApplicationResponse(
             text=f"query_reply:{response_text}",
             conversation_id="conv_1",
@@ -111,8 +114,8 @@ class FakeGatewayApplication:
             conversation_id="conv_1",
         )
 
-    async def has_pending_query(self, session_key: str) -> bool:
-        return session_key in self.pending_query_session_keys
+    async def waiting_question_id(self, session_key: str) -> str | None:
+        return self.waiting_questions.get(session_key)
 
     async def add_cron_job(
         self,
@@ -252,6 +255,20 @@ async def test_bridge_renders_task_response():
     assert messages[0].text == "task:Explain recursion"
     assert messages[0].correlation_id == "corr_response"
     assert messages[0].message_type == "task"
+
+
+@pytest.mark.asyncio
+async def test_bridge_answers_the_waiting_question_by_its_id():
+    application = FakeGatewayApplication()
+    application.waiting_questions["session_1"] = "task_query_1"
+    bridge = ChannelBridge(application)
+
+    messages = await bridge.handle_inbound(_inbound("show my scheduled jobs"))
+
+    # While a question waits, even a command-like phrase is its answer.
+    assert application.query_replies == [("session_1", "show my scheduled jobs")]
+    assert application.sent_user_messages == []
+    assert messages[0].text == "query_reply:show my scheduled jobs"
 
 
 @pytest.mark.asyncio

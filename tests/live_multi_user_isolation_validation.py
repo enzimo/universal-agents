@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from config_loader import load_config
 from custom_agents.conversation_store import ConversationStore
-from custom_agents.schedule_store import ScheduleStore
+from custom_agents.schedule_store import ScheduleStore, schedule_record_digest
 from custom_messages.contracts.routing_v1 import (
     GatewayContext,
     MessageHeader,
@@ -268,7 +268,8 @@ def _validate_isolation(config_loaded: bool) -> int:
         ownerless_views[person_id] = json.loads(list_scheduled_jobs(schedule_id=ownerless.schedule_id))
         assert ownerless_views[person_id]["total"] == 0
         assert ownerless_views[person_id]["schedules"] == []
-        removal = json.loads(remove_scheduled_job(ownerless.schedule_id))
+        # Even the schedule's exact version gives no way in.
+        removal = json.loads(remove_scheduled_job(ownerless.schedule_id, schedule_record_digest(restored_ownerless)))
         assert removal["removed"] is False, removal
     with sqlite3.connect(db_path) as conn:
         remaining_owner = conn.execute(

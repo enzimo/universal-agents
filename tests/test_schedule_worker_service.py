@@ -611,6 +611,45 @@ def test_each_schedule_gets_its_own_access_that_follows_its_requirements(lead):
     assert ended.detail == {"ended_with_schedule": "job"}
 
 
+@needs_cedar
+def test_setup_ends_only_its_own_schedules_grants_for_the_current_owner(lead):
+    """Requirement cleanup preserves other schedules, earlier owners and grants a person gave."""
+
+    from datetime import datetime, timezone
+
+    from access_control.entities import schedule_subject
+    from custom_agents import access_runtime
+    from custom_messages.contracts.access_v2 import GrantStatus, GrantV1, SubjectKind, SubjectRefV1, TargetKind, TargetRefV1
+
+    enable_access(lead, starter_profile="trusted")
+    configure(lead, capabilities=PUBLISH)
+    own_grant = ScheduleWorkerService(lead).authorize_access("job", expected_revision=1)["given"][0]["grant_id"]
+    service = access_runtime.runtime_access(lead).service
+    grantor = access_runtime.acting_agent(lead).agent.type_subject()
+    protected = (
+        ("grant-earlier-owner", "job", "earlier-owner", grantor),
+        ("grant-other-job", "other-job", "owner", grantor),
+        ("grant-from-person", "job", "owner", SubjectRefV1(kind=SubjectKind.USER, id="owner")),
+    )
+    for grant_id, schedule_id, person_id, given_by in protected:
+        service.store.create(
+            GrantV1(
+                grant_id=grant_id, team_id="team", subject=schedule_subject("team", schedule_id),
+                target=TargetRefV1(kind=TargetKind.TOOL, id="fn:publishing"),
+                granted_by=given_by, created_at_utc=datetime.now(timezone.utc), for_person_id=person_id,
+            )
+        )
+
+    # Publishing is no longer needed, but the team lead ends only what it gave for this owner's work.
+    configure(lead, expected_revision=1, capabilities=WEB_SEARCH)
+    result = ScheduleWorkerService(lead).authorize_access("job", expected_revision=2)
+
+    assert own_grant in result["ended"]
+    for grant_id, *_ in protected:
+        assert grant_id not in result["ended"]
+        assert service.store.get(grant_id).status is GrantStatus.ACTIVE
+
+
 def test_authorization_off_needs_no_hand_on(lead):
     configure(lead, capabilities=WEB_SEARCH)
     result = ScheduleWorkerService(lead).authorize_access("job", expected_revision=1)

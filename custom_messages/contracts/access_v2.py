@@ -486,6 +486,11 @@ class GrantV1(AccessContractModel):
     # task works for this person, so what one person authorizes never carries
     # over to another person's tasks. None: work for anyone (standard grants,
     # administrators' grants for the team, and system work for no person).
+    # An agent's restriction (a block an agent made) names the person too: it
+    # is bound to the request it was made in (lifetime task, task_id) and that
+    # request's person, so it never reaches the person's other requests or
+    # other people's (owner's decision 2026-10-19). People's blocks name no
+    # person and apply to the whole team.
     for_person_id: str | None = Field(default=None, max_length=240)
 
     @model_validator(mode="after")
@@ -501,11 +506,21 @@ class GrantV1(AccessContractModel):
             raise ValueError("Only access grants can be handed on.")
         if self.subject == self.granted_by and self.parent_grant_id:
             raise ValueError("Nobody hands access to themselves.")
-        if self.for_person_id is not None and (
-            self.kind is not GrantKind.ACCESS or self.subject.kind is SubjectKind.USER
-        ):
-            raise ValueError("Only agent access grants serve one person's work; blocks and people's grants cannot.")
+        problem = self._whose_work_problem()
+        if problem:
+            raise ValueError(problem)
         return self
+
+    def _whose_work_problem(self) -> str | None:
+        """Why this grant may not name the person whose work it serves (``for_person_id``), or None."""
+
+        if self.for_person_id is None:
+            return None
+        if self.kind is GrantKind.CREDENTIAL_USE or self.subject.kind is SubjectKind.USER:
+            return "Only agents' access grants and restrictions serve one person's work; people's grants cannot."
+        if self.kind is GrantKind.BLOCK and (self.lifetime is not GrantLifetime.TASK or not self.task_id):
+            return "A restriction for one person's work is bound to one request (lifetime task)."
+        return None
 
 
 class AccessEventV1(AccessContractModel):
@@ -842,6 +857,7 @@ class ChangeApprovalRecordV1(AccessContractModel):
 # A change's one-line summary (ChangeProposalV1.summary): short enough for a
 # chat message and a card heading.
 CHANGE_SUMMARY_MAX_CHARS = 300
+CHANGE_EFFECT_MAX_CHARS = 1000
 
 
 def summary_line(text: str) -> str:
@@ -928,8 +944,8 @@ class ChangeProposalV1(AccessContractModel):
     @field_validator("effect")
     @classmethod
     def _bounded_lines(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if any(not line.strip() or len(line) > 1000 for line in value):
-            raise ValueError("Each effect line is between 1 and 1000 characters.")
+        if any(not line.strip() or len(line) > CHANGE_EFFECT_MAX_CHARS for line in value):
+            raise ValueError(f"Each effect line is between 1 and {CHANGE_EFFECT_MAX_CHARS} characters.")
         return value
 
     @field_validator("summary")
@@ -1532,6 +1548,7 @@ __all__ = [
     "ChangeApprovalMode",
     "ChangeApprovalRecordV1",
     "CHANGE_SUMMARY_MAX_CHARS",
+    "CHANGE_EFFECT_MAX_CHARS",
     "ChangeProposalV1",
     "AccountLinkStatus",
     "AccountLinkV1",

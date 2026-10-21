@@ -25,7 +25,11 @@ docs are built, the image compiles app-local Python files to legacy `.pyc`
 bytecode and removes `.py`/`.pyi` files from `/app`. Use
 `./scripts/build_docker_image.sh --keep-source-code ...` or
 `--build-arg STRIP_SOURCE_CODE=false` for a debugging image with Python source
-left in place.
+left in place. The build stops when a program the image starts by file path has
+no compiled file (`required_entrypoints` in `docker/strip_python_sources.sh`).
+Inside such an image, run Python programs as modules from `/app`
+(`python -m assistant_cli ...`, `python -m scripts.<name> ...`), not by file
+name.
 
 ### Quickstart
 

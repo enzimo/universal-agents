@@ -17,13 +17,19 @@ same and can also bring more records from the same backup later
 - **Skills and tools**: reviewed skills, added web API and CLI tools with their
   programs, MCP connections, and installed procedures.
 - **People and access**: roles, channel bindings, Web Chat sign-ins, lasting
-  grants, blocks, shares, data folders, account links, person settings, and
+  grants, blocks (not TeamLead's restrictions for one request, which end with
+  their request), shares, data folders, account links, person settings, and
   the team's choices of which services' accounts and model keys are shared
   ([Shared or private](permissions.md#shared-or-private)). Disabled people
   stay disabled. Removed people do not move.
 - **Schedules and work setup**: timing, instructions, enabled state, delivery
   routes, heartbeats, worker policies, pool limits, objectives and their
   policies. Each schedule has editable Markdown containing fenced YAML.
+- **Chat sessions**: the sessions schedules deliver through and each person's
+  current session in each chat, with their names but not their conversations.
+  After the move, a person's next message continues in the session that was
+  current in the old instance, even when an older session of the same chat
+  moves too.
 - **Pinned memories**, selected and editable one fact at a time.
 - **Knowledge pages**: the team's pages and each imported person's own pages,
   with every revision, notes, links, the names of merged pages and pending
@@ -181,6 +187,10 @@ Reopen `team review` with the same arguments to select more records. Later
 batches require the exact backup used for the first batch. Already imported
 records are skipped, preserving destination edits. Existing records with the
 same identity, including credentials stored after startup, are kept too.
+A chat that already continues in a session in the new instance stays in it.
+If a later batch brings the session that was that chat's current one in the
+old instance, the session is imported and marked for attention, and people's
+next messages still go to the session they use now.
 Distinct credential and field names keep separate secret values, including
 names that differ only in punctuation. Importing a catalog credential does
 not overwrite a secret used by another existing catalog entry.

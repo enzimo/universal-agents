@@ -121,7 +121,7 @@ def test_gateway_state_repository_roundtrips_deliveries_queries_and_scheduled_ta
         available_after="2000-01-01T00:00:00+00:00",
         correlation_id="corr_delivery",
     )
-    repo.upsert_pending_query(
+    repo.add_pending_query(
         session_key="session_alpha",
         correlation_id="corr_query",
         task_query_id="task_query_1",
@@ -137,13 +137,13 @@ def test_gateway_state_repository_roundtrips_deliveries_queries_and_scheduled_ta
     )
 
     due = repo.get_due_deliveries()
-    pending = repo.get_pending_query("session_alpha")
+    pending = repo.get_pending_query("task_query_1")
     target = repo.get_scheduled_target_by_conversation_id("conv_alpha")
 
     assert len(due) == 1
     assert due[0].delivery_id == delivery_id
     assert pending is not None
-    assert pending.task_query_id == "task_query_1"
+    assert pending.session_key == "session_alpha"
     assert (
         pending.query_payload_json
         == '{"message_class":"TaskQuery","message":"Which project?"}'
@@ -152,10 +152,10 @@ def test_gateway_state_repository_roundtrips_deliveries_queries_and_scheduled_ta
     assert target.scheduled_job_id == "schedule_1"
 
     repo.mark_delivery_delivered(delivery_id)
-    repo.clear_pending_query("session_alpha")
+    assert repo.close_pending_query("task_query_1", status="answered") is True
 
     assert repo.list_pending_deliveries() == []
-    assert repo.get_pending_query("session_alpha") is None
+    assert repo.list_open_pending_queries("session_alpha") == []
     assert repo.remove_scheduled_target("schedule_1") is True
     assert repo.get_scheduled_target("schedule_1") is None
 

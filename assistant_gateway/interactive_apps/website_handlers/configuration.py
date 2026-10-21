@@ -1,13 +1,14 @@
 from __future__ import annotations
+import asyncio
 import json
 import logging
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import yaml
 from aiohttp import web
 from config_backup_retention import prune_config_backups
+from config_file_updates import ConfigFileConflict, config_revision, replace_config_file
 from assistant_gateway.config import GatewayInstanceConfig
 from runtime_settings.instance_layout import InstanceLayout
 from assistant_gateway.interactive_apps.host_ports import (
@@ -43,11 +44,13 @@ class WebsiteConfigurationHandlers:
         config_path = self._instance_config_path()
         if not config_path.is_file():
             raise web.HTTPNotFound(text="instance_config.yaml is unavailable.")
+        content = config_path.read_bytes()
         return web.json_response(
             {
                 "status": "ok",
                 "path": str(config_path),
-                "content": config_path.read_text(encoding="utf-8"),
+                "content": content.decode("utf-8"),
+                "revision": config_revision(content),
                 "backups": self._list_instance_config_backups(),
             }
         )
@@ -62,8 +65,10 @@ class WebsiteConfigurationHandlers:
         config_path = self._instance_config_path()
         if not config_path.is_file():
             raise web.HTTPNotFound(text="instance_config.yaml is unavailable.")
-        backup_path = self._create_instance_config_backup(config_path)
-        self._write_text_atomic(config_path, content)
+        backup_path = self._instance_config_backup_path(config_path)
+        revision = await self._replace_config(
+            config_path, content, self._expected_revision(payload), backup_path
+        )
         prune_config_backups(
             config_path,
             event_logger=self._logger,
@@ -73,6 +78,7 @@ class WebsiteConfigurationHandlers:
             {
                 "status": "ok",
                 "path": str(config_path),
+                "revision": revision,
                 "backup": self._config_backup_payload(backup_path),
                 "backups": self._list_instance_config_backups(),
             }
@@ -96,6 +102,8 @@ class WebsiteConfigurationHandlers:
         self, request: web.Request
     ) -> web.Response:
         self.operations._require_bootstrap_web_chat_session(request)
+        payload = await self.operations._json_payload(request)
+        expected_revision = self._expected_revision(payload)
         config_path = self._instance_config_path()
         backup_path = self._resolve_instance_config_backup(
             request.match_info.get("backup_name")
@@ -104,8 +112,10 @@ class WebsiteConfigurationHandlers:
             raise web.HTTPNotFound(text="Backup not found.")
         backup_content = backup_path.read_text(encoding="utf-8")
         self._validate_instance_config_text(backup_content)
-        current_backup_path = self._create_instance_config_backup(config_path)
-        self._write_text_atomic(config_path, backup_content)
+        current_backup_path = self._instance_config_backup_path(config_path)
+        revision = await self._replace_config(
+            config_path, backup_content, expected_revision, current_backup_path
+        )
         prune_config_backups(
             config_path,
             event_logger=self._logger,
@@ -115,6 +125,7 @@ class WebsiteConfigurationHandlers:
             {
                 "status": "ok",
                 "restored_from": backup_path.name,
+                "revision": revision,
                 "backup": self._config_backup_payload(current_backup_path),
                 "backups": self._list_instance_config_backups(),
             }
@@ -160,18 +171,34 @@ class WebsiteConfigurationHandlers:
                 text=f"Invalid instance_config.yaml: {exc}"
             ) from exc
 
-    def _create_instance_config_backup(self, config_path: Path) -> Path:
+    def _instance_config_backup_path(self, config_path: Path) -> Path:
         if not config_path.is_file():
             raise web.HTTPNotFound(text="instance_config.yaml is unavailable.")
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         backup_path = config_path.with_name(f"{config_path.name}.bak.{timestamp}")
-        backup_path.write_bytes(config_path.read_bytes())
         return backup_path
 
-    def _write_text_atomic(self, path: Path, content: str) -> None:
-        tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        tmp_path.write_text(content, encoding="utf-8")
-        tmp_path.replace(path)
+    @staticmethod
+    def _expected_revision(payload: dict[str, Any]) -> str:
+        revision = payload.get("revision")
+        if not isinstance(revision, str) or len(revision) != 64 or any(
+            character not in "0123456789abcdef" for character in revision
+        ):
+            raise web.HTTPConflict(text="Reload the configuration editor before saving or restoring settings.")
+        return revision
+
+    @staticmethod
+    async def _replace_config(path: Path, content: str, expected_revision: str, backup: Path) -> str | None:
+        try:
+            return await asyncio.to_thread(
+                replace_config_file,
+                path,
+                content.encode("utf-8"),
+                expected_revision=expected_revision,
+                backup_path=backup,
+            )
+        except ConfigFileConflict as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
 
     def _list_instance_config_backups(self) -> list[dict[str, Any]]:
         config_path = self._instance_config_path()

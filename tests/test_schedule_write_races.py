@@ -123,6 +123,12 @@ def _claim(store: ScheduleStore, agent_id: str = "worker_b", agent_type: str = W
     return claimed
 
 
+def _version(store: ScheduleStore, schedule_id: str) -> str:
+    """The version of the schedule its caller read (the tools' record_digest)."""
+
+    return schedule_record_digest(store.get_scheduled_message(schedule_id))
+
+
 def _add_note(memory: ScheduleTaskMemory) -> bool:
     memory.ledger.total_notifications += 1
     memory.state.summary = "run notes"
@@ -214,6 +220,7 @@ def test_an_edit_racing_a_reminders_last_run_never_recreates_it(store):
     reminder_id = _due(store, interval_ms=None, repeat_count=1, claim_named_agent_type="TeamArchitect")
     request = ScheduleChangeRequestV1(
         schedule_id=reminder_id,
+        expected_record_digest=_version(store, reminder_id),
         action="update",
         update=ScheduleUpdateV1(instruction="Remind me to call the bank about the card"),
     )
@@ -234,7 +241,10 @@ def test_an_edit_is_refused_when_the_person_paused_the_schedule_after_it_was_rea
     schedule = _schedule()
     store.add(schedule)
     request = ScheduleChangeRequestV1(
-        schedule_id=schedule.schedule_id, action="update", update=ScheduleUpdateV1(instruction="New wording")
+        schedule_id=schedule.schedule_id,
+        expected_record_digest=_version(store, schedule.schedule_id),
+        action="update",
+        update=ScheduleUpdateV1(instruction="New wording"),
     )
     prepared = prepare_schedule_change(store, request, person_id=OWNER)
     until = (_now() + timedelta(days=1)).isoformat()
@@ -251,7 +261,10 @@ def test_an_edit_is_refused_when_the_person_paused_the_schedule_after_it_was_rea
 def test_an_edit_keeps_the_run_time_count_and_notes_a_run_wrote_after_the_read(store):
     schedule_id = _due(store, repeat_count=5)
     request = ScheduleChangeRequestV1(
-        schedule_id=schedule_id, action="update", update=ScheduleUpdateV1(instruction="New wording")
+        schedule_id=schedule_id,
+        expected_record_digest=_version(store, schedule_id),
+        action="update",
+        update=ScheduleUpdateV1(instruction="New wording"),
     )
     prepared = prepare_schedule_change(store, request, person_id=OWNER)
     claimed = _claim(store)
@@ -275,7 +288,10 @@ def test_a_notify_policy_change_keeps_run_notes_written_after_the_read(store):
     schedule = _schedule(schedule_memory=ScheduleTaskMemory())
     store.add(schedule)
     request = ScheduleChangeRequestV1(
-        schedule_id=schedule.schedule_id, action="update", update=ScheduleUpdateV1(notify="always")
+        schedule_id=schedule.schedule_id,
+        expected_record_digest=_version(store, schedule.schedule_id),
+        action="update",
+        update=ScheduleUpdateV1(notify="always"),
     )
     prepared = prepare_schedule_change(store, request, person_id=OWNER)
     store.edit_schedule_memory(schedule.schedule_id, _add_note)  # a run writes its notes
@@ -298,7 +314,10 @@ def test_an_older_reschedule_cannot_overwrite_a_newer_run_time(store, recurring)
         return prepare_schedule_change(
             store,
             ScheduleChangeRequestV1(
-                schedule_id=schedule.schedule_id, action="update", update=ScheduleUpdateV1(next_fire_at=at)
+                schedule_id=schedule.schedule_id,
+                expected_record_digest=_version(store, schedule.schedule_id),
+                action="update",
+                update=ScheduleUpdateV1(next_fire_at=at),
             ),
             person_id=OWNER,
         )
@@ -325,7 +344,10 @@ def test_an_older_policy_edit_cannot_overwrite_newer_run_note_settings(store, ol
         return prepare_schedule_change(
             store,
             ScheduleChangeRequestV1(
-                schedule_id=schedule.schedule_id, action="update", update=ScheduleUpdateV1(**fields)
+                schedule_id=schedule.schedule_id,
+                expected_record_digest=_version(store, schedule.schedule_id),
+                action="update",
+                update=ScheduleUpdateV1(**fields),
             ),
             person_id=OWNER,
         )
@@ -349,6 +371,7 @@ def test_an_edit_that_sets_timing_or_the_count_writes_them(store):
     )
     request = ScheduleChangeRequestV1(
         schedule_id=schedule_id,
+        expected_record_digest=_version(store, schedule_id),
         action="update",
         update=ScheduleUpdateV1(interval_seconds=600, repeat_count=5),
     )

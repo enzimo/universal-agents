@@ -25,7 +25,7 @@ from custom_messages.contracts.credentials_v1 import (
 )
 from custom_messages.contracts.envelope_v1 import CommsMessage
 from custom_messages.contracts.routing_v1 import ManagerEscalationContext, MessageMeta
-from custom_messages.contracts.schedule_v1 import ScheduledMessage
+from custom_messages.contracts.schedule_v1 import ScheduledMessage, new_schedule_id
 from custom_messages.contracts.task_v1 import AfterActionReport, Task, TaskAnswer, TaskQueryChoiceOption, TaskQuery
 from custom_messages.enums import MessageMetaType, RequesterType
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
@@ -95,13 +95,22 @@ class StructuredTaskPayload(BaseModel):
 
 
 class StructuredScheduledMessagePayload(BaseModel):
-    """Direct contract for a `ScheduledMessage` payload."""
+    """Direct contract for a `ScheduledMessage` payload.
+
+    The runtime form of a model's ``schedule_message`` action, as the turn-action
+    outbox saves it. ``schedule_id`` names the new schedule; the runtime assigns
+    it (``ModelScheduledMessagePayload``), and the outbox only ever creates a
+    schedule from this payload (``schedule_installation.create_schedule_from_turn_action``).
+    """
 
     message_class: Literal["ScheduledMessage"] = Field(
         default="ScheduledMessage",
         description="Always `ScheduledMessage`.",
     )
-    schedule_id: Optional[str] = Field(default=None, description="Optional schedule id.")
+    schedule_id: Optional[str] = Field(
+        default=None,
+        description="The new schedule's id, assigned by the runtime; never chosen by a model.",
+    )
     payload: StructuredTaskPayload = Field(description="Required. The task to run when the schedule fires.")
     interval_ms: Optional[int] = Field(
         default=None,
@@ -178,6 +187,8 @@ Choose exactly the action that matches the turn:
 - To create a schedule, use `action_type="schedule_message"` with
   `actions[].scheduled_message`, followed by `task_response` to confirm it,
   or an action that waits for a result. A schedule cannot finish a task turn.
+  This action only creates a new schedule. To change, pause, resume, turn off
+  or remove an existing one, use the schedule tools.
 {credential_guidance}
 - If no outbound effect is needed outside an accepted task turn, use
   `action_type="noop"` with a concise reason.
@@ -323,11 +334,17 @@ class ModelTaskQueryPayload(BaseModel):
 
 
 class ModelScheduledMessagePayload(BaseModel):
-    """Slim model-facing ScheduledMessage payload."""
+    """Slim model-facing ScheduledMessage payload: a new schedule.
+
+    It has no schedule id, so the action can only create. Before 2026-10-20 it
+    took one and the store saved over the schedule with that id, owner
+    included, so one person's request could replace another person's
+    schedule. Existing schedules change only through the schedule tools,
+    which check the owner and the version the model read.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    schedule_id: Optional[str] = Field(default=None, description="Optional schedule id.")
     payload: ModelTaskRequestPayload = Field(description="Required task request to run when the schedule fires.")
     interval_ms: Optional[int] = Field(
         default=None,
@@ -343,8 +360,11 @@ class ModelScheduledMessagePayload(BaseModel):
     enabled: Optional[bool] = Field(default=True, description="Optional enabled flag.")
 
     def to_structured_scheduled_message_payload(self) -> StructuredScheduledMessagePayload:
+        # The runtime names the new schedule before the outbox saves the action,
+        # so running the saved action again finds the schedule it created
+        # instead of creating a second one.
         return StructuredScheduledMessagePayload(
-            schedule_id=self.schedule_id,
+            schedule_id=new_schedule_id(),
             payload=self.payload.to_structured_task_payload(),
             interval_ms=self.interval_ms,
             cron_expression=self.cron_expression,
@@ -747,7 +767,7 @@ class ModelTaskQueryAction(BaseModel):
 
 
 class ModelScheduleMessageAction(BaseModel):
-    """Slim model-facing runtime action for persisting a ScheduledMessage."""
+    """Slim model-facing runtime action that creates a new schedule (never changes one)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1206,7 +1226,7 @@ class TaskQueryAction(BaseModel):
 
 
 class ScheduleMessageAction(BaseModel):
-    """Runtime action for persisting a ScheduledMessage."""
+    """Runtime action that creates the schedule it describes; a stored schedule is never changed."""
 
     action_type: Literal["schedule_message"] = "schedule_message"
     scheduled_message: StructuredScheduledMessagePayload

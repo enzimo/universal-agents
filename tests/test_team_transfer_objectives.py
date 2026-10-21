@@ -91,7 +91,7 @@ def _old_instance(tmp_path: Path) -> Path:
         _objective("obj_deleting", scope, "usr_ana", ObjectiveStatus.DELETING),
         _objective("obj_incarnation", "agent_1234", "usr_ana"),
     ):
-        objectives.save_objective(objective)
+        objectives.insert_objective(objective)
     work = create_objective_work_repository(config.manager_storage_settings)
     work.save_installed_profile(_profile("prof_ana", scope, "usr_ana"))
     work.save_installed_profile(_profile("prof_gone", scope, "usr_gone"))

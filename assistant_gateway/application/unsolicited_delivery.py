@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Awaitable, Callable, Protocol
 
 from assistant_gateway.application.delivery_projection import DeliveryPersonMismatch, GatewayDeliveryProjection
@@ -11,6 +11,11 @@ from assistant_gateway.application.delivery_presentation import (
     GatewayDeliveryPresentation,
 )
 from assistant_gateway.application.delivery_service import GatewayDeliveryService
+from assistant_gateway.application.gateway_application import GatewayDeliveryEvent
+from assistant_gateway.application.pending_questions import (
+    GatewayPendingQuestions,
+    QuestionDisplay,
+)
 from assistant_gateway.application.credential_workflow import (
     REQUEST_KINDS_SECURE_CREDENTIAL_RESULTS,
 )
@@ -75,6 +80,7 @@ class GatewayUnsolicitedDeliveryApplication:
         *,
         settings: GatewayUnsolicitedDeliverySettings,
         requests: GatewayRequestService,
+        questions: GatewayPendingQuestions,
         sessions: SessionRepository,
         projection: GatewayDeliveryProjection,
         presentation: GatewayDeliveryPresentation,
@@ -84,9 +90,12 @@ class GatewayUnsolicitedDeliveryApplication:
         event_output: GatewayEventOutput,
         clock: GatewayClock,
         logger: logging.Logger | None = None,
+        on_request_finished: Callable[[], None] | None = None,
     ) -> None:
         self._settings = settings
         self._requests = requests
+        self._questions = questions
+        self._on_request_finished = on_request_finished
         self._sessions = sessions
         self._projection = projection
         self._presentation = presentation
@@ -189,6 +198,8 @@ class GatewayUnsolicitedDeliveryApplication:
             )
             return
         rendered_text = self._presentation.render_envelope(envelope)
+        finishes_request = self._is_final_reply(envelope.msg_content)
+        finished_task_id = envelope.msg_content.task_id if finishes_request and isinstance(envelope.msg_content, Task) else None
         try:
             delivery_event = self._projection.project(
                 envelope=envelope,
@@ -196,7 +207,14 @@ class GatewayUnsolicitedDeliveryApplication:
                 request_record=prepared.request_record,
             )
         except DeliveryPersonMismatch:
-            return  # logged by the projection: never deliver to the wrong person
+            # Logged by the projection: never deliver to the wrong person. The
+            # request still ended; leaving it running would hold the thread.
+            if finished_task_id is not None and prepared.correlation_id and (
+                prepared.request_record is None or prepared.request_record.matches_task(finished_task_id)
+            ):
+                self._requests.finish(prepared.correlation_id)
+                self._request_finished()
+            return
         policy = self._policies.current_delivery_policy()
         decision = evaluate_delivery(
             origin_kind=prepared.origin_kind,
@@ -220,25 +238,15 @@ class GatewayUnsolicitedDeliveryApplication:
                 isinstance(content, TaskQuery)
                 and content.query_type == MessageMetaType.REQUEST
             ):
-                if not prepared.correlation_id:
-                    self._logger.error(
-                        "Cannot deliver a question without reply correlation. "
-                        "event=gateway_query_missing_correlation task_query_id=%s session_key=%s",
-                        content.task_query_id,
-                        delivery_event.session_key,
-                    )
-                    return
-                # A timeout or restart removes the response waiter, not the task's
-                # need for an answer. Persist the same reply target before display.
-                self._requests.upsert_pending_query(
-                    session_key=delivery_event.session_key,
+                shown = self._question_event(
+                    content,
+                    delivery_event=delivery_event,
                     correlation_id=prepared.correlation_id,
-                    task_query_id=content.task_query_id,
-                    parent_task_id=content.parent_task_id,
-                    conversation_id=delivery_event.conversation_id,
-                    query_text=rendered_text,
-                    query_payload_json=content.model_dump_json(),
+                    rendered_text=rendered_text,
                 )
+                if shown is None:
+                    return
+                delivery_event = shown
             await self._event_output.emit(delivery_event)
             delivered_at = self._clock.now_utc().isoformat()
             await self._receipts.send_receipt(
@@ -252,7 +260,11 @@ class GatewayUnsolicitedDeliveryApplication:
                 session_key=delivery_event.session_key,
                 conversation_id=delivery_event.conversation_id,
                 last_task_id=last_task_id,
+                finished_task_id=finished_task_id,
             )
+            await self._finish_questions_of(envelope, correlation_id=prepared.correlation_id)
+            if finishes_request:
+                self._request_finished()
             return
         if decision.available_after is None:
             self._logger.error(
@@ -278,7 +290,73 @@ class GatewayUnsolicitedDeliveryApplication:
                 if prepared.request_record is not None
                 else None
             ),
+            finished_task_id=finished_task_id,
         )
+        await self._finish_questions_of(envelope, correlation_id=prepared.correlation_id)
+        if finishes_request:
+            self._request_finished()
+
+    def _question_event(
+        self,
+        content: TaskQuery,
+        *,
+        delivery_event: GatewayDeliveryEvent,
+        correlation_id: str | None,
+        rendered_text: str,
+    ) -> GatewayDeliveryEvent | None:
+        """Keep an arriving question and return what the chat shows, if anything.
+
+        A timeout or restart removes the response waiter, not the task's need
+        for an answer, so the question is stored before it is shown.
+        """
+
+        if not correlation_id:
+            self._logger.error(
+                "Cannot deliver a question without reply correlation. "
+                "event=gateway_query_missing_correlation task_query_id=%s session_key=%s",
+                content.task_query_id,
+                delivery_event.session_key,
+            )
+            return None
+        arrival = self._questions.ask(
+            session_key=delivery_event.session_key,
+            correlation_id=correlation_id,
+            conversation_id=delivery_event.conversation_id,
+            query=content,
+            rendered_text=rendered_text,
+        )
+        if arrival.display == QuestionDisplay.QUESTION:
+            return delivery_event
+        if arrival.display == QuestionDisplay.WAITS_IN_LINE:
+            return replace(
+                delivery_event,
+                text=arrival.text,
+                message_type=arrival.message_type,
+                message_level="normal",
+                attachments=(),
+            )
+        return None
+
+    async def _finish_questions_of(
+        self, envelope: MessageEnvelope, *, correlation_id: str | None
+    ) -> None:
+        """A task's final reply ends its questions and shows the next one."""
+
+        content = envelope.msg_content
+        if isinstance(content, Task) and content.task_type == MessageMetaType.RESPONSE:
+            await self._questions.task_finished(
+                correlation_id=correlation_id, task_id=content.task_id
+            )
+
+    @staticmethod
+    def _is_final_reply(content: object) -> bool:
+        """A manager ``Task`` response is the request's final reply (also a stop or failure)."""
+
+        return isinstance(content, Task) and content.task_type == MessageMetaType.RESPONSE
+
+    def _request_finished(self) -> None:
+        if self._on_request_finished is not None:
+            self._on_request_finished()
 
     @staticmethod
     def _apply_explicit_urgency(
@@ -354,13 +432,17 @@ class GatewayInboundMessageApplication:
         *,
         delivery: GatewayUnsolicitedDeliveryApplication,
         unmatched_credential_handler: Callable[[MessageEnvelope], Awaitable[bool]],
+        late_guidance_status_handler: Callable[[MessageEnvelope], Awaitable[bool]],
     ) -> None:
         self._delivery = delivery
         self._unmatched_credential_handler = unmatched_credential_handler
+        self._late_guidance_status_handler = late_guidance_status_handler
 
     async def handle(self, envelope: MessageEnvelope) -> None:
-        """Route an unmatched credential result, otherwise apply delivery policy."""
+        """Settle late guidance answers and unmatched credential results, otherwise deliver."""
 
+        if await self._late_guidance_status_handler(envelope):
+            return
         if await self._unmatched_credential_handler(envelope):
             return
         await self._delivery.deliver(self._delivery.prepare(envelope))

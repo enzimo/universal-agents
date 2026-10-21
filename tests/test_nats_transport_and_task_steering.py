@@ -16,6 +16,7 @@ from custom_agents.task_steering_runtime import (
     handle_task_steering_message,
     StrandsInterruptedTurnSession,
     _build_interrupt_response_blocks,
+    _send_steering_status_response,
     ensure_fresh_strands_agent_for_new_turn,
     send_interrupt_request_for_result,
 )
@@ -41,6 +42,49 @@ from custom_messages.enums import (
 )
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
 from custom_transport.subjects import NatsSubjectMapper
+
+
+@pytest.mark.asyncio
+async def test_steering_status_retries_keep_effect_identity_and_publish_changed_outcomes() -> None:
+    agent = SimpleNamespace(
+        id="manager_1",
+        name="Manager",
+        team_id="team_1",
+        _agent_id_by_name={},
+        named_agent_type_queue_map={},
+        _logger=MagicMock(),
+        team_comms=SimpleNamespace(send_message=AsyncMock()),
+    )
+    guidance = TaskSteering(
+        steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
+        target_task_id="task_report",
+        target_correlation_id="corr_report",
+        guidance_text="Use the June report",
+        idempotency_key="guidance_1",
+    )
+    for status, code in [
+        (TaskSteeringStatus.STALE, TaskSteeringStatusCode.TARGET_TASK_NOT_FOUND),
+        (TaskSteeringStatus.STALE, TaskSteeringStatusCode.TARGET_TASK_NOT_FOUND),
+        (TaskSteeringStatus.ACCEPTED, None),
+        (TaskSteeringStatus.ACCEPTED, None),
+        (TaskSteeringStatus.STALE, TaskSteeringStatusCode.TARGET_TASK_TERMINAL),
+    ]:
+        await _send_steering_status_response(
+            agent,
+            guidance,
+            MessageHeader(from_agent_id="gateway", response_routing_key="gateway"),
+            MessageMeta(msg_correlation_id="guidance_1", is_response_requested=True),
+            status=status,
+            status_code=code,
+            reason="Synthetic status",
+        )
+    messages = [call.kwargs["message"] for call in agent.team_comms.send_message.await_args_list]
+    keys = [message.msg_header.idempotency_key for message in messages]
+    assert keys[0] == keys[1]
+    assert keys[2] == keys[3]
+    assert len({keys[0], keys[2], keys[4]}) == 3
+    assert {message.msg_content.idempotency_key for message in messages} == {"guidance_1"}
+    assert {message.msg_meta.msg_correlation_id for message in messages} == {"guidance_1"}
 
 
 @pytest.mark.asyncio
@@ -95,6 +139,7 @@ async def test_input_interrupt_needs_an_external_requester_route(reply_route) ->
         ),
         strands_agent=object(),
         invoke_kwargs={},
+        callback_handler=lambda **_: None,
         full_prompt="prompt",
     )
 
@@ -123,6 +168,7 @@ def test_new_turn_rotates_away_from_live_interrupted_strands_agent() -> None:
         task_id="task_waiting",
         strands_agent=interrupted_agent,
         invoke_kwargs={},
+        callback_handler=lambda **_: None,
         full_prompt="prompt",
         msg_content=Task(
             task_type=MessageMetaType.REQUEST,
@@ -176,6 +222,7 @@ async def test_stop_cancellation_discards_live_interrupt_session(monkeypatch) ->
         task_id=task_id,
         strands_agent=interrupted_agent,
         invoke_kwargs={},
+        callback_handler=lambda **_: None,
         full_prompt="prompt",
         msg_content=task_info.task,
         msg_header=task_info.header,
@@ -368,6 +415,7 @@ def test_interrupt_response_blocks_fill_missing_interrupt_ids_from_live_session(
         task_id="task_123",
         strands_agent=object(),
         invoke_kwargs={},
+        callback_handler=lambda **_: None,
         full_prompt="prompt",
         msg_content=Task(
             task_type=MessageMetaType.REQUEST, problem_statement="do work"

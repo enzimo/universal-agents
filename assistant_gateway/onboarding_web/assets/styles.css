@@ -4009,6 +4009,46 @@ body.is-theme-customizing {
   margin-bottom: 10px;
 }
 
+/* Settings -> Team -> File Retention (file_retention_controls.mjs): two day
+   counts and Save on one row for administrators, the two values as a short
+   list for everyone else. Inputs and buttons use the shared form rules. */
+.file-retention-status {
+  margin-bottom: 10px;
+}
+
+.file-retention-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.file-retention-actions {
+  margin: 0;
+}
+
+.file-retention-values {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 16px;
+  margin: 0 0 8px;
+}
+
+.file-retention-values dt {
+  font-weight: 700;
+}
+
+.file-retention-values dd {
+  margin: 0;
+}
+
+@media (max-width: 720px) {
+  .file-retention-form {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+  }
+}
+
 .team-table-wrap {
   margin-bottom: 18px;
   overflow-x: auto;

@@ -47,6 +47,14 @@ class SessionRouteV1(TransferModel):
     # Whether it was its chat's current session (``get_active_session_for_channel``).
     channel_current: bool = False
 
+    @property
+    def chat(self) -> Optional[tuple[str, str, str, str]]:
+        """Its chat (channel, user, chat, thread) as the current-session record keys it; None without a full route."""
+
+        if not (self.channel_name and self.user_id and self.chat_id):
+            return None
+        return (self.channel_name, self.user_id, self.chat_id, self.thread_id or "")
+
 
 class CarriedScheduleV2(TransferModel):
     """Markdown is the schedule configuration, with separate immutable provenance."""

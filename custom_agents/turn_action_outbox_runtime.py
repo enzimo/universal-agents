@@ -18,6 +18,7 @@ from custom_agents.delegated_work_runtime import (
     record_publish_sequence,
 )
 from custom_agents.pending_work_runtime import wake_pending_work_after
+from custom_agents.schedule_installation import create_schedule_from_turn_action
 from custom_agents.task_runtime_state import TurnStartNotes
 from custom_agents.task_records import TaskInfo
 from custom_agents.worker_result_reports import is_worker_result_report, prepare_worker_result_report
@@ -1652,8 +1653,10 @@ async def _execute_turn_action_record(
             content.payload_header = incoming_header.model_copy(deep=True)
         if content.payload_meta is None:
             content.payload_meta = incoming_meta.model_copy(deep=True)
-        await self._handle_scheduled_message(
-            content, msg_header=incoming_header, msg_meta=incoming_meta
+        # A model's action only creates a schedule; changes to existing ones go
+        # through the schedule tools (owner and version checks).
+        await create_schedule_from_turn_action(
+            self, content, msg_header=incoming_header, msg_meta=incoming_meta
         )
         await self.task_manager.operations_runtime.run(
             self.task_manager.mark_turn_action_record,

@@ -116,6 +116,16 @@ Treat these lifecycles independently after promotion:
 - Treat the Task that created an Objective as provenance only unless it is also
   explicitly part of the Objective-owned task lineage. Its later failure must
   not change the successfully created Objective or Plan.
+- Change an Objective's progress or status from what you last read:
+  `objectives(action="get")`, `list` and `create_objective` return its
+  `version`, and `update_progress` and `update_status` need it as
+  `expected_version`. A `changed_since_read` refusal means another request
+  changed its definition or success criteria meanwhile and nothing was
+  changed; read it again and decide on what it says now. Progress text, focus,
+  status, linked tasks, Plans, schedules, heartbeat items and work sessions
+  do not change the version. Each change keeps unrelated stored fields;
+  changes to the same progress or status field follow the current lifecycle
+  rules rather than this version check.
 
 Supply semantic titles, objectives, rationale, evidence needs, and recovery
 intent. Leave runtime-owned task, plan, step, conversation, correlation, and
@@ -557,10 +567,11 @@ retention. Preserve recurring memory schedules.
 ### Inspecting and managing the current user's queue
 
 Use `list_task_queue` for your active execution roots, queue positions, blockers
-and delegated children. Read task history before treating two roots as
-duplicates. Use `control_task_queue` to pause runnable queued work, stop a
-confirmed duplicate, or resume the retained task once its blockers are resolved.
-Resume does not decide access requests, answer pending questions, or override
-budget pauses. Report the blocker and exact task ID instead of creating another
-copy. Self-status, own tool-result inspection and current-task history notes are
-standard access and need no grant.
+and delegated children. `control_task_queue` pauses, resumes or stops only tasks
+of the request you are working on. For a duplicate or any other request of the
+person, report its task ID and tell the person to ask in that request's own
+thread or to stop it with `/stop task <task_id>`. Resume does not decide access
+requests, answer pending questions, or override budget pauses. Report the
+blocker and exact task ID instead of creating another copy. Self-status, own
+tool-result inspection and current-task history notes are standard access and
+need no grant.

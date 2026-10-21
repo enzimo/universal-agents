@@ -251,8 +251,8 @@ class GatewayRuntimeApplication:
         )
         return gateway_response_view(response)
 
-    async def has_pending_query(self, session_key: str) -> bool:
-        return await self._clarification.has_pending_query(session_key)
+    async def waiting_question_id(self, session_key: str) -> str | None:
+        return await self._clarification.waiting_question_id(session_key)
 
     def start_new_session(
         self,
@@ -286,12 +286,14 @@ class GatewayRuntimeApplication:
         self,
         *,
         session_key: str,
+        task_query_id: str,
         response_text: str,
         replied_message: RepliedMessage | None = None,
     ) -> GatewayApplicationResponse:
         return gateway_response_view(
             await self._clarification.reply(
                 session_key=session_key,
+                task_query_id=task_query_id,
                 response_text=response_text,
                 replied_message=replied_message,
             )

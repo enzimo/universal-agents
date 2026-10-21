@@ -217,7 +217,7 @@ async def test_steering_guidance_shows_its_replied_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_reply_that_steers_an_active_task_and_its_readmission_keep_the_replied_message(tmp_path: Path) -> None:
+async def test_held_guidance_keeps_the_replied_message_without_starting_other_work(tmp_path: Path) -> None:
     config = _config(tmp_path)
     config.gateway.users.enabled = True
     config.save()
@@ -235,16 +235,21 @@ async def test_a_reply_that_steers_an_active_task_and_its_readmission_keep_the_r
     # A request still running in the conversation: the reply steers it first.
     store.record_request(
         correlation_id="corr_active", session_key=session.session_key, request_kind="interactive", request_text="Long job",
-        conversation_id=session.conversation_id, followup_to_task_id="task_gone", status="waiting_for_steering",
+        conversation_id=session.conversation_id, followup_to_task_id=None,
+        active_task_id="task_waiting_for_admission", run_state="running", status="waiting_for_steering",
     )
     replied = RepliedMessage(author="assistant", text="Daily Gmail check: nothing urgent.")
 
-    await gateway.application.send_user_message(
+    response = await gateway.application.send_user_message(
         "expected", session_key=session.session_key, channel_name="website", user_id=user.canonical_user_id,
         chat_id="web-chat", original_message_id="web_1", canonical_user_id=user.canonical_user_id, replied_message=replied,
     )
 
     [steering] = [envelope.msg_content for envelope in transport.operational]
-    [readmitted] = [envelope.msg_content for envelope in transport.durable]
     assert steering.replied_message == replied
-    assert readmitted.replied_message == replied and readmitted.problem_statement == "expected"
+    assert transport.durable == []
+    held = gateway.request_repository.get_held_guidance(response.correlation_id)
+    restored = TaskSteering.model_validate_json(held.steering_json)
+    assert restored.replied_message == replied
+    assert restored.guidance_text == "expected"
+    assert held.target_correlation_id == "corr_active"

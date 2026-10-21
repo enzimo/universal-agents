@@ -227,6 +227,7 @@ async def test_a_running_command_ends_before_its_task_is_handed_back(
                 "go",
                 tool_stop=agent._active_tool_stop,
                 invoke_kwargs=turn_invoke_kwargs("running"),
+                callback_handler=lambda **_: None,
                 logger=agent._logger,
             )
         except asyncio.CancelledError:

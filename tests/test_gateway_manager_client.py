@@ -10,6 +10,7 @@ from assistant_gateway.application.manager_client import (
     GatewayManagerClientSettings,
 )
 from custom_messages.contracts.control_v1 import AgentStatus, ManagerMemoryCommand, PinnedMemoryCommandPayload, SystemStatusMessage
+from custom_messages.contracts.task_v1 import Task
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.enums import MessageMetaType
@@ -204,12 +205,45 @@ async def test_manager_client_drops_late_memory_control_response(
 
 
 @pytest.mark.asyncio
-async def test_manager_client_rejects_duplicate_correlation_registration() -> None:
+@pytest.mark.parametrize("task_id", [None, "task_one"])
+async def test_manager_client_rejects_duplicate_correlation_registration(task_id) -> None:
     client = _client(_FakeManagerRuntime())
-    client.register_response_channel("corr_duplicate")
+    client.register_response_channel("corr_duplicate", task_id=task_id)
 
     with pytest.raises(RuntimeError, match="already registered"):
-        client.register_response_channel("corr_duplicate")
+        client.register_response_channel("corr_duplicate", task_id=task_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["response", "operational"])
+async def test_task_reply_waits_share_a_correlation_without_consuming_sibling_replies(channel) -> None:
+    unsolicited = []
+    client = _client(_FakeManagerRuntime(), unsolicited=unsolicited)
+    receive = getattr(client, f"handle_{channel}")
+
+    def reply(task_id):
+        return MessageEnvelope(
+            msg_content=Task(task_id=task_id, task_type=MessageMetaType.RESPONSE, answer="Done"),
+            msg_header=MessageHeader(from_agent_id="manager_1"),
+            msg_meta=MessageMeta(msg_correlation_id="corr_shared"),
+        )
+
+    async with client.response_channel("corr_shared", task_id="task_one") as first:
+        async with client.response_channel("corr_shared", task_id="task_two") as second:
+            assert client.pending_response_ids == ("corr_shared",)
+            await receive(reply("task_two"))
+            assert (await second.get()).msg_content.task_id == "task_two"
+            assert first.empty()
+            await receive(reply("task_other"))
+            assert first.empty() and second.empty()
+            assert len(unsolicited) == (1 if channel == "response" else 0)
+            # A service-wide availability notice must release every wait,
+            # even though only one correlation is exposed to the watcher.
+            await client.queue_response("corr_shared", _system_envelope("corr_shared"))
+            assert (await first.get()).msg_content.system_status == "ok"
+            assert (await second.get()).msg_content.system_status == "ok"
+        assert client.has_pending_response("corr_shared")
+    assert client.pending_response_ids == ()
 
 
 @pytest.mark.asyncio

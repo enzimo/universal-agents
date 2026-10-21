@@ -55,6 +55,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "target" / "debug" / "ua-cedar-authorizer"
 TEAM = "team-1"
 OWNER = PersonPrincipal("user-1", TEAM, ("owner",))
+MEMBER = PersonPrincipal("user-2", TEAM, ("member",))
 
 pytestmark = pytest.mark.skipif(not BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
 
@@ -83,14 +84,24 @@ def storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     set_agent_ref(None)
 
 
-def make_agent(storage, tmp_path: Path, *, agent_type="WebResearchAgent", lead=False, enabled=True):
+def a_request(person: PersonPrincipal = OWNER):
+    """A person's request: the gateway-signed context every task of the request carries."""
+
+    return context_signer().issue(team_id=TEAM, person_id=person.person_id, person_roles=person.roles)
+
+
+def make_agent(
+    storage, tmp_path: Path, *, agent_type="WebResearchAgent", lead=False, enabled=True, request=None, task_id=None
+):
+    """An agent running one task of ``request`` (a new request of the owner by default)."""
+
     # Every agent shares the manager database, as in production.
     manager = TaskManager(db_path=str(tmp_path / "manager.db"))
     manager.set_owner_identity(f"agent-{agent_type}", agent_type, TEAM, agent_type)
-    signed = context_signer().issue(team_id=TEAM, person_id=OWNER.person_id, person_roles=("owner",))
+    signed = request or a_request()
     meta = MessageMeta(conversation_id="conv-1")
     meta.gateway_context = SimpleNamespace(task_context=signed)
-    task_id = f"task-{agent_type}"
+    task_id = task_id or f"task-{agent_type}"
     manager.add_task(Task(task_id=task_id, task_type=MessageMetaType.REQUEST), MessageHeader(), meta, owner_person_id=None)
     agent = SimpleNamespace(
         id=f"agent-{agent_type}",
@@ -183,7 +194,8 @@ def test_a_workers_task_gets_what_the_team_lead_may_hand_on_and_restrictions_win
     service = owner_service(storage)
     apply_starter_profile(service, OWNER, "trusted", lead_agent_type="TeamArchitect")
     service.cedar.close()
-    worker = make_agent(storage, tmp_path)
+    request = a_request()
+    worker = make_agent(storage, tmp_path, request=request)
     set_agent_ref(worker)
 
     # The first call adds the access to the worker's task: no request, no turn ("access follows the work").
@@ -194,7 +206,8 @@ def test_a_workers_task_gets_what_the_team_lead_may_hand_on_and_restrictions_win
     assert handed.lifetime.value == "task" and handed.task_id == access_runtime.verified_context_id(worker)
     assert store.notices_for(TEAM, person_id=OWNER.person_id, roles=OWNER.roles) == [], "added to one task: no notice"
 
-    lead = make_agent(storage, tmp_path, agent_type="TeamArchitect", lead=True)
+    # The team lead works on the same request the worker's task belongs to.
+    lead = make_agent(storage, tmp_path, agent_type="TeamArchitect", lead=True, request=request)
     set_agent_ref(lead)
     restricted = call(
         tools.restrict_access,
@@ -209,6 +222,76 @@ def test_a_workers_task_gets_what_the_team_lead_may_hand_on_and_restrictions_win
     assert call(tools.revoke_access, grant_id=restricted["grant_id"])["status"] == "revoked"
     assert access_runtime.decide_call(worker, "create_scheduled_job", {}).allowed
     assert "give_access" not in tools.ACCESS_TOOL_NAMES
+
+
+def test_a_restriction_in_one_request_leaves_the_persons_other_requests_alone(storage, tmp_path) -> None:
+    """The person has two requests open; both use the same worker type."""
+
+    service = owner_service(storage)
+    apply_starter_profile(service, OWNER, "trusted", lead_agent_type="TeamArchitect")
+    service.cedar.close()
+    first, second = a_request(), a_request()
+    worker_first = make_agent(storage, tmp_path, request=first, task_id="task-worker-first")
+    worker_second = make_agent(storage, tmp_path, request=second, task_id="task-worker-second")
+    lead_first = make_agent(storage, tmp_path, agent_type="TeamArchitect", lead=True, request=first)
+    set_agent_ref(lead_first)
+
+    restricted = call(
+        tools.restrict_access,
+        agent_type="WebResearchAgent",
+        tool_id="fn:schedules",
+        operation="create_scheduled_job",
+        reason="Only change existing schedules",
+    )
+
+    assert restricted["status"] == "restricted"
+    assert not access_runtime.decide_call(worker_first, "create_scheduled_job", {}).allowed
+    assert access_runtime.decide_call(worker_second, "create_scheduled_job", {}).allowed, "the other request is not restricted"
+    assert "in this request" in restricted["message"]
+    set_agent_ref(worker_second)
+    assert call(tools.list_my_access)["restrictions"] == []
+    set_agent_ref(worker_first)
+    assert [row["grant_id"] for row in call(tools.list_my_access)["restrictions"]] == [restricted["grant_id"]]
+
+    # The team lead working on the second request cannot remove the first request's restriction.
+    lead_second = make_agent(
+        storage, tmp_path, agent_type="TeamArchitect", lead=True, request=second, task_id="task-lead-second"
+    )
+    set_agent_ref(lead_second)
+    refused = call(tools.revoke_access, grant_id=restricted["grant_id"])
+    assert refused["status"] == "refused" and "request you are working on" in refused["reason"]
+    assert not access_runtime.decide_call(worker_first, "create_scheduled_job", {}).allowed
+
+
+def test_the_team_lead_cannot_revoke_what_it_handed_down_for_another_persons_request(storage, tmp_path) -> None:
+    service = owner_service(storage)
+    for person in (OWNER, MEMBER):
+        apply_starter_profile(service, person, "trusted", lead_agent_type="TeamArchitect")
+    service.cedar.close()
+    members_request = a_request(MEMBER)
+    worker = make_agent(storage, tmp_path, request=members_request)
+    assert access_runtime.decide_call(worker, "create_scheduled_job", {}).allowed
+    store = access_runtime.runtime_requests(worker).service.store
+    worker_type = SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent")
+    [handed] = [grant for grant in store.for_subjects(TEAM, [worker_type]) if grant.target.id == "fn:schedules"]
+    assert handed.for_person_id == MEMBER.person_id
+
+    # Working on the owner's request, the team lead's type is the giver, but the access is not its to end here.
+    set_agent_ref(make_agent(storage, tmp_path, agent_type="TeamArchitect", lead=True))
+    refused = call(tools.revoke_access, grant_id=handed.grant_id)
+
+    assert refused["status"] == "refused"
+    assert store.get(handed.grant_id).status.value == "active"
+    assert access_runtime.decide_call(worker, "create_scheduled_job", {}).allowed
+
+    # Working on the member's request, it may take the access back.
+    set_agent_ref(
+        make_agent(
+            storage, tmp_path, agent_type="TeamArchitect", lead=True, request=members_request, task_id="task-lead-member"
+        )
+    )
+    assert call(tools.revoke_access, grant_id=handed.grant_id)["grant_ids"] == [handed.grant_id]
+    assert store.get(handed.grant_id).status.value == "revoked"
 
 
 @pytest.mark.asyncio
@@ -237,6 +320,7 @@ async def test_an_access_interrupt_waits_here_and_a_decision_resumes_the_task(st
         msg_meta=info.meta,
         strands_agent=object(),
         invoke_kwargs={},
+        callback_handler=lambda **_: None,
         full_prompt="",
     )
 
@@ -444,7 +528,7 @@ async def _waiting_on_request(storage, tmp_path):
     info = worker.task_manager.get_task_info(task_id)
     await send_interrupt_request_for_result(
         worker, result=SimpleNamespace(interrupts=[raised.value.interrupt]), task=info.task,
-        msg_header=info.header, msg_meta=info.meta, strands_agent=object(), invoke_kwargs={}, full_prompt="",
+        msg_header=info.header, msg_meta=info.meta, strands_agent=object(), invoke_kwargs={}, callback_handler=lambda **_: None, full_prompt="",
     )
     return worker, context.raised[0]["access_request_id"], task_id
 

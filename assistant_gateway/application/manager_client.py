@@ -16,9 +16,16 @@ from assistant_gateway.application.ports import (
     GatewayManagerRuntime,
     GatewayManagerTransport,
 )
-from custom_messages.contracts.control_v1 import AgentStatus
+from custom_messages.contracts.control_v1 import AgentStatus, SystemStatusMessage
+from custom_messages.contracts.credentials_v1 import (
+    SecureCredentialCollectionRequest,
+    SignupAutomationRequest,
+    ToolSetupRequestV1,
+)
+from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.envelope_v1 import GATEWAY_MANAGER_CONTROL_TYPES, MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskSteering
 from custom_messages.enums import ControlType, MessageMetaType, RequesterType, RoutingType
 
 
@@ -100,7 +107,9 @@ class GatewayManagerClient:
         self._lifecycle_connected = False
         self._manager_status_updated_at: datetime | None = None
         self._manager_status_lock = asyncio.Lock()
-        self._response_queues: dict[str, asyncio.Queue[MessageEnvelope]] = {}
+        # A schedule action keeps its originating request's correlation.
+        # Distinct scheduled tasks can therefore wait for replies at once.
+        self._response_queues: dict[tuple[str, str | None], asyncio.Queue[MessageEnvelope]] = {}
         self._control_queues: dict[str, asyncio.Queue[MessageEnvelope]] = {}
 
     @property
@@ -131,7 +140,7 @@ class GatewayManagerClient:
     def pending_response_ids(self) -> tuple[str, ...]:
         """Return a snapshot of correlations awaiting manager responses."""
 
-        return tuple(self._response_queues)
+        return tuple(dict.fromkeys(correlation_id for correlation_id, _ in self._response_queues))
 
     def set_runtime(
         self,
@@ -191,14 +200,16 @@ class GatewayManagerClient:
     async def response_channel(
         self,
         correlation_id: str,
+        *,
+        task_id: str | None = None,
     ) -> AsyncIterator[asyncio.Queue[MessageEnvelope]]:
         """Register one terminal-response correlation for a bounded operation."""
 
-        queue = self.register_response_channel(correlation_id)
+        queue = self.register_response_channel(correlation_id, task_id=task_id)
         try:
             yield queue
         finally:
-            self.unregister_response_channel(correlation_id, queue=queue)
+            self.unregister_response_channel(correlation_id, task_id=task_id, queue=queue)
 
     @asynccontextmanager
     async def control_channel(
@@ -217,29 +228,33 @@ class GatewayManagerClient:
         self,
         correlation_id: str,
         *,
+        task_id: str | None = None,
         queue: asyncio.Queue[MessageEnvelope] | None = None,
     ) -> asyncio.Queue[MessageEnvelope]:
         """Register and return a response queue for a correlation."""
 
-        if correlation_id in self._response_queues:
+        key = (correlation_id, task_id)
+        if key in self._response_queues:
             raise RuntimeError(
-                f"Response correlation {correlation_id!r} is already registered."
+                f"Response correlation {correlation_id!r} for task {task_id!r} is already registered."
             )
         registered = queue or asyncio.Queue()
-        self._response_queues[correlation_id] = registered
+        self._response_queues[key] = registered
         return registered
 
     def unregister_response_channel(
         self,
         correlation_id: str,
         *,
+        task_id: str | None = None,
         queue: asyncio.Queue[MessageEnvelope] | None = None,
     ) -> None:
         """Remove a response queue without deleting a newer replacement."""
 
-        current = self._response_queues.get(correlation_id)
+        key = (correlation_id, task_id)
+        current = self._response_queues.get(key)
         if queue is None or current is queue:
-            self._response_queues.pop(correlation_id, None)
+            self._response_queues.pop(key, None)
 
     def register_control_channel(
         self,
@@ -285,25 +300,53 @@ class GatewayManagerClient:
     def has_pending_response(self, correlation_id: str) -> bool:
         """Return whether a terminal response correlation is active."""
 
-        return correlation_id in self._response_queues
+        return correlation_id in self.pending_response_ids
 
     def pending_response_correlation_ids(self) -> tuple[str, ...]:
         """Requests the gateway is still waiting on the agent to answer."""
 
-        return tuple(self._response_queues)
+        return self.pending_response_ids
 
     def get_response_channel(
         self,
         correlation_id: str,
+        *,
+        task_id: str | None = None,
     ) -> asyncio.Queue[MessageEnvelope]:
         """Return the registered response queue for a correlation."""
 
         try:
-            return self._response_queues[correlation_id]
+            return self._response_queues[(correlation_id, task_id)]
         except KeyError as exc:
             raise RuntimeError(
-                f"Response correlation {correlation_id!r} is not registered."
+                f"Response correlation {correlation_id!r} for task {task_id!r} is not registered."
             ) from exc
+
+    def _response_targets(
+        self, correlation_id: str, envelope: MessageEnvelope
+    ) -> tuple[asyncio.Queue[MessageEnvelope], ...]:
+        """Match a task's own waiter before its request's general reply wait.
+
+        An unmatched task must never use a sibling task's queue. Untargeted
+        service availability notices wake every waiter for the correlation.
+        """
+
+        content = envelope.msg_content
+        task_id = None
+        if isinstance(content, Task):
+            task_id = content.task_id
+        elif isinstance(content, TaskSteering):
+            task_id = content.target_task_id
+        elif isinstance(content, (TaskQuery, SecureCredentialCollectionRequest, ToolSetupRequestV1, SignupAutomationRequest)):
+            task_id = content.parent_task_id
+        elif isinstance(content, UserNotification):
+            task_id = content.source_task_id
+        if isinstance(content, SystemStatusMessage):
+            return tuple(queue for (correlation, _), queue in self._response_queues.items() if correlation == correlation_id)
+        queue = self._response_queues.get((correlation_id, task_id))
+        if queue is None and task_id is not None:
+            queue = self._response_queues.get((correlation_id, None))
+        return (queue,) if queue is not None else ()
 
     async def queue_response(
         self,
@@ -312,11 +355,10 @@ class GatewayManagerClient:
     ) -> bool:
         """Queue a synthetic or inbound response for an active correlation."""
 
-        queue = self._response_queues.get(correlation_id)
-        if queue is None:
-            return False
-        await queue.put(envelope)
-        return True
+        queues = self._response_targets(correlation_id, envelope)
+        for queue in queues:
+            await queue.put(envelope)
+        return bool(queues)
 
     async def handle_response(self, envelope: MessageEnvelope) -> None:
         """Route one inbound response envelope by correlation."""
@@ -344,7 +386,7 @@ class GatewayManagerClient:
             return
 
         matched_pending = bool(
-            correlation_id and correlation_id in self._response_queues
+            correlation_id and self._response_targets(correlation_id, envelope)
         )
         if self._trace_enabled():
             self._logger.info(
@@ -365,8 +407,7 @@ class GatewayManagerClient:
                 getattr(header, "message_id", None),
                 type(content).__name__,
             )
-        if correlation_id and correlation_id in self._response_queues:
-            await self._response_queues[correlation_id].put(envelope)
+        if correlation_id and await self.queue_response(correlation_id, envelope):
             return
         if await self._handle_unmatched_status(envelope, source="response"):
             return
@@ -385,8 +426,7 @@ class GatewayManagerClient:
         if correlation_id and correlation_id in self._control_queues:
             await self._control_queues[correlation_id].put(envelope)
             return
-        if correlation_id and correlation_id in self._response_queues:
-            await self._response_queues[correlation_id].put(envelope)
+        if correlation_id and await self.queue_response(correlation_id, envelope):
             return
         if await self._handle_unmatched_status(envelope, source="operational"):
             return

@@ -6,10 +6,9 @@ through the real sandbox and process supervisor. Each command writes its
 process id to a file first, so a test can check whether it still runs.
 
 ``turn_invoke_kwargs`` gives the invocation the keywords a real turn passes
-(``LLMTurnExecutor._prepare_invocation``), including the per-turn
-``callback_handler`` that makes Strands hand tools the turn's invocation_state
-one level down. Tests must not call Strands with a bare ``invoke_kwargs={}``,
-a shape production never uses.
+(``LLMTurnExecutor._prepare_invocation``): the structured-output keywords and
+the turn's ``invocation_state``. Tests must not call Strands with a bare
+``invoke_kwargs={}``, a shape production never uses.
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 from strands import Agent
-from strands.handlers.callback_handler import CompositeCallbackHandler
 from strands.models.model import Model
 
 from custom_agents.context_debug_dump import ContextDebugDumpPlugin
@@ -46,7 +44,6 @@ def turn_invoke_kwargs(task_id: str = "task-1") -> dict[str, Any]:
             RuntimeGuardrailsPlugin._TURN_DECISION_CONTEXT_KEY: dict(context, expected_tool_name="turn_decision"),
             ContextDebugDumpPlugin.INVOCATION_CONTEXT_KEY: dict(context),
         },
-        "callback_handler": CompositeCallbackHandler(lambda **_: None),
     }
 
 

@@ -66,6 +66,9 @@ class StrandsInterruptedTurnSession:
     task_id: str
     strands_agent: Any
     invoke_kwargs: Dict[str, Any]
+    # The paused turn's callback handler: its tool-call limit and activity
+    # reports carry on in the resumed call (sdk.strands.turn_tool_stop).
+    callback_handler: Callable[..., None]
     full_prompt: str
     msg_content: Any
     msg_header: MessageHeader
@@ -343,7 +346,13 @@ async def _send_steering_status_response(
             to_routing_path=routing_key,
             response_routing_key=None,
             agent_signature="",
-            idempotency_key=response.idempotency_key,
+            # A retry can change NOT_FOUND to ACCEPTED after the task is
+            # admitted. Deduplicate repeated outcomes without suppressing a
+            # later outcome on the durable response stream.
+            idempotency_key=(
+                f"{response.idempotency_key or response.steering_id}:status:"
+                f"{status.value}:{status_code.value if status_code else 'none'}"
+            ),
         ),
         msg_meta=MessageMeta(
             from_agent_name=agent.name,
@@ -912,6 +921,7 @@ async def _run_resumed_turn(
         response_blocks,
         tool_stop=tool_stop,
         invoke_kwargs=session.invoke_kwargs,
+        callback_handler=session.callback_handler,
         logger=agent._logger,
     )
     result = agent.turn_executor._apply_agent_result_transformer(
@@ -926,6 +936,7 @@ async def _run_resumed_turn(
             msg_meta=session.msg_meta,
             strands_agent=session.strands_agent,
             invoke_kwargs=session.invoke_kwargs,
+            callback_handler=session.callback_handler,
             full_prompt=session.full_prompt,
             start_notes=session.start_notes,
         )
@@ -990,6 +1001,7 @@ async def send_interrupt_request_for_result(
     msg_meta: MessageMeta,
     strands_agent: Any,
     invoke_kwargs: Dict[str, Any],
+    callback_handler: Callable[..., None],
     full_prompt: str,
     start_notes: Optional[TurnStartNotes] = None,
 ) -> TaskSteering:
@@ -1049,6 +1061,7 @@ async def send_interrupt_request_for_result(
         task_id=task.task_id,
         strands_agent=strands_agent,
         invoke_kwargs=dict(invoke_kwargs),
+        callback_handler=callback_handler,
         full_prompt=full_prompt,
         msg_content=task,
         msg_header=msg_header.model_copy(deep=True),
