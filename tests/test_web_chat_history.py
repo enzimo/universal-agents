@@ -14,6 +14,8 @@ def test_web_chat_history_loading():
             str(Path(__file__).with_name("web_chat_history.test.cjs")),
             str(Path(__file__).with_name("chat_live_events.test.mjs")),
             str(Path(__file__).with_name("web_chat_thread_sync.test.cjs")),
+            str(Path(__file__).with_name("chat_submission.test.mjs")),
+            str(Path(__file__).with_name("chat_send_retry.test.cjs")),
         ],
         check=True,
         capture_output=True,

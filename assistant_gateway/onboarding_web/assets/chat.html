@@ -97,6 +97,14 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-7-7 14-2-5-5-2Z"></path><path d="m12 14 7-9"></path></svg>
             </button>
           </div>
+          <div class="composer-options">
+            <div class="composer-separate-request">
+              <span id="separate-request-label">Separate request</span>
+              <label class="toggle"><input id="separate-request-toggle" type="checkbox" role="switch" aria-labelledby="separate-request-label" aria-describedby="separate-request-help"><span></span></label>
+            </div>
+            <span id="separate-request-help" class="composer-help">Send this message and its files in a new chat.</span>
+          </div>
+          <p id="composer-status" class="composer-help" role="status" hidden></p>
         </form>
       </section>
     </section>

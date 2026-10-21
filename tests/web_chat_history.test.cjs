@@ -101,6 +101,22 @@ test("session creation finishing after sign-out cannot restore the old user's th
   assert.equal(sandbox.sharedState.threads.length, 0);
 });
 
+test("a stale session-creation error cannot sign out a later session while its body loads", async () => {
+  const { sandbox } = harness();
+  loadFunctions(sandbox, ["createServerThread", "createThread", "threadForSession"]);
+  let resolveBody, bodyStarted, unauthorized = 0;
+  const started = new Promise(resolve => { bodyStarted = resolve; });
+  const body = new Promise(resolve => { resolveBody = resolve; });
+  sandbox.authentication.handleUnauthorizedResponse = () => { unauthorized++; };
+  sandbox.requestClient.fetch = async () => ({ ok: false, status: 401, json: () => { bodyStarted(); return body; } });
+  const pending = sandbox.createServerThread();
+  await started;
+  sandbox.sharedState.authSessionGeneration++;
+  resolveBody({});
+  await assert.rejects(pending, /Chat sign-in changed/);
+  assert.equal(unauthorized, 0);
+});
+
 test("metadata refresh preserves the event cursor and does not reload history", async () => {
   const { sandbox, calls } = harness();
   await sandbox.fetchSessions();

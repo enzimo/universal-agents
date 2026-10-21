@@ -3478,7 +3478,7 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
         "window.UAChatDelivery.buildTimeline("
     )
     durable_message_index = render_messages_source.index(
-        "messageList.appendChild(createMessageBubble(item.value));"
+        "messageList.appendChild(createMessageBubble(item.value, thread));"
     )
     transient_notice_index = render_messages_source.index(
         "messageList.appendChild(createTransientItemCard(thread, item.value));"
@@ -3660,10 +3660,8 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
     )
     # Permission decision receipts were removed with the old Permissions tab.
     assert "PERMISSION_RECEIPT" not in script
-    assert (
-        "clearSystemError(thread, shellState.SYSTEM_ERROR_SOURCE.SEND_MESSAGE);"
-        in script
-    )
+    # Per-request Retry cleanup is exercised by chat_send_retry.test.cjs,
+    # including later acknowledgements and live acceptance before HTTP failure.
     assert "deliveryTracker.watch(clientRequestId);" in script
     assert 'deliveryStatus.textContent = "not delivered";' in script
     assert "liveEvents.start();" in script
@@ -4132,6 +4130,62 @@ async def test_web_chat_resent_upload_gets_the_first_answer_without_saving_again
         message["message_id"] for message in first["messages"]
     ]
     assert len(gateway.sent_user_messages) == 1
+    assert _saved_uploads(config, database) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_web_chat_separate_upload_and_retry_leave_the_original_question_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The browser's create-then-send flow uses the new conversation even while an older one waits."""
+
+    config = _config(tmp_path)
+    _enable_web_chat(config, monkeypatch)
+    database = tmp_path / "gateway.db"
+    store = GatewayStateStore(str(database))
+    owner = config.user.canonical_user_id
+    store.create_session(
+        session_key="pending_session",
+        conversation_id="conv_pending",
+        manager_agent_id="manager_1",
+        channel_name="website",
+        user_id=owner,
+        chat_id="web-chat",
+        owner_canonical_user_id=owner,
+    )
+    gateway = _StatefulFakeGateway(store)
+    gateway.waiting_question = "task_query_pending"
+    app = InternalWebsiteInteractiveApp(config, gateway=gateway, bridge=SimpleNamespace())
+    async with TestClient(TestServer(app.build_app())) as client:
+        headers = await _signed_in(client)
+        created = await client.post("/api/web-chat/sessions", headers=headers)
+        assert created.status == 201
+        session = (await created.json())["session"]
+        session_key = session["session_key"]
+        assert session_key != "pending_session"
+        exchanges = []
+        for _ in range(2):
+            response = await client.post(
+                "/api/web-chat/chat",
+                headers=headers,
+                data=_upload_form(
+                    session_key=session_key,
+                    conversation_id=session["conversation_id"],
+                    client_request_id="separate_upload_1",
+                ),
+            )
+            assert response.status == 200
+            exchanges.append(await response.json())
+        earlier = await client.get("/api/web-chat/sessions/pending_session/messages")
+        assert (await earlier.json())["messages"] == []
+
+    assert len(gateway.sent_user_messages) == 1
+    assert gateway.sent_user_messages[0]["session_key"] == session_key
+    assert gateway.replies_to_pending == []
+    assert gateway.waiting_question == "task_query_pending"
+    assert exchanges[0]["messages"] == exchanges[1]["messages"]
+    assert {message["session_key"] for message in exchanges[0]["messages"]} == {session_key}
     assert _saved_uploads(config, database) == (1, 1)
 
 

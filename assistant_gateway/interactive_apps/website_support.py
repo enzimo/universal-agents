@@ -111,6 +111,7 @@ ONBOARDING_ASSET_ROOT = (
 DOCKER_COMPOSE_SETUP_PATH = REPO_ROOT / "docker-compose-setup.html"
 
 WEB_CHAT_MODULE_ASSETS = (
+    "chat_submission.mjs",
     "workflow.mjs",
     "workflow_graph.mjs",
     "workflow_card.mjs",
