@@ -17,6 +17,7 @@ from storage.sqlite_connection import (
     ensure_sqlite_column,
     prepare_sqlite_database,
 )
+from tests.sqlite_lock_support import hold_exclusive_lock, release_exclusive_lock
 
 
 def test_transaction_scope_commits_or_rolls_back_and_always_closes(tmp_path):
@@ -105,17 +106,26 @@ def _wal_database(path) -> str:
 
 
 def _exclusive_holder(path: str) -> sqlite3.Connection:
-    """Hold the exclusive file lock, as a close-time checkpoint in another process does."""
+    """Hold the exclusive file lock, as a close-time checkpoint in another process does.
 
-    # Exclusive locking mode cannot start while any connection to the file is
-    # open, so the idle connection this process holds (_hold_open) is closed:
-    # the lock stands for another process that has none of ours.
-    sqlite_connection.close_held_open_databases()
-    holder = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
-    holder.execute("PRAGMA locking_mode=EXCLUSIVE")
-    holder.execute("BEGIN EXCLUSIVE")
+    Its release does no disk work, so a timed release frees the lock on time on
+    any disk (``tests.sqlite_lock_support``).
+    """
+
+    holder = hold_exclusive_lock(path)
     holder.execute("INSERT INTO work VALUES ('held')")
     return holder
+
+
+def test_the_lock_holder_releases_without_flushing_or_checkpointing(tmp_path):
+    path = _wal_database(tmp_path / "holder.db")
+    holder = _exclusive_holder(path)
+    assert holder.execute("PRAGMA synchronous").fetchone()[0] == 0, "its commit must not flush"
+    release_exclusive_lock(holder)
+    # A close-time checkpoint would have flushed the WAL into the database and deleted it.
+    assert os.path.getsize(f"{path}-wal") > 0
+    with connect_sqlite(path) as check:
+        assert check.execute("SELECT value FROM work").fetchall() == [("held",)]
 
 
 def test_closing_a_connection_keeps_the_wal_instead_of_checkpointing_it(tmp_path):
@@ -152,7 +162,7 @@ def test_open_is_not_blocked_by_another_connections_write_transaction(tmp_path):
 def test_open_waits_for_an_exclusive_lock_released_within_the_busy_timeout(tmp_path):
     path = _wal_database(tmp_path / "released.db")
     holder = _exclusive_holder(path)
-    timer = threading.Timer(0.3, lambda: (holder.execute("COMMIT"), holder.close()))
+    timer = threading.Timer(0.3, release_exclusive_lock, args=(holder,))
     timer.start()
     try:
         started = time.monotonic()
@@ -174,8 +184,7 @@ def test_a_lock_that_outlasts_the_busy_timeout_is_waited_for_once(tmp_path, capl
                 connect_sqlite(path, busy_timeout_ms=busy_timeout_ms, logger=logging.getLogger("sqlite-test"))
         elapsed = time.monotonic() - started
     finally:
-        holder.execute("COMMIT")
-        holder.close()
+        release_exclusive_lock(holder)
     # The retried WAL switch took 5 x 200 ms plus 750 ms of backoff (1.75 s).
     assert elapsed < 3 * busy_timeout_ms / 1000
     assert "event=sqlite_journal_mode_check_locked" in caplog.text
@@ -500,8 +509,7 @@ def test_a_lock_failure_names_the_process_also_without_a_caller_logger(tmp_path,
             with pytest.raises(sqlite3.OperationalError, match="locked"):
                 connect_sqlite(path, busy_timeout_ms=200)
     finally:
-        holder.execute("COMMIT")
-        holder.close()
+        release_exclusive_lock(holder)
     [line] = [r.getMessage() for r in caplog.records if "event=sqlite_journal_mode_check_locked" in r.getMessage()]
     assert f"database={path}" in line and f"pid={os.getpid()}" in line and "program=" in line
 

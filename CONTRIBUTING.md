@@ -163,6 +163,12 @@ When several agents save results independently, wait for every saved record
 that the test checks. One agent's reply or saved task does not establish that
 another agent has finished saving its task.
 
+Keep SQLite timing tests independent of disk speed. A test that holds a
+database lock for a set time takes it with `tests/sqlite_lock_support.py`,
+whose connection neither flushes its commit nor checkpoints the write-ahead log
+when it closes. A plain connection does both while it still holds the lock, and
+on a slow CI disk that outlasted the stores' 2.5-second lock wait.
+
 The access tests start the evaluator (`target/debug/ua-cedar-authorizer
 serve-access`) as a real process. After changing the Cedar files in
 `ua_definitions/access/cedar/`, check that they still validate strictly:
