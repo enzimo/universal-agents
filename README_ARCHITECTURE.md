@@ -2708,6 +2708,20 @@ in headers.
 Onboarding completion opens the existing authenticated Status page through
 **Open Status**. It does not request private agent data before sign-in.
 
+Onboarding owns the lifetime of its model connection checks
+(`assistant_gateway/onboarding_web/provider_process.py`). Each check runs the
+shared synchronous provider test in a child process, with a typed JSON request
+on stdin. Keys never enter process arguments or temporary files. At most two
+checks run at once; another request receives HTTP 429 until a check ends. This
+limit matters because onboarding is reachable before sign-in.
+
+On SIGTERM or SIGINT the page cancels those checks before waiting for HTTP
+handlers to finish. It terminates and reaps each child, using SIGKILL with a
+warning if a child ignores SIGTERM for one second. Why: canceling a thread
+leaves its blocking provider request running, and `asyncio.run` waits for that
+thread. The page could then outlast Docker's ten-second stop grace even though
+the signal was handled. Normal provider tests retain their existing timeouts.
+
 The gateway gives people the places to decide; it never decides access itself.
 The access Inbox (`assistant_gateway/access_inbox.py`) lists access and change
 requests with notices, announces each waiting request once in a chat where the

@@ -19,4 +19,4 @@ types-PyYAML>=6.0.12.20260724
 vulture>=2.16
 
 # Reproducible lock generation
-uv==0.12.24
+uv==0.13.4

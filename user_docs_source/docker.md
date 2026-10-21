@@ -217,6 +217,11 @@ contains `instance_config.yaml`, `team.env`, `control/`, `dbs/`, `state/`, and
 instance created by an earlier version still has a `workspace/` folder; the
 container refuses to start until you run the move commands it prints.
 
+Stopping the container during browser onboarding also stops any model
+connection tests in progress. You do not need to wait for a slow provider to
+answer before stopping. Onboarding accepts two model connection tests at a
+time; if both are running, wait for one to finish before starting another.
+
 ### NATS 2.15 upgrades
 
 The container images and native installer include NATS Server 2.15.1. NATS

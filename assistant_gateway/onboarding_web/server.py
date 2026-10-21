@@ -37,7 +37,8 @@ from assistant_gateway.onboarding_engine import (
     normalize_onboarding_answers,
     write_onboarded_instance,
 )
-from assistant_gateway.onboarding_web.provider_test import test_provider_connection
+from assistant_gateway.onboarding_web.provider_process import ProviderChecks, ProviderChecksBusy
+from assistant_gateway.onboarding_web.provider_test import ProviderTestResult
 from assistant_gateway.onboarding_web.settings_import import (
     ImportedSettings,
     OnboardingImportError,
@@ -281,6 +282,7 @@ class OnboardingWebService:
         self.completion_event: asyncio.Event | None = None
         self.last_completion: dict[str, Any] | None = None
         self.xai_device_logins: dict[str, XAIDeviceLoginSession] = {}
+        self.provider_checks = ProviderChecks()
         # Let's Begin > Import a team export (assistant_gateway.onboarding_web.team_import).
         self.team_import = TeamImport(
             self._instance_layout, on_imported=self._record_team_import, logger=self.logger
@@ -347,6 +349,8 @@ class OnboardingWebService:
         app.router.add_get("/download/team.env", self._handle_download_team_env)
         self.team_import.add_routes(app)
         app.router.add_get("/{path:.*}", self._handle_asset)
+        # Stop blocking provider requests before aiohttp waits for their handlers.
+        app.on_shutdown.append(self.provider_checks.close)
         app.on_cleanup.append(self._cleanup_xai_device_logins)
         app.on_cleanup.append(self.team_import.close)
         return app
@@ -467,19 +471,16 @@ class OnboardingWebService:
                 "refresh_skew_seconds": xai_settings.refresh_skew_seconds,
                 "refresh_timeout_seconds": xai_settings.refresh_timeout_seconds,
             }
-        result = await asyncio.to_thread(
-            test_provider_connection,
-            provider=str(payload.get("provider") or ""),
-            endpoint=str(payload.get("endpoint") or ""),
-            token=str(payload.get("token") or ""),
-            model=str(payload.get("model") or ""),
-            reasoning_effort=str(payload.get("reasoning_effort") or ""),
-            reasoning_summary=payload.get("reasoning_summary"),
-            litellm_api_mode=str(payload.get("litellm_api_mode") or "chat_completions"),
-            stream=payload.get("stream"),
-            xai_oauth=raw_xai_oauth,
-            instance_root=instance_root,
-        )
+        try:
+            result = await self._run_provider_check(payload, raw_xai_oauth, instance_root)
+        except ProviderChecksBusy as exc:
+            return web.json_response({"status": "error", "message": str(exc)}, status=429)
+        except ValidationError:
+            # Validation exceptions include the rejected input. Keep keys and
+            # other submitted values out of aiohttp's exception log.
+            return web.json_response(
+                {"status": "error", "message": "The model connection test has invalid fields."}, status=400
+            )
         if not result.ok:
             endpoint_host, endpoint_path = _provider_endpoint_log_fields(
                 str(payload.get("endpoint") or "")
@@ -506,6 +507,22 @@ class OnboardingWebService:
                 "sample": result.sample,
             },
             status=status,
+        )
+
+    async def _run_provider_check(
+        self, payload: dict[str, Any], raw_xai_oauth: dict[str, Any] | None, instance_root: str
+    ) -> ProviderTestResult:
+        return await self.provider_checks.run(
+            provider=str(payload.get("provider") or ""),
+            endpoint=str(payload.get("endpoint") or ""),
+            token=str(payload.get("token") or ""),
+            model=str(payload.get("model") or ""),
+            reasoning_effort=str(payload.get("reasoning_effort") or ""),
+            reasoning_summary=payload.get("reasoning_summary"),
+            litellm_api_mode=str(payload.get("litellm_api_mode") or "chat_completions"),
+            stream=payload.get("stream"),
+            xai_oauth=raw_xai_oauth,
+            instance_root=instance_root,
         )
 
     async def _handle_xai_device_login_start(self, request: web.Request) -> web.Response:

@@ -113,11 +113,15 @@ deadlocks rather than enforcing a cold-start speed target; thread stacks are
 captured every 20 seconds and included if the subprocess times out.
 
 After editing an input, regenerate the universal, hash-checked locks with the
-development environment's uv 0.12.24:
+development environment's uv 0.13.4:
 
 ```bash
 UV_BIN="$PWD/.venv/bin/uv" ./scripts/regenerate_python_lockfiles.sh
 ```
+
+The uv pin and the generator's required version move together. Version 0.13.4
+removes a compromised certificate root from uv's own HTTPS trust store; fixing
+certifi alone does not fix uv's separate bundle.
 
 Generation retains existing versions where constraints permit. Pass `--upgrade`
 for an intentional dependency refresh. Do not hand-edit generated lockfiles.
