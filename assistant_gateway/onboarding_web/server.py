@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 from dataclasses import dataclass
 import logging
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
 import time
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Iterator
 from urllib import parse as urllib_parse
 import uuid
 
@@ -1187,9 +1189,49 @@ async def start_onboarding_web_service(settings: OnboardingWebSettings) -> tuple
     return service, site
 
 
+@contextlib.contextmanager
+def _stop_on_signals(stop: asyncio.Event) -> Iterator[None]:
+    """Set ``stop`` on SIGTERM or SIGINT while the onboarding page runs.
+
+    ``docker stop`` sends SIGTERM, which tini passes on to this process. Without
+    a handler the signal ended the process at once: the page was not shut down
+    and the container reported exit code 143 for a normal stop. The agents
+    handle their stop signals the same way (``strands_main``).
+    """
+
+    loop = asyncio.get_running_loop()
+    installed: list[signal.Signals] = []
+
+    def _received(received: signal.Signals) -> None:
+        LOGGER.info(
+            "Stopping the onboarding page. event=onboarding_web_stop_signal_received signal=%s", received.name
+        )
+        stop.set()
+
+    for handled in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(handled, _received, handled)
+        except (NotImplementedError, RuntimeError, ValueError) as exc:
+            LOGGER.warning(
+                "Could not install the onboarding page's stop handler. "
+                "event=onboarding_web_stop_signal_handler_unavailable signal=%s error=%s",
+                handled.name,
+                exc,
+            )
+        else:
+            installed.append(handled)
+    try:
+        yield
+    finally:
+        for handled in installed:
+            loop.remove_signal_handler(handled)
+
+
 async def run_onboarding_web(settings: OnboardingWebSettings) -> None:
     service = OnboardingWebService(settings)
     app = service.build_app()
+    # Set when onboarding finishes and restarts into the runtime, or when the
+    # process is asked to stop (_stop_on_signals); either way the page shuts down.
     completion_event = asyncio.Event()
     service.completion_event = completion_event
     site = await start_aiohttp_site(
@@ -1203,7 +1245,8 @@ async def run_onboarding_web(settings: OnboardingWebSettings) -> None:
     LOGGER.info("Open this URL in your browser: %s", service.onboarding_browser_url())
     LOGGER.info("If Docker is running on another machine, set NETWORK_PUBLIC_ORIGIN to that machine's http(s) origin.")
     # LOGGER.info("Web onboarding bound to %s", site.base_url)
-    try:
-        await completion_event.wait()
-    finally:
-        await site.stop()
+    with _stop_on_signals(completion_event):
+        try:
+            await completion_event.wait()
+        finally:
+            await site.stop()

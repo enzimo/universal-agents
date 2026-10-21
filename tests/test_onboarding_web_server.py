@@ -1812,3 +1812,50 @@ async def test_sharing_off_makes_everything_private_and_a_fixed_service_is_refus
     assert handover is not None and set(handover.sharing.values()) == {"private"}
     assert refused.status == 400
     assert "not services the team can share or keep private: cli:google" in refused_text
+
+
+def test_the_onboarding_page_stops_cleanly_when_the_container_stops(tmp_path: Path) -> None:
+    """``docker stop`` sends SIGTERM, which tini passes on: the page shuts down and exits 0, not 143."""
+
+    import os
+    import signal
+    import socket
+    import sys
+    import time
+    import urllib.request
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    repo = Path(__file__).resolve().parents[1]
+    process = subprocess.Popen(
+        [
+            sys.executable, str(repo / "assistant_cli.py"), "onboard-web",
+            "--instance-root", str(tmp_path / "instance"), "--host", "127.0.0.1", "--port", str(port),
+        ],
+        cwd=repo,
+        env={**os.environ, "TMPDIR": str(tmp_path)},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 90
+        while True:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as response:
+                    if response.status == 200:
+                        break
+            except OSError:
+                pass
+            assert process.poll() is None, "the onboarding page stopped before it was ready"
+            assert time.monotonic() < deadline, "the onboarding page did not become ready"
+            time.sleep(0.2)
+        process.send_signal(signal.SIGTERM)
+        output, _ = process.communicate(timeout=30)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+    assert process.returncode == 0, output[-3000:]
+    assert "event=onboarding_web_stop_signal_received signal=SIGTERM" in output
