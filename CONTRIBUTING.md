@@ -123,6 +123,15 @@ The uv pin and the generator's required version move together. Version 0.13.4
 removes a compromised certificate root from uv's own HTTPS trust store; fixing
 certifi alone does not fix uv's separate bundle.
 
+The release's distrusted-root fingerprints live in
+`data/security/distrusted_roots.json`, shared by Debian image builds and the
+Photon sidecar. Test a change with `tests/test_system_certificate_store.py`
+on Debian with `update-ca-certificates` and OpenSSL available, and `npm test`
+in `assistant_gateway/interactive_apps/photon_sidecar`. These integration tests
+verify the system bundle, OpenSSL's hashed directory, Node's effective defaults,
+private-CA TLS and explicit gRPC bundles. Python lock audits alone cannot cover
+system or Node trust.
+
 Generation retains existing versions where constraints permit. Pass `--upgrade`
 for an intentional dependency refresh. Do not hand-edit generated lockfiles.
 `requirements.skillspector.txt` retains its separate environment and lock so the

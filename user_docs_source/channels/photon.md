@@ -169,7 +169,7 @@ delivery:
 
 ## Verification
 
-1. Confirm Node.js 24 or newer is available in the runtime.
+1. Confirm Node.js 24.5 or newer is available in the runtime.
 2. Confirm `PHOTON_PROJECT_ID` and `PHOTON_PROJECT_SECRET` are loaded.
 3. Start the gateway with Photon enabled.
 4. Confirm logs show the Photon sidecar is healthy.
@@ -177,6 +177,19 @@ delivery:
 6. Confirm the gateway logs the inbound sender id.
 7. Confirm the agent replies through Photon/iMessage.
 8. If using a group, send a message with a configured marker such as `Nova`.
+
+Photon requires Node 24.5's default-certificate API to remove the compromised
+`emSign ECC Root CA - G3` root before loading the Spectrum SDK. Node 24.0 through
+24.4 are no longer supported. All other effective default roots, including
+private CAs from `NODE_EXTRA_CA_CERTS`, remain available. If
+`GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` names a custom bundle, remove the compromised
+root from that bundle; an unreadable, invalid or distrusted bundle stops startup.
+
+Use an official Node build in its default bundled-CA mode or with
+`--use-system-ca`. Photon refuses `--use-openssl-ca` and custom builds with
+additional OpenSSL default stores because Node cannot enumerate those roots
+safely. Supply private roots through `NODE_EXTRA_CA_CERTS` instead. This avoids
+silently discarding a private root or adding unrelated trusted roots.
 
 ## Interrupting Active Work
 
@@ -195,7 +208,7 @@ metadata but does not create manager tasks from them.
 
 ## Troubleshooting
 
-- Startup fails: verify Photon credentials and Node.js 24-or-newer availability.
+- Startup fails: verify Photon credentials and Node.js 24.5-or-newer availability.
 - Sidecar health fails: run `npm ci` in the sidecar directory or rebuild the Docker image with Node.js support.
 - Direct messages are ignored: check `allowed_sender_ids` or onboard the user with `/user`.
 - A Markdown reply with a link fails: confirm the sidecar lockfile contains the

@@ -26,11 +26,15 @@ from runtime_settings.governance import REMOVED_TOOL_POLICY_KEYS
         ("v20.19.2", False),
         ("v22.22.0", False),
         ("v23.11.1", False),
-        ("v24.0.0", True),
+        ("v24.0.0", False),
+        ("v24.4.9", False),
+        ("v24.5.0", True),
         ("v25.1.0", True),
+        ("v24", False),
+        ("invalid", False),
     ],
 )
-def test_nodejs_available_requires_node_24(
+def test_nodejs_available_requires_node_24_5(
     monkeypatch: pytest.MonkeyPatch,
     version: str,
     expected: bool,

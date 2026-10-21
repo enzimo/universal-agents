@@ -74,6 +74,27 @@ curl -fsSL https://raw.githubusercontent.com/enzimo/universal-agents/main/instal
 
 The native installer creates a constrained virtual environment, installs a
 local message broker binary, builds the Cedar and Sealbox binaries, and installs the `ua`
-launcher under `~/.local/bin`. Node.js 24 or newer must already be installed
+launcher under `~/.local/bin`. Node.js 24.5 or newer must already be installed
 to enable Photon/iMessage natively. Run `ua` to start browser onboarding or the
 onboarded runtime in the foreground.
+
+Photon requires an official Node build using bundled or system CAs. It refuses
+`--use-openssl-ca` and custom OpenSSL default stores, whose certificates Node
+cannot enumerate safely. Use `NODE_EXTRA_CA_CERTS` for private CAs.
+
+Native installations use the host's system certificate store. On Debian or
+Ubuntu, an operator can remove the compromised `emSign ECC Root CA - G3` root
+from that store by running this command from the source checkout:
+
+```bash
+sudo python3 docker/distrust_compromised_roots.py
+```
+
+The helper disables the exact certificate fingerprint, rebuilds the system
+bundle and certificate directory, and preserves other roots. It refuses a copy
+under `/usr/local/share/ca-certificates`; remove that distrusted local copy and
+run it again. It also refuses a distrusted certificate manually installed in
+`/etc/ssl/certs`, which OpenSSL can trust independently of the bundle. Remove
+the reported copy and retry. On other operating systems, remove the same root
+through the host's certificate management tools. Photon also filters Node's defaults at
+startup; updating Python packages alone does not change the host or Node store.

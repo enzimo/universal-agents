@@ -7,6 +7,10 @@ ENV PYTHONPATH=/app
 
 WORKDIR /app
 
+COPY docker/distrust_compromised_roots.py /app/docker/distrust_compromised_roots.py
+COPY data/security/distrusted_roots.json /app/data/security/distrusted_roots.json
+RUN python /app/docker/distrust_compromised_roots.py
+
 # Install dependencies first for better caching
 COPY requirements.txt requirements.lock.txt ./
 RUN pip install --no-cache-dir --require-hashes -r requirements.lock.txt

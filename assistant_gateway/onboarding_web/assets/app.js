@@ -285,7 +285,7 @@ sharedState.channelDefinitions = [
       label: "iMessage (Photon)",
       enabledByDefault: false,
       requiresNodejs: true,
-      unavailableNote: "Requires Node.js 24 LTS",
+      unavailableNote: "Requires Node.js 24.5+",
       fields: [
         ["Project ID", "text", "PHOTON_PROJECT_ID"],
         ["Project secret", "password", "PHOTON_PROJECT_SECRET"],

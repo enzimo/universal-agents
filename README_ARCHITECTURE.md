@@ -3546,6 +3546,21 @@ and Sealbox acceptance require those services; file-store tests do not prove
 their deployment behavior. Browser checks cover unsaved edits, confirmation
 invalidation, selection changes and the validate/import sequence.
 
+## Certificate trust
+
+Certificate trust spans independent stores. Python certifi and uv use their
+pinned patched bundles. Docker stages run the standard-library-only
+`docker/distrust_compromised_roots.py` against Debian's system bundle and hashed
+certificate directory. Photon applies the same DER SHA-256 list from
+`data/security/distrusted_roots.json` through Node's default-certificate API
+before importing Spectrum. This preserves other public and private roots;
+explicit gRPC bundles bypass defaults and are checked separately at startup.
+Photon refuses OpenSSL CA mode and custom OpenSSL default stores whose roots
+Node cannot enumerate, rather than silently replacing an incomplete list.
+Tests rebuild a real isolated Debian store, exercise OpenSSL verification, and
+connect Node TLS through a temporary private CA. Image builds and a live Photon
+account remain separate deployment checks.
+
 ## Where to look next
 
 - [README.md](README.md) gives the product overview.

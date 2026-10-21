@@ -1,6 +1,9 @@
 FROM python:3.13-slim-trixie AS user-docs-builder
 
 WORKDIR /app
+COPY docker/distrust_compromised_roots.py /app/docker/distrust_compromised_roots.py
+COPY data/security/distrusted_roots.json /app/data/security/distrusted_roots.json
+RUN python /app/docker/distrust_compromised_roots.py
 COPY requirements-dev.lock.txt /app/requirements-dev.lock.txt
 RUN python -m pip install --no-cache-dir --require-hashes -r /app/requirements-dev.lock.txt
 COPY mkdocs.yml /app/mkdocs.yml
@@ -16,8 +19,11 @@ ARG CARGO_BUILD_JOBS=2
 
 WORKDIR /src
 
+COPY docker/distrust_compromised_roots.py /src/docker/distrust_compromised_roots.py
+COPY data/security/distrusted_roots.json /src/data/security/distrusted_roots.json
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential pkg-config \
+    && apt-get install -y --no-install-recommends build-essential pkg-config python3 ca-certificates \
+    && python3 /src/docker/distrust_compromised_roots.py \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock /src/
@@ -82,6 +88,8 @@ ENV TEAM_BUNDLE_INSTALL_NATS=${INSTALL_NATS}
 
 WORKDIR /app
 
+COPY docker/distrust_compromised_roots.py /app/docker/distrust_compromised_roots.py
+COPY data/security/distrusted_roots.json /app/data/security/distrusted_roots.json
 COPY --from=rust-tools-builder /src/target/release/anydoc /usr/local/bin/anydoc
 COPY --from=rust-tools-builder /src/target/release/ua-cedar-authorizer /usr/local/bin/ua-cedar-authorizer
 
@@ -91,6 +99,7 @@ RUN set -eux; \
     case "${INSTALL_NODEJS}" in true|false) ;; *) echo "INSTALL_NODEJS must be true or false, got: ${INSTALL_NODEJS}" >&2; exit 2 ;; esac; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates curl; \
+    python /app/docker/distrust_compromised_roots.py; \
     if [ "${INSTALL_POSTGRES}" = "true" ]; then \
         install -d -m 0755 /usr/share/postgresql-common/pgdg; \
         curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc; \
@@ -143,6 +152,7 @@ RUN set -eux; \
         packages="${packages} postgresql-${POSTGRES_MAJOR}=${POSTGRES_VERSION} postgresql-client-${POSTGRES_MAJOR}=${POSTGRES_VERSION} postgresql-server-dev-${POSTGRES_MAJOR}=${POSTGRES_VERSION} postgresql-${POSTGRES_MAJOR}-pgvector=${PGVECTOR_PACKAGE_VERSION}"; \
     fi; \
     apt-get install -y --no-install-recommends ${packages}; \
+    python /app/docker/distrust_compromised_roots.py; \
     if [ "${INSTALL_NODEJS}" = "true" ]; then \
         case "$(dpkg --print-architecture)" in \
             amd64) node_arch="x64"; node_sha256="${NODEJS_SHA256_AMD64}" ;; \

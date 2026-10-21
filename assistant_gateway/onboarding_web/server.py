@@ -87,7 +87,7 @@ GIT_COMMAND_TIMEOUT_SECONDS = 30
 MAX_SKILLS_REPOSITORIES = MAX_EXTERNAL_SKILL_REPOSITORIES
 MAX_XAI_DEVICE_LOGIN_SESSIONS = 8
 XAI_DEVICE_LOGIN_RETENTION_SECONDS = 10 * 60
-MIN_PHOTON_NODE_MAJOR = 24
+MIN_PHOTON_NODE_VERSION = (24, 5)
 NODE_VERSION_CHECK_TIMEOUT_SECONDS = 2
 
 
@@ -128,15 +128,16 @@ def nodejs_available() -> bool:
         )
         return False
     try:
-        major = int(completed.stdout.strip().removeprefix("v").split(".", 1)[0])
-    except ValueError:
+        parts = completed.stdout.strip().removeprefix("v").split(".")
+        version = (int(parts[0]), int(parts[1]))
+    except (ValueError, IndexError):
         LOGGER.warning(
             "Node.js availability probe returned an invalid version node_bin=%s version=%r",
             node_bin,
             completed.stdout.strip(),
         )
         return False
-    return major >= MIN_PHOTON_NODE_MAJOR
+    return version >= MIN_PHOTON_NODE_VERSION
 
 
 @dataclass(frozen=True)

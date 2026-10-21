@@ -107,8 +107,11 @@ test("the runtime enforces the repository's Node floor", () => {
   assert.equal(isSupportedNodeVersion("20.6.0"), false);
   assert.equal(isSupportedNodeVersion("22.22.0"), false);
   assert.equal(isSupportedNodeVersion("23.11.1"), false);
-  assert.equal(isSupportedNodeVersion("24.0.0"), true);
+  assert.equal(isSupportedNodeVersion("24.0.0"), false);
+  assert.equal(isSupportedNodeVersion("24.4.9"), false);
+  assert.equal(isSupportedNodeVersion("24.5.0"), true);
   assert.equal(isSupportedNodeVersion("25.0.0"), true);
+  assert.equal(isSupportedNodeVersion("garbage"), false);
 });
 
 test("the patched Photon telemetry dependency constructs and shuts down", async () => {
