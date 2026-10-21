@@ -393,3 +393,53 @@ def test_two_calls_decided_at_once_never_share_one_use(store_settings) -> None:
 
     assert sorted(allowed.values()) == [False, True]
     assert uses_taken(store_settings, grant) == 1
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["first-use", "held-use"])
+@pytest.mark.parametrize("revocation", ["revoke", "end-task"])
+def test_revocation_after_eligibility_refuses_consumption(
+    store_settings, monkeypatch: pytest.MonkeyPatch, held: bool, revocation: str
+) -> None:
+    """A held use cannot bypass a revocation committed before the consumption write lock."""
+
+    ua_agent = worker(store_settings)
+    grant = give_one_use(store_settings, ua_agent, "apply_change")
+    repo = AccessRepository(store_settings)
+    other_writer = AccessRepository(store_settings)
+    cedar = CedarAccessClient(binary=str(BINARY))
+    try:
+        service = AccessService(store=repo, catalog=load_catalog(None), cedar=cedar, team_id=TEAM)
+        operation_id = "tool_call:one"
+        if held:
+            assert decide_with(service, operation_id, ua_agent.work_id).allowed
+
+        read_grant = repo.get
+        consume = repo.consume
+
+        def read_then_revoke(grant_id: str):
+            snapshot = read_grant(grant_id)
+            assert snapshot is not None and snapshot.status.value == "active"
+            if revocation == "revoke":
+                other_writer.revoke(
+                    grant_id, actor=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id), at=NOW
+                )
+            else:
+                assert grant_id in other_writer.end_task_grants(TEAM, [ua_agent.work_id], at=NOW)
+            assert other_writer.get(grant_id).status.value == "revoked"
+            return snapshot
+
+        def consume_after_revocation(grant_id: str, *, at: datetime, operation_id: str | None = None):
+            # Eligibility has already passed. Keep even consume's pre-lock
+            # read stale, so the status check must run under the write lock.
+            with monkeypatch.context() as patch:
+                patch.setattr(repo, "get", read_then_revoke)
+                return consume(grant_id, at=at, operation_id=operation_id)
+
+        monkeypatch.setattr(repo, "consume", consume_after_revocation)
+        result = decide_with(service, operation_id, ua_agent.work_id)
+
+        assert not result.allowed
+        assert not result.consumed_grant_ids
+        assert uses_taken(store_settings, grant) == int(held)
+    finally:
+        cedar.close()

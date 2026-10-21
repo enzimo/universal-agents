@@ -1168,10 +1168,11 @@ class AccessRepository:
 
         ``operation_id`` names the tool call the use is for (the access hook
         passes ``custom_agents.access_runtime.call_operation_id``). A call that
-        already holds a use of this grant keeps it: nothing more is used and
-        False is returned. That happens when Strands runs a paused call again
-        as it resumes and the access hook decides it a second time. Without an
-        id the use belongs to no call and is never recognized again. True when
+        already holds a use of this grant keeps it only while the grant is
+        active: nothing more is used and False is returned. That happens when
+        Strands runs a paused call again as it resumes and the access hook
+        decides it a second time. Without an id the use belongs to no call and
+        is never recognized again. True when
         a use was taken now. The check, the guarded update and the record of
         the use are one transaction, so two calls never share one use.
         """
@@ -1183,6 +1184,13 @@ class AccessRepository:
         with self._connect() as conn:
             conn.begin_write()
             if operation_id is not None and self._use_held_in(conn, grant_id, operation_id):
+                # Eligibility and the pre-lock get can both predate revocation.
+                # All access writers share this lock on SQLite and PostgreSQL.
+                current = conn.execute(
+                    f"SELECT status FROM access_grants WHERE grant_id={p}", (grant_id,)
+                ).fetchone()
+                if current is None or current["status"] != GrantStatus.ACTIVE.value:
+                    raise AccessStoreConflict(f"Grant {grant_id} is no longer active.")
                 conn.commit()
                 return False
             updated = conn.execute(
