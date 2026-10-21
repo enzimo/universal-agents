@@ -3478,7 +3478,7 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
         "window.UAChatDelivery.buildTimeline("
     )
     durable_message_index = render_messages_source.index(
-        "messageList.appendChild(createMessageBubble(item.value));"
+        "messageList.appendChild(createMessageBubble(item.value, thread));"
     )
     transient_notice_index = render_messages_source.index(
         "messageList.appendChild(createTransientItemCard(thread, item.value));"
@@ -3660,10 +3660,8 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
     )
     # Permission decision receipts were removed with the old Permissions tab.
     assert "PERMISSION_RECEIPT" not in script
-    assert (
-        "clearSystemError(thread, shellState.SYSTEM_ERROR_SOURCE.SEND_MESSAGE);"
-        in script
-    )
+    # Per-request Retry cleanup is exercised by chat_send_retry.test.cjs,
+    # including later acknowledgements and live acceptance before HTTP failure.
     assert "deliveryTracker.watch(clientRequestId);" in script
     assert 'deliveryStatus.textContent = "not delivered";' in script
     assert "liveEvents.start();" in script
@@ -4157,7 +4155,7 @@ async def test_web_chat_separate_upload_and_retry_leave_the_original_question_un
         owner_canonical_user_id=owner,
     )
     gateway = _StatefulFakeGateway(store)
-    gateway.pending_query = object()
+    gateway.waiting_question = "task_query_pending"
     app = InternalWebsiteInteractiveApp(config, gateway=gateway, bridge=SimpleNamespace())
     async with TestClient(TestServer(app.build_app())) as client:
         headers = await _signed_in(client)
@@ -4185,7 +4183,7 @@ async def test_web_chat_separate_upload_and_retry_leave_the_original_question_un
     assert len(gateway.sent_user_messages) == 1
     assert gateway.sent_user_messages[0]["session_key"] == session_key
     assert gateway.replies_to_pending == []
-    assert gateway.pending_query is not None
+    assert gateway.waiting_question == "task_query_pending"
     assert exchanges[0]["messages"] == exchanges[1]["messages"]
     assert {message["session_key"] for message in exchanges[0]["messages"]} == {session_key}
     assert _saved_uploads(config, database) == (1, 1)

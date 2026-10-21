@@ -45,9 +45,14 @@ async function main() {
         ? JSON.parse(body) : { session_key: field("session_key"), client_request_id: field("client_request_id"), message: field("message") };
       sends.push({ ...send, body });
       if (failSend) { failSend = false; return route.abort("connectionreset"); }
+      if (send.message === "Another request") {
+        return json({ session_key: send.session_key, messages: [
+          { message_id: "accepted-later", client_request_id: send.client_request_id, session_sequence: 1, role: "user", content: send.message },
+        ] });
+      }
       return json({ session_key: send.session_key, messages: [
-        { message_id: "accepted", client_request_id: send.client_request_id, session_sequence: 1, role: "user", content: send.message },
-        { message_id: "answer", session_sequence: 2, role: "assistant", content: "Reply in the separate chat" },
+        { message_id: "accepted", client_request_id: send.client_request_id, session_sequence: 2, role: "user", content: send.message },
+        { message_id: "answer", session_sequence: 3, role: "assistant", content: "Reply in the separate chat" },
       ] });
     }
     if (url.pathname.startsWith("/api/")) return json({});
@@ -79,15 +84,21 @@ async function main() {
     assert.equal(sends[0].session_key, "separate_2");
     assert.ok(sends[0].body.includes('filename="notes.txt"'));
     assert.ok(sends[0].body.includes("Research notes"));
+    // A later send and its acknowledgement must not erase the failed upload's Retry.
+    await input.fill("Another request");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await page.locator('[data-message-id="accepted-later"]').waitFor();
+    assert.equal(await page.getByRole("button", { name: "Retry", exact: true }).count(), 1,
+      "the failed upload stays retryable after another message is accepted");
     // A new draft is independent of retrying the previous, frozen message.
     await input.fill("Draft for later");
     await page.getByRole("button", { name: "Retry", exact: true }).click();
     await page.getByText("Reply in the separate chat", { exact: true }).waitFor();
-    assert.equal(sends.length, 2);
+    assert.equal(sends.length, 3);
     assert.equal(creations, 2, "Retry never creates another destination");
-    assert.equal(sends[1].client_request_id, sends[0].client_request_id);
-    assert.equal(sends[1].session_key, sends[0].session_key);
-    assert.ok(sends[1].body.includes("Research notes"));
+    assert.equal(sends[2].client_request_id, sends[0].client_request_id);
+    assert.equal(sends[2].session_key, sends[0].session_key);
+    assert.ok(sends[2].body.includes("Research notes"));
     assert.equal(await input.inputValue(), "Draft for later");
     assert.equal(await page.locator('[data-message-id="accepted"]').count(), 1);
     await page.getByRole("button", { name: "Earlier request", exact: true }).click();
@@ -101,6 +112,14 @@ async function main() {
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
       }
     }
+    // Reload restores cached sidebar metadata and must initialize fresh retry state.
+    await page.reload();
+    await page.getByRole("button", { name: "Earlier request", exact: true }).waitFor();
+    await input.fill("Another request");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await page.locator('[data-message-id="accepted-later"]').waitFor();
+    assert.equal(sends.length, 4);
+    assert.equal(sends[3].session_key, "original");
     assert.deepEqual(errors, []);
     console.log("Separate request: keyboard, text/files, failed creation, stable Retry, reply routing and narrow-screen themes passed.");
   } finally { await browser.close(); }

@@ -1831,7 +1831,11 @@ its history. Steps with linked requests cannot use this correction.
   disable composer edits and New Chat, and announce **Preparing your chat…**.
   A failed creation keeps the draft and files. **Retry** on a send failure
   resends the original message and files with the same request id and destination.
-  Retrying a send does not use or clear a newer composer draft.
+  Show each send error and its **Retry** beside the failed message, using the
+  shared error text and compact secondary button. Later messages and their
+  acknowledgements must not remove another message's retry. Retrying a send
+  does not use or clear a newer composer draft. Remove that message's retry
+  when the server accepts it; clear retained files at sign-out or archive.
 - The composer includes an icon-only paperclip button and a hidden file input.
   Pasted images and drag/drop files appear in a compact attachment rail above
   the textarea before sending.

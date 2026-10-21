@@ -292,7 +292,6 @@ shellState.SYSTEM_ERROR_SOURCE = Object.freeze({
     HYDRATE_THREAD: "hydrate_thread",
     OPEN_SETTINGS: "open_settings",
     RENAME_THREAD: "rename_thread",
-    SEND_MESSAGE: "send_message",
   });
 
 sharedState.historyHydrationError = null;
@@ -550,11 +549,9 @@ function mergeTranscriptMessages(thread, messages) {
     );
     reconciliation.acknowledgedMessages.forEach(function (message) {
       shellState.deliveryTracker.acknowledge(message.clientRequestId);
+      thread.pendingDeliveries.delete(message.clientRequestId);
       releaseMessageAttachmentPreviews(message);
     });
-    if (reconciliation.acknowledgedMessages.length) {
-      clearSystemError(thread, shellState.SYSTEM_ERROR_SOURCE.SEND_MESSAGE);
-    }
     thread.messages = reconciliation.messages;
     thread.transientItems = window.UAChatDelivery.reconcileTransientItems(
       thread.transientItems,
@@ -617,6 +614,7 @@ function releaseMessageAttachmentPreviews(message) {
   }
 
 function clearThreadOptimisticDeliveries(thread) {
+    if (thread) thread.pendingDeliveries.clear();
     (thread && Array.isArray(thread.messages) ? thread.messages : []).forEach(function (message) {
       if (!message.optimistic) {
         return;
@@ -727,7 +725,9 @@ function loadThreads() {
       return parsed.map(function (thread) {
         var id = String(thread.id || shellState.operationalIds.newId("thread"));
         var title = String(thread.title || NEW_CHAT_TITLE);
-        return {
+        // Restore metadata through the same constructor as server-created
+        // chats, so all page-only delivery state starts fresh after reload.
+        return threadFromSeed({
           id: id,
           sessionKey: String(thread.sessionKey || thread.session_key || ""),
           conversationId: String(thread.conversationId || thread.conversation_id || ""),
@@ -735,18 +735,11 @@ function loadThreads() {
           titleFull: String(thread.titleFull || thread.title_full || title),
           sessionAlias: String(thread.sessionAlias || thread.session_alias || ""),
           persisted: Boolean(thread.persisted),
-          pendingReply: false,
-          pendingReplyCount: 0,
           hasUnreadReply: Boolean(thread.hasUnreadReply || thread.has_unread_reply),
           unreadReplyLevel: String(thread.unreadReplyLevel || thread.unread_reply_level || "normal"),
           messages: [],
-          historyBeforeCursor: "",
-          hasMoreHistory: false,
-          historyLoaded: false,
-          transientError: null,
-          transientItems: [],
           updatedAt: Number(thread.updatedAt || Date.now()),
-        };
+        });
       });
     } catch (error) {
       return [];
@@ -800,6 +793,9 @@ function threadFromSeed(seed) {
       persisted: Boolean(seed.persisted),
       pendingReply: false,
       pendingReplyCount: 0,
+      // File objects and retry callbacks belong to this page's sign-in only.
+      // Keep them outside the disposable error notice shared by chat operations.
+      pendingDeliveries: new Map(),
       hasUnreadReply: Boolean(seed.hasUnreadReply || seed.has_unread_reply),
       unreadReplyLevel: String(seed.unreadReplyLevel || seed.unread_reply_level || "normal"),
       messages: messages,
@@ -2030,7 +2026,7 @@ function timestampElement(value, className) {
     return time;
   }
 
-function createMessageBubble(message) {
+function createMessageBubble(message, thread) {
     var bubble = document.createElement("article");
     bubble.setAttribute("data-message-id", message.messageId);
     bubble.className = "message-bubble " + (message.role === "user" ? "is-user" : message.role === "system" ? "is-system" : "is-assistant");
@@ -2090,7 +2086,16 @@ function createMessageBubble(message) {
         isCurrent: function () { return sharedState.authSessionActive && sharedState.authSessionGeneration === workflowAuthGeneration; } });
     }
     renderAttachmentList(bubble, message.attachments);
-    if (message.localDeliveryState === "not_delivered") {
+    var delivery = thread.pendingDeliveries.get(message.clientRequestId);
+    if (delivery && delivery.error) {
+      var failure = uiElement("div", "message-delivery-status is-error", delivery.error + " ");
+      failure.setAttribute("role", "status");
+      var retry = uiElement("button", "button secondary small", "Retry");
+      retry.type = "button";
+      lifecycle.listen(retry, "click", delivery.retry);
+      failure.appendChild(retry);
+      bubble.appendChild(failure);
+    } else if (message.localDeliveryState === "not_delivered") {
       var deliveryStatus = uiElement("p", "message-delivery-status is-error");
       deliveryStatus.textContent = "not delivered";
       deliveryStatus.setAttribute("role", "status");
@@ -2279,7 +2284,7 @@ function renderMessages(options) {
           sharedState.messageList.appendChild(createTransientItemCard(thread, item.value));
           return;
         }
-        sharedState.messageList.appendChild(createMessageBubble(item.value));
+        sharedState.messageList.appendChild(createMessageBubble(item.value, thread));
       });
     }
     var shouldRunTransientCountdown = updateTransientCountdown();
@@ -2370,6 +2375,14 @@ function sendMessage(content, options) {
     var delivery = options.delivery || { clientRequestId: shellState.operationalIds.newId("web_request") };
     if (delivery.inFlight) return;
     delivery.inFlight = true;
+    delivery.error = "";
+    var clientRequestId = delivery.clientRequestId;
+    thread.pendingDeliveries.set(clientRequestId, delivery);
+    delivery.retry = function () {
+      if (current() && thread.pendingDeliveries.get(clientRequestId) === delivery) {
+        sendMessage(content, { ...options, thread: thread, delivery: delivery });
+      }
+    };
     // The first ordinary message names the thread, as the server will;
     // slash commands never do (web_chat_threads.py).
     if (thread.title === NEW_CHAT_TITLE && content.trim().charAt(0) !== "/") {
@@ -2378,8 +2391,6 @@ function sendMessage(content, options) {
       thread.titleFull = normalizeThreadTitle(titleSource) || "Attachment";
     }
     if (isReadingThread(thread)) setThreadUnread(thread, false);
-    clearSystemError(thread, shellState.SYSTEM_ERROR_SOURCE.SEND_MESSAGE);
-    var clientRequestId = delivery.clientRequestId;
     var anchorSessionSequence = window.UAChatDelivery.latestDurableSessionSequence(
       thread.messages
     );
@@ -2431,7 +2442,7 @@ function sendMessage(content, options) {
     }).then(function (payload) {
       if (!current()) return;
       var responseSessionKey = String(payload.session_key || thread.sessionKey);
-      clearSystemError(thread, shellState.SYSTEM_ERROR_SOURCE.SEND_MESSAGE);
+      thread.pendingDeliveries.delete(clientRequestId);
       thread.conversationId = String(payload.conversation_id || thread.conversationId || "");
       thread.persisted = true;
       if (startsTerminalReplyWait) {
@@ -2483,14 +2494,11 @@ function sendMessage(content, options) {
       } else if (pendingReplyCount(thread) === 0) {
         setThreadPending(thread, false);
       }
-      appendSystemError(
-        thread,
-        shellState.SYSTEM_ERROR_SOURCE.SEND_MESSAGE,
-        error.message || "Message failed.",
-        function () {
-          if (current()) sendMessage(content, { ...options, thread: thread, delivery: delivery });
-        }
-      );
+      // An SSE acknowledgement may precede a lost HTTP reply. Only the
+      // still-unaccepted request can fail, never another message in the chat.
+      if (thread.pendingDeliveries.get(clientRequestId) === delivery) {
+        delivery.error = error.message || "Message failed.";
+      }
       thread.updatedAt = Date.now();
       saveThreads();
       renderThreads();
