@@ -2005,6 +2005,31 @@ def test_launch_sets_up_the_message_streams_with_the_gateway_environment_just_be
     assert stream_env["NATS_PASSWORD"] == "nats"
 
 
+def test_a_launch_that_uses_the_configured_nats_says_so_without_a_warning(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """The bundle launcher starts NATS itself and turns the local one off on every start."""
+
+    import logging
+
+    import docker.launch_headless as lh
+
+    _prepare_launch(
+        tmp_path, monkeypatch, team_id="team_test",
+        env={"TEAM_LOCAL_NATS_ENABLED": "false", "NATS_SERVERS": "nats://127.0.0.1:4222"},
+    )
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: None)
+    monkeypatch.setattr(lh, "run_supervised", lambda **_kwargs: 0)
+
+    with caplog.at_level(logging.INFO, logger="docker.launch_headless"):
+        assert lh.main() == 0
+    [record] = [record for record in caplog.records if "event=local_nats_not_started" in record.getMessage()]
+    assert record.levelno == logging.INFO
+    assert "TEAM_LOCAL_NATS_ENABLED=false" in record.getMessage()
+    assert "nats_servers=nats://127.0.0.1:4222" in record.getMessage()
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING and "NATS" in record.getMessage()]
+
+
 def test_launch_refuses_to_start_and_stops_nats_when_the_streams_cannot_be_set_up(
     tmp_path: Path, monkeypatch, caplog
 ) -> None:
