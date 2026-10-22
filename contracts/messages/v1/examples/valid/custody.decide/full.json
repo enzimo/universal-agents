@@ -1,0 +1,43 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "custody.decide",
+  "message_id": "01928f3a-7b2c-74b4-8000-0000000004b4",
+  "idempotency_key": "custody.decide:example_1204",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.custody.decide",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_1",
+    "task_id": "task_id_1",
+    "seen_custody_token": 3,
+    "decision": {
+      "type": "reassign",
+      "to": {
+        "target": "agent",
+        "agent": "token_id_1"
+      },
+      "from_checkpoint": {
+        "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+        "size": 3,
+        "media_type": "application/pdf",
+        "name": "Example name"
+      }
+    }
+  },
+  "body_digest": "gAcg25s9iLtF3TS_6zmWrDRPT5BR94KpoPKwpt6oRvI",
+  "signature": "D5W49ZrU1fpAeVG_qg8I9XBkOniZm45nkK2hNGQVKUdcKDEvryn3n12Cptms8rEeLH9bjGGT0SciQpifBBMLDw"
+}

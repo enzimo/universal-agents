@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.merge",
+  "message_id": "01928f3a-7b2c-7494-8000-000000000494",
+  "idempotency_key": "knowledge.merge:example_1172",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.knowledge.merge",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_1",
+    "space": "team",
+    "page": "Example page",
+    "seen_version": "v3",
+    "into": "Example into"
+  },
+  "body_digest": "G4-3pV6Pzx6PQtddvTAp7-MOpnxVeK_nIckC80H6TpY",
+  "signature": "6OhxuQxjPW9xpF1UTx6fzfyoS5vGl1jkMsOR9Z11rhGzQQeRd0Dq4OiPqjh9R8k7pqnLvzfJrV4k3SH0RfkPAQ"
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/knowledge.read_contribution.schema.json",
+  "title": "knowledge.read_contribution request",
+  "description": "Read one contribution.",
+  "type": "object",
+  "properties": {
+    "contribution_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    }
+  },
+  "required": [
+    "contribution_id"
+  ],
+  "additionalProperties": false
+}

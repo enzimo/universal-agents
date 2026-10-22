@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/agent.status.reply.schema.json",
+  "title": "agent.status reply",
+  "description": "An agent's status: basic for anyone allowed, full only for the team's lead.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "agent_type": {
+          "$ref": "../common.schema.json#/$defs/agent_type"
+        },
+        "is_lead": {
+          "type": "boolean"
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "executing": {
+          "type": "boolean"
+        },
+        "has_capacity": {
+          "type": "boolean"
+        },
+        "accepting_work": {
+          "type": "boolean"
+        },
+        "exiting": {
+          "type": "boolean"
+        },
+        "queued": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "waiting": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "deferred": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "current_task_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "current_task_age_seconds": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "context": {
+          "type": "object",
+          "properties": {
+            "window_tokens": {
+              "$ref": "../common.schema.json#/$defs/count"
+            },
+            "estimated_tokens": {
+              "$ref": "../common.schema.json#/$defs/count"
+            },
+            "fill_per_mille": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            },
+            "pressure": {
+              "type": "string",
+              "enum": [
+                "low",
+                "moderate",
+                "high",
+                "critical",
+                "unknown"
+              ]
+            }
+          },
+          "required": [
+            "window_tokens",
+            "estimated_tokens",
+            "fill_per_mille",
+            "pressure"
+          ],
+          "additionalProperties": false
+        },
+        "tool_call_budget_per_mille": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "tool_result_budget_per_mille": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/tool_id"
+          },
+          "maxItems": 500
+        },
+        "skills": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "maxItems": 500
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "finding_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "info",
+                  "warning",
+                  "error",
+                  "critical"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 2000
+              },
+              "action": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 1000
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "since": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              },
+              "details": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 2000
+              }
+            },
+            "required": [
+              "finding_id",
+              "severity",
+              "title"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 50
+        },
+        "diagnostic_json": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        }
+      },
+      "required": [
+        "outcome",
+        "agent_type",
+        "is_lead",
+        "paused",
+        "executing",
+        "has_capacity",
+        "accepting_work",
+        "exiting",
+        "queued",
+        "waiting",
+        "deferred",
+        "context",
+        "tools",
+        "skills",
+        "findings"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

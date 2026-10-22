@@ -1,0 +1,43 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "memory.list.reply",
+  "message_id": "01928f3a-7b2c-744a-8000-00000000044a",
+  "idempotency_key": "memory.list:example_1098:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.memory.list",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "facts": [
+      {
+        "memory_id": 3,
+        "fact_text": "Example fact text",
+        "valid_from": "2026-10-22T04:30:00.000Z",
+        "expires": "2026-10-22T04:30:00.000Z",
+        "tags": [
+          "Example tags"
+        ],
+        "created_at": "2026-10-22T04:30:00.000Z",
+        "updated_at": "2026-10-22T04:30:00.000Z",
+        "seen_version": "v3"
+      }
+    ],
+    "total": 3
+  },
+  "causation_id": "01928f3a-7b2c-7449-8000-000000000449",
+  "body_digest": "D5---PUL0IM5pxLL_fK7WSxtqK_APXqX69eO4fqmRmE",
+  "signature": "joHEBE3Ct8sTl0uQUzAdoOYba0kIuMZtyOlk_k2liYU1KRROW6lmslDz4aNc5l0Qd00x5sHiMLMVJKQdCZ7aCA"
+}

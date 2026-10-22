@@ -1,0 +1,42 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tasks.list.reply",
+  "message_id": "01928f3a-7b2c-7408-8000-000000000408",
+  "idempotency_key": "tasks.list:example_1032:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.tasks.list",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "tasks": [
+      {
+        "task_id": "task_id_1",
+        "state": "abandoned",
+        "problem_statement": "Example problem statement",
+        "is_current": true,
+        "queue_position": 3,
+        "last_updated_at": "2026-10-22T04:30:00.000Z"
+      }
+    ],
+    "total": 3,
+    "queued_count": 3,
+    "current_count": 3,
+    "queue_digest": "v3"
+  },
+  "causation_id": "01928f3a-7b2c-7407-8000-000000000407",
+  "body_digest": "FXjjGzw5G6PR06cH72gpb4Qd_u9pVOMYxG9ncAbVp3g",
+  "signature": "Vboa3vJmMMwOb02nHcN25BGwCAo1thkcB4Q4WwadImGVAlddRiiufU9t-8Mkh6N7c2OU_aoSp2eN9rG-SoRFDQ"
+}

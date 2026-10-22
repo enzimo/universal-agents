@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/tasks.inventory.schema.json",
+  "title": "tasks.inventory request",
+  "description": "The person's running work and schedules.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

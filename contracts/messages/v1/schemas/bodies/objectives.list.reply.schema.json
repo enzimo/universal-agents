@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/objectives.list.reply.schema.json",
+  "title": "objectives.list reply",
+  "description": "The person's Objectives.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "objectives": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "objective_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "seen_version": {
+                "$ref": "../common.schema.json#/$defs/record_version"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "proposed",
+                  "active",
+                  "paused",
+                  "blocked",
+                  "satisfied",
+                  "failed",
+                  "cancelled",
+                  "abandoned",
+                  "deleting",
+                  "deleted"
+                ]
+              },
+              "horizon": {
+                "type": "string",
+                "enum": [
+                  "finite",
+                  "long_horizon",
+                  "recurring",
+                  "standing"
+                ]
+              },
+              "priority": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "normal",
+                  "high",
+                  "critical"
+                ]
+              },
+              "desired_outcome": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32768
+              },
+              "progress_summary": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000
+              },
+              "subgoals": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "maxItems": 50
+              },
+              "success_criteria": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "maxItems": 50
+              },
+              "schedule_ids": {
+                "type": "array",
+                "items": {
+                  "$ref": "../common.schema.json#/$defs/record_id"
+                },
+                "maxItems": 50
+              },
+              "heartbeat_item_ids": {
+                "type": "array",
+                "items": {
+                  "$ref": "../common.schema.json#/$defs/record_id"
+                },
+                "maxItems": 50
+              },
+              "available_actions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "pause",
+                    "resume",
+                    "stop",
+                    "abandon",
+                    "delete"
+                  ]
+                },
+                "maxItems": 5
+              }
+            },
+            "required": [
+              "objective_id",
+              "seen_version",
+              "title",
+              "status",
+              "horizon",
+              "priority",
+              "available_actions"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "outcome",
+        "objectives"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

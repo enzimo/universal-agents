@@ -1,0 +1,29 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "conflicts.list",
+  "message_id": "01928f3a-7b2c-74a5-8000-0000000004a5",
+  "idempotency_key": "conflicts.list:example_1189",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.conflicts.list",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "offset": 3,
+    "limit": 3,
+    "state": "open"
+  },
+  "body_digest": "oI6NAqlhZyXe3n-TxEXuKvAEmMJnCj19li20fIVLMHM",
+  "signature": "NEZWjhX0vvcc12gQZUqumcXNKayB45OpQbr1_zXw06_6m3Zz-Jvr3dOmK-w9j3s51IyxKiHo_a-EkwNI4kmqBg"
+}

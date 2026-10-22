@@ -1,0 +1,30 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "custody.decide.reply",
+  "message_id": "01928f3a-7b2c-74b5-8000-0000000004b5",
+  "idempotency_key": "custody.decide:example_1205:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.custody.decide",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "custody_token": 3,
+    "holder": "token_id_1"
+  },
+  "causation_id": "01928f3a-7b2c-74b4-8000-0000000004b4",
+  "body_digest": "7R0ZCazU3-Xf2SCLiCoXFU2lcVuwgJ9FktOhlui2hVU",
+  "signature": "qPxzbzseTL_HYC_4_jA0iPaC9sNDlvmTVlPs0l7lEXVoNfBLSFRmzLUt1aCgv8gTCcMcPQ5W95q14xbuDeIKDw"
+}

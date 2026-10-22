@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/schedules.update.schema.json",
+  "title": "schedules.update request",
+  "description": "Change a schedule's instruction, timing or delivery.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "schedule_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "seen_version": {
+      "$ref": "../common.schema.json#/$defs/record_version"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "instruction": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32768
+    },
+    "timing": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "interval"
+            },
+            "interval_ms": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 31536000000
+            }
+          },
+          "required": [
+            "kind",
+            "interval_ms"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "cron"
+            },
+            "expression": {
+              "type": "string",
+              "pattern": "^[0-9*/,? A-Za-z-]{9,120}$"
+            },
+            "time_zone": {
+              "$ref": "../common.schema.json#/$defs/time_zone"
+            }
+          },
+          "required": [
+            "kind",
+            "expression",
+            "time_zone"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "once"
+            },
+            "at": {
+              "$ref": "../common.schema.json#/$defs/timestamp"
+            }
+          },
+          "required": [
+            "kind",
+            "at"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "expires_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "repeat_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    }
+  },
+  "required": [
+    "request_id",
+    "schedule_id",
+    "seen_version"
+  ],
+  "additionalProperties": false
+}

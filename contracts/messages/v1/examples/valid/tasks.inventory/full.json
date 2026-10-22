@@ -1,0 +1,25 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tasks.inventory",
+  "message_id": "01928f3a-7b2c-7401-8000-000000000401",
+  "idempotency_key": "tasks.inventory:example_1025",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.tasks.inventory",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {},
+  "body_digest": "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o",
+  "signature": "xwlB1M_CsOQZF6HQPaduYSlks7QXzDErh4HnBoOWUNRqvMNhT03CnNyGDiJ7nNKrz2jOSuV5wuLkt60NMLxzCA"
+}

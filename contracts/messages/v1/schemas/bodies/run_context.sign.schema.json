@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/run_context.sign.schema.json",
+  "title": "run_context.sign request",
+  "description": "A worker running a scheduled job asks for the run's authority token.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "schedule_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "claim_token": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "scheduled_job_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "conversation_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "heartbeat_item_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    }
+  },
+  "required": [
+    "request_id",
+    "schedule_id",
+    "claim_token",
+    "scheduled_job_id",
+    "conversation_id"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/memory.list.schema.json",
+  "title": "memory.list request",
+  "description": "List a memory bank's facts.",
+  "type": "object",
+  "properties": {
+    "bank": {
+      "type": "string",
+      "enum": [
+        "coremem",
+        "usermem"
+      ]
+    },
+    "sort": {
+      "type": "string",
+      "enum": [
+        "newest",
+        "oldest",
+        "updated"
+      ]
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    }
+  },
+  "required": [
+    "bank",
+    "sort",
+    "offset",
+    "limit"
+  ],
+  "additionalProperties": false
+}

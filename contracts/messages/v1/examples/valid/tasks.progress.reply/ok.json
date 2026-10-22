@@ -1,0 +1,52 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tasks.progress.reply",
+  "message_id": "01928f3a-7b2c-749b-8000-00000000049b",
+  "idempotency_key": "tasks.progress:example_1179:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.tasks.progress",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "state": "active",
+    "root_task_id": "root_task_id_1",
+    "root_state": "abandoned",
+    "plan_phase": "Example plan phase",
+    "plan_status": "Example plan status",
+    "children": [
+      {
+        "task_id": "task_id_1",
+        "agent_type": "token_id_1",
+        "state": "abandoned",
+        "queue_status": "queued",
+        "holder": "token_id_1",
+        "last_updated_at": "2026-10-22T04:30:00.000Z"
+      }
+    ],
+    "last_activity_at": "2026-10-22T04:30:00.000Z",
+    "last_activity": "Example last activity",
+    "blocker": "Example blocker",
+    "steering": {
+      "state": "with_lead",
+      "held": 3,
+      "reached": 3,
+      "total": 3
+    }
+  },
+  "causation_id": "01928f3a-7b2c-749a-8000-00000000049a",
+  "body_digest": "gkZQzAhl-nwg3olxsqNy7GXXoy0uR9875Ie4F7mBp6A",
+  "signature": "Qebpem5C8MCcXqSCwZA3JjyhQBOmDDpC-KYM5begv9b5O-6i6J7QGULzGppt5Y3StspJU3y5h-544LHRdpLOAQ"
+}

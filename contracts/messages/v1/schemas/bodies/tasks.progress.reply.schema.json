@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/tasks.progress.reply.schema.json",
+  "title": "tasks.progress reply",
+  "description": "Where the person's request in one conversation stands.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "active",
+            "idle"
+          ]
+        },
+        "root_task_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "root_state": {
+          "$ref": "../common.schema.json#/$defs/progress_state"
+        },
+        "plan_phase": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "plan_status": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "task_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "agent_type": {
+                "$ref": "../common.schema.json#/$defs/agent_type"
+              },
+              "state": {
+                "$ref": "../common.schema.json#/$defs/progress_state"
+              },
+              "queue_status": {
+                "type": "string",
+                "enum": [
+                  "queued",
+                  "running",
+                  "finished",
+                  "failed",
+                  "cancelled"
+                ]
+              },
+              "holder": {
+                "$ref": "../common.schema.json#/$defs/agent_id"
+              },
+              "last_updated_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              }
+            },
+            "required": [
+              "task_id",
+              "state",
+              "queue_status"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100
+        },
+        "last_activity_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "last_activity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "blocker": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "steering": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "with_lead",
+                "passed_on",
+                "timed_out"
+              ]
+            },
+            "held": {
+              "$ref": "../common.schema.json#/$defs/count"
+            },
+            "reached": {
+              "$ref": "../common.schema.json#/$defs/count"
+            },
+            "total": {
+              "$ref": "../common.schema.json#/$defs/count"
+            }
+          },
+          "required": [
+            "state",
+            "held",
+            "reached",
+            "total"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "outcome",
+        "state",
+        "children"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

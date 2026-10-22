@@ -1,0 +1,31 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.freeze",
+  "message_id": "01928f3a-7b2c-748e-8000-00000000048e",
+  "idempotency_key": "knowledge.freeze:example_1166",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.knowledge.freeze",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_1",
+    "space": "team",
+    "page": "Example page",
+    "seen_version": "v3"
+  },
+  "body_digest": "UH6s6pN5KCymyrbcleMxmd1Ui1owFGUli2zgHppi_Ew",
+  "signature": "aiwAA5v0AFspkZgu2B8_yq6GNqje-3iJq1oQ6hP8ThgQK5Ph-TUii0rYH6eGZEiZABksNnSP4RTsYhwhVojPCw"
+}

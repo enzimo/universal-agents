@@ -1,0 +1,54 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.list.reply",
+  "message_id": "01928f3a-7b2c-7465-8000-000000000465",
+  "idempotency_key": "knowledge.list:example_1125:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.knowledge.list",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "pages": [
+      {
+        "space": "team",
+        "page": "Example page",
+        "title": "Example title",
+        "summary": "Example summary",
+        "body": "Example body",
+        "body_ref": {
+          "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+          "size": 3,
+          "media_type": "application/pdf",
+          "name": "Example name"
+        },
+        "tags": [
+          "Example tags"
+        ],
+        "status": "active",
+        "seen_version": "v3",
+        "updated_at": "2026-10-22T04:30:00.000Z",
+        "updated_by": {
+          "kind": "agent",
+          "agent_type": "token_id_1"
+        }
+      }
+    ],
+    "total": 3
+  },
+  "causation_id": "01928f3a-7b2c-7464-8000-000000000464",
+  "body_digest": "-PHFZHeokQgC-uAYe5SuGdvWLotJGKaqGnESaQLMy20",
+  "signature": "DVg_-Jub-uAFVN6YtnlU78nubpWVid9W3H-_NcNg6juFdHIJc7AXO0Xo3w2Zd0sqvTbpUJxc249DQIDS9_GbCQ"
+}

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/tasks.list.reply.schema.json",
+  "title": "tasks.list reply",
+  "description": "One agent's task queue.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "task_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "state": {
+                "$ref": "../common.schema.json#/$defs/progress_state"
+              },
+              "problem_statement": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000
+              },
+              "is_current": {
+                "type": "boolean"
+              },
+              "queue_position": {
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "last_updated_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              }
+            },
+            "required": [
+              "task_id",
+              "state",
+              "is_current"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 20
+        },
+        "total": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "queued_count": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "current_count": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "queue_digest": {
+          "$ref": "../common.schema.json#/$defs/record_version"
+        }
+      },
+      "required": [
+        "outcome",
+        "tasks",
+        "total",
+        "queued_count",
+        "current_count",
+        "queue_digest"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

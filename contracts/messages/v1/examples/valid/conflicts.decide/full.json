@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "conflicts.decide",
+  "message_id": "01928f3a-7b2c-74a2-8000-0000000004a2",
+  "idempotency_key": "conflicts.decide:example_1186",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.conflicts.decide",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "case_id": "case_id_1",
+    "question_id": "question_id_1",
+    "values_digest": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+    "choice": {
+      "type": "keep_current"
+    }
+  },
+  "body_digest": "PdQQPoIISC5Tg07PBNC1dVwa-UCA0pE1vYgl1mdQkiA",
+  "signature": "sCKXYdHlMgNjOOIAbhDTwPUVqX4mN1rNHUBjf4OiccFCgUFq5VRKG7BqCxMm3vFA03ORxGGOBPZefWc1NlcyAQ"
+}

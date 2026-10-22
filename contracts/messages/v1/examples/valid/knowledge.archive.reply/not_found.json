@@ -1,0 +1,29 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.archive.reply",
+  "message_id": "01928f3a-7b2c-7475-8000-000000000475",
+  "idempotency_key": "knowledge.archive:example_1141:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.knowledge.archive",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "not_found",
+    "message": "Example short text"
+  },
+  "causation_id": "01928f3a-7b2c-7473-8000-000000000473",
+  "body_digest": "kjF9c_l0diFRNuvYGjQmkStmu5fcSEld8Fzu2xnpRcU",
+  "signature": "pBQbWdqdc8oCQfmSFYjry1KG3oGv-plgtcB1tClHquQA_6ZvIK2V1tkLHu4a5YTR0GHF9sOoVs8uWIe_IjOxBQ"
+}

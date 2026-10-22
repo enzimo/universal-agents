@@ -1,0 +1,40 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tasks.purge.reply",
+  "message_id": "01928f3a-7b2c-7411-8000-000000000411",
+  "idempotency_key": "tasks.purge:example_1041:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.tasks.purge",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "receipts": [
+      {
+        "root_task_id": "root_task_id_1",
+        "cancelled_task_count": 3,
+        "stop_signals_sent": 3,
+        "unconfirmed_worker_count": 3,
+        "state": "confirmed"
+      }
+    ],
+    "removed": 3,
+    "queue_digest": "v3",
+    "all_confirmed": true
+  },
+  "causation_id": "01928f3a-7b2c-7410-8000-000000000410",
+  "body_digest": "Bn-LVPNY1a-h259BJr9qjkwBVjY7rwoeVhTfZKiWVpc",
+  "signature": "uFysriGN6mYYiTqMUCQtBLbzUvOyJUqgE46A5XSNQQAGXaxHjeZa6V9l8QtM6kbvlVoo4d-PqMJIxDu7GbYUDw"
+}

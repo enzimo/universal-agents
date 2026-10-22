@@ -1,0 +1,30 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "agent.status.reply",
+  "message_id": "01928f3a-7b2c-74d9-8000-0000000004d9",
+  "idempotency_key": "agent.status:example_1241:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.ctl.agent.researcher-2.status",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "not_allowed",
+    "message": "Example short text"
+  },
+  "causation_id": "01928f3a-7b2c-74d7-8000-0000000004d7",
+  "body_digest": "ndygni9OJ0mKj0moIMNE8d_WpJsDHbcv-NSrk03DUfg",
+  "signature": "hS4jZWFLBlSvPhgS49Zw7C2aFSrQoTt0_UZ9QERH6sQtOu0OytIbn0bejLyZWEJQ3m7FMdBFq3Ch0LTKRZEiAg"
+}

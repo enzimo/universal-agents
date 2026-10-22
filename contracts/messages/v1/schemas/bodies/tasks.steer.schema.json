@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/tasks.steer.schema.json",
+  "title": "tasks.steer request",
+  "description": "The person's guidance for a running request; stored before it is accepted.",
+  "type": "object",
+  "properties": {
+    "steer_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32768
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/attachment"
+      },
+      "maxItems": 20
+    },
+    "replied_message": {
+      "$ref": "../common.schema.json#/$defs/replied_message"
+    }
+  },
+  "required": [
+    "steer_id",
+    "task_id",
+    "text"
+  ],
+  "additionalProperties": false
+}

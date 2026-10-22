@@ -25,11 +25,67 @@
         }
       }
     },
+    "access_withdraw": {
+      "address": "ua.v1.{team}.{sender}.svc.team.access.withdraw",
+      "messages": {
+        "access_withdraw": {
+          "$ref": "#/components/messages/access_withdraw"
+        }
+      }
+    },
+    "agent_exit": {
+      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.exit",
+      "messages": {
+        "agent_exit": {
+          "$ref": "#/components/messages/agent_exit"
+        }
+      }
+    },
     "agent_pause": {
       "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.pause",
       "messages": {
         "agent_pause": {
           "$ref": "#/components/messages/agent_pause"
+        }
+      }
+    },
+    "agent_resume": {
+      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.resume",
+      "messages": {
+        "agent_resume": {
+          "$ref": "#/components/messages/agent_resume"
+        }
+      }
+    },
+    "agent_status": {
+      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.status",
+      "messages": {
+        "agent_status": {
+          "$ref": "#/components/messages/agent_status"
+        }
+      }
+    },
+    "conflicts_cancel": {
+      "address": "ua.v1.{team}.{sender}.svc.team.conflicts.cancel",
+      "messages": {
+        "conflicts_cancel": {
+          "$ref": "#/components/messages/conflicts_cancel"
+        }
+      }
+    },
+    "conflicts_decide": {
+      "address": "ua.v1.{team}.{sender}.svc.team.conflicts.decide",
+      "messages": {
+        "conflicts_decide": {
+          "$ref": "#/components/messages/conflicts_decide"
+        }
+      }
+    },
+    "conflicts_list": {
+      "address": "ua.v1.{team}.{sender}.svc.team.conflicts.list",
+      "messages": {
+        "conflicts_list": {
+          "$ref": "#/components/messages/conflicts_list"
         }
       }
     },
@@ -49,11 +105,27 @@
         }
       }
     },
+    "custody_decide": {
+      "address": "ua.v1.{team}.{sender}.svc.team.custody.decide",
+      "messages": {
+        "custody_decide": {
+          "$ref": "#/components/messages/custody_decide"
+        }
+      }
+    },
     "custody_moved": {
       "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
       "messages": {
         "custody_moved": {
           "$ref": "#/components/messages/custody_moved"
+        }
+      }
+    },
+    "debug_dump": {
+      "address": "ua.v1.{team}.{sender}.svc.team.debug.dump",
+      "messages": {
+        "debug_dump": {
+          "$ref": "#/components/messages/debug_dump"
         }
       }
     },
@@ -89,11 +161,323 @@
         }
       }
     },
+    "heartbeat_items_add": {
+      "address": "ua.v1.{team}.{sender}.svc.team.heartbeat_items.add",
+      "messages": {
+        "heartbeat_items_add": {
+          "$ref": "#/components/messages/heartbeat_items_add"
+        }
+      }
+    },
+    "heartbeat_items_disable": {
+      "address": "ua.v1.{team}.{sender}.svc.team.heartbeat_items.disable",
+      "messages": {
+        "heartbeat_items_disable": {
+          "$ref": "#/components/messages/heartbeat_items_disable"
+        }
+      }
+    },
+    "heartbeat_items_enable": {
+      "address": "ua.v1.{team}.{sender}.svc.team.heartbeat_items.enable",
+      "messages": {
+        "heartbeat_items_enable": {
+          "$ref": "#/components/messages/heartbeat_items_enable"
+        }
+      }
+    },
+    "heartbeat_items_remove": {
+      "address": "ua.v1.{team}.{sender}.svc.team.heartbeat_items.remove",
+      "messages": {
+        "heartbeat_items_remove": {
+          "$ref": "#/components/messages/heartbeat_items_remove"
+        }
+      }
+    },
+    "heartbeat_items_update": {
+      "address": "ua.v1.{team}.{sender}.svc.team.heartbeat_items.update",
+      "messages": {
+        "heartbeat_items_update": {
+          "$ref": "#/components/messages/heartbeat_items_update"
+        }
+      }
+    },
+    "intent_set": {
+      "address": "ua.v1.{team}.{sender}.svc.team.intent.set",
+      "messages": {
+        "intent_set": {
+          "$ref": "#/components/messages/intent_set"
+        }
+      }
+    },
+    "knowledge_add_note": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.add_note",
+      "messages": {
+        "knowledge_add_note": {
+          "$ref": "#/components/messages/knowledge_add_note"
+        }
+      }
+    },
+    "knowledge_archive": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.archive",
+      "messages": {
+        "knowledge_archive": {
+          "$ref": "#/components/messages/knowledge_archive"
+        }
+      }
+    },
+    "knowledge_count_contributions": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.count_contributions",
+      "messages": {
+        "knowledge_count_contributions": {
+          "$ref": "#/components/messages/knowledge_count_contributions"
+        }
+      }
+    },
+    "knowledge_freeze": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.freeze",
+      "messages": {
+        "knowledge_freeze": {
+          "$ref": "#/components/messages/knowledge_freeze"
+        }
+      }
+    },
+    "knowledge_history": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.history",
+      "messages": {
+        "knowledge_history": {
+          "$ref": "#/components/messages/knowledge_history"
+        }
+      }
+    },
+    "knowledge_list": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.list",
+      "messages": {
+        "knowledge_list": {
+          "$ref": "#/components/messages/knowledge_list"
+        }
+      }
+    },
+    "knowledge_list_contributions": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.list_contributions",
+      "messages": {
+        "knowledge_list_contributions": {
+          "$ref": "#/components/messages/knowledge_list_contributions"
+        }
+      }
+    },
+    "knowledge_merge": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.merge",
+      "messages": {
+        "knowledge_merge": {
+          "$ref": "#/components/messages/knowledge_merge"
+        }
+      }
+    },
+    "knowledge_publish_contribution": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.publish_contribution",
+      "messages": {
+        "knowledge_publish_contribution": {
+          "$ref": "#/components/messages/knowledge_publish_contribution"
+        }
+      }
+    },
+    "knowledge_read": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.read",
+      "messages": {
+        "knowledge_read": {
+          "$ref": "#/components/messages/knowledge_read"
+        }
+      }
+    },
+    "knowledge_read_contribution": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.read_contribution",
+      "messages": {
+        "knowledge_read_contribution": {
+          "$ref": "#/components/messages/knowledge_read_contribution"
+        }
+      }
+    },
+    "knowledge_reject_contribution": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.reject_contribution",
+      "messages": {
+        "knowledge_reject_contribution": {
+          "$ref": "#/components/messages/knowledge_reject_contribution"
+        }
+      }
+    },
+    "knowledge_resolve_note": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.resolve_note",
+      "messages": {
+        "knowledge_resolve_note": {
+          "$ref": "#/components/messages/knowledge_resolve_note"
+        }
+      }
+    },
+    "knowledge_revert": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.revert",
+      "messages": {
+        "knowledge_revert": {
+          "$ref": "#/components/messages/knowledge_revert"
+        }
+      }
+    },
+    "knowledge_unfreeze": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.unfreeze",
+      "messages": {
+        "knowledge_unfreeze": {
+          "$ref": "#/components/messages/knowledge_unfreeze"
+        }
+      }
+    },
+    "knowledge_withdraw_contribution": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.withdraw_contribution",
+      "messages": {
+        "knowledge_withdraw_contribution": {
+          "$ref": "#/components/messages/knowledge_withdraw_contribution"
+        }
+      }
+    },
+    "knowledge_write": {
+      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.write",
+      "messages": {
+        "knowledge_write": {
+          "$ref": "#/components/messages/knowledge_write"
+        }
+      }
+    },
     "ledger_fact": {
       "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
       "messages": {
         "ledger_fact": {
           "$ref": "#/components/messages/ledger_fact"
+        }
+      }
+    },
+    "memory_create": {
+      "address": "ua.v1.{team}.{sender}.svc.team.memory.create",
+      "messages": {
+        "memory_create": {
+          "$ref": "#/components/messages/memory_create"
+        }
+      }
+    },
+    "memory_delete": {
+      "address": "ua.v1.{team}.{sender}.svc.team.memory.delete",
+      "messages": {
+        "memory_delete": {
+          "$ref": "#/components/messages/memory_delete"
+        }
+      }
+    },
+    "memory_list": {
+      "address": "ua.v1.{team}.{sender}.svc.team.memory.list",
+      "messages": {
+        "memory_list": {
+          "$ref": "#/components/messages/memory_list"
+        }
+      }
+    },
+    "memory_replace": {
+      "address": "ua.v1.{team}.{sender}.svc.team.memory.replace",
+      "messages": {
+        "memory_replace": {
+          "$ref": "#/components/messages/memory_replace"
+        }
+      }
+    },
+    "memory_show": {
+      "address": "ua.v1.{team}.{sender}.svc.team.memory.show",
+      "messages": {
+        "memory_show": {
+          "$ref": "#/components/messages/memory_show"
+        }
+      }
+    },
+    "memory_undo": {
+      "address": "ua.v1.{team}.{sender}.svc.team.memory.undo",
+      "messages": {
+        "memory_undo": {
+          "$ref": "#/components/messages/memory_undo"
+        }
+      }
+    },
+    "objectives_abandon": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.abandon",
+      "messages": {
+        "objectives_abandon": {
+          "$ref": "#/components/messages/objectives_abandon"
+        }
+      }
+    },
+    "objectives_create": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.create",
+      "messages": {
+        "objectives_create": {
+          "$ref": "#/components/messages/objectives_create"
+        }
+      }
+    },
+    "objectives_delete": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.delete",
+      "messages": {
+        "objectives_delete": {
+          "$ref": "#/components/messages/objectives_delete"
+        }
+      }
+    },
+    "objectives_list": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.list",
+      "messages": {
+        "objectives_list": {
+          "$ref": "#/components/messages/objectives_list"
+        }
+      }
+    },
+    "objectives_pause": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.pause",
+      "messages": {
+        "objectives_pause": {
+          "$ref": "#/components/messages/objectives_pause"
+        }
+      }
+    },
+    "objectives_resume": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.resume",
+      "messages": {
+        "objectives_resume": {
+          "$ref": "#/components/messages/objectives_resume"
+        }
+      }
+    },
+    "objectives_stop": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.stop",
+      "messages": {
+        "objectives_stop": {
+          "$ref": "#/components/messages/objectives_stop"
+        }
+      }
+    },
+    "objectives_update_progress": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.update_progress",
+      "messages": {
+        "objectives_update_progress": {
+          "$ref": "#/components/messages/objectives_update_progress"
+        }
+      }
+    },
+    "objectives_update_status": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.update_status",
+      "messages": {
+        "objectives_update_status": {
+          "$ref": "#/components/messages/objectives_update_status"
+        }
+      }
+    },
+    "people_set_standing": {
+      "address": "ua.v1.{team}.{sender}.svc.team.people.set_standing",
+      "messages": {
+        "people_set_standing": {
+          "$ref": "#/components/messages/people_set_standing"
         }
       }
     },
@@ -113,11 +497,115 @@
         }
       }
     },
+    "requests_pause": {
+      "address": "ua.v1.{team}.{sender}.svc.team.requests.pause",
+      "messages": {
+        "requests_pause": {
+          "$ref": "#/components/messages/requests_pause"
+        }
+      }
+    },
+    "requests_resume": {
+      "address": "ua.v1.{team}.{sender}.svc.team.requests.resume",
+      "messages": {
+        "requests_resume": {
+          "$ref": "#/components/messages/requests_resume"
+        }
+      }
+    },
+    "run_context_sign": {
+      "address": "ua.v1.{team}.{sender}.svc.team.run_context.sign",
+      "messages": {
+        "run_context_sign": {
+          "$ref": "#/components/messages/run_context_sign"
+        }
+      }
+    },
+    "schedules_disable": {
+      "address": "ua.v1.{team}.{sender}.svc.team.schedules.disable",
+      "messages": {
+        "schedules_disable": {
+          "$ref": "#/components/messages/schedules_disable"
+        }
+      }
+    },
+    "schedules_install": {
+      "address": "ua.v1.{team}.{sender}.svc.team.schedules.install",
+      "messages": {
+        "schedules_install": {
+          "$ref": "#/components/messages/schedules_install"
+        }
+      }
+    },
+    "schedules_list": {
+      "address": "ua.v1.{team}.{sender}.svc.team.schedules.list",
+      "messages": {
+        "schedules_list": {
+          "$ref": "#/components/messages/schedules_list"
+        }
+      }
+    },
+    "schedules_pause": {
+      "address": "ua.v1.{team}.{sender}.svc.team.schedules.pause",
+      "messages": {
+        "schedules_pause": {
+          "$ref": "#/components/messages/schedules_pause"
+        }
+      }
+    },
+    "schedules_remove": {
+      "address": "ua.v1.{team}.{sender}.svc.team.schedules.remove",
+      "messages": {
+        "schedules_remove": {
+          "$ref": "#/components/messages/schedules_remove"
+        }
+      }
+    },
+    "schedules_resume": {
+      "address": "ua.v1.{team}.{sender}.svc.team.schedules.resume",
+      "messages": {
+        "schedules_resume": {
+          "$ref": "#/components/messages/schedules_resume"
+        }
+      }
+    },
+    "schedules_set_worker": {
+      "address": "ua.v1.{team}.{sender}.svc.team.schedules.set_worker",
+      "messages": {
+        "schedules_set_worker": {
+          "$ref": "#/components/messages/schedules_set_worker"
+        }
+      }
+    },
+    "schedules_update": {
+      "address": "ua.v1.{team}.{sender}.svc.team.schedules.update",
+      "messages": {
+        "schedules_update": {
+          "$ref": "#/components/messages/schedules_update"
+        }
+      }
+    },
     "skills_changed": {
       "address": "ua.v1.{team}.{sender}.evt.skills_changed",
       "messages": {
         "skills_changed": {
           "$ref": "#/components/messages/skills_changed"
+        }
+      }
+    },
+    "staged_changes_apply": {
+      "address": "ua.v1.{team}.{sender}.svc.team.staged_changes.apply",
+      "messages": {
+        "staged_changes_apply": {
+          "$ref": "#/components/messages/staged_changes_apply"
+        }
+      }
+    },
+    "steering_decide": {
+      "address": "ua.v1.{team}.{sender}.svc.team.steering.decide",
+      "messages": {
+        "steering_decide": {
+          "$ref": "#/components/messages/steering_decide"
         }
       }
     },
@@ -166,6 +654,14 @@
       "messages": {
         "task_handback": {
           "$ref": "#/components/messages/task_handback"
+        }
+      }
+    },
+    "task_probe": {
+      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.task.probe",
+      "messages": {
+        "task_probe": {
+          "$ref": "#/components/messages/task_probe"
         }
       }
     },
@@ -265,6 +761,110 @@
         }
       }
     },
+    "tasks_cancel": {
+      "address": "ua.v1.{team}.{sender}.svc.team.tasks.cancel",
+      "messages": {
+        "tasks_cancel": {
+          "$ref": "#/components/messages/tasks_cancel"
+        }
+      }
+    },
+    "tasks_inventory": {
+      "address": "ua.v1.{team}.{sender}.svc.team.tasks.inventory",
+      "messages": {
+        "tasks_inventory": {
+          "$ref": "#/components/messages/tasks_inventory"
+        }
+      }
+    },
+    "tasks_list": {
+      "address": "ua.v1.{team}.{sender}.svc.team.tasks.list",
+      "messages": {
+        "tasks_list": {
+          "$ref": "#/components/messages/tasks_list"
+        }
+      }
+    },
+    "tasks_list_1": {
+      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.tasks.list",
+      "messages": {
+        "tasks_list": {
+          "$ref": "#/components/messages/tasks_list"
+        }
+      }
+    },
+    "tasks_list_finished": {
+      "address": "ua.v1.{team}.{sender}.svc.team.tasks.list_finished",
+      "messages": {
+        "tasks_list_finished": {
+          "$ref": "#/components/messages/tasks_list_finished"
+        }
+      }
+    },
+    "tasks_list_finished_1": {
+      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.tasks.list_finished",
+      "messages": {
+        "tasks_list_finished": {
+          "$ref": "#/components/messages/tasks_list_finished"
+        }
+      }
+    },
+    "tasks_probe": {
+      "address": "ua.v1.{team}.{sender}.svc.team.tasks.probe",
+      "messages": {
+        "tasks_probe": {
+          "$ref": "#/components/messages/tasks_probe"
+        }
+      }
+    },
+    "tasks_progress": {
+      "address": "ua.v1.{team}.{sender}.svc.team.tasks.progress",
+      "messages": {
+        "tasks_progress": {
+          "$ref": "#/components/messages/tasks_progress"
+        }
+      }
+    },
+    "tasks_purge": {
+      "address": "ua.v1.{team}.{sender}.svc.team.tasks.purge",
+      "messages": {
+        "tasks_purge": {
+          "$ref": "#/components/messages/tasks_purge"
+        }
+      }
+    },
+    "tasks_purge_1": {
+      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.tasks.purge",
+      "messages": {
+        "tasks_purge": {
+          "$ref": "#/components/messages/tasks_purge"
+        }
+      }
+    },
+    "tasks_remove": {
+      "address": "ua.v1.{team}.{sender}.svc.team.tasks.remove",
+      "messages": {
+        "tasks_remove": {
+          "$ref": "#/components/messages/tasks_remove"
+        }
+      }
+    },
+    "tasks_remove_1": {
+      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.tasks.remove",
+      "messages": {
+        "tasks_remove": {
+          "$ref": "#/components/messages/tasks_remove"
+        }
+      }
+    },
+    "tasks_steer": {
+      "address": "ua.v1.{team}.{sender}.svc.team.tasks.steer",
+      "messages": {
+        "tasks_steer": {
+          "$ref": "#/components/messages/tasks_steer"
+        }
+      }
+    },
     "tool_setup_request": {
       "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
       "messages": {
@@ -278,6 +878,30 @@
       "messages": {
         "tool_setup_result": {
           "$ref": "#/components/messages/tool_setup_result"
+        }
+      }
+    },
+    "topics_find_threads": {
+      "address": "ua.v1.{team}.{sender}.svc.team.topics.find_threads",
+      "messages": {
+        "topics_find_threads": {
+          "$ref": "#/components/messages/topics_find_threads"
+        }
+      }
+    },
+    "topics_list_tags": {
+      "address": "ua.v1.{team}.{sender}.svc.team.topics.list_tags",
+      "messages": {
+        "topics_list_tags": {
+          "$ref": "#/components/messages/topics_list_tags"
+        }
+      }
+    },
+    "topics_tag_thread": {
+      "address": "ua.v1.{team}.{sender}.svc.team.topics.tag_thread",
+      "messages": {
+        "topics_tag_thread": {
+          "$ref": "#/components/messages/topics_tag_thread"
         }
       }
     }
@@ -305,6 +929,32 @@
         },
         "summary": "A person's decision on an access request, from the gateway to the team services."
       },
+      "access_withdraw": {
+        "name": "access.withdraw",
+        "payload": {
+          "$ref": "../schemas/bodies/access.withdraw.schema.json"
+        },
+        "summary": "The lead withdraws a task's access request."
+      },
+      "access_withdraw_reply": {
+        "name": "access.withdraw.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/access.withdraw.reply.schema.json"
+        }
+      },
+      "agent_exit": {
+        "name": "agent.exit",
+        "payload": {
+          "$ref": "../schemas/bodies/agent.exit.schema.json"
+        },
+        "summary": "Stop an agent after its current step."
+      },
+      "agent_exit_reply": {
+        "name": "agent.exit.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/agent.exit.reply.schema.json"
+        }
+      },
       "agent_pause": {
         "name": "agent.pause",
         "payload": {
@@ -316,6 +966,71 @@
         "name": "agent.pause.reply",
         "payload": {
           "$ref": "../schemas/bodies/agent.pause.reply.schema.json"
+        }
+      },
+      "agent_resume": {
+        "name": "agent.resume",
+        "payload": {
+          "$ref": "../schemas/bodies/agent.resume.schema.json"
+        },
+        "summary": "Resume a paused agent."
+      },
+      "agent_resume_reply": {
+        "name": "agent.resume.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/agent.resume.reply.schema.json"
+        }
+      },
+      "agent_status": {
+        "name": "agent.status",
+        "payload": {
+          "$ref": "../schemas/bodies/agent.status.schema.json"
+        },
+        "summary": "An agent's status: basic for anyone allowed, full only for the team's lead."
+      },
+      "agent_status_reply": {
+        "name": "agent.status.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/agent.status.reply.schema.json"
+        }
+      },
+      "conflicts_cancel": {
+        "name": "conflicts.cancel",
+        "payload": {
+          "$ref": "../schemas/bodies/conflicts.cancel.schema.json"
+        },
+        "summary": "An administrator cancels a change conflict."
+      },
+      "conflicts_cancel_reply": {
+        "name": "conflicts.cancel.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/conflicts.cancel.reply.schema.json"
+        }
+      },
+      "conflicts_decide": {
+        "name": "conflicts.decide",
+        "payload": {
+          "$ref": "../schemas/bodies/conflicts.decide.schema.json"
+        },
+        "summary": "A person decides a change conflict."
+      },
+      "conflicts_decide_reply": {
+        "name": "conflicts.decide.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/conflicts.decide.reply.schema.json"
+        }
+      },
+      "conflicts_list": {
+        "name": "conflicts.list",
+        "payload": {
+          "$ref": "../schemas/bodies/conflicts.list.schema.json"
+        },
+        "summary": "Open and recent change conflicts, for administrators."
+      },
+      "conflicts_list_reply": {
+        "name": "conflicts.list.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/conflicts.list.reply.schema.json"
         }
       },
       "credential_form_request": {
@@ -332,12 +1047,38 @@
         },
         "summary": "What became of a credential form."
       },
+      "custody_decide": {
+        "name": "custody.decide",
+        "payload": {
+          "$ref": "../schemas/bodies/custody.decide.schema.json"
+        },
+        "summary": "The lead reassigns a task or adopts late work."
+      },
+      "custody_decide_reply": {
+        "name": "custody.decide.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/custody.decide.reply.schema.json"
+        }
+      },
       "custody_moved": {
         "name": "custody.moved",
         "payload": {
           "$ref": "../schemas/bodies/custody.moved.schema.json"
         },
         "summary": "Tells a former holder that its task moved; later results are kept as late work."
+      },
+      "debug_dump": {
+        "name": "debug.dump",
+        "payload": {
+          "$ref": "../schemas/bodies/debug.dump.schema.json"
+        },
+        "summary": "Turn an agent's diagnostic context dumps on or off."
+      },
+      "debug_dump_reply": {
+        "name": "debug.dump.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/debug.dump.reply.schema.json"
+        }
       },
       "delivery_receipt": {
         "name": "delivery.receipt",
@@ -353,12 +1094,519 @@
         },
         "summary": "A receiver refused a message; sent back to its sender."
       },
+      "heartbeat_items_add": {
+        "name": "heartbeat_items.add",
+        "payload": {
+          "$ref": "../schemas/bodies/heartbeat_items.add.schema.json"
+        },
+        "summary": "The lead adds a heartbeat item."
+      },
+      "heartbeat_items_add_reply": {
+        "name": "heartbeat_items.add.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/heartbeat_items.add.reply.schema.json"
+        }
+      },
+      "heartbeat_items_disable": {
+        "name": "heartbeat_items.disable",
+        "payload": {
+          "$ref": "../schemas/bodies/heartbeat_items.disable.schema.json"
+        },
+        "summary": "The lead disables a heartbeat item."
+      },
+      "heartbeat_items_disable_reply": {
+        "name": "heartbeat_items.disable.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/heartbeat_items.disable.reply.schema.json"
+        }
+      },
+      "heartbeat_items_enable": {
+        "name": "heartbeat_items.enable",
+        "payload": {
+          "$ref": "../schemas/bodies/heartbeat_items.enable.schema.json"
+        },
+        "summary": "The lead enables a heartbeat item."
+      },
+      "heartbeat_items_enable_reply": {
+        "name": "heartbeat_items.enable.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/heartbeat_items.enable.reply.schema.json"
+        }
+      },
+      "heartbeat_items_remove": {
+        "name": "heartbeat_items.remove",
+        "payload": {
+          "$ref": "../schemas/bodies/heartbeat_items.remove.schema.json"
+        },
+        "summary": "The lead removes a heartbeat item."
+      },
+      "heartbeat_items_remove_reply": {
+        "name": "heartbeat_items.remove.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/heartbeat_items.remove.reply.schema.json"
+        }
+      },
+      "heartbeat_items_update": {
+        "name": "heartbeat_items.update",
+        "payload": {
+          "$ref": "../schemas/bodies/heartbeat_items.update.schema.json"
+        },
+        "summary": "The lead changes a heartbeat item."
+      },
+      "heartbeat_items_update_reply": {
+        "name": "heartbeat_items.update.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/heartbeat_items.update.reply.schema.json"
+        }
+      },
+      "intent_set": {
+        "name": "intent.set",
+        "payload": {
+          "$ref": "../schemas/bodies/intent.set.schema.json"
+        },
+        "summary": "The lead states a request's current intent."
+      },
+      "intent_set_reply": {
+        "name": "intent.set.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/intent.set.reply.schema.json"
+        }
+      },
+      "knowledge_add_note": {
+        "name": "knowledge.add_note",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.add_note.schema.json"
+        },
+        "summary": "Add a note to a knowledge page."
+      },
+      "knowledge_add_note_reply": {
+        "name": "knowledge.add_note.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.add_note.reply.schema.json"
+        }
+      },
+      "knowledge_archive": {
+        "name": "knowledge.archive",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.archive.schema.json"
+        },
+        "summary": "Archive a knowledge page."
+      },
+      "knowledge_archive_reply": {
+        "name": "knowledge.archive.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.archive.reply.schema.json"
+        }
+      },
+      "knowledge_count_contributions": {
+        "name": "knowledge.count_contributions",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.count_contributions.schema.json"
+        },
+        "summary": "How many contributions wait for a curator."
+      },
+      "knowledge_count_contributions_reply": {
+        "name": "knowledge.count_contributions.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.count_contributions.reply.schema.json"
+        }
+      },
+      "knowledge_freeze": {
+        "name": "knowledge.freeze",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.freeze.schema.json"
+        },
+        "summary": "A curator freezes a page."
+      },
+      "knowledge_freeze_reply": {
+        "name": "knowledge.freeze.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.freeze.reply.schema.json"
+        }
+      },
+      "knowledge_history": {
+        "name": "knowledge.history",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.history.schema.json"
+        },
+        "summary": "A knowledge page's revisions."
+      },
+      "knowledge_history_reply": {
+        "name": "knowledge.history.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.history.reply.schema.json"
+        }
+      },
+      "knowledge_list": {
+        "name": "knowledge.list",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.list.schema.json"
+        },
+        "summary": "List knowledge pages."
+      },
+      "knowledge_list_contributions": {
+        "name": "knowledge.list_contributions",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.list_contributions.schema.json"
+        },
+        "summary": "Contributions waiting for a curator."
+      },
+      "knowledge_list_contributions_reply": {
+        "name": "knowledge.list_contributions.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.list_contributions.reply.schema.json"
+        }
+      },
+      "knowledge_list_reply": {
+        "name": "knowledge.list.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.list.reply.schema.json"
+        }
+      },
+      "knowledge_merge": {
+        "name": "knowledge.merge",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.merge.schema.json"
+        },
+        "summary": "A curator merges a page into another."
+      },
+      "knowledge_merge_reply": {
+        "name": "knowledge.merge.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.merge.reply.schema.json"
+        }
+      },
+      "knowledge_publish_contribution": {
+        "name": "knowledge.publish_contribution",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.publish_contribution.schema.json"
+        },
+        "summary": "Publish a contribution, edited or as it is."
+      },
+      "knowledge_publish_contribution_reply": {
+        "name": "knowledge.publish_contribution.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.publish_contribution.reply.schema.json"
+        }
+      },
+      "knowledge_read": {
+        "name": "knowledge.read",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.read.schema.json"
+        },
+        "summary": "Read a knowledge page."
+      },
+      "knowledge_read_contribution": {
+        "name": "knowledge.read_contribution",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.read_contribution.schema.json"
+        },
+        "summary": "Read one contribution."
+      },
+      "knowledge_read_contribution_reply": {
+        "name": "knowledge.read_contribution.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.read_contribution.reply.schema.json"
+        }
+      },
+      "knowledge_read_reply": {
+        "name": "knowledge.read.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.read.reply.schema.json"
+        }
+      },
+      "knowledge_reject_contribution": {
+        "name": "knowledge.reject_contribution",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.reject_contribution.schema.json"
+        },
+        "summary": "A curator rejects a contribution."
+      },
+      "knowledge_reject_contribution_reply": {
+        "name": "knowledge.reject_contribution.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.reject_contribution.reply.schema.json"
+        }
+      },
+      "knowledge_resolve_note": {
+        "name": "knowledge.resolve_note",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.resolve_note.schema.json"
+        },
+        "summary": "A curator resolves a note on a page."
+      },
+      "knowledge_resolve_note_reply": {
+        "name": "knowledge.resolve_note.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.resolve_note.reply.schema.json"
+        }
+      },
+      "knowledge_revert": {
+        "name": "knowledge.revert",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.revert.schema.json"
+        },
+        "summary": "Revert a knowledge page to an earlier revision."
+      },
+      "knowledge_revert_reply": {
+        "name": "knowledge.revert.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.revert.reply.schema.json"
+        }
+      },
+      "knowledge_unfreeze": {
+        "name": "knowledge.unfreeze",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.unfreeze.schema.json"
+        },
+        "summary": "A curator unfreezes a page."
+      },
+      "knowledge_unfreeze_reply": {
+        "name": "knowledge.unfreeze.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.unfreeze.reply.schema.json"
+        }
+      },
+      "knowledge_withdraw_contribution": {
+        "name": "knowledge.withdraw_contribution",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.withdraw_contribution.schema.json"
+        },
+        "summary": "Withdraw one's own contribution."
+      },
+      "knowledge_withdraw_contribution_reply": {
+        "name": "knowledge.withdraw_contribution.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.withdraw_contribution.reply.schema.json"
+        }
+      },
+      "knowledge_write": {
+        "name": "knowledge.write",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.write.schema.json"
+        },
+        "summary": "Create or edit a knowledge page."
+      },
+      "knowledge_write_reply": {
+        "name": "knowledge.write.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/knowledge.write.reply.schema.json"
+        }
+      },
       "ledger_fact": {
         "name": "ledger.fact",
         "payload": {
           "$ref": "../schemas/bodies/ledger.fact.schema.json"
         },
         "summary": "A fact for an agent's work ledger from the team services."
+      },
+      "memory_create": {
+        "name": "memory.create",
+        "payload": {
+          "$ref": "../schemas/bodies/memory.create.schema.json"
+        },
+        "summary": "Add a memory fact."
+      },
+      "memory_create_reply": {
+        "name": "memory.create.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/memory.create.reply.schema.json"
+        }
+      },
+      "memory_delete": {
+        "name": "memory.delete",
+        "payload": {
+          "$ref": "../schemas/bodies/memory.delete.schema.json"
+        },
+        "summary": "Delete a memory fact."
+      },
+      "memory_delete_reply": {
+        "name": "memory.delete.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/memory.delete.reply.schema.json"
+        }
+      },
+      "memory_list": {
+        "name": "memory.list",
+        "payload": {
+          "$ref": "../schemas/bodies/memory.list.schema.json"
+        },
+        "summary": "List a memory bank's facts."
+      },
+      "memory_list_reply": {
+        "name": "memory.list.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/memory.list.reply.schema.json"
+        }
+      },
+      "memory_replace": {
+        "name": "memory.replace",
+        "payload": {
+          "$ref": "../schemas/bodies/memory.replace.schema.json"
+        },
+        "summary": "Replace a memory fact's text or tags."
+      },
+      "memory_replace_reply": {
+        "name": "memory.replace.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/memory.replace.reply.schema.json"
+        }
+      },
+      "memory_show": {
+        "name": "memory.show",
+        "payload": {
+          "$ref": "../schemas/bodies/memory.show.schema.json"
+        },
+        "summary": "Show one memory fact."
+      },
+      "memory_show_reply": {
+        "name": "memory.show.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/memory.show.reply.schema.json"
+        }
+      },
+      "memory_undo": {
+        "name": "memory.undo",
+        "payload": {
+          "$ref": "../schemas/bodies/memory.undo.schema.json"
+        },
+        "summary": "Undo one memory change."
+      },
+      "memory_undo_reply": {
+        "name": "memory.undo.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/memory.undo.reply.schema.json"
+        }
+      },
+      "objectives_abandon": {
+        "name": "objectives.abandon",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.abandon.schema.json"
+        },
+        "summary": "Abandon one of the person's Objectives."
+      },
+      "objectives_abandon_reply": {
+        "name": "objectives.abandon.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.abandon.reply.schema.json"
+        }
+      },
+      "objectives_create": {
+        "name": "objectives.create",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.create.schema.json"
+        },
+        "summary": "The lead creates an Objective."
+      },
+      "objectives_create_reply": {
+        "name": "objectives.create.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.create.reply.schema.json"
+        }
+      },
+      "objectives_delete": {
+        "name": "objectives.delete",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.delete.schema.json"
+        },
+        "summary": "Delete one of the person's Objectives."
+      },
+      "objectives_delete_reply": {
+        "name": "objectives.delete.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.delete.reply.schema.json"
+        }
+      },
+      "objectives_list": {
+        "name": "objectives.list",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.list.schema.json"
+        },
+        "summary": "The person's Objectives."
+      },
+      "objectives_list_reply": {
+        "name": "objectives.list.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.list.reply.schema.json"
+        }
+      },
+      "objectives_pause": {
+        "name": "objectives.pause",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.pause.schema.json"
+        },
+        "summary": "Pause one of the person's Objectives."
+      },
+      "objectives_pause_reply": {
+        "name": "objectives.pause.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.pause.reply.schema.json"
+        }
+      },
+      "objectives_resume": {
+        "name": "objectives.resume",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.resume.schema.json"
+        },
+        "summary": "Resume one of the person's Objectives."
+      },
+      "objectives_resume_reply": {
+        "name": "objectives.resume.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.resume.reply.schema.json"
+        }
+      },
+      "objectives_stop": {
+        "name": "objectives.stop",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.stop.schema.json"
+        },
+        "summary": "Stop one of the person's Objectives."
+      },
+      "objectives_stop_reply": {
+        "name": "objectives.stop.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.stop.reply.schema.json"
+        }
+      },
+      "objectives_update_progress": {
+        "name": "objectives.update_progress",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.update_progress.schema.json"
+        },
+        "summary": "The lead records progress on an Objective."
+      },
+      "objectives_update_progress_reply": {
+        "name": "objectives.update_progress.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.update_progress.reply.schema.json"
+        }
+      },
+      "objectives_update_status": {
+        "name": "objectives.update_status",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.update_status.schema.json"
+        },
+        "summary": "The lead changes an Objective's status."
+      },
+      "objectives_update_status_reply": {
+        "name": "objectives.update_status.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/objectives.update_status.reply.schema.json"
+        }
+      },
+      "people_set_standing": {
+        "name": "people.set_standing",
+        "payload": {
+          "$ref": "../schemas/bodies/people.set_standing.schema.json"
+        },
+        "summary": "Settle a person's work after their standing changed."
+      },
+      "people_set_standing_reply": {
+        "name": "people.set_standing.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/people.set_standing.reply.schema.json"
+        }
       },
       "person_notify": {
         "name": "person.notify",
@@ -374,12 +1622,181 @@
         },
         "summary": "A question ended without an answer."
       },
+      "requests_pause": {
+        "name": "requests.pause",
+        "payload": {
+          "$ref": "../schemas/bodies/requests.pause.schema.json"
+        },
+        "summary": "The lead pauses its own request's work."
+      },
+      "requests_pause_reply": {
+        "name": "requests.pause.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/requests.pause.reply.schema.json"
+        }
+      },
+      "requests_resume": {
+        "name": "requests.resume",
+        "payload": {
+          "$ref": "../schemas/bodies/requests.resume.schema.json"
+        },
+        "summary": "The lead resumes its own request's work."
+      },
+      "requests_resume_reply": {
+        "name": "requests.resume.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/requests.resume.reply.schema.json"
+        }
+      },
+      "run_context_sign": {
+        "name": "run_context.sign",
+        "payload": {
+          "$ref": "../schemas/bodies/run_context.sign.schema.json"
+        },
+        "summary": "A worker running a scheduled job asks for the run's authority token."
+      },
+      "run_context_sign_reply": {
+        "name": "run_context.sign.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/run_context.sign.reply.schema.json"
+        }
+      },
+      "schedules_disable": {
+        "name": "schedules.disable",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.disable.schema.json"
+        },
+        "summary": "Disable a schedule."
+      },
+      "schedules_disable_reply": {
+        "name": "schedules.disable.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.disable.reply.schema.json"
+        }
+      },
+      "schedules_install": {
+        "name": "schedules.install",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.install.schema.json"
+        },
+        "summary": "Install a schedule: create, replace, ensure or refresh it."
+      },
+      "schedules_install_reply": {
+        "name": "schedules.install.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.install.reply.schema.json"
+        }
+      },
+      "schedules_list": {
+        "name": "schedules.list",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.list.schema.json"
+        },
+        "summary": "The schedules the caller may see."
+      },
+      "schedules_list_reply": {
+        "name": "schedules.list.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.list.reply.schema.json"
+        }
+      },
+      "schedules_pause": {
+        "name": "schedules.pause",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.pause.schema.json"
+        },
+        "summary": "Pause a schedule until a time."
+      },
+      "schedules_pause_reply": {
+        "name": "schedules.pause.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.pause.reply.schema.json"
+        }
+      },
+      "schedules_remove": {
+        "name": "schedules.remove",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.remove.schema.json"
+        },
+        "summary": "Remove a schedule."
+      },
+      "schedules_remove_reply": {
+        "name": "schedules.remove.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.remove.reply.schema.json"
+        }
+      },
+      "schedules_resume": {
+        "name": "schedules.resume",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.resume.schema.json"
+        },
+        "summary": "Resume a schedule."
+      },
+      "schedules_resume_reply": {
+        "name": "schedules.resume.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.resume.reply.schema.json"
+        }
+      },
+      "schedules_set_worker": {
+        "name": "schedules.set_worker",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.set_worker.schema.json"
+        },
+        "summary": "Choose which worker runs a schedule."
+      },
+      "schedules_set_worker_reply": {
+        "name": "schedules.set_worker.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.set_worker.reply.schema.json"
+        }
+      },
+      "schedules_update": {
+        "name": "schedules.update",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.update.schema.json"
+        },
+        "summary": "Change a schedule's instruction, timing or delivery."
+      },
+      "schedules_update_reply": {
+        "name": "schedules.update.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/schedules.update.reply.schema.json"
+        }
+      },
       "skills_changed": {
         "name": "skills.changed",
         "payload": {
           "$ref": "../schemas/bodies/skills.changed.schema.json"
         },
         "summary": "Hint that a managed skill was installed or removed. Receivers verify the stored receipt before they refresh."
+      },
+      "staged_changes_apply": {
+        "name": "staged_changes.apply",
+        "payload": {
+          "$ref": "../schemas/bodies/staged_changes.apply.schema.json"
+        },
+        "summary": "The lead applies a staged change the person reviewed."
+      },
+      "staged_changes_apply_reply": {
+        "name": "staged_changes.apply.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/staged_changes.apply.reply.schema.json"
+        }
+      },
+      "steering_decide": {
+        "name": "steering.decide",
+        "payload": {
+          "$ref": "../schemas/bodies/steering.decide.schema.json"
+        },
+        "summary": "The lead decides what each held task changes, or extends the hold once."
+      },
+      "steering_decide_reply": {
+        "name": "steering.decide.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/steering.decide.reply.schema.json"
+        }
       },
       "task_account": {
         "name": "task.account",
@@ -408,6 +1825,19 @@
           "$ref": "../schemas/bodies/task.handback.schema.json"
         },
         "summary": "A holder that lost its lease returns a task."
+      },
+      "task_probe": {
+        "name": "task.probe",
+        "payload": {
+          "$ref": "../schemas/bodies/task.probe.schema.json"
+        },
+        "summary": "Whether the holder still has a task, asked by the watchdog."
+      },
+      "task_probe_reply": {
+        "name": "task.probe.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/task.probe.reply.schema.json"
+        }
       },
       "task_progress": {
         "name": "task.progress",
@@ -458,6 +1888,123 @@
         },
         "summary": "Stop one task. Sent only to the task's current holder."
       },
+      "tasks_cancel": {
+        "name": "tasks.cancel",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.cancel.schema.json"
+        },
+        "summary": "Stop a task, a conversation's work, a delivery's work or all of the person's work."
+      },
+      "tasks_cancel_reply": {
+        "name": "tasks.cancel.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.cancel.reply.schema.json"
+        }
+      },
+      "tasks_inventory": {
+        "name": "tasks.inventory",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.inventory.schema.json"
+        },
+        "summary": "The person's running work and schedules."
+      },
+      "tasks_inventory_reply": {
+        "name": "tasks.inventory.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.inventory.reply.schema.json"
+        }
+      },
+      "tasks_list": {
+        "name": "tasks.list",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.list.schema.json"
+        },
+        "summary": "One agent's task queue."
+      },
+      "tasks_list_finished": {
+        "name": "tasks.list_finished",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.list_finished.schema.json"
+        },
+        "summary": "One agent's finished tasks."
+      },
+      "tasks_list_finished_reply": {
+        "name": "tasks.list_finished.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.list_finished.reply.schema.json"
+        }
+      },
+      "tasks_list_reply": {
+        "name": "tasks.list.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.list.reply.schema.json"
+        }
+      },
+      "tasks_probe": {
+        "name": "tasks.probe",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.probe.schema.json"
+        },
+        "summary": "Whether a task the person owns is still known."
+      },
+      "tasks_probe_reply": {
+        "name": "tasks.probe.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.probe.reply.schema.json"
+        }
+      },
+      "tasks_progress": {
+        "name": "tasks.progress",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.progress.schema.json"
+        },
+        "summary": "Where the person's request in one conversation stands."
+      },
+      "tasks_progress_reply": {
+        "name": "tasks.progress.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.progress.reply.schema.json"
+        }
+      },
+      "tasks_purge": {
+        "name": "tasks.purge",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.purge.schema.json"
+        },
+        "summary": "Remove every queued task that is not running from an agent's queue."
+      },
+      "tasks_purge_reply": {
+        "name": "tasks.purge.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.purge.reply.schema.json"
+        }
+      },
+      "tasks_remove": {
+        "name": "tasks.remove",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.remove.schema.json"
+        },
+        "summary": "Remove one queued task from an agent's queue."
+      },
+      "tasks_remove_reply": {
+        "name": "tasks.remove.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.remove.reply.schema.json"
+        }
+      },
+      "tasks_steer": {
+        "name": "tasks.steer",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.steer.schema.json"
+        },
+        "summary": "The person's guidance for a running request; stored before it is accepted."
+      },
+      "tasks_steer_reply": {
+        "name": "tasks.steer.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/tasks.steer.reply.schema.json"
+        }
+      },
       "tool_setup_request": {
         "name": "tool.setup.request",
         "payload": {
@@ -471,6 +2018,45 @@
           "$ref": "../schemas/bodies/tool.setup.result.schema.json"
         },
         "summary": "What became of a tool setup."
+      },
+      "topics_find_threads": {
+        "name": "topics.find_threads",
+        "payload": {
+          "$ref": "../schemas/bodies/topics.find_threads.schema.json"
+        },
+        "summary": "Threads with the given tags."
+      },
+      "topics_find_threads_reply": {
+        "name": "topics.find_threads.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/topics.find_threads.reply.schema.json"
+        }
+      },
+      "topics_list_tags": {
+        "name": "topics.list_tags",
+        "payload": {
+          "$ref": "../schemas/bodies/topics.list_tags.schema.json"
+        },
+        "summary": "The thread tags in use."
+      },
+      "topics_list_tags_reply": {
+        "name": "topics.list_tags.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/topics.list_tags.reply.schema.json"
+        }
+      },
+      "topics_tag_thread": {
+        "name": "topics.tag_thread",
+        "payload": {
+          "$ref": "../schemas/bodies/topics.tag_thread.schema.json"
+        },
+        "summary": "Tag a thread."
+      },
+      "topics_tag_thread_reply": {
+        "name": "topics.tag_thread.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/topics.tag_thread.reply.schema.json"
+        }
       }
     }
   },
@@ -498,10 +2084,52 @@
         "$ref": "#/channels/access_resolved"
       }
     },
+    "receive_access_withdraw": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/access_withdraw"
+      }
+    },
+    "receive_agent_exit": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/agent_exit"
+      }
+    },
     "receive_agent_pause": {
       "action": "receive",
       "channel": {
         "$ref": "#/channels/agent_pause"
+      }
+    },
+    "receive_agent_resume": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/agent_resume"
+      }
+    },
+    "receive_agent_status": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/agent_status"
+      }
+    },
+    "receive_conflicts_cancel": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/conflicts_cancel"
+      }
+    },
+    "receive_conflicts_decide": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/conflicts_decide"
+      }
+    },
+    "receive_conflicts_list": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/conflicts_list"
       }
     },
     "receive_credential_form_request": {
@@ -516,10 +2144,22 @@
         "$ref": "#/channels/credential_form_result"
       }
     },
+    "receive_custody_decide": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/custody_decide"
+      }
+    },
     "receive_custody_moved": {
       "action": "receive",
       "channel": {
         "$ref": "#/channels/custody_moved"
+      }
+    },
+    "receive_debug_dump": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/debug_dump"
       }
     },
     "receive_delivery_receipt": {
@@ -534,10 +2174,244 @@
         "$ref": "#/channels/delivery_refused"
       }
     },
+    "receive_heartbeat_items_add": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/heartbeat_items_add"
+      }
+    },
+    "receive_heartbeat_items_disable": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/heartbeat_items_disable"
+      }
+    },
+    "receive_heartbeat_items_enable": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/heartbeat_items_enable"
+      }
+    },
+    "receive_heartbeat_items_remove": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/heartbeat_items_remove"
+      }
+    },
+    "receive_heartbeat_items_update": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/heartbeat_items_update"
+      }
+    },
+    "receive_intent_set": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/intent_set"
+      }
+    },
+    "receive_knowledge_add_note": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_add_note"
+      }
+    },
+    "receive_knowledge_archive": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_archive"
+      }
+    },
+    "receive_knowledge_count_contributions": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_count_contributions"
+      }
+    },
+    "receive_knowledge_freeze": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_freeze"
+      }
+    },
+    "receive_knowledge_history": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_history"
+      }
+    },
+    "receive_knowledge_list": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_list"
+      }
+    },
+    "receive_knowledge_list_contributions": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_list_contributions"
+      }
+    },
+    "receive_knowledge_merge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_merge"
+      }
+    },
+    "receive_knowledge_publish_contribution": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_publish_contribution"
+      }
+    },
+    "receive_knowledge_read": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_read"
+      }
+    },
+    "receive_knowledge_read_contribution": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_read_contribution"
+      }
+    },
+    "receive_knowledge_reject_contribution": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_reject_contribution"
+      }
+    },
+    "receive_knowledge_resolve_note": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_resolve_note"
+      }
+    },
+    "receive_knowledge_revert": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_revert"
+      }
+    },
+    "receive_knowledge_unfreeze": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_unfreeze"
+      }
+    },
+    "receive_knowledge_withdraw_contribution": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_withdraw_contribution"
+      }
+    },
+    "receive_knowledge_write": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/knowledge_write"
+      }
+    },
     "receive_ledger_fact": {
       "action": "receive",
       "channel": {
         "$ref": "#/channels/ledger_fact"
+      }
+    },
+    "receive_memory_create": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/memory_create"
+      }
+    },
+    "receive_memory_delete": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/memory_delete"
+      }
+    },
+    "receive_memory_list": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/memory_list"
+      }
+    },
+    "receive_memory_replace": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/memory_replace"
+      }
+    },
+    "receive_memory_show": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/memory_show"
+      }
+    },
+    "receive_memory_undo": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/memory_undo"
+      }
+    },
+    "receive_objectives_abandon": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/objectives_abandon"
+      }
+    },
+    "receive_objectives_create": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/objectives_create"
+      }
+    },
+    "receive_objectives_delete": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/objectives_delete"
+      }
+    },
+    "receive_objectives_list": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/objectives_list"
+      }
+    },
+    "receive_objectives_pause": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/objectives_pause"
+      }
+    },
+    "receive_objectives_resume": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/objectives_resume"
+      }
+    },
+    "receive_objectives_stop": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/objectives_stop"
+      }
+    },
+    "receive_objectives_update_progress": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/objectives_update_progress"
+      }
+    },
+    "receive_objectives_update_status": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/objectives_update_status"
+      }
+    },
+    "receive_people_set_standing": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/people_set_standing"
       }
     },
     "receive_person_notify": {
@@ -552,10 +2426,88 @@
         "$ref": "#/channels/question_closed"
       }
     },
+    "receive_requests_pause": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/requests_pause"
+      }
+    },
+    "receive_requests_resume": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/requests_resume"
+      }
+    },
+    "receive_run_context_sign": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/run_context_sign"
+      }
+    },
+    "receive_schedules_disable": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/schedules_disable"
+      }
+    },
+    "receive_schedules_install": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/schedules_install"
+      }
+    },
+    "receive_schedules_list": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/schedules_list"
+      }
+    },
+    "receive_schedules_pause": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/schedules_pause"
+      }
+    },
+    "receive_schedules_remove": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/schedules_remove"
+      }
+    },
+    "receive_schedules_resume": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/schedules_resume"
+      }
+    },
+    "receive_schedules_set_worker": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/schedules_set_worker"
+      }
+    },
+    "receive_schedules_update": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/schedules_update"
+      }
+    },
     "receive_skills_changed": {
       "action": "receive",
       "channel": {
         "$ref": "#/channels/skills_changed"
+      }
+    },
+    "receive_staged_changes_apply": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/staged_changes_apply"
+      }
+    },
+    "receive_steering_decide": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/steering_decide"
       }
     },
     "receive_task_account": {
@@ -580,6 +2532,12 @@
       "action": "receive",
       "channel": {
         "$ref": "#/channels/task_handback"
+      }
+    },
+    "receive_task_probe": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_probe"
       }
     },
     "receive_task_progress": {
@@ -624,6 +2582,60 @@
         "$ref": "#/channels/task_stop"
       }
     },
+    "receive_tasks_cancel": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/tasks_cancel"
+      }
+    },
+    "receive_tasks_inventory": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/tasks_inventory"
+      }
+    },
+    "receive_tasks_list": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/tasks_list"
+      }
+    },
+    "receive_tasks_list_finished": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/tasks_list_finished"
+      }
+    },
+    "receive_tasks_probe": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/tasks_probe"
+      }
+    },
+    "receive_tasks_progress": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/tasks_progress"
+      }
+    },
+    "receive_tasks_purge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/tasks_purge"
+      }
+    },
+    "receive_tasks_remove": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/tasks_remove"
+      }
+    },
+    "receive_tasks_steer": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/tasks_steer"
+      }
+    },
     "receive_tool_setup_request": {
       "action": "receive",
       "channel": {
@@ -634,6 +2646,24 @@
       "action": "receive",
       "channel": {
         "$ref": "#/channels/tool_setup_result"
+      }
+    },
+    "receive_topics_find_threads": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/topics_find_threads"
+      }
+    },
+    "receive_topics_list_tags": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/topics_list_tags"
+      }
+    },
+    "receive_topics_tag_thread": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/topics_tag_thread"
       }
     },
     "send_access_decision": {
@@ -654,6 +2684,32 @@
         "$ref": "#/channels/access_resolved"
       }
     },
+    "send_access_withdraw": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/access_withdraw"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/access_withdraw_reply"
+          }
+        ]
+      }
+    },
+    "send_agent_exit": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/agent_exit"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/agent_exit_reply"
+          }
+        ]
+      }
+    },
     "send_agent_pause": {
       "action": "send",
       "channel": {
@@ -663,6 +2719,71 @@
         "messages": [
           {
             "$ref": "#/components/messages/agent_pause_reply"
+          }
+        ]
+      }
+    },
+    "send_agent_resume": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/agent_resume"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/agent_resume_reply"
+          }
+        ]
+      }
+    },
+    "send_agent_status": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/agent_status"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/agent_status_reply"
+          }
+        ]
+      }
+    },
+    "send_conflicts_cancel": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/conflicts_cancel"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/conflicts_cancel_reply"
+          }
+        ]
+      }
+    },
+    "send_conflicts_decide": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/conflicts_decide"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/conflicts_decide_reply"
+          }
+        ]
+      }
+    },
+    "send_conflicts_list": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/conflicts_list"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/conflicts_list_reply"
           }
         ]
       }
@@ -679,10 +2800,36 @@
         "$ref": "#/channels/credential_form_result"
       }
     },
+    "send_custody_decide": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/custody_decide"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/custody_decide_reply"
+          }
+        ]
+      }
+    },
     "send_custody_moved": {
       "action": "send",
       "channel": {
         "$ref": "#/channels/custody_moved"
+      }
+    },
+    "send_debug_dump": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/debug_dump"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/debug_dump_reply"
+          }
+        ]
       }
     },
     "send_delivery_receipt": {
@@ -697,10 +2844,517 @@
         "$ref": "#/channels/delivery_refused"
       }
     },
+    "send_heartbeat_items_add": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/heartbeat_items_add"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/heartbeat_items_add_reply"
+          }
+        ]
+      }
+    },
+    "send_heartbeat_items_disable": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/heartbeat_items_disable"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/heartbeat_items_disable_reply"
+          }
+        ]
+      }
+    },
+    "send_heartbeat_items_enable": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/heartbeat_items_enable"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/heartbeat_items_enable_reply"
+          }
+        ]
+      }
+    },
+    "send_heartbeat_items_remove": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/heartbeat_items_remove"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/heartbeat_items_remove_reply"
+          }
+        ]
+      }
+    },
+    "send_heartbeat_items_update": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/heartbeat_items_update"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/heartbeat_items_update_reply"
+          }
+        ]
+      }
+    },
+    "send_intent_set": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/intent_set"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/intent_set_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_add_note": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_add_note"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_add_note_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_archive": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_archive"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_archive_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_count_contributions": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_count_contributions"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_count_contributions_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_freeze": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_freeze"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_freeze_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_history": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_history"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_history_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_list": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_list"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_list_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_list_contributions": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_list_contributions"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_list_contributions_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_merge": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_merge"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_merge_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_publish_contribution": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_publish_contribution"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_publish_contribution_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_read": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_read"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_read_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_read_contribution": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_read_contribution"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_read_contribution_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_reject_contribution": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_reject_contribution"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_reject_contribution_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_resolve_note": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_resolve_note"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_resolve_note_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_revert": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_revert"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_revert_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_unfreeze": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_unfreeze"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_unfreeze_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_withdraw_contribution": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_withdraw_contribution"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_withdraw_contribution_reply"
+          }
+        ]
+      }
+    },
+    "send_knowledge_write": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/knowledge_write"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/knowledge_write_reply"
+          }
+        ]
+      }
+    },
     "send_ledger_fact": {
       "action": "send",
       "channel": {
         "$ref": "#/channels/ledger_fact"
+      }
+    },
+    "send_memory_create": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/memory_create"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/memory_create_reply"
+          }
+        ]
+      }
+    },
+    "send_memory_delete": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/memory_delete"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/memory_delete_reply"
+          }
+        ]
+      }
+    },
+    "send_memory_list": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/memory_list"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/memory_list_reply"
+          }
+        ]
+      }
+    },
+    "send_memory_replace": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/memory_replace"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/memory_replace_reply"
+          }
+        ]
+      }
+    },
+    "send_memory_show": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/memory_show"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/memory_show_reply"
+          }
+        ]
+      }
+    },
+    "send_memory_undo": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/memory_undo"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/memory_undo_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_abandon": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/objectives_abandon"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/objectives_abandon_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_create": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/objectives_create"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/objectives_create_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_delete": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/objectives_delete"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/objectives_delete_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_list": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/objectives_list"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/objectives_list_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_pause": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/objectives_pause"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/objectives_pause_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_resume": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/objectives_resume"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/objectives_resume_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_stop": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/objectives_stop"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/objectives_stop_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_update_progress": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/objectives_update_progress"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/objectives_update_progress_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_update_status": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/objectives_update_status"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/objectives_update_status_reply"
+          }
+        ]
+      }
+    },
+    "send_people_set_standing": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/people_set_standing"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/people_set_standing_reply"
+          }
+        ]
       }
     },
     "send_person_notify": {
@@ -715,10 +3369,179 @@
         "$ref": "#/channels/question_closed"
       }
     },
+    "send_requests_pause": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/requests_pause"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/requests_pause_reply"
+          }
+        ]
+      }
+    },
+    "send_requests_resume": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/requests_resume"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/requests_resume_reply"
+          }
+        ]
+      }
+    },
+    "send_run_context_sign": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/run_context_sign"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/run_context_sign_reply"
+          }
+        ]
+      }
+    },
+    "send_schedules_disable": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/schedules_disable"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/schedules_disable_reply"
+          }
+        ]
+      }
+    },
+    "send_schedules_install": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/schedules_install"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/schedules_install_reply"
+          }
+        ]
+      }
+    },
+    "send_schedules_list": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/schedules_list"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/schedules_list_reply"
+          }
+        ]
+      }
+    },
+    "send_schedules_pause": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/schedules_pause"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/schedules_pause_reply"
+          }
+        ]
+      }
+    },
+    "send_schedules_remove": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/schedules_remove"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/schedules_remove_reply"
+          }
+        ]
+      }
+    },
+    "send_schedules_resume": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/schedules_resume"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/schedules_resume_reply"
+          }
+        ]
+      }
+    },
+    "send_schedules_set_worker": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/schedules_set_worker"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/schedules_set_worker_reply"
+          }
+        ]
+      }
+    },
+    "send_schedules_update": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/schedules_update"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/schedules_update_reply"
+          }
+        ]
+      }
+    },
     "send_skills_changed": {
       "action": "send",
       "channel": {
         "$ref": "#/channels/skills_changed"
+      }
+    },
+    "send_staged_changes_apply": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/staged_changes_apply"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/staged_changes_apply_reply"
+          }
+        ]
+      }
+    },
+    "send_steering_decide": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/steering_decide"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/steering_decide_reply"
+          }
+        ]
       }
     },
     "send_task_account": {
@@ -743,6 +3566,19 @@
       "action": "send",
       "channel": {
         "$ref": "#/channels/task_handback"
+      }
+    },
+    "send_task_probe": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_probe"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/task_probe_reply"
+          }
+        ]
       }
     },
     "send_task_progress": {
@@ -787,6 +3623,123 @@
         "$ref": "#/channels/task_stop"
       }
     },
+    "send_tasks_cancel": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/tasks_cancel"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/tasks_cancel_reply"
+          }
+        ]
+      }
+    },
+    "send_tasks_inventory": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/tasks_inventory"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/tasks_inventory_reply"
+          }
+        ]
+      }
+    },
+    "send_tasks_list": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/tasks_list"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/tasks_list_reply"
+          }
+        ]
+      }
+    },
+    "send_tasks_list_finished": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/tasks_list_finished"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/tasks_list_finished_reply"
+          }
+        ]
+      }
+    },
+    "send_tasks_probe": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/tasks_probe"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/tasks_probe_reply"
+          }
+        ]
+      }
+    },
+    "send_tasks_progress": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/tasks_progress"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/tasks_progress_reply"
+          }
+        ]
+      }
+    },
+    "send_tasks_purge": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/tasks_purge"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/tasks_purge_reply"
+          }
+        ]
+      }
+    },
+    "send_tasks_remove": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/tasks_remove"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/tasks_remove_reply"
+          }
+        ]
+      }
+    },
+    "send_tasks_steer": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/tasks_steer"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/tasks_steer_reply"
+          }
+        ]
+      }
+    },
     "send_tool_setup_request": {
       "action": "send",
       "channel": {
@@ -797,6 +3750,45 @@
       "action": "send",
       "channel": {
         "$ref": "#/channels/tool_setup_result"
+      }
+    },
+    "send_topics_find_threads": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/topics_find_threads"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/topics_find_threads_reply"
+          }
+        ]
+      }
+    },
+    "send_topics_list_tags": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/topics_list_tags"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/topics_list_tags_reply"
+          }
+        ]
+      }
+    },
+    "send_topics_tag_thread": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/topics_tag_thread"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/topics_tag_thread_reply"
+          }
+        ]
       }
     }
   }

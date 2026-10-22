@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/people.set_standing.reply.schema.json",
+  "title": "people.set_standing reply",
+  "description": "Settle a person's work after their standing changed.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "settled",
+            "settled_with_problems"
+          ]
+        },
+        "standing": {
+          "type": "string",
+          "enum": [
+            "active",
+            "disabled",
+            "removed"
+          ]
+        },
+        "tasks_stopped": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "schedules_paused": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "schedules_moved": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "grants_revoked": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "requests_closed": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "memory_kept": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "pages_kept": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "threads_closed": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "forms_closed": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "team_schedules_moved": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "schedule_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "schedule_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "new_owner": {
+                "$ref": "../common.schema.json#/$defs/person_ref"
+              }
+            },
+            "required": [
+              "schedule_id",
+              "new_owner"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100
+        },
+        "problems": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "maxItems": 50
+        }
+      },
+      "required": [
+        "outcome",
+        "state",
+        "team_schedules_moved",
+        "problems"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "administrator_required"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

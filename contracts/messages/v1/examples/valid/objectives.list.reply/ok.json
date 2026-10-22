@@ -1,0 +1,55 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.list.reply",
+  "message_id": "01928f3a-7b2c-7414-8000-000000000414",
+  "idempotency_key": "objectives.list:example_1044:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.objectives.list",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "objectives": [
+      {
+        "objective_id": "objective_id_1",
+        "seen_version": "v3",
+        "title": "Example title",
+        "status": "proposed",
+        "horizon": "finite",
+        "priority": "low",
+        "desired_outcome": "Example desired outcome",
+        "progress_summary": "Example progress summary",
+        "subgoals": [
+          "Example subgoals"
+        ],
+        "success_criteria": [
+          "Example success criteria"
+        ],
+        "schedule_ids": [
+          "schedule_ids_1"
+        ],
+        "heartbeat_item_ids": [
+          "heartbeat_item_ids_1"
+        ],
+        "available_actions": [
+          "pause"
+        ]
+      }
+    ]
+  },
+  "causation_id": "01928f3a-7b2c-7413-8000-000000000413",
+  "body_digest": "M7F_vPSGpHgRqeRjeT9gUzGI2zyH2KORdnq16nq-1-0",
+  "signature": "1TUviDPkQrK8-tcfzgxaRFdzVuWxVgkCQ8aQuwy0Zhre4utbnGo9AYpAjtOyVdUbO-0Qs2OJx5LBQ9h_82LIBA"
+}

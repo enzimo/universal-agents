@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/knowledge.resolve_note.schema.json",
+  "title": "knowledge.resolve_note request",
+  "description": "A curator resolves a note on a page.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "space": {
+      "type": "string",
+      "enum": [
+        "team",
+        "personal"
+      ]
+    },
+    "page": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "seen_version": {
+      "$ref": "../common.schema.json#/$defs/record_version"
+    },
+    "note_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    }
+  },
+  "required": [
+    "request_id",
+    "space",
+    "page",
+    "seen_version",
+    "note_id"
+  ],
+  "additionalProperties": false
+}

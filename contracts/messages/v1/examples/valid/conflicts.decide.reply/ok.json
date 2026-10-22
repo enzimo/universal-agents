@@ -1,0 +1,31 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "conflicts.decide.reply",
+  "message_id": "01928f3a-7b2c-74a3-8000-0000000004a3",
+  "idempotency_key": "conflicts.decide:example_1187:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.conflicts.decide",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "state": "decided",
+    "case_id": "case_id_1",
+    "choice": "keep_current"
+  },
+  "causation_id": "01928f3a-7b2c-74a2-8000-0000000004a2",
+  "body_digest": "naNDftFly34iJYTGYTJDiGOEnTgZdqMM96AAQOoaFnU",
+  "signature": "tv3jodjj1HKA4VrMCSWotTYDY7_hdEglNF__ePEFmRhcKLZ1NOsjMGSZld0lTPUx3obadMcZsZLbv7Ij2S-KBg"
+}

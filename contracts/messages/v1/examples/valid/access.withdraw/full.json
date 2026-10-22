@@ -1,0 +1,30 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "access.withdraw",
+  "message_id": "01928f3a-7b2c-74b7-8000-0000000004b7",
+  "idempotency_key": "access.withdraw:example_1207",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.access.withdraw",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_1",
+    "access_request_id": "access_request_id_1",
+    "reason": "Example reason"
+  },
+  "body_digest": "5JtxIgUikYkbZALvSDdzPpsN7tK7s2JQsS6mDw4gLGQ",
+  "signature": "2WDCJ8g7Mf5X1bcJBsda4mphkPMsTgwKkQV3J_MLLA18YFsoP5OW7s_m70dhsQ6g4SEk2rxqHn_rfAR3nSdaAA"
+}

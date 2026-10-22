@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/objectives.update_status.schema.json",
+  "title": "objectives.update_status request",
+  "description": "The lead changes an Objective's status.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "objective_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "seen_version": {
+      "$ref": "../common.schema.json#/$defs/record_version"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "proposed",
+        "active",
+        "paused",
+        "blocked",
+        "satisfied",
+        "failed",
+        "cancelled",
+        "abandoned"
+      ]
+    },
+    "note": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "confirmed": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "request_id",
+    "objective_id",
+    "seen_version",
+    "status",
+    "confirmed"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/tasks.probe.reply.schema.json",
+  "title": "tasks.probe reply",
+  "description": "Whether a task the person owns is still known.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "known": {
+          "type": "boolean"
+        },
+        "state": {
+          "$ref": "../common.schema.json#/$defs/progress_state"
+        },
+        "last_update_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "outcome",
+        "known"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "steering.decide.reply",
+  "message_id": "01928f3a-7b2c-74af-8000-0000000004af",
+  "idempotency_key": "steering.decide:example_1199:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.steering.decide",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "state": "decided",
+    "hold_until": "2026-10-22T04:30:00.000Z",
+    "sent": [
+      {
+        "task_id": "task_id_1",
+        "steer_id": "steer_id_1"
+      }
+    ],
+    "unreachable": [
+      "unreachable_1"
+    ]
+  },
+  "causation_id": "01928f3a-7b2c-74ae-8000-0000000004ae",
+  "body_digest": "xl5O7EpteHRUzriHbYDt2P_8oMKQgUZZute5YsUj_1E",
+  "signature": "bgKhiMQZqxPZqAD8eTYAljuKqW4rPGw3SzgDQW1HdcIHSNGkAIG58pNJn9H7dY5WU6r4DZCwCWKFZ5rJrEJOCg"
+}

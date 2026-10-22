@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/knowledge.withdraw_contribution.schema.json",
+  "title": "knowledge.withdraw_contribution request",
+  "description": "Withdraw one's own contribution.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "contribution_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    }
+  },
+  "required": [
+    "request_id",
+    "contribution_id"
+  ],
+  "additionalProperties": false
+}

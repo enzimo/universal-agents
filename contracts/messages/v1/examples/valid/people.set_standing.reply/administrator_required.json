@@ -1,0 +1,29 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "people.set_standing.reply",
+  "message_id": "01928f3a-7b2c-7499-8000-000000000499",
+  "idempotency_key": "people.set_standing:example_1177:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.people.set_standing",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "administrator_required",
+    "message": "Example short text"
+  },
+  "causation_id": "01928f3a-7b2c-7497-8000-000000000497",
+  "body_digest": "q-sgQ619xpD2lGikkTNRDydUy8c_ChqrP14xVuB6ySY",
+  "signature": "ucaE8fKDSe6eoP-imyJ2Knqbb3miO3lVHRYo1vBGCPufUPpWnYFskvkTVH-io_uMjsZtg5Yeae0Pnu8ofyWCAw"
+}

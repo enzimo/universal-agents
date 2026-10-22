@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/topics.find_threads.schema.json",
+  "title": "topics.find_threads request",
+  "description": "Threads with the given tags.",
+  "type": "object",
+  "properties": {
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+      },
+      "maxItems": 10,
+      "minItems": 1
+    }
+  },
+  "required": [
+    "tags"
+  ],
+  "additionalProperties": false
+}

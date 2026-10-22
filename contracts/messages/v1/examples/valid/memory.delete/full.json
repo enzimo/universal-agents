@@ -1,0 +1,30 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "memory.delete",
+  "message_id": "01928f3a-7b2c-7455-8000-000000000455",
+  "idempotency_key": "memory.delete:example_1109",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.memory.delete",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_1",
+    "bank": "coremem",
+    "memory_id": 3,
+    "seen_version": "v3"
+  },
+  "body_digest": "RE8F1D_c4OrG93utVqcI2GfkPyC3ifOjvO83suDy_rA",
+  "signature": "I1XroL9evEZY5aXuDlRJr3lCKrPu8LL45hupza8dCi4hZHrK57ZnXi1eH4pSN_JpKoAQDwzaeXbUkA1QS7_tBA"
+}

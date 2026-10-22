@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/knowledge.publish_contribution.schema.json",
+  "title": "knowledge.publish_contribution request",
+  "description": "Publish a contribution, edited or as it is.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "contribution_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "seen_version": {
+      "$ref": "../common.schema.json#/$defs/record_version"
+    },
+    "edited": {
+      "type": "boolean"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 4000
+    },
+    "body": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32768
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "maxItems": 100
+    }
+  },
+  "required": [
+    "request_id",
+    "contribution_id",
+    "seen_version",
+    "edited"
+  ],
+  "additionalProperties": false
+}

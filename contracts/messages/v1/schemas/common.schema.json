@@ -942,6 +942,30 @@
         "counters"
       ],
       "additionalProperties": false
+    },
+    "record_version": {
+      "description": "The version of a stored record that a writer saw, as the store reports it.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
+    "progress_state": {
+      "type": "string",
+      "enum": [
+        "abandoned",
+        "accepted",
+        "cancelled",
+        "completed",
+        "finalizing_plan",
+        "failed",
+        "in_progress",
+        "not_started",
+        "partial",
+        "paused",
+        "preparing",
+        "retrying",
+        "undefined",
+        "waiting"
+      ]
     }
   }
 }

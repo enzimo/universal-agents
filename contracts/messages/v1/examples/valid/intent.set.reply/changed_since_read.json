@@ -1,0 +1,30 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "intent.set.reply",
+  "message_id": "01928f3a-7b2c-74b3-8000-0000000004b3",
+  "idempotency_key": "intent.set:example_1203:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.intent.set",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "changed_since_read",
+    "current_version": "v3",
+    "message": "Example short text"
+  },
+  "causation_id": "01928f3a-7b2c-74b1-8000-0000000004b1",
+  "body_digest": "mwwZA7vJlzwnTKc2NrDFsCkUFXwWp2P2FWgqNmQpjwU",
+  "signature": "9jHISQ4_ERhbfMKzWixIGQvReGCTY3BXwybUqKxu-djwpZGCmq-MtHutn7y7_OCPvE9WDWYp_Rgy2WvZs82ACA"
+}

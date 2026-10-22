@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/conflicts.decide.schema.json",
+  "title": "conflicts.decide request",
+  "description": "A person decides a change conflict.",
+  "type": "object",
+  "properties": {
+    "case_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "question_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "values_digest": {
+      "$ref": "../common.schema.json#/$defs/sha256_digest"
+    },
+    "choice": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "keep_current"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "use_this_change"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "redo_with_note"
+            },
+            "note": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          "required": [
+            "type",
+            "note"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "stop_request"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "case_id",
+    "question_id",
+    "values_digest",
+    "choice"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,29 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "people.set_standing",
+  "message_id": "01928f3a-7b2c-7497-8000-000000000497",
+  "idempotency_key": "people.set_standing:example_1175",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.people.set_standing",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_1",
+    "person": "person_1",
+    "expected_standing": "active"
+  },
+  "body_digest": "r6_BhH5bnF54cC7ux_RPqxXiyTCqo-N1At51X0Jt9Rk",
+  "signature": "j6dmmKpczNYVf9_1zPPyxYMNKw9UJ9B1LY9-91-ge--4YKPTUgBNV2Uh1iTeRpc06r6dQf1MZCpHVcDZT0BUCw"
+}

@@ -1,0 +1,31 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "intent.set",
+  "message_id": "01928f3a-7b2c-74b1-8000-0000000004b1",
+  "idempotency_key": "intent.set:example_1201",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.intent.set",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_1",
+    "root_task_id": "root_task_id_1",
+    "seen_version": 3,
+    "text": "Example text"
+  },
+  "body_digest": "EOQeJYNPB8Yl1lUd0nipeTGXFQXryhvH8o6gcYHwQtQ",
+  "signature": "rVQHjfOhCcOz95Vd7243d7iqL12d3EehUAovsnWJVrXiJDWP3uCnwv1zW_0V8a3lGf1HkVXcHC2GeLKMYcb6Cg"
+}

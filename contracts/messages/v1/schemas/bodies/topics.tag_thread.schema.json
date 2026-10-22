@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/topics.tag_thread.schema.json",
+  "title": "topics.tag_thread request",
+  "description": "Tag a thread.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "conversation_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+      },
+      "maxItems": 20,
+      "minItems": 1
+    },
+    "private": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "request_id",
+    "conversation_id",
+    "tags",
+    "private"
+  ],
+  "additionalProperties": false
+}

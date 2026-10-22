@@ -1,0 +1,30 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "requests.resume",
+  "message_id": "01928f3a-7b2c-74bd-8000-0000000004bd",
+  "idempotency_key": "requests.resume:example_1213",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.requests.resume",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_1",
+    "root_task_id": "root_task_id_1",
+    "reason": "Example reason"
+  },
+  "body_digest": "_EEbD085x1FPnbZVGCY6CZ26cIMMLS6LNi0aAIm58qg",
+  "signature": "_tDNAYKc7csxBXXgZwtalaooEtkv88XbtVdcZ19za2nynN-8yobKARa4-ayTZwPTbkmn5qe1nZinXkWgcCinAw"
+}

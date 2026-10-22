@@ -329,6 +329,12 @@ class LedgerSnapshot(WireModel):
     counters: LedgerSnapshotCounters
 
 
+RecordVersion = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$')]
+
+
+ProgressState = Literal['abandoned', 'accepted', 'cancelled', 'completed', 'finalizing_plan', 'failed', 'in_progress', 'not_started', 'partial', 'paused', 'preparing', 'retrying', 'undefined', 'waiting']
+
+
 class Frame(WireModel):
     "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The body is checked against the schema its kind names in the registry."
 
@@ -432,6 +438,42 @@ class AccessResolvedBody(WireModel):
     keep_hours: Optional[Annotated[int, Field(ge=1, le=2160)]] = Field(default=None)
 
 
+class AccessWithdrawBody(WireModel):
+    "The lead withdraws a task's access request."
+
+    request_id: RecordId
+    access_request_id: RecordId
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+
+
+class AccessWithdrawReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['withdrawn', 'already_decided']
+    decided_state: Optional[Literal['handed_down', 'granted', 'denied', 'withdrawn', 'refused']] = Field(default=None)
+
+
+class AccessWithdrawReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class AccessWithdrawReplyNotOwnRequest(WireModel):
+    outcome: Literal['not_own_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class AgentExitBody(WireModel):
+    "Stop an agent after its current step."
+
+    request_id: RecordId
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+
+
+class AgentExitReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['exiting', 'already_exiting']
+
+
 class AgentPauseBody(WireModel):
     request_id: RecordId
     reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
@@ -442,10 +484,180 @@ class AgentPauseReplyOk(WireModel):
     state: Literal['paused', 'already_paused']
 
 
-class AgentPauseReplyError(WireModel):
-    outcome: Literal['error']
-    code: Literal['agent_exiting']
-    message: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+class AgentPauseReplyAgentExiting(WireModel):
+    outcome: Literal['agent_exiting']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class AgentResumeBody(WireModel):
+    "Resume a paused agent."
+
+    request_id: RecordId
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+
+
+class AgentResumeReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['resumed', 'not_paused']
+
+
+class AgentResumeReplyAgentExiting(WireModel):
+    outcome: Literal['agent_exiting']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class AgentStatusBody(WireModel):
+    "An agent's status: basic for anyone allowed, full only for the team's lead."
+
+    level: Literal['basic', 'full']
+
+
+class AgentStatusReplyOkContext(WireModel):
+    window_tokens: Count
+    estimated_tokens: Count
+    fill_per_mille: Annotated[int, Field(ge=0, le=1000)]
+    pressure: Literal['low', 'moderate', 'high', 'critical', 'unknown']
+
+
+class AgentStatusReplyOkFindingsItem(WireModel):
+    finding_id: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    severity: Literal['info', 'warning', 'error', 'critical']
+    title: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    summary: Optional[Annotated[str, StringConstraints(min_length=0, max_length=2000)]] = Field(default=None)
+    action: Optional[Annotated[str, StringConstraints(min_length=0, max_length=1000)]] = Field(default=None)
+    source: Optional[Annotated[str, StringConstraints(min_length=1, max_length=120)]] = Field(default=None)
+    since: Optional[Timestamp] = Field(default=None)
+    details: Optional[Annotated[str, StringConstraints(min_length=0, max_length=2000)]] = Field(default=None)
+
+
+class AgentStatusReplyOk(WireModel):
+    outcome: Literal['ok']
+    agent_type: AgentType
+    is_lead: bool
+    paused: bool
+    executing: bool
+    has_capacity: bool
+    accepting_work: bool
+    exiting: bool
+    queued: Count
+    waiting: Count
+    deferred: Count
+    current_task_id: Optional[RecordId] = Field(default=None)
+    current_task_age_seconds: Optional[Count] = Field(default=None)
+    context: AgentStatusReplyOkContext
+    tool_call_budget_per_mille: Optional[Annotated[int, Field(ge=0, le=1000)]] = Field(default=None)
+    tool_result_budget_per_mille: Optional[Annotated[int, Field(ge=0, le=1000)]] = Field(default=None)
+    tools: Annotated[list[ToolId], Field(max_length=500)]
+    skills: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=160)]], Field(max_length=500)]
+    findings: Annotated[list[AgentStatusReplyOkFindingsItem], Field(max_length=50)]
+    diagnostic_json: Optional[Annotated[str, StringConstraints(min_length=1, max_length=65536)]] = Field(default=None)
+
+
+class AgentStatusReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ConflictsCancelBody(WireModel):
+    "An administrator cancels a change conflict."
+
+    request_id: RecordId
+    case_id: RecordId
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+
+
+class ConflictsCancelReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['cancelled', 'already_closed']
+
+
+class ConflictsCancelReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ConflictsCancelReplyAdministratorRequired(WireModel):
+    outcome: Literal['administrator_required']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ConflictsDecideBodyChoiceKeepCurrent(WireModel):
+    type: Literal['keep_current']
+
+
+class ConflictsDecideBodyChoiceUseThisChange(WireModel):
+    type: Literal['use_this_change']
+
+
+class ConflictsDecideBodyChoiceRedoWithNote(WireModel):
+    type: Literal['redo_with_note']
+    note: Annotated[str, StringConstraints(min_length=1, max_length=2000)]
+
+
+class ConflictsDecideBodyChoiceStopRequest(WireModel):
+    type: Literal['stop_request']
+
+
+class ConflictsDecideBody(WireModel):
+    "A person decides a change conflict."
+
+    case_id: RecordId
+    question_id: RecordId
+    values_digest: Sha256Digest
+    choice: Annotated[Union[ConflictsDecideBodyChoiceKeepCurrent, ConflictsDecideBodyChoiceUseThisChange, ConflictsDecideBodyChoiceRedoWithNote, ConflictsDecideBodyChoiceStopRequest], Field(discriminator='type')]
+
+
+class ConflictsDecideReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['decided', 'already_decided']
+    case_id: RecordId
+    choice: Literal['keep_current', 'use_this_change', 'redo_with_note', 'stop_request']
+
+
+class ConflictsDecideReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ConflictsDecideReplyCaseClosed(WireModel):
+    outcome: Literal['case_closed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ConflictsDecideReplyValuesChanged(WireModel):
+    outcome: Literal['values_changed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ConflictsDecideReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ConflictsListBody(WireModel):
+    "Open and recent change conflicts, for administrators."
+
+    offset: Annotated[int, Field(ge=0, le=100000)]
+    limit: Annotated[int, Field(ge=1, le=50)]
+    state: Optional[Literal['open', 'decided', 'withdrawn', 'expired', 'cancelled']] = Field(default=None)
+
+
+class ConflictsListReplyOkCasesItem(WireModel):
+    case_id: RecordId
+    record_kind: ChangeRecordKind
+    opened_at: Timestamp
+    state: Literal['open', 'decided', 'withdrawn', 'expired', 'cancelled']
+
+
+class ConflictsListReplyOk(WireModel):
+    outcome: Literal['ok']
+    cases: Annotated[list[ConflictsListReplyOkCasesItem], Field(max_length=50)]
+    total: Count
+
+
+class ConflictsListReplyAdministratorRequired(WireModel):
+    outcome: Literal['administrator_required']
+    message: Optional[ShortText] = Field(default=None)
 
 
 class CredentialFormRequestBodyFlowCollectFieldsItemForm(WireModel):
@@ -564,12 +776,95 @@ class CredentialFormResultBody(WireModel):
     credential: Optional[CredentialFormResultBodyCredential] = Field(default=None)
 
 
+class CustodyDecideBodyDecisionReassignToAgent(WireModel):
+    target: Literal['agent']
+    agent: AgentId
+
+
+class CustodyDecideBodyDecisionReassignToPool(WireModel):
+    target: Literal['pool']
+    pool: AgentType
+
+
+class CustodyDecideBodyDecisionReassign(WireModel):
+    type: Literal['reassign']
+    to: Annotated[Union[CustodyDecideBodyDecisionReassignToAgent, CustodyDecideBodyDecisionReassignToPool], Field(discriminator='target')]
+    from_checkpoint: Optional[BlobRef] = Field(default=None)
+
+
+class CustodyDecideBodyDecisionAdoptLateWork(WireModel):
+    type: Literal['adopt_late_work']
+    late_message_id: MessageId
+    stop_current: bool
+
+
+class CustodyDecideBody(WireModel):
+    "The lead reassigns a task or adopts late work."
+
+    request_id: RecordId
+    task_id: RecordId
+    seen_custody_token: CustodyToken
+    decision: Annotated[Union[CustodyDecideBodyDecisionReassign, CustodyDecideBodyDecisionAdoptLateWork], Field(discriminator='type')]
+
+
+class CustodyDecideReplyOk(WireModel):
+    outcome: Literal['ok']
+    custody_token: CustodyToken
+    holder: Optional[AgentId] = Field(default=None)
+
+
+class CustodyDecideReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class CustodyDecideReplyStaleCustody(WireModel):
+    outcome: Literal['stale_custody']
+    current_custody_token: CustodyToken
+    message: Optional[ShortText] = Field(default=None)
+
+
+class CustodyDecideReplyLateWorkNotFound(WireModel):
+    outcome: Literal['late_work_not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class CustodyDecideReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class CustodyDecideReplyNotOwnRequest(WireModel):
+    outcome: Literal['not_own_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
 class CustodyMovedBody(WireModel):
     "Tells a former holder that its task moved; later results are kept as late work."
 
     task_id: RecordId
     custody_token: CustodyToken
     reason: Literal['reassigned', 'adopted_elsewhere', 'cancelled']
+
+
+class DebugDumpBody(WireModel):
+    "Turn an agent's diagnostic context dumps on or off."
+
+    request_id: RecordId
+    enabled: bool
+    mode: Literal['always', 'on_error', 'on_budget_warning']
+    agent: Optional[AgentId] = Field(default=None)
+
+
+class DebugDumpReplyOk(WireModel):
+    outcome: Literal['ok']
+    enabled: bool
+    mode: Literal['always', 'on_error', 'on_budget_warning']
+
+
+class DebugDumpReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
 
 
 class DeliveryReceiptBody(WireModel):
@@ -591,6 +886,2329 @@ class DeliveryRefusedBody(WireModel):
     task_id: Optional[RecordId] = Field(default=None)
     reason: Literal['edge_not_allowed', 'not_holder', 'stale_custody', 'task_unknown', 'task_closed']
     current_custody_token: Optional[CustodyToken] = Field(default=None)
+
+
+class HeartbeatItemsAddBody(WireModel):
+    "The lead adds a heartbeat item."
+
+    request_id: RecordId
+    instruction: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
+    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    target_agent_type: Optional[AgentType] = Field(default=None)
+    objective_id: Optional[RecordId] = Field(default=None)
+
+
+class HeartbeatItemsAddReplyOkItem(WireModel):
+    heartbeat_item_id: RecordId
+    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    instruction: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
+    target_agent_type: Optional[AgentType] = Field(default=None)
+    objective_id: Optional[RecordId] = Field(default=None)
+    enabled: bool
+    seen_version: RecordVersion
+
+
+class HeartbeatItemsAddReplyOk(WireModel):
+    outcome: Literal['ok']
+    item: HeartbeatItemsAddReplyOkItem
+    warning: Optional[Literal['heartbeat_off', 'launcher_missing']] = Field(default=None)
+
+
+class HeartbeatItemsAddReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsAddReplyObjectiveLinkRefused(WireModel):
+    outcome: Literal['objective_link_refused']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsAddReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsAddReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsAddReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsAddReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsAddReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsAddReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsDisableBody(WireModel):
+    "The lead disables a heartbeat item."
+
+    request_id: RecordId
+    heartbeat_item_id: RecordId
+    seen_version: RecordVersion
+
+
+class HeartbeatItemsDisableReplyOkItem(WireModel):
+    heartbeat_item_id: RecordId
+    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    instruction: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
+    target_agent_type: Optional[AgentType] = Field(default=None)
+    objective_id: Optional[RecordId] = Field(default=None)
+    enabled: bool
+    seen_version: RecordVersion
+
+
+class HeartbeatItemsDisableReplyOk(WireModel):
+    outcome: Literal['ok']
+    item: HeartbeatItemsDisableReplyOkItem
+    warning: Optional[Literal['heartbeat_off', 'launcher_missing']] = Field(default=None)
+
+
+class HeartbeatItemsDisableReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsDisableReplyObjectiveLinkRefused(WireModel):
+    outcome: Literal['objective_link_refused']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsDisableReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsDisableReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsDisableReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsDisableReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsDisableReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsDisableReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsEnableBody(WireModel):
+    "The lead enables a heartbeat item."
+
+    request_id: RecordId
+    heartbeat_item_id: RecordId
+    seen_version: RecordVersion
+
+
+class HeartbeatItemsEnableReplyOkItem(WireModel):
+    heartbeat_item_id: RecordId
+    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    instruction: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
+    target_agent_type: Optional[AgentType] = Field(default=None)
+    objective_id: Optional[RecordId] = Field(default=None)
+    enabled: bool
+    seen_version: RecordVersion
+
+
+class HeartbeatItemsEnableReplyOk(WireModel):
+    outcome: Literal['ok']
+    item: HeartbeatItemsEnableReplyOkItem
+    warning: Optional[Literal['heartbeat_off', 'launcher_missing']] = Field(default=None)
+
+
+class HeartbeatItemsEnableReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsEnableReplyObjectiveLinkRefused(WireModel):
+    outcome: Literal['objective_link_refused']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsEnableReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsEnableReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsEnableReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsEnableReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsEnableReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsEnableReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsRemoveBody(WireModel):
+    "The lead removes a heartbeat item."
+
+    request_id: RecordId
+    heartbeat_item_id: RecordId
+    seen_version: RecordVersion
+
+
+class HeartbeatItemsRemoveReplyOkItem(WireModel):
+    heartbeat_item_id: RecordId
+    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    instruction: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
+    target_agent_type: Optional[AgentType] = Field(default=None)
+    objective_id: Optional[RecordId] = Field(default=None)
+    enabled: bool
+    seen_version: RecordVersion
+
+
+class HeartbeatItemsRemoveReplyOk(WireModel):
+    outcome: Literal['ok']
+    item: HeartbeatItemsRemoveReplyOkItem
+    warning: Optional[Literal['heartbeat_off', 'launcher_missing']] = Field(default=None)
+
+
+class HeartbeatItemsRemoveReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsRemoveReplyObjectiveLinkRefused(WireModel):
+    outcome: Literal['objective_link_refused']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsRemoveReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsRemoveReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsRemoveReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsRemoveReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsRemoveReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsRemoveReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsUpdateBody(WireModel):
+    "The lead changes a heartbeat item."
+
+    request_id: RecordId
+    heartbeat_item_id: RecordId
+    seen_version: RecordVersion
+    instruction: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    target_agent_type: Optional[AgentType] = Field(default=None)
+    objective_id: Optional[RecordId] = Field(default=None)
+
+
+class HeartbeatItemsUpdateReplyOkItem(WireModel):
+    heartbeat_item_id: RecordId
+    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    instruction: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
+    target_agent_type: Optional[AgentType] = Field(default=None)
+    objective_id: Optional[RecordId] = Field(default=None)
+    enabled: bool
+    seen_version: RecordVersion
+
+
+class HeartbeatItemsUpdateReplyOk(WireModel):
+    outcome: Literal['ok']
+    item: HeartbeatItemsUpdateReplyOkItem
+    warning: Optional[Literal['heartbeat_off', 'launcher_missing']] = Field(default=None)
+
+
+class HeartbeatItemsUpdateReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsUpdateReplyObjectiveLinkRefused(WireModel):
+    outcome: Literal['objective_link_refused']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsUpdateReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsUpdateReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsUpdateReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsUpdateReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsUpdateReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HeartbeatItemsUpdateReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class IntentSetBody(WireModel):
+    "The lead states a request's current intent."
+
+    request_id: RecordId
+    root_task_id: RecordId
+    seen_version: Count
+    text: Annotated[str, StringConstraints(min_length=1, max_length=2000)]
+
+
+class IntentSetReplyOk(WireModel):
+    outcome: Literal['ok']
+    version: Count
+
+
+class IntentSetReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class IntentSetReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class IntentSetReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class IntentSetReplyNotOwnRequest(WireModel):
+    outcome: Literal['not_own_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteBody(WireModel):
+    "Add a note to a knowledge page."
+
+    request_id: RecordId
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    note: Annotated[str, StringConstraints(min_length=1, max_length=2000)]
+    confirm_review: bool
+
+
+class KnowledgeAddNoteReplyOkPageUpdatedByAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeAddNoteReplyOkPageUpdatedByPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeAddNoteReplyOkPageUpdatedBySystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeAddNoteReplyOkPage(WireModel):
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    body_ref: Optional[BlobRef] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
+    status: Literal['active', 'archived']
+    seen_version: RecordVersion
+    updated_at: Timestamp
+    updated_by: Annotated[Union[KnowledgeAddNoteReplyOkPageUpdatedByAgent, KnowledgeAddNoteReplyOkPageUpdatedByPerson, KnowledgeAddNoteReplyOkPageUpdatedBySystem], Field(discriminator='kind')]
+
+
+class KnowledgeAddNoteReplyOk(WireModel):
+    outcome: Literal['ok']
+    page: KnowledgeAddNoteReplyOkPage
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+
+
+class KnowledgeAddNoteReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyPageExists(WireModel):
+    outcome: Literal['page_exists']
+    current_version: RecordVersion
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyMerged(WireModel):
+    outcome: Literal['merged']
+    merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyReviewRequired(WireModel):
+    outcome: Literal['review_required']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplySensitiveContent(WireModel):
+    outcome: Literal['sensitive_content']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyPageFrozen(WireModel):
+    outcome: Literal['page_frozen']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyRepeatsRecentRevision(WireModel):
+    outcome: Literal['repeats_recent_revision']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyPersonalSpaceUnavailable(WireModel):
+    outcome: Literal['personal_space_unavailable']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplySavedWriteMismatch(WireModel):
+    outcome: Literal['saved_write_mismatch']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyContributionNotPending(WireModel):
+    outcome: Literal['contribution_not_pending']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeAddNoteReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveBody(WireModel):
+    "Archive a knowledge page."
+
+    request_id: RecordId
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    seen_version: RecordVersion
+
+
+class KnowledgeArchiveReplyOkPageUpdatedByAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeArchiveReplyOkPageUpdatedByPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeArchiveReplyOkPageUpdatedBySystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeArchiveReplyOkPage(WireModel):
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    body_ref: Optional[BlobRef] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
+    status: Literal['active', 'archived']
+    seen_version: RecordVersion
+    updated_at: Timestamp
+    updated_by: Annotated[Union[KnowledgeArchiveReplyOkPageUpdatedByAgent, KnowledgeArchiveReplyOkPageUpdatedByPerson, KnowledgeArchiveReplyOkPageUpdatedBySystem], Field(discriminator='kind')]
+
+
+class KnowledgeArchiveReplyOk(WireModel):
+    outcome: Literal['ok']
+    page: KnowledgeArchiveReplyOkPage
+
+
+class KnowledgeArchiveReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyPageExists(WireModel):
+    outcome: Literal['page_exists']
+    current_version: RecordVersion
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyMerged(WireModel):
+    outcome: Literal['merged']
+    merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyReviewRequired(WireModel):
+    outcome: Literal['review_required']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplySensitiveContent(WireModel):
+    outcome: Literal['sensitive_content']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyPageFrozen(WireModel):
+    outcome: Literal['page_frozen']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyRepeatsRecentRevision(WireModel):
+    outcome: Literal['repeats_recent_revision']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyPersonalSpaceUnavailable(WireModel):
+    outcome: Literal['personal_space_unavailable']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplySavedWriteMismatch(WireModel):
+    outcome: Literal['saved_write_mismatch']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyContributionNotPending(WireModel):
+    outcome: Literal['contribution_not_pending']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeArchiveReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeCountContributionsBody(WireModel):
+    "How many contributions wait for a curator."
+
+
+
+class KnowledgeCountContributionsReplyOk(WireModel):
+    outcome: Literal['ok']
+    total: Count
+
+
+class KnowledgeCountContributionsReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeCountContributionsReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeCountContributionsReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeBody(WireModel):
+    "A curator freezes a page."
+
+    request_id: RecordId
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    seen_version: RecordVersion
+
+
+class KnowledgeFreezeReplyOkPageUpdatedByAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeFreezeReplyOkPageUpdatedByPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeFreezeReplyOkPageUpdatedBySystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeFreezeReplyOkPage(WireModel):
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    body_ref: Optional[BlobRef] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
+    status: Literal['active', 'archived']
+    seen_version: RecordVersion
+    updated_at: Timestamp
+    updated_by: Annotated[Union[KnowledgeFreezeReplyOkPageUpdatedByAgent, KnowledgeFreezeReplyOkPageUpdatedByPerson, KnowledgeFreezeReplyOkPageUpdatedBySystem], Field(discriminator='kind')]
+
+
+class KnowledgeFreezeReplyOk(WireModel):
+    outcome: Literal['ok']
+    page: KnowledgeFreezeReplyOkPage
+
+
+class KnowledgeFreezeReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyPageExists(WireModel):
+    outcome: Literal['page_exists']
+    current_version: RecordVersion
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyMerged(WireModel):
+    outcome: Literal['merged']
+    merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyReviewRequired(WireModel):
+    outcome: Literal['review_required']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplySensitiveContent(WireModel):
+    outcome: Literal['sensitive_content']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyPageFrozen(WireModel):
+    outcome: Literal['page_frozen']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyRepeatsRecentRevision(WireModel):
+    outcome: Literal['repeats_recent_revision']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyPersonalSpaceUnavailable(WireModel):
+    outcome: Literal['personal_space_unavailable']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplySavedWriteMismatch(WireModel):
+    outcome: Literal['saved_write_mismatch']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyContributionNotPending(WireModel):
+    outcome: Literal['contribution_not_pending']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeFreezeReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeHistoryBody(WireModel):
+    "A knowledge page's revisions."
+
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+
+
+class KnowledgeHistoryReplyOkPageUpdatedByAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeHistoryReplyOkPageUpdatedByPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeHistoryReplyOkPageUpdatedBySystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeHistoryReplyOkPage(WireModel):
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    body_ref: Optional[BlobRef] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
+    status: Literal['active', 'archived']
+    seen_version: RecordVersion
+    updated_at: Timestamp
+    updated_by: Annotated[Union[KnowledgeHistoryReplyOkPageUpdatedByAgent, KnowledgeHistoryReplyOkPageUpdatedByPerson, KnowledgeHistoryReplyOkPageUpdatedBySystem], Field(discriminator='kind')]
+
+
+class KnowledgeHistoryReplyOkRevisionsItemUpdatedByAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeHistoryReplyOkRevisionsItemUpdatedByPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeHistoryReplyOkRevisionsItemUpdatedBySystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeHistoryReplyOkRevisionsItem(WireModel):
+    revision: Count
+    updated_at: Timestamp
+    updated_by: Annotated[Union[KnowledgeHistoryReplyOkRevisionsItemUpdatedByAgent, KnowledgeHistoryReplyOkRevisionsItemUpdatedByPerson, KnowledgeHistoryReplyOkRevisionsItemUpdatedBySystem], Field(discriminator='kind')]
+    change_summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+
+
+class KnowledgeHistoryReplyOk(WireModel):
+    outcome: Literal['ok']
+    page: KnowledgeHistoryReplyOkPage
+    revisions: Annotated[list[KnowledgeHistoryReplyOkRevisionsItem], Field(max_length=50)]
+    total: Count
+
+
+class KnowledgeHistoryReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeHistoryReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeHistoryReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeHistoryReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeListBody(WireModel):
+    "List knowledge pages."
+
+    space: Literal['team', 'personal']
+    status: Literal['active', 'archived']
+    query: Optional[Annotated[str, StringConstraints(min_length=1, max_length=400)]] = Field(default=None)
+    offset: Annotated[int, Field(ge=0, le=100000)]
+    limit: Annotated[int, Field(ge=1, le=20)]
+
+
+class KnowledgeListReplyOkPagesItemUpdatedByAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeListReplyOkPagesItemUpdatedByPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeListReplyOkPagesItemUpdatedBySystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeListReplyOkPagesItem(WireModel):
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    body_ref: Optional[BlobRef] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
+    status: Literal['active', 'archived']
+    seen_version: RecordVersion
+    updated_at: Timestamp
+    updated_by: Annotated[Union[KnowledgeListReplyOkPagesItemUpdatedByAgent, KnowledgeListReplyOkPagesItemUpdatedByPerson, KnowledgeListReplyOkPagesItemUpdatedBySystem], Field(discriminator='kind')]
+
+
+class KnowledgeListReplyOk(WireModel):
+    outcome: Literal['ok']
+    pages: Annotated[list[KnowledgeListReplyOkPagesItem], Field(max_length=20)]
+    total: Count
+
+
+class KnowledgeListReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeListReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeListReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeListContributionsBody(WireModel):
+    "Contributions waiting for a curator."
+
+    offset: Annotated[int, Field(ge=0, le=100000)]
+    limit: Annotated[int, Field(ge=1, le=20)]
+
+
+class KnowledgeListContributionsReplyOkContributionsItemAuthorAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeListContributionsReplyOkContributionsItemAuthorPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeListContributionsReplyOkContributionsItemAuthorSystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeListContributionsReplyOkContributionsItem(WireModel):
+    contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    page: Optional[Annotated[str, StringConstraints(min_length=1, max_length=240)]] = Field(default=None)
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    state: Literal['pending', 'published', 'withdrawn', 'rejected']
+    seen_version: RecordVersion
+    created_at: Timestamp
+    author: Annotated[Union[KnowledgeListContributionsReplyOkContributionsItemAuthorAgent, KnowledgeListContributionsReplyOkContributionsItemAuthorPerson, KnowledgeListContributionsReplyOkContributionsItemAuthorSystem], Field(discriminator='kind')]
+
+
+class KnowledgeListContributionsReplyOk(WireModel):
+    outcome: Literal['ok']
+    contributions: Annotated[list[KnowledgeListContributionsReplyOkContributionsItem], Field(max_length=20)]
+    total: Count
+
+
+class KnowledgeListContributionsReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeListContributionsReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeListContributionsReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeBody(WireModel):
+    "A curator merges a page into another."
+
+    request_id: RecordId
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    seen_version: RecordVersion
+    into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+
+
+class KnowledgeMergeReplyOkPageUpdatedByAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeMergeReplyOkPageUpdatedByPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeMergeReplyOkPageUpdatedBySystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeMergeReplyOkPage(WireModel):
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    body_ref: Optional[BlobRef] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
+    status: Literal['active', 'archived']
+    seen_version: RecordVersion
+    updated_at: Timestamp
+    updated_by: Annotated[Union[KnowledgeMergeReplyOkPageUpdatedByAgent, KnowledgeMergeReplyOkPageUpdatedByPerson, KnowledgeMergeReplyOkPageUpdatedBySystem], Field(discriminator='kind')]
+
+
+class KnowledgeMergeReplyOk(WireModel):
+    outcome: Literal['ok']
+    page: KnowledgeMergeReplyOkPage
+
+
+class KnowledgeMergeReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyPageExists(WireModel):
+    outcome: Literal['page_exists']
+    current_version: RecordVersion
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyMerged(WireModel):
+    outcome: Literal['merged']
+    merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyReviewRequired(WireModel):
+    outcome: Literal['review_required']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplySensitiveContent(WireModel):
+    outcome: Literal['sensitive_content']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyPageFrozen(WireModel):
+    outcome: Literal['page_frozen']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyRepeatsRecentRevision(WireModel):
+    outcome: Literal['repeats_recent_revision']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyPersonalSpaceUnavailable(WireModel):
+    outcome: Literal['personal_space_unavailable']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplySavedWriteMismatch(WireModel):
+    outcome: Literal['saved_write_mismatch']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyContributionNotPending(WireModel):
+    outcome: Literal['contribution_not_pending']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeMergeReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionBody(WireModel):
+    "Publish a contribution, edited or as it is."
+
+    request_id: RecordId
+    contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    seen_version: RecordVersion
+    edited: bool
+    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    summary: Optional[Annotated[str, StringConstraints(min_length=0, max_length=4000)]] = Field(default=None)
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    tags: Optional[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyOkPageUpdatedByAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgePublishContributionReplyOkPageUpdatedByPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgePublishContributionReplyOkPageUpdatedBySystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgePublishContributionReplyOkPage(WireModel):
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    body_ref: Optional[BlobRef] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
+    status: Literal['active', 'archived']
+    seen_version: RecordVersion
+    updated_at: Timestamp
+    updated_by: Annotated[Union[KnowledgePublishContributionReplyOkPageUpdatedByAgent, KnowledgePublishContributionReplyOkPageUpdatedByPerson, KnowledgePublishContributionReplyOkPageUpdatedBySystem], Field(discriminator='kind')]
+
+
+class KnowledgePublishContributionReplyOk(WireModel):
+    outcome: Literal['ok']
+    page: KnowledgePublishContributionReplyOkPage
+
+
+class KnowledgePublishContributionReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyPageExists(WireModel):
+    outcome: Literal['page_exists']
+    current_version: RecordVersion
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyMerged(WireModel):
+    outcome: Literal['merged']
+    merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyReviewRequired(WireModel):
+    outcome: Literal['review_required']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplySensitiveContent(WireModel):
+    outcome: Literal['sensitive_content']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyPageFrozen(WireModel):
+    outcome: Literal['page_frozen']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyRepeatsRecentRevision(WireModel):
+    outcome: Literal['repeats_recent_revision']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyPersonalSpaceUnavailable(WireModel):
+    outcome: Literal['personal_space_unavailable']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplySavedWriteMismatch(WireModel):
+    outcome: Literal['saved_write_mismatch']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyContributionNotPending(WireModel):
+    outcome: Literal['contribution_not_pending']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgePublishContributionReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeReadBody(WireModel):
+    "Read a knowledge page."
+
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    revision: Optional[Count] = Field(default=None)
+
+
+class KnowledgeReadReplyOkPageUpdatedByAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeReadReplyOkPageUpdatedByPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeReadReplyOkPageUpdatedBySystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeReadReplyOkPage(WireModel):
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    body_ref: Optional[BlobRef] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
+    status: Literal['active', 'archived']
+    seen_version: RecordVersion
+    updated_at: Timestamp
+    updated_by: Annotated[Union[KnowledgeReadReplyOkPageUpdatedByAgent, KnowledgeReadReplyOkPageUpdatedByPerson, KnowledgeReadReplyOkPageUpdatedBySystem], Field(discriminator='kind')]
+
+
+class KnowledgeReadReplyOk(WireModel):
+    outcome: Literal['ok']
+    page: KnowledgeReadReplyOkPage
+
+
+class KnowledgeReadReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeReadReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeReadReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeReadReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeReadContributionBody(WireModel):
+    "Read one contribution."
+
+    contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+
+
+class KnowledgeReadContributionReplyOkContributionAuthorAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeReadContributionReplyOkContributionAuthorPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeReadContributionReplyOkContributionAuthorSystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeReadContributionReplyOkContribution(WireModel):
+    contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    page: Optional[Annotated[str, StringConstraints(min_length=1, max_length=240)]] = Field(default=None)
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    state: Literal['pending', 'published', 'withdrawn', 'rejected']
+    seen_version: RecordVersion
+    created_at: Timestamp
+    author: Annotated[Union[KnowledgeReadContributionReplyOkContributionAuthorAgent, KnowledgeReadContributionReplyOkContributionAuthorPerson, KnowledgeReadContributionReplyOkContributionAuthorSystem], Field(discriminator='kind')]
+
+
+class KnowledgeReadContributionReplyOk(WireModel):
+    outcome: Literal['ok']
+    contribution: KnowledgeReadContributionReplyOkContribution
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+
+
+class KnowledgeReadContributionReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeReadContributionReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeReadContributionReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeReadContributionReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionBody(WireModel):
+    "A curator rejects a contribution."
+
+    request_id: RecordId
+    contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    seen_version: RecordVersion
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyOkContributionAuthorAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeRejectContributionReplyOkContributionAuthorPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeRejectContributionReplyOkContributionAuthorSystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeRejectContributionReplyOkContribution(WireModel):
+    contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    page: Optional[Annotated[str, StringConstraints(min_length=1, max_length=240)]] = Field(default=None)
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    state: Literal['pending', 'published', 'withdrawn', 'rejected']
+    seen_version: RecordVersion
+    created_at: Timestamp
+    author: Annotated[Union[KnowledgeRejectContributionReplyOkContributionAuthorAgent, KnowledgeRejectContributionReplyOkContributionAuthorPerson, KnowledgeRejectContributionReplyOkContributionAuthorSystem], Field(discriminator='kind')]
+
+
+class KnowledgeRejectContributionReplyOk(WireModel):
+    outcome: Literal['ok']
+    contribution: KnowledgeRejectContributionReplyOkContribution
+
+
+class KnowledgeRejectContributionReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyPageExists(WireModel):
+    outcome: Literal['page_exists']
+    current_version: RecordVersion
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyMerged(WireModel):
+    outcome: Literal['merged']
+    merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyReviewRequired(WireModel):
+    outcome: Literal['review_required']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplySensitiveContent(WireModel):
+    outcome: Literal['sensitive_content']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyPageFrozen(WireModel):
+    outcome: Literal['page_frozen']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyRepeatsRecentRevision(WireModel):
+    outcome: Literal['repeats_recent_revision']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyPersonalSpaceUnavailable(WireModel):
+    outcome: Literal['personal_space_unavailable']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplySavedWriteMismatch(WireModel):
+    outcome: Literal['saved_write_mismatch']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyContributionNotPending(WireModel):
+    outcome: Literal['contribution_not_pending']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRejectContributionReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteBody(WireModel):
+    "A curator resolves a note on a page."
+
+    request_id: RecordId
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    seen_version: RecordVersion
+    note_id: RecordId
+
+
+class KnowledgeResolveNoteReplyOkPageUpdatedByAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeResolveNoteReplyOkPageUpdatedByPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeResolveNoteReplyOkPageUpdatedBySystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeResolveNoteReplyOkPage(WireModel):
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    body_ref: Optional[BlobRef] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
+    status: Literal['active', 'archived']
+    seen_version: RecordVersion
+    updated_at: Timestamp
+    updated_by: Annotated[Union[KnowledgeResolveNoteReplyOkPageUpdatedByAgent, KnowledgeResolveNoteReplyOkPageUpdatedByPerson, KnowledgeResolveNoteReplyOkPageUpdatedBySystem], Field(discriminator='kind')]
+
+
+class KnowledgeResolveNoteReplyOk(WireModel):
+    outcome: Literal['ok']
+    page: KnowledgeResolveNoteReplyOkPage
+
+
+class KnowledgeResolveNoteReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyPageExists(WireModel):
+    outcome: Literal['page_exists']
+    current_version: RecordVersion
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyMerged(WireModel):
+    outcome: Literal['merged']
+    merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyReviewRequired(WireModel):
+    outcome: Literal['review_required']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplySensitiveContent(WireModel):
+    outcome: Literal['sensitive_content']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyPageFrozen(WireModel):
+    outcome: Literal['page_frozen']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyRepeatsRecentRevision(WireModel):
+    outcome: Literal['repeats_recent_revision']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyPersonalSpaceUnavailable(WireModel):
+    outcome: Literal['personal_space_unavailable']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplySavedWriteMismatch(WireModel):
+    outcome: Literal['saved_write_mismatch']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyContributionNotPending(WireModel):
+    outcome: Literal['contribution_not_pending']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeResolveNoteReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertBody(WireModel):
+    "Revert a knowledge page to an earlier revision."
+
+    request_id: RecordId
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    to_revision: Count
+    seen_version: RecordVersion
+
+
+class KnowledgeRevertReplyOkPageUpdatedByAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeRevertReplyOkPageUpdatedByPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeRevertReplyOkPageUpdatedBySystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeRevertReplyOkPage(WireModel):
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    body_ref: Optional[BlobRef] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
+    status: Literal['active', 'archived']
+    seen_version: RecordVersion
+    updated_at: Timestamp
+    updated_by: Annotated[Union[KnowledgeRevertReplyOkPageUpdatedByAgent, KnowledgeRevertReplyOkPageUpdatedByPerson, KnowledgeRevertReplyOkPageUpdatedBySystem], Field(discriminator='kind')]
+
+
+class KnowledgeRevertReplyOk(WireModel):
+    outcome: Literal['ok']
+    page: KnowledgeRevertReplyOkPage
+
+
+class KnowledgeRevertReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyPageExists(WireModel):
+    outcome: Literal['page_exists']
+    current_version: RecordVersion
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyMerged(WireModel):
+    outcome: Literal['merged']
+    merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyReviewRequired(WireModel):
+    outcome: Literal['review_required']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplySensitiveContent(WireModel):
+    outcome: Literal['sensitive_content']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyPageFrozen(WireModel):
+    outcome: Literal['page_frozen']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyRepeatsRecentRevision(WireModel):
+    outcome: Literal['repeats_recent_revision']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyPersonalSpaceUnavailable(WireModel):
+    outcome: Literal['personal_space_unavailable']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplySavedWriteMismatch(WireModel):
+    outcome: Literal['saved_write_mismatch']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyContributionNotPending(WireModel):
+    outcome: Literal['contribution_not_pending']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeRevertReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeBody(WireModel):
+    "A curator unfreezes a page."
+
+    request_id: RecordId
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    seen_version: RecordVersion
+
+
+class KnowledgeUnfreezeReplyOkPageUpdatedByAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeUnfreezeReplyOkPageUpdatedByPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeUnfreezeReplyOkPageUpdatedBySystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeUnfreezeReplyOkPage(WireModel):
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    body_ref: Optional[BlobRef] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
+    status: Literal['active', 'archived']
+    seen_version: RecordVersion
+    updated_at: Timestamp
+    updated_by: Annotated[Union[KnowledgeUnfreezeReplyOkPageUpdatedByAgent, KnowledgeUnfreezeReplyOkPageUpdatedByPerson, KnowledgeUnfreezeReplyOkPageUpdatedBySystem], Field(discriminator='kind')]
+
+
+class KnowledgeUnfreezeReplyOk(WireModel):
+    outcome: Literal['ok']
+    page: KnowledgeUnfreezeReplyOkPage
+
+
+class KnowledgeUnfreezeReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyPageExists(WireModel):
+    outcome: Literal['page_exists']
+    current_version: RecordVersion
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyMerged(WireModel):
+    outcome: Literal['merged']
+    merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyReviewRequired(WireModel):
+    outcome: Literal['review_required']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplySensitiveContent(WireModel):
+    outcome: Literal['sensitive_content']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyPageFrozen(WireModel):
+    outcome: Literal['page_frozen']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyRepeatsRecentRevision(WireModel):
+    outcome: Literal['repeats_recent_revision']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyPersonalSpaceUnavailable(WireModel):
+    outcome: Literal['personal_space_unavailable']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplySavedWriteMismatch(WireModel):
+    outcome: Literal['saved_write_mismatch']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyContributionNotPending(WireModel):
+    outcome: Literal['contribution_not_pending']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeUnfreezeReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWithdrawContributionBody(WireModel):
+    "Withdraw one's own contribution."
+
+    request_id: RecordId
+    contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+
+
+class KnowledgeWithdrawContributionReplyOkContributionAuthorAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeWithdrawContributionReplyOkContributionAuthorPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeWithdrawContributionReplyOkContributionAuthorSystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeWithdrawContributionReplyOkContribution(WireModel):
+    contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    page: Optional[Annotated[str, StringConstraints(min_length=1, max_length=240)]] = Field(default=None)
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    state: Literal['pending', 'published', 'withdrawn', 'rejected']
+    seen_version: RecordVersion
+    created_at: Timestamp
+    author: Annotated[Union[KnowledgeWithdrawContributionReplyOkContributionAuthorAgent, KnowledgeWithdrawContributionReplyOkContributionAuthorPerson, KnowledgeWithdrawContributionReplyOkContributionAuthorSystem], Field(discriminator='kind')]
+
+
+class KnowledgeWithdrawContributionReplyOk(WireModel):
+    outcome: Literal['ok']
+    contribution: KnowledgeWithdrawContributionReplyOkContribution
+
+
+class KnowledgeWithdrawContributionReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWithdrawContributionReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWithdrawContributionReplyContributionNotPending(WireModel):
+    outcome: Literal['contribution_not_pending']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWithdrawContributionReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteBody(WireModel):
+    "Create or edit a knowledge page."
+
+    request_id: RecordId
+    space: Literal['team', 'personal']
+    page: Optional[Annotated[str, StringConstraints(min_length=1, max_length=240)]] = Field(default=None)
+    seen_version: Optional[RecordVersion] = Field(default=None)
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    summary: Optional[Annotated[str, StringConstraints(min_length=0, max_length=4000)]] = Field(default=None)
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    body_ref: Optional[BlobRef] = Field(default=None)
+    tags: Optional[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]] = Field(default=None)
+    page_type: Optional[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]] = Field(default=None)
+    change_summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    confirm_review: bool
+
+
+class KnowledgeWriteReplyOkPageUpdatedByAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeWriteReplyOkPageUpdatedByPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeWriteReplyOkPageUpdatedBySystem(WireModel):
+    kind: Literal['system']
+
+
+class KnowledgeWriteReplyOkPage(WireModel):
+    space: Literal['team', 'personal']
+    page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    body_ref: Optional[BlobRef] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
+    status: Literal['active', 'archived']
+    seen_version: RecordVersion
+    updated_at: Timestamp
+    updated_by: Annotated[Union[KnowledgeWriteReplyOkPageUpdatedByAgent, KnowledgeWriteReplyOkPageUpdatedByPerson, KnowledgeWriteReplyOkPageUpdatedBySystem], Field(discriminator='kind')]
+
+
+class KnowledgeWriteReplyOk(WireModel):
+    outcome: Literal['ok']
+    page: KnowledgeWriteReplyOkPage
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+
+
+class KnowledgeWriteReplyPendingReview(WireModel):
+    outcome: Literal['pending_review']
+    contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyPageExists(WireModel):
+    outcome: Literal['page_exists']
+    current_version: RecordVersion
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyMerged(WireModel):
+    outcome: Literal['merged']
+    merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyReviewRequired(WireModel):
+    outcome: Literal['review_required']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplySensitiveContent(WireModel):
+    outcome: Literal['sensitive_content']
+    review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyPageFrozen(WireModel):
+    outcome: Literal['page_frozen']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyRepeatsRecentRevision(WireModel):
+    outcome: Literal['repeats_recent_revision']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyPersonalSpaceUnavailable(WireModel):
+    outcome: Literal['personal_space_unavailable']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplySavedWriteMismatch(WireModel):
+    outcome: Literal['saved_write_mismatch']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyContributionNotPending(WireModel):
+    outcome: Literal['contribution_not_pending']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class KnowledgeWriteReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
 
 
 class LedgerFactBodyFactCustodyConfirmed(WireModel):
@@ -667,6 +3285,985 @@ class LedgerFactBody(WireModel):
     fact: Annotated[Union[LedgerFactBodyFactCustodyConfirmed, LedgerFactBodyFactAccessRequested, LedgerFactBodyFactAccessDecided, LedgerFactBodyFactDecisionAheadUsed, LedgerFactBodyFactColleagueExchange, LedgerFactBodyFactSteeringSeen, LedgerFactBodyFactWait, LedgerFactBodyFactHoldTimedOut, LedgerFactBodyFactLateWork, LedgerFactBodyFactIntentChanged], Field(discriminator='type')]
 
 
+class MemoryCreateBody(WireModel):
+    "Add a memory fact."
+
+    request_id: RecordId
+    bank: Literal['coremem', 'usermem']
+    fact_text: Annotated[str, StringConstraints(min_length=1, max_length=12000)]
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=20)]
+    valid_from: Optional[Timestamp] = Field(default=None)
+    expires: Optional[Timestamp] = Field(default=None)
+
+
+class MemoryCreateReplyOkFact(WireModel):
+    memory_id: Annotated[int, Field(ge=1, le=9007199254740991)]
+    fact_text: Annotated[str, StringConstraints(min_length=1, max_length=12000)]
+    valid_from: Optional[Timestamp] = Field(default=None)
+    expires: Optional[Timestamp] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=20)]
+    created_at: Timestamp
+    updated_at: Timestamp
+    seen_version: RecordVersion
+
+
+class MemoryCreateReplyOk(WireModel):
+    outcome: Literal['ok']
+    fact: MemoryCreateReplyOkFact
+    event_id: RecordId
+
+
+class MemoryCreateReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryCreateReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryCreateReplyCapacityReached(WireModel):
+    outcome: Literal['capacity_reached']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryCreateReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryCreateReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryCreateReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryCreateReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryCreateReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryCreateReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryCreateReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryDeleteBody(WireModel):
+    "Delete a memory fact."
+
+    request_id: RecordId
+    bank: Literal['coremem', 'usermem']
+    memory_id: Annotated[int, Field(ge=1, le=9007199254740991)]
+    seen_version: RecordVersion
+
+
+class MemoryDeleteReplyOk(WireModel):
+    outcome: Literal['ok']
+    memory_id: Annotated[int, Field(ge=1, le=9007199254740991)]
+    event_id: RecordId
+
+
+class MemoryDeleteReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryDeleteReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryDeleteReplyCapacityReached(WireModel):
+    outcome: Literal['capacity_reached']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryDeleteReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryDeleteReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryDeleteReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryDeleteReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryDeleteReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryDeleteReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryDeleteReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryListBody(WireModel):
+    "List a memory bank's facts."
+
+    bank: Literal['coremem', 'usermem']
+    sort: Literal['newest', 'oldest', 'updated']
+    offset: Annotated[int, Field(ge=0, le=100000)]
+    limit: Annotated[int, Field(ge=1, le=100)]
+
+
+class MemoryListReplyOkFactsItem(WireModel):
+    memory_id: Annotated[int, Field(ge=1, le=9007199254740991)]
+    fact_text: Annotated[str, StringConstraints(min_length=1, max_length=12000)]
+    valid_from: Optional[Timestamp] = Field(default=None)
+    expires: Optional[Timestamp] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=20)]
+    created_at: Timestamp
+    updated_at: Timestamp
+    seen_version: RecordVersion
+
+
+class MemoryListReplyOk(WireModel):
+    outcome: Literal['ok']
+    facts: Annotated[list[MemoryListReplyOkFactsItem], Field(max_length=100)]
+    total: Count
+
+
+class MemoryListReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryListReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryReplaceBody(WireModel):
+    "Replace a memory fact's text or tags."
+
+    request_id: RecordId
+    bank: Literal['coremem', 'usermem']
+    memory_id: Annotated[int, Field(ge=1, le=9007199254740991)]
+    seen_version: RecordVersion
+    fact_text: Annotated[str, StringConstraints(min_length=1, max_length=12000)]
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=20)]
+    valid_from: Optional[Timestamp] = Field(default=None)
+    expires: Optional[Timestamp] = Field(default=None)
+
+
+class MemoryReplaceReplyOkFact(WireModel):
+    memory_id: Annotated[int, Field(ge=1, le=9007199254740991)]
+    fact_text: Annotated[str, StringConstraints(min_length=1, max_length=12000)]
+    valid_from: Optional[Timestamp] = Field(default=None)
+    expires: Optional[Timestamp] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=20)]
+    created_at: Timestamp
+    updated_at: Timestamp
+    seen_version: RecordVersion
+
+
+class MemoryReplaceReplyOk(WireModel):
+    outcome: Literal['ok']
+    fact: MemoryReplaceReplyOkFact
+    event_id: RecordId
+
+
+class MemoryReplaceReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryReplaceReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryReplaceReplyCapacityReached(WireModel):
+    outcome: Literal['capacity_reached']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryReplaceReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryReplaceReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryReplaceReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryReplaceReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryReplaceReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryReplaceReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryReplaceReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryShowBody(WireModel):
+    "Show one memory fact."
+
+    bank: Literal['coremem', 'usermem']
+    memory_id: Annotated[int, Field(ge=1, le=9007199254740991)]
+
+
+class MemoryShowReplyOkFact(WireModel):
+    memory_id: Annotated[int, Field(ge=1, le=9007199254740991)]
+    fact_text: Annotated[str, StringConstraints(min_length=1, max_length=12000)]
+    valid_from: Optional[Timestamp] = Field(default=None)
+    expires: Optional[Timestamp] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=20)]
+    created_at: Timestamp
+    updated_at: Timestamp
+    seen_version: RecordVersion
+
+
+class MemoryShowReplyOk(WireModel):
+    outcome: Literal['ok']
+    fact: MemoryShowReplyOkFact
+
+
+class MemoryShowReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryShowReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryShowReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryUndoBody(WireModel):
+    "Undo one memory change."
+
+    request_id: RecordId
+    bank: Literal['coremem', 'usermem']
+    event_id: RecordId
+
+
+class MemoryUndoReplyOkFact(WireModel):
+    memory_id: Annotated[int, Field(ge=1, le=9007199254740991)]
+    fact_text: Annotated[str, StringConstraints(min_length=1, max_length=12000)]
+    valid_from: Optional[Timestamp] = Field(default=None)
+    expires: Optional[Timestamp] = Field(default=None)
+    tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=20)]
+    created_at: Timestamp
+    updated_at: Timestamp
+    seen_version: RecordVersion
+
+
+class MemoryUndoReplyOk(WireModel):
+    outcome: Literal['ok']
+    event_id: RecordId
+    undone_event_id: RecordId
+    undone_event_type: Literal['create', 'replace', 'delete']
+    fact: Optional[MemoryUndoReplyOkFact] = Field(default=None)
+    deleted: bool
+
+
+class MemoryUndoReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryUndoReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryUndoReplyCapacityReached(WireModel):
+    outcome: Literal['capacity_reached']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryUndoReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryUndoReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryUndoReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryUndoReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryUndoReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryUndoReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class MemoryUndoReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesAbandonBody(WireModel):
+    "Abandon one of the person's Objectives."
+
+    request_id: RecordId
+    objective_id: RecordId
+    seen_version: RecordVersion
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+
+
+class ObjectivesAbandonReplyOkIncompleteItem(WireModel):
+    part: Literal['schedule', 'heartbeat', 'policy', 'task', 'objective']
+    id: RecordId
+
+
+class ObjectivesAbandonReplyOkReceiptsItem(WireModel):
+    root_task_id: RecordId
+    cancelled_task_count: Count
+    stop_signals_sent: Count
+    unconfirmed_worker_count: Count
+    state: Literal['confirmed', 'barrier_not_saved', 'failed']
+
+
+class ObjectivesAbandonReplyOk(WireModel):
+    outcome: Literal['ok']
+    objective_id: RecordId
+    status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
+    seen_version: RecordVersion
+    incomplete: Annotated[list[ObjectivesAbandonReplyOkIncompleteItem], Field(max_length=50)]
+    receipts: Annotated[list[ObjectivesAbandonReplyOkReceiptsItem], Field(max_length=50)]
+
+
+class ObjectivesAbandonReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesAbandonReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesAbandonReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesAbandonReplyActionUnavailable(WireModel):
+    outcome: Literal['action_unavailable']
+    current_status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesAbandonReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesCreateBody(WireModel):
+    "The lead creates an Objective."
+
+    request_id: RecordId
+    title: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    desired_outcome: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
+    horizon: Literal['finite', 'long_horizon', 'recurring', 'standing']
+    priority: Literal['low', 'normal', 'high', 'critical']
+    success_criteria: Optional[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=2000)]], Field(max_length=50)]] = Field(default=None)
+
+
+class ObjectivesCreateReplyOk(WireModel):
+    outcome: Literal['ok']
+    objective_id: RecordId
+    seen_version: RecordVersion
+
+
+class ObjectivesCreateReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesCreateReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesCreateReplyStatusNotSettable(WireModel):
+    outcome: Literal['status_not_settable']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesCreateReplyConfirmationRequired(WireModel):
+    outcome: Literal['confirmation_required']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesCreateReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesCreateReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesCreateReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesCreateReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesCreateReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesCreateReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesDeleteBody(WireModel):
+    "Delete one of the person's Objectives."
+
+    request_id: RecordId
+    objective_id: RecordId
+    seen_version: RecordVersion
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+
+
+class ObjectivesDeleteReplyOkIncompleteItem(WireModel):
+    part: Literal['schedule', 'heartbeat', 'policy', 'task', 'objective']
+    id: RecordId
+
+
+class ObjectivesDeleteReplyOkReceiptsItem(WireModel):
+    root_task_id: RecordId
+    cancelled_task_count: Count
+    stop_signals_sent: Count
+    unconfirmed_worker_count: Count
+    state: Literal['confirmed', 'barrier_not_saved', 'failed']
+
+
+class ObjectivesDeleteReplyOk(WireModel):
+    outcome: Literal['ok']
+    objective_id: RecordId
+    status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
+    seen_version: RecordVersion
+    incomplete: Annotated[list[ObjectivesDeleteReplyOkIncompleteItem], Field(max_length=50)]
+    receipts: Annotated[list[ObjectivesDeleteReplyOkReceiptsItem], Field(max_length=50)]
+
+
+class ObjectivesDeleteReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesDeleteReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesDeleteReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesDeleteReplyActionUnavailable(WireModel):
+    outcome: Literal['action_unavailable']
+    current_status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesDeleteReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesListBody(WireModel):
+    "The person's Objectives."
+
+
+
+class ObjectivesListReplyOkObjectivesItem(WireModel):
+    objective_id: RecordId
+    seen_version: RecordVersion
+    title: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
+    horizon: Literal['finite', 'long_horizon', 'recurring', 'standing']
+    priority: Literal['low', 'normal', 'high', 'critical']
+    desired_outcome: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    progress_summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    subgoals: Optional[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=2000)]], Field(max_length=50)]] = Field(default=None)
+    success_criteria: Optional[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=2000)]], Field(max_length=50)]] = Field(default=None)
+    schedule_ids: Optional[Annotated[list[RecordId], Field(max_length=50)]] = Field(default=None)
+    heartbeat_item_ids: Optional[Annotated[list[RecordId], Field(max_length=50)]] = Field(default=None)
+    available_actions: Annotated[list[Literal['pause', 'resume', 'stop', 'abandon', 'delete']], Field(max_length=5)]
+
+
+class ObjectivesListReplyOk(WireModel):
+    outcome: Literal['ok']
+    objectives: Annotated[list[ObjectivesListReplyOkObjectivesItem], Field(max_length=100)]
+
+
+class ObjectivesListReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesPauseBody(WireModel):
+    "Pause one of the person's Objectives."
+
+    request_id: RecordId
+    objective_id: RecordId
+    seen_version: RecordVersion
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+
+
+class ObjectivesPauseReplyOkIncompleteItem(WireModel):
+    part: Literal['schedule', 'heartbeat', 'policy', 'task', 'objective']
+    id: RecordId
+
+
+class ObjectivesPauseReplyOkReceiptsItem(WireModel):
+    root_task_id: RecordId
+    cancelled_task_count: Count
+    stop_signals_sent: Count
+    unconfirmed_worker_count: Count
+    state: Literal['confirmed', 'barrier_not_saved', 'failed']
+
+
+class ObjectivesPauseReplyOk(WireModel):
+    outcome: Literal['ok']
+    objective_id: RecordId
+    status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
+    seen_version: RecordVersion
+    incomplete: Annotated[list[ObjectivesPauseReplyOkIncompleteItem], Field(max_length=50)]
+    receipts: Annotated[list[ObjectivesPauseReplyOkReceiptsItem], Field(max_length=50)]
+
+
+class ObjectivesPauseReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesPauseReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesPauseReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesPauseReplyActionUnavailable(WireModel):
+    outcome: Literal['action_unavailable']
+    current_status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesPauseReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesResumeBody(WireModel):
+    "Resume one of the person's Objectives."
+
+    request_id: RecordId
+    objective_id: RecordId
+    seen_version: RecordVersion
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+
+
+class ObjectivesResumeReplyOkIncompleteItem(WireModel):
+    part: Literal['schedule', 'heartbeat', 'policy', 'task', 'objective']
+    id: RecordId
+
+
+class ObjectivesResumeReplyOkReceiptsItem(WireModel):
+    root_task_id: RecordId
+    cancelled_task_count: Count
+    stop_signals_sent: Count
+    unconfirmed_worker_count: Count
+    state: Literal['confirmed', 'barrier_not_saved', 'failed']
+
+
+class ObjectivesResumeReplyOk(WireModel):
+    outcome: Literal['ok']
+    objective_id: RecordId
+    status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
+    seen_version: RecordVersion
+    incomplete: Annotated[list[ObjectivesResumeReplyOkIncompleteItem], Field(max_length=50)]
+    receipts: Annotated[list[ObjectivesResumeReplyOkReceiptsItem], Field(max_length=50)]
+
+
+class ObjectivesResumeReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesResumeReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesResumeReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesResumeReplyActionUnavailable(WireModel):
+    outcome: Literal['action_unavailable']
+    current_status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesResumeReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesStopBody(WireModel):
+    "Stop one of the person's Objectives."
+
+    request_id: RecordId
+    objective_id: RecordId
+    seen_version: RecordVersion
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+
+
+class ObjectivesStopReplyOkIncompleteItem(WireModel):
+    part: Literal['schedule', 'heartbeat', 'policy', 'task', 'objective']
+    id: RecordId
+
+
+class ObjectivesStopReplyOkReceiptsItem(WireModel):
+    root_task_id: RecordId
+    cancelled_task_count: Count
+    stop_signals_sent: Count
+    unconfirmed_worker_count: Count
+    state: Literal['confirmed', 'barrier_not_saved', 'failed']
+
+
+class ObjectivesStopReplyOk(WireModel):
+    outcome: Literal['ok']
+    objective_id: RecordId
+    status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
+    seen_version: RecordVersion
+    incomplete: Annotated[list[ObjectivesStopReplyOkIncompleteItem], Field(max_length=50)]
+    receipts: Annotated[list[ObjectivesStopReplyOkReceiptsItem], Field(max_length=50)]
+
+
+class ObjectivesStopReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesStopReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesStopReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesStopReplyActionUnavailable(WireModel):
+    outcome: Literal['action_unavailable']
+    current_status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesStopReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateProgressBody(WireModel):
+    "The lead records progress on an Objective."
+
+    request_id: RecordId
+    objective_id: RecordId
+    seen_version: RecordVersion
+    progress_summary: Annotated[str, StringConstraints(min_length=1, max_length=2000)]
+
+
+class ObjectivesUpdateProgressReplyOk(WireModel):
+    outcome: Literal['ok']
+    objective_id: RecordId
+    seen_version: RecordVersion
+
+
+class ObjectivesUpdateProgressReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateProgressReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateProgressReplyStatusNotSettable(WireModel):
+    outcome: Literal['status_not_settable']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateProgressReplyConfirmationRequired(WireModel):
+    outcome: Literal['confirmation_required']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateProgressReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateProgressReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateProgressReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateProgressReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateProgressReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateProgressReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateStatusBody(WireModel):
+    "The lead changes an Objective's status."
+
+    request_id: RecordId
+    objective_id: RecordId
+    seen_version: RecordVersion
+    status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned']
+    note: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    confirmed: bool
+
+
+class ObjectivesUpdateStatusReplyOk(WireModel):
+    outcome: Literal['ok']
+    objective_id: RecordId
+    status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
+    seen_version: RecordVersion
+
+
+class ObjectivesUpdateStatusReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateStatusReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateStatusReplyStatusNotSettable(WireModel):
+    outcome: Literal['status_not_settable']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateStatusReplyConfirmationRequired(WireModel):
+    outcome: Literal['confirmation_required']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateStatusReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateStatusReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateStatusReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateStatusReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateStatusReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class ObjectivesUpdateStatusReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class PeopleSetStandingBody(WireModel):
+    "Settle a person's work after their standing changed."
+
+    request_id: RecordId
+    person: PersonRef
+    expected_standing: Literal['active', 'disabled', 'removed']
+
+
+class PeopleSetStandingReplyOkTeamSchedulesMovedItem(WireModel):
+    schedule_id: RecordId
+    schedule_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    new_owner: PersonRef
+
+
+class PeopleSetStandingReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['settled', 'settled_with_problems']
+    standing: Optional[Literal['active', 'disabled', 'removed']] = Field(default=None)
+    tasks_stopped: Optional[Count] = Field(default=None)
+    schedules_paused: Optional[Count] = Field(default=None)
+    schedules_moved: Optional[Count] = Field(default=None)
+    grants_revoked: Optional[Count] = Field(default=None)
+    requests_closed: Optional[Count] = Field(default=None)
+    memory_kept: Optional[Count] = Field(default=None)
+    pages_kept: Optional[Count] = Field(default=None)
+    threads_closed: Optional[Count] = Field(default=None)
+    forms_closed: Optional[Count] = Field(default=None)
+    team_schedules_moved: Annotated[list[PeopleSetStandingReplyOkTeamSchedulesMovedItem], Field(max_length=100)]
+    problems: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=2000)]], Field(max_length=50)]
+
+
+class PeopleSetStandingReplyAdministratorRequired(WireModel):
+    outcome: Literal['administrator_required']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class PeopleSetStandingReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
 class PersonNotifyBodyReasonAgent(WireModel):
     source: Literal['agent']
     note: ShortText
@@ -704,6 +4301,750 @@ class QuestionClosedBody(WireModel):
     reason: Literal['answered_elsewhere', 'expired', 'withdrawn_by_guidance', 'request_ended', 'replaced', 'case_closed']
 
 
+class RequestsPauseBody(WireModel):
+    "The lead pauses its own request's work."
+
+    request_id: RecordId
+    root_task_id: RecordId
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+
+
+class RequestsPauseReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['paused', 'already_paused']
+    held: Count
+
+
+class RequestsPauseReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class RequestsPauseReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class RequestsPauseReplyNotOwnRequest(WireModel):
+    outcome: Literal['not_own_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class RequestsResumeBody(WireModel):
+    "The lead resumes its own request's work."
+
+    request_id: RecordId
+    root_task_id: RecordId
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+
+
+class RequestsResumeReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['resumed', 'not_paused']
+
+
+class RequestsResumeReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class RequestsResumeReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class RequestsResumeReplyNotOwnRequest(WireModel):
+    outcome: Literal['not_own_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class RunContextSignBody(WireModel):
+    "A worker running a scheduled job asks for the run's authority token."
+
+    request_id: RecordId
+    schedule_id: RecordId
+    claim_token: RecordId
+    scheduled_job_id: RecordId
+    conversation_id: RecordId
+    heartbeat_item_id: Optional[RecordId] = Field(default=None)
+
+
+class RunContextSignReplyOk(WireModel):
+    outcome: Literal['ok']
+    system_work: bool
+    authority: Optional[AuthorityToken] = Field(default=None)
+
+
+class RunContextSignReplySignerMissing(WireModel):
+    outcome: Literal['signer_missing']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class RunContextSignReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class RunContextSignReplyClaimNotHeld(WireModel):
+    outcome: Literal['claim_not_held']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class RunContextSignReplyScheduleStopped(WireModel):
+    outcome: Literal['schedule_stopped']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class RunContextSignReplyScheduledJobMismatch(WireModel):
+    outcome: Literal['scheduled_job_mismatch']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class RunContextSignReplyHeartbeatItemNotFound(WireModel):
+    outcome: Literal['heartbeat_item_not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class RunContextSignReplyOwnerInactive(WireModel):
+    outcome: Literal['owner_inactive']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class RunContextSignReplyCheckFailed(WireModel):
+    outcome: Literal['check_failed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesDisableBody(WireModel):
+    "Disable a schedule."
+
+    request_id: RecordId
+    schedule_id: RecordId
+    seen_version: RecordVersion
+
+
+class SchedulesDisableReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['disabled']
+    schedule_id: RecordId
+    seen_version: RecordVersion
+
+
+class SchedulesDisableReplyApprovalRequired(WireModel):
+    outcome: Literal['approval_required']
+    change_id: RecordId
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesDisableReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesDisableReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesDisableReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesDisableReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesDisableReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesDisableReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesDisableReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesDisableReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesInstallBodyWorker(WireModel):
+    agent_type: AgentType
+    agent_id: Optional[AgentId] = Field(default=None)
+
+
+class SchedulesInstallBodyTimingInterval(WireModel):
+    kind: Literal['interval']
+    interval_ms: Annotated[int, Field(ge=1000, le=31536000000)]
+
+
+class SchedulesInstallBodyTimingCron(WireModel):
+    kind: Literal['cron']
+    expression: Annotated[str, StringConstraints(pattern='^[0-9*/,? A-Za-z-]{9,120}$')]
+    time_zone: TimeZone
+
+
+class SchedulesInstallBodyTimingOnce(WireModel):
+    kind: Literal['once']
+    at: Timestamp
+
+
+class SchedulesInstallBodyActionTask(WireModel):
+    type: Literal['task']
+    instruction: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
+    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+
+
+class SchedulesInstallBodyActionFixedMessage(WireModel):
+    type: Literal['fixed_message']
+    text: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
+    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+
+
+class SchedulesInstallBodyRunNotesPolicy(WireModel):
+    notify: bool
+    notify_on_failure: bool
+    evidence_required: bool
+
+
+class SchedulesInstallBodyRunNotes(WireModel):
+    schedule_kind: Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]
+    policy: SchedulesInstallBodyRunNotesPolicy
+
+
+class SchedulesInstallBodyDeliverTo(WireModel):
+    delivery_ref: DeliveryRef
+    conversation_id: Optional[RecordId] = Field(default=None)
+    time_zone: Optional[TimeZone] = Field(default=None)
+
+
+class SchedulesInstallBody(WireModel):
+    "Install a schedule: create, replace, ensure or refresh it."
+
+    request_id: RecordId
+    schedule_id: RecordId
+    mode: Literal['create', 'replace', 'ensure', 'refresh']
+    seen_version: Optional[RecordVersion] = Field(default=None)
+    name: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    management_class: Literal['user', 'system']
+    system_schedule_kind: Optional[Literal['unclassified', 'heartbeat_launcher', 'memory_review_coremem', 'memory_review_usermem', 'memory_review_stale_conversations', 'internal_improvement', 'after_action_report_review', 'delegation_assurance', 'isolated_recovery_checkpoint', 'provider_overload_retry', 'objective_work_session', 'knowledge_curation_person', 'knowledge_curation_team']] = Field(default=None)
+    objective_id: Optional[RecordId] = Field(default=None)
+    worker: SchedulesInstallBodyWorker
+    timing: Annotated[Union[SchedulesInstallBodyTimingInterval, SchedulesInstallBodyTimingCron, SchedulesInstallBodyTimingOnce], Field(discriminator='kind')]
+    repeat_count: Optional[Annotated[int, Field(ge=1, le=100000)]] = Field(default=None)
+    expires_at: Optional[Timestamp] = Field(default=None)
+    paused_until: Optional[Timestamp] = Field(default=None)
+    enabled: bool
+    action: Annotated[Union[SchedulesInstallBodyActionTask, SchedulesInstallBodyActionFixedMessage], Field(discriminator='type')]
+    run_notes: Optional[SchedulesInstallBodyRunNotes] = Field(default=None)
+    decisions_ahead: Optional[Annotated[list[DecisionAhead], Field(max_length=8)]] = Field(default=None)
+    deliver_to: Optional[SchedulesInstallBodyDeliverTo] = Field(default=None)
+
+
+class SchedulesInstallReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['installed', 'replaced', 'kept', 'refreshed']
+    schedule_id: RecordId
+    seen_version: RecordVersion
+    timing_revision: Count
+    next_fire_at: Optional[Timestamp] = Field(default=None)
+
+
+class SchedulesInstallReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesInstallReplyIdInUse(WireModel):
+    outcome: Literal['id_in_use']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesInstallReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesInstallReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesInstallReplyNotSystemManaged(WireModel):
+    outcome: Literal['not_system_managed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesInstallReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesInstallReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesInstallReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesInstallReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesInstallReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesListBody(WireModel):
+    "The schedules the caller may see."
+
+    offset: Annotated[int, Field(ge=0, le=100000)]
+    limit: Annotated[int, Field(ge=1, le=50)]
+    delivery_ref: Optional[DeliveryRef] = Field(default=None)
+
+
+class SchedulesListReplyOkSchedulesItemTimingInterval(WireModel):
+    kind: Literal['interval']
+    interval_ms: Annotated[int, Field(ge=1000, le=31536000000)]
+
+
+class SchedulesListReplyOkSchedulesItemTimingCron(WireModel):
+    kind: Literal['cron']
+    expression: Annotated[str, StringConstraints(pattern='^[0-9*/,? A-Za-z-]{9,120}$')]
+    time_zone: TimeZone
+
+
+class SchedulesListReplyOkSchedulesItemTimingOnce(WireModel):
+    kind: Literal['once']
+    at: Timestamp
+
+
+class SchedulesListReplyOkSchedulesItemWorker(WireModel):
+    agent_type: AgentType
+    agent_id: Optional[AgentId] = Field(default=None)
+
+
+class SchedulesListReplyOkSchedulesItem(WireModel):
+    schedule_id: RecordId
+    name: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    management_class: Literal['user', 'system']
+    system_schedule_kind: Optional[Literal['unclassified', 'heartbeat_launcher', 'memory_review_coremem', 'memory_review_usermem', 'memory_review_stale_conversations', 'internal_improvement', 'after_action_report_review', 'delegation_assurance', 'isolated_recovery_checkpoint', 'provider_overload_retry', 'objective_work_session', 'knowledge_curation_person', 'knowledge_curation_team']] = Field(default=None)
+    objective_id: Optional[RecordId] = Field(default=None)
+    instruction_preview: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    timing: Annotated[Union[SchedulesListReplyOkSchedulesItemTimingInterval, SchedulesListReplyOkSchedulesItemTimingCron, SchedulesListReplyOkSchedulesItemTimingOnce], Field(discriminator='kind')]
+    next_fire_at: Optional[Timestamp] = Field(default=None)
+    paused_until: Optional[Timestamp] = Field(default=None)
+    expires_at: Optional[Timestamp] = Field(default=None)
+    enabled: bool
+    timing_revision: Count
+    seen_version: RecordVersion
+    worker: SchedulesListReplyOkSchedulesItemWorker
+
+
+class SchedulesListReplyOk(WireModel):
+    outcome: Literal['ok']
+    schedules: Annotated[list[SchedulesListReplyOkSchedulesItem], Field(max_length=50)]
+    total: Count
+
+
+class SchedulesListReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesListReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesPauseBody(WireModel):
+    "Pause a schedule until a time."
+
+    request_id: RecordId
+    schedule_id: RecordId
+    seen_version: RecordVersion
+    paused_until: Timestamp
+
+
+class SchedulesPauseReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['paused']
+    schedule_id: RecordId
+    seen_version: RecordVersion
+
+
+class SchedulesPauseReplyApprovalRequired(WireModel):
+    outcome: Literal['approval_required']
+    change_id: RecordId
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesPauseReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesPauseReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesPauseReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesPauseReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesPauseReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesPauseReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesPauseReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesPauseReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesRemoveBody(WireModel):
+    "Remove a schedule."
+
+    request_id: RecordId
+    schedule_id: RecordId
+    seen_version: RecordVersion
+
+
+class SchedulesRemoveReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['removed']
+    schedule_id: RecordId
+    seen_version: RecordVersion
+
+
+class SchedulesRemoveReplyApprovalRequired(WireModel):
+    outcome: Literal['approval_required']
+    change_id: RecordId
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesRemoveReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesRemoveReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesRemoveReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesRemoveReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesRemoveReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesRemoveReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesRemoveReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesRemoveReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesResumeBody(WireModel):
+    "Resume a schedule."
+
+    request_id: RecordId
+    schedule_id: RecordId
+    seen_version: RecordVersion
+
+
+class SchedulesResumeReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['resumed']
+    schedule_id: RecordId
+    seen_version: RecordVersion
+
+
+class SchedulesResumeReplyApprovalRequired(WireModel):
+    outcome: Literal['approval_required']
+    change_id: RecordId
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesResumeReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesResumeReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesResumeReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesResumeReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesResumeReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesResumeReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesResumeReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesResumeReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesSetWorkerBodyWorker(WireModel):
+    agent_type: AgentType
+    agent_id: Optional[AgentId] = Field(default=None)
+
+
+class SchedulesSetWorkerBody(WireModel):
+    "Choose which worker runs a schedule."
+
+    request_id: RecordId
+    schedule_id: RecordId
+    seen_version: RecordVersion
+    worker: SchedulesSetWorkerBodyWorker
+
+
+class SchedulesSetWorkerReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['applied']
+    schedule_id: RecordId
+    seen_version: RecordVersion
+
+
+class SchedulesSetWorkerReplyApprovalRequired(WireModel):
+    outcome: Literal['approval_required']
+    change_id: RecordId
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesSetWorkerReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesSetWorkerReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesSetWorkerReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesSetWorkerReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesSetWorkerReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesSetWorkerReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesSetWorkerReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesSetWorkerReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesUpdateBodyTimingInterval(WireModel):
+    kind: Literal['interval']
+    interval_ms: Annotated[int, Field(ge=1000, le=31536000000)]
+
+
+class SchedulesUpdateBodyTimingCron(WireModel):
+    kind: Literal['cron']
+    expression: Annotated[str, StringConstraints(pattern='^[0-9*/,? A-Za-z-]{9,120}$')]
+    time_zone: TimeZone
+
+
+class SchedulesUpdateBodyTimingOnce(WireModel):
+    kind: Literal['once']
+    at: Timestamp
+
+
+class SchedulesUpdateBody(WireModel):
+    "Change a schedule's instruction, timing or delivery."
+
+    request_id: RecordId
+    schedule_id: RecordId
+    seen_version: RecordVersion
+    name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    instruction: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    timing: Optional[Annotated[Union[SchedulesUpdateBodyTimingInterval, SchedulesUpdateBodyTimingCron, SchedulesUpdateBodyTimingOnce], Field(discriminator='kind')]] = Field(default=None)
+    expires_at: Optional[Timestamp] = Field(default=None)
+    repeat_count: Optional[Annotated[int, Field(ge=1, le=100000)]] = Field(default=None)
+
+
+class SchedulesUpdateReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['applied']
+    schedule_id: RecordId
+    seen_version: RecordVersion
+
+
+class SchedulesUpdateReplyApprovalRequired(WireModel):
+    outcome: Literal['approval_required']
+    change_id: RecordId
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesUpdateReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesUpdateReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesUpdateReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesUpdateReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesUpdateReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesUpdateReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesUpdateReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SchedulesUpdateReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
 class SkillsChangedBodyInstall(WireModel):
     operation: Literal['install']
     change_id: Annotated[str, StringConstraints(pattern='^skill_install_[0-9a-f]{12}$')]
@@ -716,6 +5057,175 @@ class SkillsChangedBodyUninstall(WireModel):
     change_id: Annotated[str, StringConstraints(pattern='^skill_uninstall_[0-9a-f]{12}$')]
     skill_name: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$')]
     installed_tree_sha256: Annotated[str, StringConstraints(pattern='^[0-9a-f]{64}$')]
+
+
+class StagedChangesApplyBody(WireModel):
+    "The lead applies a staged change the person reviewed."
+
+    request_id: RecordId
+    change_id: Annotated[str, StringConstraints(min_length=1, max_length=120)]
+    seen_version: RecordVersion
+    reason: Annotated[str, StringConstraints(min_length=1, max_length=2000)]
+    confirmed: bool
+
+
+class StagedChangesApplyReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['applied']
+
+
+class StagedChangesApplyReplyWaiting(WireModel):
+    outcome: Literal['waiting']
+    access_request_id: RecordId
+    message: Optional[ShortText] = Field(default=None)
+
+
+class StagedChangesApplyReplyAgreementRequired(WireModel):
+    outcome: Literal['agreement_required']
+    title: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    effect: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=2000)]], Field(max_length=20)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class StagedChangesApplyReplyAlreadyApplied(WireModel):
+    outcome: Literal['already_applied']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class StagedChangesApplyReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class StagedChangesApplyReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class StagedChangesApplyReplyDenied(WireModel):
+    outcome: Literal['denied']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class StagedChangesApplyReplyWithdrawn(WireModel):
+    outcome: Literal['withdrawn']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class StagedChangesApplyReplyChangedSinceRead(WireModel):
+    outcome: Literal['changed_since_read']
+    current_version: Optional[RecordVersion] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class StagedChangesApplyReplyChangeConflict(WireModel):
+    outcome: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    message: Optional[ShortText] = Field(default=None)
+
+
+class StagedChangesApplyReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class StagedChangesApplyReplyNeedsPersonDecision(WireModel):
+    outcome: Literal['needs_person_decision']
+    case_id: Optional[RecordId] = Field(default=None)
+    message: Optional[ShortText] = Field(default=None)
+
+
+class StagedChangesApplyReplyRecordBusy(WireModel):
+    outcome: Literal['record_busy']
+    retry_at: Timestamp
+    message: Optional[ShortText] = Field(default=None)
+
+
+class StagedChangesApplyReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SteeringDecideBodyDecisionDecidedActionsItemActionGuidance(WireModel):
+    type: Literal['guidance']
+    text: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
+    source: Literal['lead', 'person_as_is']
+    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+
+
+class SteeringDecideBodyDecisionDecidedActionsItemActionRelease(WireModel):
+    type: Literal['release']
+
+
+class SteeringDecideBodyDecisionDecidedActionsItemActionStop(WireModel):
+    type: Literal['stop']
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+
+
+class SteeringDecideBodyDecisionDecidedActionsItem(WireModel):
+    task_id: RecordId
+    action: Annotated[Union[SteeringDecideBodyDecisionDecidedActionsItemActionGuidance, SteeringDecideBodyDecisionDecidedActionsItemActionRelease, SteeringDecideBodyDecisionDecidedActionsItemActionStop], Field(discriminator='type')]
+
+
+class SteeringDecideBodyDecisionDecided(WireModel):
+    type: Literal['decided']
+    actions: Annotated[list[SteeringDecideBodyDecisionDecidedActionsItem], Field(min_length=1, max_length=100)]
+    note: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+
+
+class SteeringDecideBodyDecisionExtendHold(WireModel):
+    type: Literal['extend_hold']
+    until: Timestamp
+
+
+class SteeringDecideBody(WireModel):
+    "The lead decides what each held task changes, or extends the hold once."
+
+    request_id: RecordId
+    person_steering_id: RecordId
+    root_task_id: RecordId
+    decision: Annotated[Union[SteeringDecideBodyDecisionDecided, SteeringDecideBodyDecisionExtendHold], Field(discriminator='type')]
+
+
+class SteeringDecideReplyOkSentItem(WireModel):
+    task_id: RecordId
+    steer_id: RecordId
+
+
+class SteeringDecideReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['decided', 'hold_extended']
+    hold_until: Optional[Timestamp] = Field(default=None)
+    sent: Annotated[list[SteeringDecideReplyOkSentItem], Field(max_length=100)]
+    unreachable: Annotated[list[RecordId], Field(max_length=100)]
+
+
+class SteeringDecideReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SteeringDecideReplyHoldExpired(WireModel):
+    outcome: Literal['hold_expired']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SteeringDecideReplyExtensionUsed(WireModel):
+    outcome: Literal['extension_used']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SteeringDecideReplyTasksNotCovered(WireModel):
+    outcome: Literal['tasks_not_covered']
+    task_ids: Annotated[list[RecordId], Field(min_length=1, max_length=100)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class SteeringDecideReplyNotOwnRequest(WireModel):
+    outcome: Literal['not_own_request']
+    message: Optional[ShortText] = Field(default=None)
 
 
 class TaskAccountBodyStageImmediate(WireModel):
@@ -780,6 +5290,23 @@ class TaskHandbackBody(WireModel):
     scheduler_errors: Optional[Annotated[list[ShortText], Field(max_length=10)]] = Field(default=None)
     actions: Annotated[list[HeldAction], Field(max_length=50)]
     ledger: Optional[LedgerSnapshot] = Field(default=None)
+
+
+class TaskProbeBody(WireModel):
+    "Whether the holder still has a task, asked by the watchdog."
+
+    task_id: RecordId
+    custody_token: Optional[CustodyToken] = Field(default=None)
+
+
+class TaskProbeReplyOk(WireModel):
+    outcome: Literal['ok']
+    known: bool
+    current: bool
+    state: Optional[ProgressState] = Field(default=None)
+    last_update_at: Optional[Timestamp] = Field(default=None)
+    executing: bool
+    exiting: bool
 
 
 class TaskProgressBody(WireModel):
@@ -1042,6 +5569,355 @@ class TaskStopBody(WireModel):
     cascade_to_subtasks: bool
 
 
+class TasksCancelBodySelectorTask(WireModel):
+    by: Literal['task']
+    task_id: RecordId
+
+
+class TasksCancelBodySelectorConversation(WireModel):
+    by: Literal['conversation']
+    conversation_id: RecordId
+
+
+class TasksCancelBodySelectorDelivery(WireModel):
+    by: Literal['delivery']
+    delivery_ref: DeliveryRef
+
+
+class TasksCancelBodySelectorAll(WireModel):
+    by: Literal['all']
+
+
+class TasksCancelBody(WireModel):
+    "Stop a task, a conversation's work, a delivery's work or all of the person's work."
+
+    request_id: RecordId
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    selector: Annotated[Union[TasksCancelBodySelectorTask, TasksCancelBodySelectorConversation, TasksCancelBodySelectorDelivery, TasksCancelBodySelectorAll], Field(discriminator='by')]
+
+
+class TasksCancelReplyOkReceiptsItem(WireModel):
+    root_task_id: RecordId
+    cancelled_task_count: Count
+    stop_signals_sent: Count
+    unconfirmed_worker_count: Count
+    state: Literal['confirmed', 'barrier_not_saved', 'failed']
+
+
+class TasksCancelReplyOk(WireModel):
+    outcome: Literal['ok']
+    receipts: Annotated[list[TasksCancelReplyOkReceiptsItem], Field(max_length=100)]
+    all_confirmed: bool
+
+
+class TasksCancelReplyNoMatchingWork(WireModel):
+    outcome: Literal['no_matching_work']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksCancelReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksInventoryBody(WireModel):
+    "The person's running work and schedules."
+
+
+
+class TasksInventoryReplyOkRootsItemChildrenItem(WireModel):
+    task_id: RecordId
+    state: ProgressState
+    last_updated_at: Optional[Timestamp] = Field(default=None)
+    agent_id: Optional[AgentId] = Field(default=None)
+    agent_type: Optional[AgentType] = Field(default=None)
+
+
+class TasksInventoryReplyOkRootsItem(WireModel):
+    root_task_id: RecordId
+    state: ProgressState
+    conversation_id: Optional[RecordId] = Field(default=None)
+    objective_id: Optional[RecordId] = Field(default=None)
+    objective_work_session_id: Optional[RecordId] = Field(default=None)
+    plan_id: Optional[RecordId] = Field(default=None)
+    latest_activity_at: Optional[Timestamp] = Field(default=None)
+    latest_activity: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    blocker: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    children: Annotated[list[TasksInventoryReplyOkRootsItemChildrenItem], Field(max_length=200)]
+
+
+class TasksInventoryReplyOkSchedulesItem(WireModel):
+    schedule_id: RecordId
+    name: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    next_fire_at: Optional[Timestamp] = Field(default=None)
+    enabled: bool
+
+
+class TasksInventoryReplyOk(WireModel):
+    outcome: Literal['ok']
+    roots: Annotated[list[TasksInventoryReplyOkRootsItem], Field(max_length=100)]
+    schedules: Annotated[list[TasksInventoryReplyOkSchedulesItem], Field(max_length=100)]
+
+
+class TasksInventoryReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksListBody(WireModel):
+    "One agent's task queue."
+
+    agent: AgentId
+    offset: Annotated[int, Field(ge=0, le=100000)]
+    limit: Annotated[int, Field(ge=1, le=20)]
+
+
+class TasksListReplyOkTasksItem(WireModel):
+    task_id: RecordId
+    state: ProgressState
+    problem_statement: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    is_current: bool
+    queue_position: Optional[Count] = Field(default=None)
+    last_updated_at: Optional[Timestamp] = Field(default=None)
+
+
+class TasksListReplyOk(WireModel):
+    outcome: Literal['ok']
+    tasks: Annotated[list[TasksListReplyOkTasksItem], Field(max_length=20)]
+    total: Count
+    queued_count: Count
+    current_count: Count
+    queue_digest: RecordVersion
+
+
+class TasksListReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksListReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksListFinishedBody(WireModel):
+    "One agent's finished tasks."
+
+    agent: AgentId
+    offset: Annotated[int, Field(ge=0, le=100000)]
+    limit: Annotated[int, Field(ge=1, le=20)]
+
+
+class TasksListFinishedReplyOkTasksItem(WireModel):
+    task_id: RecordId
+    state: ProgressState
+    problem_statement: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    owner_agent_id: AgentId
+    finished_at: Optional[Timestamp] = Field(default=None)
+    answer: Optional[Annotated[str, StringConstraints(min_length=1, max_length=12288)]] = Field(default=None)
+
+
+class TasksListFinishedReplyOk(WireModel):
+    outcome: Literal['ok']
+    tasks: Annotated[list[TasksListFinishedReplyOkTasksItem], Field(max_length=20)]
+    total: Count
+
+
+class TasksListFinishedReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksListFinishedReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksProbeBody(WireModel):
+    "Whether a task the person owns is still known."
+
+    task_id: RecordId
+
+
+class TasksProbeReplyOk(WireModel):
+    outcome: Literal['ok']
+    known: bool
+    state: Optional[ProgressState] = Field(default=None)
+    last_update_at: Optional[Timestamp] = Field(default=None)
+
+
+class TasksProgressBody(WireModel):
+    "Where the person's request in one conversation stands."
+
+    conversation_id: RecordId
+    delivery_ref: Optional[DeliveryRef] = Field(default=None)
+
+
+class TasksProgressReplyOkChildrenItem(WireModel):
+    task_id: RecordId
+    agent_type: Optional[AgentType] = Field(default=None)
+    state: ProgressState
+    queue_status: Literal['queued', 'running', 'finished', 'failed', 'cancelled']
+    holder: Optional[AgentId] = Field(default=None)
+    last_updated_at: Optional[Timestamp] = Field(default=None)
+
+
+class TasksProgressReplyOkSteering(WireModel):
+    state: Literal['with_lead', 'passed_on', 'timed_out']
+    held: Count
+    reached: Count
+    total: Count
+
+
+class TasksProgressReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['active', 'idle']
+    root_task_id: Optional[RecordId] = Field(default=None)
+    root_state: Optional[ProgressState] = Field(default=None)
+    plan_phase: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    plan_status: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    children: Annotated[list[TasksProgressReplyOkChildrenItem], Field(max_length=100)]
+    last_activity_at: Optional[Timestamp] = Field(default=None)
+    last_activity: Optional[Annotated[str, StringConstraints(min_length=1, max_length=240)]] = Field(default=None)
+    blocker: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    steering: Optional[TasksProgressReplyOkSteering] = Field(default=None)
+
+
+class TasksProgressReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksPurgeBody(WireModel):
+    "Remove every queued task that is not running from an agent's queue."
+
+    request_id: RecordId
+    agent: AgentId
+    seen_queue_digest: RecordVersion
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+
+
+class TasksPurgeReplyOkReceiptsItem(WireModel):
+    root_task_id: RecordId
+    cancelled_task_count: Count
+    stop_signals_sent: Count
+    unconfirmed_worker_count: Count
+    state: Literal['confirmed', 'barrier_not_saved', 'failed']
+
+
+class TasksPurgeReplyOk(WireModel):
+    outcome: Literal['ok']
+    receipts: Annotated[list[TasksPurgeReplyOkReceiptsItem], Field(max_length=100)]
+    removed: Count
+    queue_digest: RecordVersion
+    all_confirmed: bool
+
+
+class TasksPurgeReplyQueueChanged(WireModel):
+    outcome: Literal['queue_changed']
+    current_digest: RecordVersion
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksPurgeReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksPurgeReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksPurgeReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksRemoveBody(WireModel):
+    "Remove one queued task from an agent's queue."
+
+    request_id: RecordId
+    agent: AgentId
+    task_id: RecordId
+    seen_queue_digest: RecordVersion
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+
+
+class TasksRemoveReplyOkReceiptsItem(WireModel):
+    root_task_id: RecordId
+    cancelled_task_count: Count
+    stop_signals_sent: Count
+    unconfirmed_worker_count: Count
+    state: Literal['confirmed', 'barrier_not_saved', 'failed']
+
+
+class TasksRemoveReplyOk(WireModel):
+    outcome: Literal['ok']
+    receipts: Annotated[list[TasksRemoveReplyOkReceiptsItem], Field(max_length=20)]
+    removed: Count
+    queue_digest: RecordVersion
+    all_confirmed: bool
+
+
+class TasksRemoveReplyQueueChanged(WireModel):
+    outcome: Literal['queue_changed']
+    current_digest: RecordVersion
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksRemoveReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksRemoveReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksRemoveReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksSteerBody(WireModel):
+    "The person's guidance for a running request; stored before it is accepted."
+
+    steer_id: RecordId
+    task_id: RecordId
+    text: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
+    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+    replied_message: Optional[RepliedMessage] = Field(default=None)
+
+
+class TasksSteerReplyOk(WireModel):
+    outcome: Literal['ok']
+    state: Literal['accepted']
+    holds_sent: Count
+    duplicate: bool
+
+
+class TasksSteerReplyNotStarted(WireModel):
+    outcome: Literal['not_started']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksSteerReplyRequestFinished(WireModel):
+    outcome: Literal['request_finished']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksSteerReplyFeatureOff(WireModel):
+    outcome: Literal['feature_off']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TasksSteerReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
 class ToolSetupRequestBodySetupSignIn(WireModel):
     type: Literal['sign_in']
     owner: Literal['person']
@@ -1113,24 +5989,228 @@ class ToolSetupResultBody(WireModel):
     broker_session_id: Optional[RecordId] = Field(default=None)
 
 
+class TopicsFindThreadsBody(WireModel):
+    "Threads with the given tags."
+
+    tags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z0-9][a-z0-9_-]{0,63}$')]], Field(min_length=1, max_length=10)]
+
+
+class TopicsFindThreadsReplyOkMatchesItem(WireModel):
+    conversation_id: RecordId
+    latest_task_id: Optional[RecordId] = Field(default=None)
+    status: ProgressState
+    subject_preview: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    updated_at: Timestamp
+    matched_tags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z0-9][a-z0-9_-]{0,63}$')]], Field(max_length=10)]
+
+
+class TopicsFindThreadsReplyOk(WireModel):
+    outcome: Literal['ok']
+    matches: Annotated[list[TopicsFindThreadsReplyOkMatchesItem], Field(max_length=10)]
+
+
+class TopicsFindThreadsReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TopicsFindThreadsReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TopicsListTagsBody(WireModel):
+    "The thread tags in use."
+
+
+
+class TopicsListTagsReplyOkTagsItem(WireModel):
+    tag: Annotated[str, StringConstraints(pattern='^[a-z0-9][a-z0-9_-]{0,63}$')]
+    thread_count: Count
+    updated_at: Timestamp
+
+
+class TopicsListTagsReplyOk(WireModel):
+    outcome: Literal['ok']
+    tags: Annotated[list[TopicsListTagsReplyOkTagsItem], Field(max_length=200)]
+
+
+class TopicsListTagsReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TopicsTagThreadBody(WireModel):
+    "Tag a thread."
+
+    request_id: RecordId
+    conversation_id: RecordId
+    tags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z0-9][a-z0-9_-]{0,63}$')]], Field(min_length=1, max_length=20)]
+    private: bool
+
+
+class TopicsTagThreadReplyOk(WireModel):
+    outcome: Literal['ok']
+    applied_tags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z0-9][a-z0-9_-]{0,63}$')]], Field(max_length=20)]
+
+
+class TopicsTagThreadReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TopicsTagThreadReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class TopicsTagThreadReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
 AccessDecisionBodyAdapter = TypeAdapter(AccessDecisionBody)
 AccessRequestBodyAdapter = TypeAdapter(AccessRequestBody)
 AccessResolvedBodyAdapter = TypeAdapter(AccessResolvedBody)
+AccessWithdrawBodyAdapter = TypeAdapter(AccessWithdrawBody)
+AccessWithdrawReplyAdapter = TypeAdapter(Annotated[Union[AccessWithdrawReplyOk, AccessWithdrawReplyNotFound, AccessWithdrawReplyNotOwnRequest], Field(discriminator='outcome')])
+AgentExitBodyAdapter = TypeAdapter(AgentExitBody)
+AgentExitReplyAdapter = TypeAdapter(Annotated[Union[AgentExitReplyOk], Field(discriminator='outcome')])
 AgentPauseBodyAdapter = TypeAdapter(AgentPauseBody)
-AgentPauseReplyAdapter = TypeAdapter(Annotated[Union[AgentPauseReplyOk, AgentPauseReplyError], Field(discriminator='outcome')])
+AgentPauseReplyAdapter = TypeAdapter(Annotated[Union[AgentPauseReplyOk, AgentPauseReplyAgentExiting], Field(discriminator='outcome')])
+AgentResumeBodyAdapter = TypeAdapter(AgentResumeBody)
+AgentResumeReplyAdapter = TypeAdapter(Annotated[Union[AgentResumeReplyOk, AgentResumeReplyAgentExiting], Field(discriminator='outcome')])
+AgentStatusBodyAdapter = TypeAdapter(AgentStatusBody)
+AgentStatusReplyAdapter = TypeAdapter(Annotated[Union[AgentStatusReplyOk, AgentStatusReplyNotAllowed], Field(discriminator='outcome')])
+ConflictsCancelBodyAdapter = TypeAdapter(ConflictsCancelBody)
+ConflictsCancelReplyAdapter = TypeAdapter(Annotated[Union[ConflictsCancelReplyOk, ConflictsCancelReplyNotFound, ConflictsCancelReplyAdministratorRequired], Field(discriminator='outcome')])
+ConflictsDecideBodyAdapter = TypeAdapter(ConflictsDecideBody)
+ConflictsDecideReplyAdapter = TypeAdapter(Annotated[Union[ConflictsDecideReplyOk, ConflictsDecideReplyNotFound, ConflictsDecideReplyCaseClosed, ConflictsDecideReplyValuesChanged, ConflictsDecideReplyNotAllowed], Field(discriminator='outcome')])
+ConflictsListBodyAdapter = TypeAdapter(ConflictsListBody)
+ConflictsListReplyAdapter = TypeAdapter(Annotated[Union[ConflictsListReplyOk, ConflictsListReplyAdministratorRequired], Field(discriminator='outcome')])
 CredentialFormRequestBodyAdapter = TypeAdapter(CredentialFormRequestBody)
 CredentialFormResultBodyAdapter = TypeAdapter(CredentialFormResultBody)
+CustodyDecideBodyAdapter = TypeAdapter(CustodyDecideBody)
+CustodyDecideReplyAdapter = TypeAdapter(Annotated[Union[CustodyDecideReplyOk, CustodyDecideReplyNotFound, CustodyDecideReplyStaleCustody, CustodyDecideReplyLateWorkNotFound, CustodyDecideReplyRequestClosed, CustodyDecideReplyNotOwnRequest], Field(discriminator='outcome')])
 CustodyMovedBodyAdapter = TypeAdapter(CustodyMovedBody)
+DebugDumpBodyAdapter = TypeAdapter(DebugDumpBody)
+DebugDumpReplyAdapter = TypeAdapter(Annotated[Union[DebugDumpReplyOk, DebugDumpReplyNotAllowed], Field(discriminator='outcome')])
 DeliveryReceiptBodyAdapter = TypeAdapter(DeliveryReceiptBody)
 DeliveryRefusedBodyAdapter = TypeAdapter(DeliveryRefusedBody)
+HeartbeatItemsAddBodyAdapter = TypeAdapter(HeartbeatItemsAddBody)
+HeartbeatItemsAddReplyAdapter = TypeAdapter(Annotated[Union[HeartbeatItemsAddReplyOk, HeartbeatItemsAddReplyNotFound, HeartbeatItemsAddReplyObjectiveLinkRefused, HeartbeatItemsAddReplyChangedSinceRead, HeartbeatItemsAddReplyChangeConflict, HeartbeatItemsAddReplyRequestClosed, HeartbeatItemsAddReplyNeedsPersonDecision, HeartbeatItemsAddReplyRecordBusy, HeartbeatItemsAddReplyRuntimeError], Field(discriminator='outcome')])
+HeartbeatItemsDisableBodyAdapter = TypeAdapter(HeartbeatItemsDisableBody)
+HeartbeatItemsDisableReplyAdapter = TypeAdapter(Annotated[Union[HeartbeatItemsDisableReplyOk, HeartbeatItemsDisableReplyNotFound, HeartbeatItemsDisableReplyObjectiveLinkRefused, HeartbeatItemsDisableReplyChangedSinceRead, HeartbeatItemsDisableReplyChangeConflict, HeartbeatItemsDisableReplyRequestClosed, HeartbeatItemsDisableReplyNeedsPersonDecision, HeartbeatItemsDisableReplyRecordBusy, HeartbeatItemsDisableReplyRuntimeError], Field(discriminator='outcome')])
+HeartbeatItemsEnableBodyAdapter = TypeAdapter(HeartbeatItemsEnableBody)
+HeartbeatItemsEnableReplyAdapter = TypeAdapter(Annotated[Union[HeartbeatItemsEnableReplyOk, HeartbeatItemsEnableReplyNotFound, HeartbeatItemsEnableReplyObjectiveLinkRefused, HeartbeatItemsEnableReplyChangedSinceRead, HeartbeatItemsEnableReplyChangeConflict, HeartbeatItemsEnableReplyRequestClosed, HeartbeatItemsEnableReplyNeedsPersonDecision, HeartbeatItemsEnableReplyRecordBusy, HeartbeatItemsEnableReplyRuntimeError], Field(discriminator='outcome')])
+HeartbeatItemsRemoveBodyAdapter = TypeAdapter(HeartbeatItemsRemoveBody)
+HeartbeatItemsRemoveReplyAdapter = TypeAdapter(Annotated[Union[HeartbeatItemsRemoveReplyOk, HeartbeatItemsRemoveReplyNotFound, HeartbeatItemsRemoveReplyObjectiveLinkRefused, HeartbeatItemsRemoveReplyChangedSinceRead, HeartbeatItemsRemoveReplyChangeConflict, HeartbeatItemsRemoveReplyRequestClosed, HeartbeatItemsRemoveReplyNeedsPersonDecision, HeartbeatItemsRemoveReplyRecordBusy, HeartbeatItemsRemoveReplyRuntimeError], Field(discriminator='outcome')])
+HeartbeatItemsUpdateBodyAdapter = TypeAdapter(HeartbeatItemsUpdateBody)
+HeartbeatItemsUpdateReplyAdapter = TypeAdapter(Annotated[Union[HeartbeatItemsUpdateReplyOk, HeartbeatItemsUpdateReplyNotFound, HeartbeatItemsUpdateReplyObjectiveLinkRefused, HeartbeatItemsUpdateReplyChangedSinceRead, HeartbeatItemsUpdateReplyChangeConflict, HeartbeatItemsUpdateReplyRequestClosed, HeartbeatItemsUpdateReplyNeedsPersonDecision, HeartbeatItemsUpdateReplyRecordBusy, HeartbeatItemsUpdateReplyRuntimeError], Field(discriminator='outcome')])
+IntentSetBodyAdapter = TypeAdapter(IntentSetBody)
+IntentSetReplyAdapter = TypeAdapter(Annotated[Union[IntentSetReplyOk, IntentSetReplyChangedSinceRead, IntentSetReplyNotFound, IntentSetReplyRequestClosed, IntentSetReplyNotOwnRequest], Field(discriminator='outcome')])
+KnowledgeAddNoteBodyAdapter = TypeAdapter(KnowledgeAddNoteBody)
+KnowledgeAddNoteReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeAddNoteReplyOk, KnowledgeAddNoteReplyNotFound, KnowledgeAddNoteReplyNotAllowed, KnowledgeAddNoteReplyFeatureOff, KnowledgeAddNoteReplyPageExists, KnowledgeAddNoteReplyMerged, KnowledgeAddNoteReplyReviewRequired, KnowledgeAddNoteReplySensitiveContent, KnowledgeAddNoteReplyLimitReached, KnowledgeAddNoteReplyPageFrozen, KnowledgeAddNoteReplyRepeatsRecentRevision, KnowledgeAddNoteReplyPersonalSpaceUnavailable, KnowledgeAddNoteReplySavedWriteMismatch, KnowledgeAddNoteReplyContributionNotPending, KnowledgeAddNoteReplyInvalidRequest, KnowledgeAddNoteReplyChangedSinceRead, KnowledgeAddNoteReplyChangeConflict, KnowledgeAddNoteReplyRequestClosed, KnowledgeAddNoteReplyNeedsPersonDecision, KnowledgeAddNoteReplyRecordBusy, KnowledgeAddNoteReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeArchiveBodyAdapter = TypeAdapter(KnowledgeArchiveBody)
+KnowledgeArchiveReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeArchiveReplyOk, KnowledgeArchiveReplyNotFound, KnowledgeArchiveReplyNotAllowed, KnowledgeArchiveReplyFeatureOff, KnowledgeArchiveReplyPageExists, KnowledgeArchiveReplyMerged, KnowledgeArchiveReplyReviewRequired, KnowledgeArchiveReplySensitiveContent, KnowledgeArchiveReplyLimitReached, KnowledgeArchiveReplyPageFrozen, KnowledgeArchiveReplyRepeatsRecentRevision, KnowledgeArchiveReplyPersonalSpaceUnavailable, KnowledgeArchiveReplySavedWriteMismatch, KnowledgeArchiveReplyContributionNotPending, KnowledgeArchiveReplyInvalidRequest, KnowledgeArchiveReplyChangedSinceRead, KnowledgeArchiveReplyChangeConflict, KnowledgeArchiveReplyRequestClosed, KnowledgeArchiveReplyNeedsPersonDecision, KnowledgeArchiveReplyRecordBusy, KnowledgeArchiveReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeCountContributionsBodyAdapter = TypeAdapter(KnowledgeCountContributionsBody)
+KnowledgeCountContributionsReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeCountContributionsReplyOk, KnowledgeCountContributionsReplyNotAllowed, KnowledgeCountContributionsReplyFeatureOff, KnowledgeCountContributionsReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeFreezeBodyAdapter = TypeAdapter(KnowledgeFreezeBody)
+KnowledgeFreezeReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeFreezeReplyOk, KnowledgeFreezeReplyNotFound, KnowledgeFreezeReplyNotAllowed, KnowledgeFreezeReplyFeatureOff, KnowledgeFreezeReplyPageExists, KnowledgeFreezeReplyMerged, KnowledgeFreezeReplyReviewRequired, KnowledgeFreezeReplySensitiveContent, KnowledgeFreezeReplyLimitReached, KnowledgeFreezeReplyPageFrozen, KnowledgeFreezeReplyRepeatsRecentRevision, KnowledgeFreezeReplyPersonalSpaceUnavailable, KnowledgeFreezeReplySavedWriteMismatch, KnowledgeFreezeReplyContributionNotPending, KnowledgeFreezeReplyInvalidRequest, KnowledgeFreezeReplyChangedSinceRead, KnowledgeFreezeReplyChangeConflict, KnowledgeFreezeReplyRequestClosed, KnowledgeFreezeReplyNeedsPersonDecision, KnowledgeFreezeReplyRecordBusy, KnowledgeFreezeReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeHistoryBodyAdapter = TypeAdapter(KnowledgeHistoryBody)
+KnowledgeHistoryReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeHistoryReplyOk, KnowledgeHistoryReplyNotFound, KnowledgeHistoryReplyNotAllowed, KnowledgeHistoryReplyFeatureOff, KnowledgeHistoryReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeListBodyAdapter = TypeAdapter(KnowledgeListBody)
+KnowledgeListReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeListReplyOk, KnowledgeListReplyNotAllowed, KnowledgeListReplyFeatureOff, KnowledgeListReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeListContributionsBodyAdapter = TypeAdapter(KnowledgeListContributionsBody)
+KnowledgeListContributionsReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeListContributionsReplyOk, KnowledgeListContributionsReplyNotAllowed, KnowledgeListContributionsReplyFeatureOff, KnowledgeListContributionsReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeMergeBodyAdapter = TypeAdapter(KnowledgeMergeBody)
+KnowledgeMergeReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeMergeReplyOk, KnowledgeMergeReplyNotFound, KnowledgeMergeReplyNotAllowed, KnowledgeMergeReplyFeatureOff, KnowledgeMergeReplyPageExists, KnowledgeMergeReplyMerged, KnowledgeMergeReplyReviewRequired, KnowledgeMergeReplySensitiveContent, KnowledgeMergeReplyLimitReached, KnowledgeMergeReplyPageFrozen, KnowledgeMergeReplyRepeatsRecentRevision, KnowledgeMergeReplyPersonalSpaceUnavailable, KnowledgeMergeReplySavedWriteMismatch, KnowledgeMergeReplyContributionNotPending, KnowledgeMergeReplyInvalidRequest, KnowledgeMergeReplyChangedSinceRead, KnowledgeMergeReplyChangeConflict, KnowledgeMergeReplyRequestClosed, KnowledgeMergeReplyNeedsPersonDecision, KnowledgeMergeReplyRecordBusy, KnowledgeMergeReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgePublishContributionBodyAdapter = TypeAdapter(KnowledgePublishContributionBody)
+KnowledgePublishContributionReplyAdapter = TypeAdapter(Annotated[Union[KnowledgePublishContributionReplyOk, KnowledgePublishContributionReplyNotFound, KnowledgePublishContributionReplyNotAllowed, KnowledgePublishContributionReplyFeatureOff, KnowledgePublishContributionReplyPageExists, KnowledgePublishContributionReplyMerged, KnowledgePublishContributionReplyReviewRequired, KnowledgePublishContributionReplySensitiveContent, KnowledgePublishContributionReplyLimitReached, KnowledgePublishContributionReplyPageFrozen, KnowledgePublishContributionReplyRepeatsRecentRevision, KnowledgePublishContributionReplyPersonalSpaceUnavailable, KnowledgePublishContributionReplySavedWriteMismatch, KnowledgePublishContributionReplyContributionNotPending, KnowledgePublishContributionReplyInvalidRequest, KnowledgePublishContributionReplyChangedSinceRead, KnowledgePublishContributionReplyChangeConflict, KnowledgePublishContributionReplyRequestClosed, KnowledgePublishContributionReplyNeedsPersonDecision, KnowledgePublishContributionReplyRecordBusy, KnowledgePublishContributionReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeReadBodyAdapter = TypeAdapter(KnowledgeReadBody)
+KnowledgeReadReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeReadReplyOk, KnowledgeReadReplyNotFound, KnowledgeReadReplyNotAllowed, KnowledgeReadReplyFeatureOff, KnowledgeReadReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeReadContributionBodyAdapter = TypeAdapter(KnowledgeReadContributionBody)
+KnowledgeReadContributionReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeReadContributionReplyOk, KnowledgeReadContributionReplyNotFound, KnowledgeReadContributionReplyNotAllowed, KnowledgeReadContributionReplyFeatureOff, KnowledgeReadContributionReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeRejectContributionBodyAdapter = TypeAdapter(KnowledgeRejectContributionBody)
+KnowledgeRejectContributionReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeRejectContributionReplyOk, KnowledgeRejectContributionReplyNotFound, KnowledgeRejectContributionReplyNotAllowed, KnowledgeRejectContributionReplyFeatureOff, KnowledgeRejectContributionReplyPageExists, KnowledgeRejectContributionReplyMerged, KnowledgeRejectContributionReplyReviewRequired, KnowledgeRejectContributionReplySensitiveContent, KnowledgeRejectContributionReplyLimitReached, KnowledgeRejectContributionReplyPageFrozen, KnowledgeRejectContributionReplyRepeatsRecentRevision, KnowledgeRejectContributionReplyPersonalSpaceUnavailable, KnowledgeRejectContributionReplySavedWriteMismatch, KnowledgeRejectContributionReplyContributionNotPending, KnowledgeRejectContributionReplyInvalidRequest, KnowledgeRejectContributionReplyChangedSinceRead, KnowledgeRejectContributionReplyChangeConflict, KnowledgeRejectContributionReplyRequestClosed, KnowledgeRejectContributionReplyNeedsPersonDecision, KnowledgeRejectContributionReplyRecordBusy, KnowledgeRejectContributionReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeResolveNoteBodyAdapter = TypeAdapter(KnowledgeResolveNoteBody)
+KnowledgeResolveNoteReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeResolveNoteReplyOk, KnowledgeResolveNoteReplyNotFound, KnowledgeResolveNoteReplyNotAllowed, KnowledgeResolveNoteReplyFeatureOff, KnowledgeResolveNoteReplyPageExists, KnowledgeResolveNoteReplyMerged, KnowledgeResolveNoteReplyReviewRequired, KnowledgeResolveNoteReplySensitiveContent, KnowledgeResolveNoteReplyLimitReached, KnowledgeResolveNoteReplyPageFrozen, KnowledgeResolveNoteReplyRepeatsRecentRevision, KnowledgeResolveNoteReplyPersonalSpaceUnavailable, KnowledgeResolveNoteReplySavedWriteMismatch, KnowledgeResolveNoteReplyContributionNotPending, KnowledgeResolveNoteReplyInvalidRequest, KnowledgeResolveNoteReplyChangedSinceRead, KnowledgeResolveNoteReplyChangeConflict, KnowledgeResolveNoteReplyRequestClosed, KnowledgeResolveNoteReplyNeedsPersonDecision, KnowledgeResolveNoteReplyRecordBusy, KnowledgeResolveNoteReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeRevertBodyAdapter = TypeAdapter(KnowledgeRevertBody)
+KnowledgeRevertReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeRevertReplyOk, KnowledgeRevertReplyNotFound, KnowledgeRevertReplyNotAllowed, KnowledgeRevertReplyFeatureOff, KnowledgeRevertReplyPageExists, KnowledgeRevertReplyMerged, KnowledgeRevertReplyReviewRequired, KnowledgeRevertReplySensitiveContent, KnowledgeRevertReplyLimitReached, KnowledgeRevertReplyPageFrozen, KnowledgeRevertReplyRepeatsRecentRevision, KnowledgeRevertReplyPersonalSpaceUnavailable, KnowledgeRevertReplySavedWriteMismatch, KnowledgeRevertReplyContributionNotPending, KnowledgeRevertReplyInvalidRequest, KnowledgeRevertReplyChangedSinceRead, KnowledgeRevertReplyChangeConflict, KnowledgeRevertReplyRequestClosed, KnowledgeRevertReplyNeedsPersonDecision, KnowledgeRevertReplyRecordBusy, KnowledgeRevertReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeUnfreezeBodyAdapter = TypeAdapter(KnowledgeUnfreezeBody)
+KnowledgeUnfreezeReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeUnfreezeReplyOk, KnowledgeUnfreezeReplyNotFound, KnowledgeUnfreezeReplyNotAllowed, KnowledgeUnfreezeReplyFeatureOff, KnowledgeUnfreezeReplyPageExists, KnowledgeUnfreezeReplyMerged, KnowledgeUnfreezeReplyReviewRequired, KnowledgeUnfreezeReplySensitiveContent, KnowledgeUnfreezeReplyLimitReached, KnowledgeUnfreezeReplyPageFrozen, KnowledgeUnfreezeReplyRepeatsRecentRevision, KnowledgeUnfreezeReplyPersonalSpaceUnavailable, KnowledgeUnfreezeReplySavedWriteMismatch, KnowledgeUnfreezeReplyContributionNotPending, KnowledgeUnfreezeReplyInvalidRequest, KnowledgeUnfreezeReplyChangedSinceRead, KnowledgeUnfreezeReplyChangeConflict, KnowledgeUnfreezeReplyRequestClosed, KnowledgeUnfreezeReplyNeedsPersonDecision, KnowledgeUnfreezeReplyRecordBusy, KnowledgeUnfreezeReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeWithdrawContributionBodyAdapter = TypeAdapter(KnowledgeWithdrawContributionBody)
+KnowledgeWithdrawContributionReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeWithdrawContributionReplyOk, KnowledgeWithdrawContributionReplyNotFound, KnowledgeWithdrawContributionReplyNotAllowed, KnowledgeWithdrawContributionReplyContributionNotPending, KnowledgeWithdrawContributionReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeWriteBodyAdapter = TypeAdapter(KnowledgeWriteBody)
+KnowledgeWriteReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeWriteReplyOk, KnowledgeWriteReplyPendingReview, KnowledgeWriteReplyNotFound, KnowledgeWriteReplyNotAllowed, KnowledgeWriteReplyFeatureOff, KnowledgeWriteReplyPageExists, KnowledgeWriteReplyMerged, KnowledgeWriteReplyReviewRequired, KnowledgeWriteReplySensitiveContent, KnowledgeWriteReplyLimitReached, KnowledgeWriteReplyPageFrozen, KnowledgeWriteReplyRepeatsRecentRevision, KnowledgeWriteReplyPersonalSpaceUnavailable, KnowledgeWriteReplySavedWriteMismatch, KnowledgeWriteReplyContributionNotPending, KnowledgeWriteReplyInvalidRequest, KnowledgeWriteReplyChangedSinceRead, KnowledgeWriteReplyChangeConflict, KnowledgeWriteReplyRequestClosed, KnowledgeWriteReplyNeedsPersonDecision, KnowledgeWriteReplyRecordBusy, KnowledgeWriteReplyRuntimeError], Field(discriminator='outcome')])
 LedgerFactBodyAdapter = TypeAdapter(LedgerFactBody)
+MemoryCreateBodyAdapter = TypeAdapter(MemoryCreateBody)
+MemoryCreateReplyAdapter = TypeAdapter(Annotated[Union[MemoryCreateReplyOk, MemoryCreateReplyNotAllowed, MemoryCreateReplyNotFound, MemoryCreateReplyCapacityReached, MemoryCreateReplyInvalidRequest, MemoryCreateReplyChangedSinceRead, MemoryCreateReplyChangeConflict, MemoryCreateReplyRequestClosed, MemoryCreateReplyNeedsPersonDecision, MemoryCreateReplyRecordBusy, MemoryCreateReplyRuntimeError], Field(discriminator='outcome')])
+MemoryDeleteBodyAdapter = TypeAdapter(MemoryDeleteBody)
+MemoryDeleteReplyAdapter = TypeAdapter(Annotated[Union[MemoryDeleteReplyOk, MemoryDeleteReplyNotAllowed, MemoryDeleteReplyNotFound, MemoryDeleteReplyCapacityReached, MemoryDeleteReplyInvalidRequest, MemoryDeleteReplyChangedSinceRead, MemoryDeleteReplyChangeConflict, MemoryDeleteReplyRequestClosed, MemoryDeleteReplyNeedsPersonDecision, MemoryDeleteReplyRecordBusy, MemoryDeleteReplyRuntimeError], Field(discriminator='outcome')])
+MemoryListBodyAdapter = TypeAdapter(MemoryListBody)
+MemoryListReplyAdapter = TypeAdapter(Annotated[Union[MemoryListReplyOk, MemoryListReplyNotAllowed, MemoryListReplyRuntimeError], Field(discriminator='outcome')])
+MemoryReplaceBodyAdapter = TypeAdapter(MemoryReplaceBody)
+MemoryReplaceReplyAdapter = TypeAdapter(Annotated[Union[MemoryReplaceReplyOk, MemoryReplaceReplyNotAllowed, MemoryReplaceReplyNotFound, MemoryReplaceReplyCapacityReached, MemoryReplaceReplyInvalidRequest, MemoryReplaceReplyChangedSinceRead, MemoryReplaceReplyChangeConflict, MemoryReplaceReplyRequestClosed, MemoryReplaceReplyNeedsPersonDecision, MemoryReplaceReplyRecordBusy, MemoryReplaceReplyRuntimeError], Field(discriminator='outcome')])
+MemoryShowBodyAdapter = TypeAdapter(MemoryShowBody)
+MemoryShowReplyAdapter = TypeAdapter(Annotated[Union[MemoryShowReplyOk, MemoryShowReplyNotAllowed, MemoryShowReplyNotFound, MemoryShowReplyRuntimeError], Field(discriminator='outcome')])
+MemoryUndoBodyAdapter = TypeAdapter(MemoryUndoBody)
+MemoryUndoReplyAdapter = TypeAdapter(Annotated[Union[MemoryUndoReplyOk, MemoryUndoReplyNotAllowed, MemoryUndoReplyNotFound, MemoryUndoReplyCapacityReached, MemoryUndoReplyInvalidRequest, MemoryUndoReplyChangedSinceRead, MemoryUndoReplyChangeConflict, MemoryUndoReplyRequestClosed, MemoryUndoReplyNeedsPersonDecision, MemoryUndoReplyRecordBusy, MemoryUndoReplyRuntimeError], Field(discriminator='outcome')])
+ObjectivesAbandonBodyAdapter = TypeAdapter(ObjectivesAbandonBody)
+ObjectivesAbandonReplyAdapter = TypeAdapter(Annotated[Union[ObjectivesAbandonReplyOk, ObjectivesAbandonReplyNotFound, ObjectivesAbandonReplyNotAllowed, ObjectivesAbandonReplyChangedSinceRead, ObjectivesAbandonReplyActionUnavailable, ObjectivesAbandonReplyRuntimeError], Field(discriminator='outcome')])
+ObjectivesCreateBodyAdapter = TypeAdapter(ObjectivesCreateBody)
+ObjectivesCreateReplyAdapter = TypeAdapter(Annotated[Union[ObjectivesCreateReplyOk, ObjectivesCreateReplyNotFound, ObjectivesCreateReplyFeatureOff, ObjectivesCreateReplyStatusNotSettable, ObjectivesCreateReplyConfirmationRequired, ObjectivesCreateReplyChangedSinceRead, ObjectivesCreateReplyChangeConflict, ObjectivesCreateReplyRequestClosed, ObjectivesCreateReplyNeedsPersonDecision, ObjectivesCreateReplyRecordBusy, ObjectivesCreateReplyRuntimeError], Field(discriminator='outcome')])
+ObjectivesDeleteBodyAdapter = TypeAdapter(ObjectivesDeleteBody)
+ObjectivesDeleteReplyAdapter = TypeAdapter(Annotated[Union[ObjectivesDeleteReplyOk, ObjectivesDeleteReplyNotFound, ObjectivesDeleteReplyNotAllowed, ObjectivesDeleteReplyChangedSinceRead, ObjectivesDeleteReplyActionUnavailable, ObjectivesDeleteReplyRuntimeError], Field(discriminator='outcome')])
+ObjectivesListBodyAdapter = TypeAdapter(ObjectivesListBody)
+ObjectivesListReplyAdapter = TypeAdapter(Annotated[Union[ObjectivesListReplyOk, ObjectivesListReplyRuntimeError], Field(discriminator='outcome')])
+ObjectivesPauseBodyAdapter = TypeAdapter(ObjectivesPauseBody)
+ObjectivesPauseReplyAdapter = TypeAdapter(Annotated[Union[ObjectivesPauseReplyOk, ObjectivesPauseReplyNotFound, ObjectivesPauseReplyNotAllowed, ObjectivesPauseReplyChangedSinceRead, ObjectivesPauseReplyActionUnavailable, ObjectivesPauseReplyRuntimeError], Field(discriminator='outcome')])
+ObjectivesResumeBodyAdapter = TypeAdapter(ObjectivesResumeBody)
+ObjectivesResumeReplyAdapter = TypeAdapter(Annotated[Union[ObjectivesResumeReplyOk, ObjectivesResumeReplyNotFound, ObjectivesResumeReplyNotAllowed, ObjectivesResumeReplyChangedSinceRead, ObjectivesResumeReplyActionUnavailable, ObjectivesResumeReplyRuntimeError], Field(discriminator='outcome')])
+ObjectivesStopBodyAdapter = TypeAdapter(ObjectivesStopBody)
+ObjectivesStopReplyAdapter = TypeAdapter(Annotated[Union[ObjectivesStopReplyOk, ObjectivesStopReplyNotFound, ObjectivesStopReplyNotAllowed, ObjectivesStopReplyChangedSinceRead, ObjectivesStopReplyActionUnavailable, ObjectivesStopReplyRuntimeError], Field(discriminator='outcome')])
+ObjectivesUpdateProgressBodyAdapter = TypeAdapter(ObjectivesUpdateProgressBody)
+ObjectivesUpdateProgressReplyAdapter = TypeAdapter(Annotated[Union[ObjectivesUpdateProgressReplyOk, ObjectivesUpdateProgressReplyNotFound, ObjectivesUpdateProgressReplyFeatureOff, ObjectivesUpdateProgressReplyStatusNotSettable, ObjectivesUpdateProgressReplyConfirmationRequired, ObjectivesUpdateProgressReplyChangedSinceRead, ObjectivesUpdateProgressReplyChangeConflict, ObjectivesUpdateProgressReplyRequestClosed, ObjectivesUpdateProgressReplyNeedsPersonDecision, ObjectivesUpdateProgressReplyRecordBusy, ObjectivesUpdateProgressReplyRuntimeError], Field(discriminator='outcome')])
+ObjectivesUpdateStatusBodyAdapter = TypeAdapter(ObjectivesUpdateStatusBody)
+ObjectivesUpdateStatusReplyAdapter = TypeAdapter(Annotated[Union[ObjectivesUpdateStatusReplyOk, ObjectivesUpdateStatusReplyNotFound, ObjectivesUpdateStatusReplyFeatureOff, ObjectivesUpdateStatusReplyStatusNotSettable, ObjectivesUpdateStatusReplyConfirmationRequired, ObjectivesUpdateStatusReplyChangedSinceRead, ObjectivesUpdateStatusReplyChangeConflict, ObjectivesUpdateStatusReplyRequestClosed, ObjectivesUpdateStatusReplyNeedsPersonDecision, ObjectivesUpdateStatusReplyRecordBusy, ObjectivesUpdateStatusReplyRuntimeError], Field(discriminator='outcome')])
+PeopleSetStandingBodyAdapter = TypeAdapter(PeopleSetStandingBody)
+PeopleSetStandingReplyAdapter = TypeAdapter(Annotated[Union[PeopleSetStandingReplyOk, PeopleSetStandingReplyAdministratorRequired, PeopleSetStandingReplyRuntimeError], Field(discriminator='outcome')])
 PersonNotifyBodyAdapter = TypeAdapter(PersonNotifyBody)
 QuestionClosedBodyAdapter = TypeAdapter(QuestionClosedBody)
+RequestsPauseBodyAdapter = TypeAdapter(RequestsPauseBody)
+RequestsPauseReplyAdapter = TypeAdapter(Annotated[Union[RequestsPauseReplyOk, RequestsPauseReplyNotFound, RequestsPauseReplyRequestClosed, RequestsPauseReplyNotOwnRequest], Field(discriminator='outcome')])
+RequestsResumeBodyAdapter = TypeAdapter(RequestsResumeBody)
+RequestsResumeReplyAdapter = TypeAdapter(Annotated[Union[RequestsResumeReplyOk, RequestsResumeReplyNotFound, RequestsResumeReplyRequestClosed, RequestsResumeReplyNotOwnRequest], Field(discriminator='outcome')])
+RunContextSignBodyAdapter = TypeAdapter(RunContextSignBody)
+RunContextSignReplyAdapter = TypeAdapter(Annotated[Union[RunContextSignReplyOk, RunContextSignReplySignerMissing, RunContextSignReplyNotFound, RunContextSignReplyClaimNotHeld, RunContextSignReplyScheduleStopped, RunContextSignReplyScheduledJobMismatch, RunContextSignReplyHeartbeatItemNotFound, RunContextSignReplyOwnerInactive, RunContextSignReplyCheckFailed], Field(discriminator='outcome')])
+SchedulesDisableBodyAdapter = TypeAdapter(SchedulesDisableBody)
+SchedulesDisableReplyAdapter = TypeAdapter(Annotated[Union[SchedulesDisableReplyOk, SchedulesDisableReplyApprovalRequired, SchedulesDisableReplyNotFound, SchedulesDisableReplyNotAllowed, SchedulesDisableReplyChangedSinceRead, SchedulesDisableReplyChangeConflict, SchedulesDisableReplyRequestClosed, SchedulesDisableReplyNeedsPersonDecision, SchedulesDisableReplyRecordBusy, SchedulesDisableReplyRuntimeError], Field(discriminator='outcome')])
+SchedulesInstallBodyAdapter = TypeAdapter(SchedulesInstallBody)
+SchedulesInstallReplyAdapter = TypeAdapter(Annotated[Union[SchedulesInstallReplyOk, SchedulesInstallReplyInvalidRequest, SchedulesInstallReplyIdInUse, SchedulesInstallReplyNotAllowed, SchedulesInstallReplyNotFound, SchedulesInstallReplyNotSystemManaged, SchedulesInstallReplyChangedSinceRead, SchedulesInstallReplyChangeConflict, SchedulesInstallReplyRequestClosed, SchedulesInstallReplyNeedsPersonDecision, SchedulesInstallReplyRecordBusy], Field(discriminator='outcome')])
+SchedulesListBodyAdapter = TypeAdapter(SchedulesListBody)
+SchedulesListReplyAdapter = TypeAdapter(Annotated[Union[SchedulesListReplyOk, SchedulesListReplyNotAllowed, SchedulesListReplyRuntimeError], Field(discriminator='outcome')])
+SchedulesPauseBodyAdapter = TypeAdapter(SchedulesPauseBody)
+SchedulesPauseReplyAdapter = TypeAdapter(Annotated[Union[SchedulesPauseReplyOk, SchedulesPauseReplyApprovalRequired, SchedulesPauseReplyNotFound, SchedulesPauseReplyNotAllowed, SchedulesPauseReplyChangedSinceRead, SchedulesPauseReplyChangeConflict, SchedulesPauseReplyRequestClosed, SchedulesPauseReplyNeedsPersonDecision, SchedulesPauseReplyRecordBusy, SchedulesPauseReplyRuntimeError], Field(discriminator='outcome')])
+SchedulesRemoveBodyAdapter = TypeAdapter(SchedulesRemoveBody)
+SchedulesRemoveReplyAdapter = TypeAdapter(Annotated[Union[SchedulesRemoveReplyOk, SchedulesRemoveReplyApprovalRequired, SchedulesRemoveReplyNotFound, SchedulesRemoveReplyNotAllowed, SchedulesRemoveReplyChangedSinceRead, SchedulesRemoveReplyChangeConflict, SchedulesRemoveReplyRequestClosed, SchedulesRemoveReplyNeedsPersonDecision, SchedulesRemoveReplyRecordBusy, SchedulesRemoveReplyRuntimeError], Field(discriminator='outcome')])
+SchedulesResumeBodyAdapter = TypeAdapter(SchedulesResumeBody)
+SchedulesResumeReplyAdapter = TypeAdapter(Annotated[Union[SchedulesResumeReplyOk, SchedulesResumeReplyApprovalRequired, SchedulesResumeReplyNotFound, SchedulesResumeReplyNotAllowed, SchedulesResumeReplyChangedSinceRead, SchedulesResumeReplyChangeConflict, SchedulesResumeReplyRequestClosed, SchedulesResumeReplyNeedsPersonDecision, SchedulesResumeReplyRecordBusy, SchedulesResumeReplyRuntimeError], Field(discriminator='outcome')])
+SchedulesSetWorkerBodyAdapter = TypeAdapter(SchedulesSetWorkerBody)
+SchedulesSetWorkerReplyAdapter = TypeAdapter(Annotated[Union[SchedulesSetWorkerReplyOk, SchedulesSetWorkerReplyApprovalRequired, SchedulesSetWorkerReplyNotFound, SchedulesSetWorkerReplyNotAllowed, SchedulesSetWorkerReplyChangedSinceRead, SchedulesSetWorkerReplyChangeConflict, SchedulesSetWorkerReplyRequestClosed, SchedulesSetWorkerReplyNeedsPersonDecision, SchedulesSetWorkerReplyRecordBusy, SchedulesSetWorkerReplyRuntimeError], Field(discriminator='outcome')])
+SchedulesUpdateBodyAdapter = TypeAdapter(SchedulesUpdateBody)
+SchedulesUpdateReplyAdapter = TypeAdapter(Annotated[Union[SchedulesUpdateReplyOk, SchedulesUpdateReplyApprovalRequired, SchedulesUpdateReplyNotFound, SchedulesUpdateReplyNotAllowed, SchedulesUpdateReplyChangedSinceRead, SchedulesUpdateReplyChangeConflict, SchedulesUpdateReplyRequestClosed, SchedulesUpdateReplyNeedsPersonDecision, SchedulesUpdateReplyRecordBusy, SchedulesUpdateReplyRuntimeError], Field(discriminator='outcome')])
 SkillsChangedBodyAdapter = TypeAdapter(Annotated[Union[SkillsChangedBodyInstall, SkillsChangedBodyUninstall], Field(discriminator='operation')])
+StagedChangesApplyBodyAdapter = TypeAdapter(StagedChangesApplyBody)
+StagedChangesApplyReplyAdapter = TypeAdapter(Annotated[Union[StagedChangesApplyReplyOk, StagedChangesApplyReplyWaiting, StagedChangesApplyReplyAgreementRequired, StagedChangesApplyReplyAlreadyApplied, StagedChangesApplyReplyNotFound, StagedChangesApplyReplyNotAllowed, StagedChangesApplyReplyDenied, StagedChangesApplyReplyWithdrawn, StagedChangesApplyReplyChangedSinceRead, StagedChangesApplyReplyChangeConflict, StagedChangesApplyReplyRequestClosed, StagedChangesApplyReplyNeedsPersonDecision, StagedChangesApplyReplyRecordBusy, StagedChangesApplyReplyRuntimeError], Field(discriminator='outcome')])
+SteeringDecideBodyAdapter = TypeAdapter(SteeringDecideBody)
+SteeringDecideReplyAdapter = TypeAdapter(Annotated[Union[SteeringDecideReplyOk, SteeringDecideReplyNotFound, SteeringDecideReplyHoldExpired, SteeringDecideReplyExtensionUsed, SteeringDecideReplyTasksNotCovered, SteeringDecideReplyNotOwnRequest], Field(discriminator='outcome')])
 TaskAccountBodyAdapter = TypeAdapter(TaskAccountBody)
 TaskAnswerBodyAdapter = TypeAdapter(TaskAnswerBody)
 TaskClaimedBodyAdapter = TypeAdapter(TaskClaimedBody)
 TaskHandbackBodyAdapter = TypeAdapter(TaskHandbackBody)
+TaskProbeBodyAdapter = TypeAdapter(TaskProbeBody)
+TaskProbeReplyAdapter = TypeAdapter(Annotated[Union[TaskProbeReplyOk], Field(discriminator='outcome')])
 TaskProgressBodyAdapter = TypeAdapter(TaskProgressBody)
 TaskQuestionBodyAdapter = TypeAdapter(TaskQuestionBody)
 TaskReportBodyAdapter = TypeAdapter(TaskReportBody)
@@ -1138,5 +6218,29 @@ TaskRequestBodyAdapter = TypeAdapter(TaskRequestBody)
 TaskResultBodyAdapter = TypeAdapter(TaskResultBody)
 TaskSteerBodyAdapter = TypeAdapter(TaskSteerBody)
 TaskStopBodyAdapter = TypeAdapter(TaskStopBody)
+TasksCancelBodyAdapter = TypeAdapter(TasksCancelBody)
+TasksCancelReplyAdapter = TypeAdapter(Annotated[Union[TasksCancelReplyOk, TasksCancelReplyNoMatchingWork, TasksCancelReplyRuntimeError], Field(discriminator='outcome')])
+TasksInventoryBodyAdapter = TypeAdapter(TasksInventoryBody)
+TasksInventoryReplyAdapter = TypeAdapter(Annotated[Union[TasksInventoryReplyOk, TasksInventoryReplyRuntimeError], Field(discriminator='outcome')])
+TasksListBodyAdapter = TypeAdapter(TasksListBody)
+TasksListReplyAdapter = TypeAdapter(Annotated[Union[TasksListReplyOk, TasksListReplyNotAllowed, TasksListReplyRuntimeError], Field(discriminator='outcome')])
+TasksListFinishedBodyAdapter = TypeAdapter(TasksListFinishedBody)
+TasksListFinishedReplyAdapter = TypeAdapter(Annotated[Union[TasksListFinishedReplyOk, TasksListFinishedReplyNotAllowed, TasksListFinishedReplyRuntimeError], Field(discriminator='outcome')])
+TasksProbeBodyAdapter = TypeAdapter(TasksProbeBody)
+TasksProbeReplyAdapter = TypeAdapter(Annotated[Union[TasksProbeReplyOk], Field(discriminator='outcome')])
+TasksProgressBodyAdapter = TypeAdapter(TasksProgressBody)
+TasksProgressReplyAdapter = TypeAdapter(Annotated[Union[TasksProgressReplyOk, TasksProgressReplyNotAllowed], Field(discriminator='outcome')])
+TasksPurgeBodyAdapter = TypeAdapter(TasksPurgeBody)
+TasksPurgeReplyAdapter = TypeAdapter(Annotated[Union[TasksPurgeReplyOk, TasksPurgeReplyQueueChanged, TasksPurgeReplyNotFound, TasksPurgeReplyNotAllowed, TasksPurgeReplyRuntimeError], Field(discriminator='outcome')])
+TasksRemoveBodyAdapter = TypeAdapter(TasksRemoveBody)
+TasksRemoveReplyAdapter = TypeAdapter(Annotated[Union[TasksRemoveReplyOk, TasksRemoveReplyQueueChanged, TasksRemoveReplyNotFound, TasksRemoveReplyNotAllowed, TasksRemoveReplyRuntimeError], Field(discriminator='outcome')])
+TasksSteerBodyAdapter = TypeAdapter(TasksSteerBody)
+TasksSteerReplyAdapter = TypeAdapter(Annotated[Union[TasksSteerReplyOk, TasksSteerReplyNotStarted, TasksSteerReplyRequestFinished, TasksSteerReplyFeatureOff, TasksSteerReplyNotAllowed], Field(discriminator='outcome')])
 ToolSetupRequestBodyAdapter = TypeAdapter(ToolSetupRequestBody)
 ToolSetupResultBodyAdapter = TypeAdapter(ToolSetupResultBody)
+TopicsFindThreadsBodyAdapter = TypeAdapter(TopicsFindThreadsBody)
+TopicsFindThreadsReplyAdapter = TypeAdapter(Annotated[Union[TopicsFindThreadsReplyOk, TopicsFindThreadsReplyInvalidRequest, TopicsFindThreadsReplyRuntimeError], Field(discriminator='outcome')])
+TopicsListTagsBodyAdapter = TypeAdapter(TopicsListTagsBody)
+TopicsListTagsReplyAdapter = TypeAdapter(Annotated[Union[TopicsListTagsReplyOk, TopicsListTagsReplyRuntimeError], Field(discriminator='outcome')])
+TopicsTagThreadBodyAdapter = TypeAdapter(TopicsTagThreadBody)
+TopicsTagThreadReplyAdapter = TypeAdapter(Annotated[Union[TopicsTagThreadReplyOk, TopicsTagThreadReplyNotFound, TopicsTagThreadReplyInvalidRequest, TopicsTagThreadReplyRuntimeError], Field(discriminator='outcome')])

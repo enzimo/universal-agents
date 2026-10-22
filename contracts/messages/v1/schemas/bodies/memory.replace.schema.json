@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/memory.replace.schema.json",
+  "title": "memory.replace request",
+  "description": "Replace a memory fact's text or tags.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "bank": {
+      "type": "string",
+      "enum": [
+        "coremem",
+        "usermem"
+      ]
+    },
+    "memory_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "seen_version": {
+      "$ref": "../common.schema.json#/$defs/record_version"
+    },
+    "fact_text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 12000
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "maxItems": 20
+    },
+    "valid_from": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "expires": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    }
+  },
+  "required": [
+    "request_id",
+    "bank",
+    "memory_id",
+    "seen_version",
+    "fact_text",
+    "tags"
+  ],
+  "additionalProperties": false
+}

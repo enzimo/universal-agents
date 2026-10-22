@@ -1,0 +1,29 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.read",
+  "message_id": "01928f3a-7b2c-7467-8000-000000000467",
+  "idempotency_key": "knowledge.read:example_1127",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.knowledge.read",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "space": "team",
+    "page": "Example page",
+    "revision": 3
+  },
+  "body_digest": "pqFnXn8yf9CMiSMBCmwt49ZOEsFDiiNyen4RgSqL0W0",
+  "signature": "VWZOYZFjYI7GHuvFeWccoh2A84zDpVeak8YRxhoiFAAvt3ePu7ZCVbD6TuzCWk8dvHXS8A8HvlfOoHDki0l8Bg"
+}

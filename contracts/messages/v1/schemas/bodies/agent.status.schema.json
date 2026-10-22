@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/agent.status.schema.json",
+  "title": "agent.status request",
+  "description": "An agent's status: basic for anyone allowed, full only for the team's lead.",
+  "type": "object",
+  "properties": {
+    "level": {
+      "type": "string",
+      "enum": [
+        "basic",
+        "full"
+      ]
+    }
+  },
+  "required": [
+    "level"
+  ],
+  "additionalProperties": false
+}

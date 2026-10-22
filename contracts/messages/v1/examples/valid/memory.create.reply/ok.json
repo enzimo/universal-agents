@@ -1,0 +1,41 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "memory.create.reply",
+  "message_id": "01928f3a-7b2c-7450-8000-000000000450",
+  "idempotency_key": "memory.create:example_1104:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.memory.create",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "fact": {
+      "memory_id": 3,
+      "fact_text": "Example fact text",
+      "valid_from": "2026-10-22T04:30:00.000Z",
+      "expires": "2026-10-22T04:30:00.000Z",
+      "tags": [
+        "Example tags"
+      ],
+      "created_at": "2026-10-22T04:30:00.000Z",
+      "updated_at": "2026-10-22T04:30:00.000Z",
+      "seen_version": "v3"
+    },
+    "event_id": "event_id_1"
+  },
+  "causation_id": "01928f3a-7b2c-744f-8000-00000000044f",
+  "body_digest": "5fzWBlWnY2u1d8WtOLds2tGeMkOtiaTMdrBcbZOGsP8",
+  "signature": "jCWfxqveuZy_eI7GyuFHVWVAVnp-GBQgWitY6d_0qa2NSi0BTRHzvc_XMY_2thpTpyrF8cenk8MCKx5zDVwRDQ"
+}

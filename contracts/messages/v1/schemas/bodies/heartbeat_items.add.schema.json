@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/heartbeat_items.add.schema.json",
+  "title": "heartbeat_items.add request",
+  "description": "The lead adds a heartbeat item.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "instruction": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32768
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "target_agent_type": {
+      "$ref": "../common.schema.json#/$defs/agent_type"
+    },
+    "objective_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    }
+  },
+  "required": [
+    "request_id",
+    "instruction"
+  ],
+  "additionalProperties": false
+}

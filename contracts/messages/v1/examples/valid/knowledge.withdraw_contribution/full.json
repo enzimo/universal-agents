@@ -1,0 +1,28 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.withdraw_contribution",
+  "message_id": "01928f3a-7b2c-7485-8000-000000000485",
+  "idempotency_key": "knowledge.withdraw_contribution:example_1157",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.knowledge.withdraw_contribution",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_1",
+    "contribution_id": "Example contribution id"
+  },
+  "body_digest": "EDAkmYOM5hHx5jMpSOqmzXhF4UlxGBHgQp8Og8X6hko",
+  "signature": "LU9oL8zahgHGP_BPHJOSpwr-0o9wzJu0dr08pyQP177YTyKdhyzwRK5MqzCzuWmaUwx9wLwoKL6vg0h8Z3bpBg"
+}

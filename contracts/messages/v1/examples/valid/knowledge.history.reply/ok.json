@@ -1,0 +1,63 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.history.reply",
+  "message_id": "01928f3a-7b2c-746b-8000-00000000046b",
+  "idempotency_key": "knowledge.history:example_1131:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.knowledge.history",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "page": {
+      "space": "team",
+      "page": "Example page",
+      "title": "Example title",
+      "summary": "Example summary",
+      "body": "Example body",
+      "body_ref": {
+        "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+        "size": 3,
+        "media_type": "application/pdf",
+        "name": "Example name"
+      },
+      "tags": [
+        "Example tags"
+      ],
+      "status": "active",
+      "seen_version": "v3",
+      "updated_at": "2026-10-22T04:30:00.000Z",
+      "updated_by": {
+        "kind": "agent",
+        "agent_type": "token_id_1"
+      }
+    },
+    "revisions": [
+      {
+        "revision": 3,
+        "updated_at": "2026-10-22T04:30:00.000Z",
+        "updated_by": {
+          "kind": "agent",
+          "agent_type": "token_id_1"
+        },
+        "change_summary": "Example change summary"
+      }
+    ],
+    "total": 3
+  },
+  "causation_id": "01928f3a-7b2c-746a-8000-00000000046a",
+  "body_digest": "pYYqvsuzlUS4FWNRfv9tUeK-rdXM33OHI7kMneXOsDQ",
+  "signature": "IyAx8D9QpTk0Phs4OLW1mWBKOOmiKOQtJo41Oo9oXr7eY2OoKcblcxADk-Q_wqgYeaWCJhI2naRB494rmtY1DQ"
+}

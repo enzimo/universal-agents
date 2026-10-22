@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/steering.decide.schema.json",
+  "title": "steering.decide request",
+  "description": "The lead decides what each held task changes, or extends the hold once.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "person_steering_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "root_task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "decision": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "decided"
+            },
+            "actions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "task_id": {
+                    "$ref": "../common.schema.json#/$defs/record_id"
+                  },
+                  "action": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "guidance"
+                          },
+                          "text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 32768
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "lead",
+                              "person_as_is"
+                            ]
+                          },
+                          "attachments": {
+                            "type": "array",
+                            "items": {
+                              "$ref": "../common.schema.json#/$defs/attachment"
+                            },
+                            "maxItems": 20
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "text",
+                          "source"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "release"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "stop"
+                          },
+                          "reason": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "task_id",
+                  "action"
+                ],
+                "additionalProperties": false
+              },
+              "maxItems": 100,
+              "minItems": 1
+            },
+            "note": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          "required": [
+            "type",
+            "actions"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "extend_hold"
+            },
+            "until": {
+              "$ref": "../common.schema.json#/$defs/timestamp"
+            }
+          },
+          "required": [
+            "type",
+            "until"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "request_id",
+    "person_steering_id",
+    "root_task_id",
+    "decision"
+  ],
+  "additionalProperties": false
+}

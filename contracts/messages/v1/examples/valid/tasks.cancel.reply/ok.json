@@ -1,0 +1,38 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tasks.cancel.reply",
+  "message_id": "01928f3a-7b2c-7405-8000-000000000405",
+  "idempotency_key": "tasks.cancel:example_1029:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.tasks.cancel",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "receipts": [
+      {
+        "root_task_id": "root_task_id_1",
+        "cancelled_task_count": 3,
+        "stop_signals_sent": 3,
+        "unconfirmed_worker_count": 3,
+        "state": "confirmed"
+      }
+    ],
+    "all_confirmed": true
+  },
+  "causation_id": "01928f3a-7b2c-7404-8000-000000000404",
+  "body_digest": "lbBHQd6QaYvc9Vl6qYPiAtsc2UBwhtxr3XosTMcj78s",
+  "signature": "w4rAhDbfhHEjoh46EG5jIXLOPh8T5UJIRH9bxsvDq700IL5pik_2Bh4gIG0zVOZpfQSfY4vZdLn_SBOMh2UkDA"
+}

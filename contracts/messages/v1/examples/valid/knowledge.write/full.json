@@ -1,0 +1,45 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.write",
+  "message_id": "01928f3a-7b2c-746d-8000-00000000046d",
+  "idempotency_key": "knowledge.write:example_1133",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.knowledge.write",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_1",
+    "space": "team",
+    "page": "Example page",
+    "seen_version": "v3",
+    "title": "Example title",
+    "summary": "Example summary",
+    "body": "Example body",
+    "body_ref": {
+      "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+      "size": 3,
+      "media_type": "application/pdf",
+      "name": "Example name"
+    },
+    "tags": [
+      "Example tags"
+    ],
+    "page_type": "page_type_1",
+    "change_summary": "Example change summary",
+    "confirm_review": true
+  },
+  "body_digest": "R1Q1S78kXfrd30WvJefLmRlsmk2KHfO8ic-Z5SRbNGw",
+  "signature": "DL1ho-xRFHt-tvboPMS11Gy2EoSYFZa911ggeiI0KLSoSg6l_Y0GmTfwaVtrA6MRRIUcG_J7rcCuz7UrBSe7Bg"
+}

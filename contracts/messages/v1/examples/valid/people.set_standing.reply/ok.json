@@ -1,0 +1,49 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "people.set_standing.reply",
+  "message_id": "01928f3a-7b2c-7498-8000-000000000498",
+  "idempotency_key": "people.set_standing:example_1176:reply",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.svc.team.people.set_standing",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "state": "settled",
+    "standing": "active",
+    "tasks_stopped": 3,
+    "schedules_paused": 3,
+    "schedules_moved": 3,
+    "grants_revoked": 3,
+    "requests_closed": 3,
+    "memory_kept": 3,
+    "pages_kept": 3,
+    "threads_closed": 3,
+    "forms_closed": 3,
+    "team_schedules_moved": [
+      {
+        "schedule_id": "schedule_id_1",
+        "schedule_name": "Example schedule name",
+        "new_owner": "person_1"
+      }
+    ],
+    "problems": [
+      "Example problems"
+    ]
+  },
+  "causation_id": "01928f3a-7b2c-7497-8000-000000000497",
+  "body_digest": "8I-5ujY234AkRJ_TVLiU7-3rIYzNQfbGNAB8496qi78",
+  "signature": "D18mwhzwqosN_gMzjhs2EdxBO1Li8bzKQpOkg65AFmIgy1D9UNJSIMs93vfvmEyKtFXueJmP2OjQnj7HWz2uBA"
+}

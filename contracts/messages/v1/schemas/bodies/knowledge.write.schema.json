@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/knowledge.write.schema.json",
+  "title": "knowledge.write request",
+  "description": "Create or edit a knowledge page.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "space": {
+      "type": "string",
+      "enum": [
+        "team",
+        "personal"
+      ]
+    },
+    "page": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "seen_version": {
+      "$ref": "../common.schema.json#/$defs/record_version"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 4000
+    },
+    "body": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32768
+    },
+    "body_ref": {
+      "$ref": "../common.schema.json#/$defs/blob_ref"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "maxItems": 100
+    },
+    "page_type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "change_summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "confirm_review": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "request_id",
+    "space",
+    "title",
+    "confirm_review"
+  ],
+  "additionalProperties": false
+}

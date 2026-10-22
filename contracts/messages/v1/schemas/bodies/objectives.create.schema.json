@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/objectives.create.schema.json",
+  "title": "objectives.create request",
+  "description": "The lead creates an Objective.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "desired_outcome": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32768
+    },
+    "horizon": {
+      "type": "string",
+      "enum": [
+        "finite",
+        "long_horizon",
+        "recurring",
+        "standing"
+      ]
+    },
+    "priority": {
+      "type": "string",
+      "enum": [
+        "low",
+        "normal",
+        "high",
+        "critical"
+      ]
+    },
+    "success_criteria": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2000
+      },
+      "maxItems": 50
+    }
+  },
+  "required": [
+    "request_id",
+    "title",
+    "desired_outcome",
+    "horizon",
+    "priority"
+  ],
+  "additionalProperties": false
+}

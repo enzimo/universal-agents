@@ -1,0 +1,36 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "memory.replace",
+  "message_id": "01928f3a-7b2c-7452-8000-000000000452",
+  "idempotency_key": "memory.replace:example_1106",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.memory.replace",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_1",
+    "bank": "coremem",
+    "memory_id": 3,
+    "seen_version": "v3",
+    "fact_text": "Example fact text",
+    "tags": [
+      "Example tags"
+    ],
+    "valid_from": "2026-10-22T04:30:00.000Z",
+    "expires": "2026-10-22T04:30:00.000Z"
+  },
+  "body_digest": "LRNhvs0O98zjaHmDEeZNxix4LAzd9cRuZIL3PaNwV7g",
+  "signature": "HNyasGKPIc-w_4BMFjqKzmJuxIOzpyF7KYlxkfcsvUyQZprxwWJ6TPWY_3HOQn1fUw7R1Z5xe4BnmlLsJ446AA"
+}

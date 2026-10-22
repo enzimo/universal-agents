@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/schedules.set_worker.schema.json",
+  "title": "schedules.set_worker request",
+  "description": "Choose which worker runs a schedule.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "schedule_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "seen_version": {
+      "$ref": "../common.schema.json#/$defs/record_version"
+    },
+    "worker": {
+      "type": "object",
+      "properties": {
+        "agent_type": {
+          "$ref": "../common.schema.json#/$defs/agent_type"
+        },
+        "agent_id": {
+          "$ref": "../common.schema.json#/$defs/agent_id"
+        }
+      },
+      "required": [
+        "agent_type"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "request_id",
+    "schedule_id",
+    "seen_version",
+    "worker"
+  ],
+  "additionalProperties": false
+}

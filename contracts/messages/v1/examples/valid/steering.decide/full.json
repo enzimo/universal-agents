@@ -1,0 +1,57 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "steering.decide",
+  "message_id": "01928f3a-7b2c-74ae-8000-0000000004ae",
+  "idempotency_key": "steering.decide:example_1198",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.steering.decide",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_1",
+    "person_steering_id": "person_steering_id_1",
+    "root_task_id": "root_task_id_1",
+    "decision": {
+      "type": "decided",
+      "actions": [
+        {
+          "task_id": "task_id_1",
+          "action": {
+            "type": "guidance",
+            "text": "Example text",
+            "source": "lead",
+            "attachments": [
+              {
+                "attachment_id": "attachment_id_1",
+                "blob": {
+                  "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+                  "size": 3,
+                  "media_type": "application/pdf",
+                  "name": "Example name"
+                },
+                "kind": "image",
+                "caption": "Example caption"
+              }
+            ]
+          }
+        }
+      ],
+      "note": "Example note"
+    }
+  },
+  "body_digest": "EkMgA4g-i7j_xs_XHPuFdANv2nc3uU-5b-_krXXyHuI",
+  "signature": "d7vEGginCLRC3Gh9KtvtawkTYLQL5Jr7e_ic6KeSiP39d2H-IZcyfv14gGUkzV-lyMord5m5zWqoARAi4UOLBw"
+}

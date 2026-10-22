@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "heartbeat_items.add",
+  "message_id": "01928f3a-7b2c-74c0-8000-0000000004c0",
+  "idempotency_key": "heartbeat_items.add:example_1216",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.heartbeat_items.add",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_1",
+    "instruction": "Example instruction",
+    "title": "Example title",
+    "target_agent_type": "token_id_1",
+    "objective_id": "objective_id_1"
+  },
+  "body_digest": "GW2I2KeFZAnbDfABtS2wqSW7wtEFJbjwT1sJBKjoAQQ",
+  "signature": "Q5mGFgR5DWHZxe-vOPDSVSp7J6Gz0Qr7QRizcDX4sNgNDZSIO4kL4BO-rAekzcV_OiBvxkRRFz6DT5umClenCQ"
+}

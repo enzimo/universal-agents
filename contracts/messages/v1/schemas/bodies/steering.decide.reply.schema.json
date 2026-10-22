@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/steering.decide.reply.schema.json",
+  "title": "steering.decide reply",
+  "description": "The lead decides what each held task changes, or extends the hold once.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "decided",
+            "hold_extended"
+          ]
+        },
+        "hold_until": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "sent": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "task_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "steer_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              }
+            },
+            "required": [
+              "task_id",
+              "steer_id"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100
+        },
+        "unreachable": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/record_id"
+          },
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "outcome",
+        "state",
+        "sent",
+        "unreachable"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_found"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "hold_expired"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "extension_used"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "tasks_not_covered"
+        },
+        "task_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/record_id"
+          },
+          "maxItems": 100,
+          "minItems": 1
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "task_ids"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_own_request"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

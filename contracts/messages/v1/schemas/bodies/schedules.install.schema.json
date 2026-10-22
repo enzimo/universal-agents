@@ -1,0 +1,273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/schedules.install.schema.json",
+  "title": "schedules.install request",
+  "description": "Install a schedule: create, replace, ensure or refresh it.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "schedule_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "create",
+        "replace",
+        "ensure",
+        "refresh"
+      ]
+    },
+    "seen_version": {
+      "$ref": "../common.schema.json#/$defs/record_version"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "management_class": {
+      "type": "string",
+      "enum": [
+        "user",
+        "system"
+      ]
+    },
+    "system_schedule_kind": {
+      "type": "string",
+      "enum": [
+        "unclassified",
+        "heartbeat_launcher",
+        "memory_review_coremem",
+        "memory_review_usermem",
+        "memory_review_stale_conversations",
+        "internal_improvement",
+        "after_action_report_review",
+        "delegation_assurance",
+        "isolated_recovery_checkpoint",
+        "provider_overload_retry",
+        "objective_work_session",
+        "knowledge_curation_person",
+        "knowledge_curation_team"
+      ]
+    },
+    "objective_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "worker": {
+      "type": "object",
+      "properties": {
+        "agent_type": {
+          "$ref": "../common.schema.json#/$defs/agent_type"
+        },
+        "agent_id": {
+          "$ref": "../common.schema.json#/$defs/agent_id"
+        }
+      },
+      "required": [
+        "agent_type"
+      ],
+      "additionalProperties": false
+    },
+    "timing": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "interval"
+            },
+            "interval_ms": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 31536000000
+            }
+          },
+          "required": [
+            "kind",
+            "interval_ms"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "cron"
+            },
+            "expression": {
+              "type": "string",
+              "pattern": "^[0-9*/,? A-Za-z-]{9,120}$"
+            },
+            "time_zone": {
+              "$ref": "../common.schema.json#/$defs/time_zone"
+            }
+          },
+          "required": [
+            "kind",
+            "expression",
+            "time_zone"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "once"
+            },
+            "at": {
+              "$ref": "../common.schema.json#/$defs/timestamp"
+            }
+          },
+          "required": [
+            "kind",
+            "at"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "repeat_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "expires_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "paused_until": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "action": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "task"
+            },
+            "instruction": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32768
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/attachment"
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "type",
+            "instruction"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "fixed_message"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32768
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/attachment"
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "run_notes": {
+      "type": "object",
+      "properties": {
+        "schedule_kind": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "notify": {
+              "type": "boolean"
+            },
+            "notify_on_failure": {
+              "type": "boolean"
+            },
+            "evidence_required": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "notify",
+            "notify_on_failure",
+            "evidence_required"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schedule_kind",
+        "policy"
+      ],
+      "additionalProperties": false
+    },
+    "decisions_ahead": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/decision_ahead"
+      },
+      "maxItems": 8
+    },
+    "deliver_to": {
+      "type": "object",
+      "properties": {
+        "delivery_ref": {
+          "$ref": "../common.schema.json#/$defs/delivery_ref"
+        },
+        "conversation_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "time_zone": {
+          "$ref": "../common.schema.json#/$defs/time_zone"
+        }
+      },
+      "required": [
+        "delivery_ref"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "request_id",
+    "schedule_id",
+    "mode",
+    "name",
+    "management_class",
+    "worker",
+    "timing",
+    "enabled",
+    "action"
+  ],
+  "additionalProperties": false
+}

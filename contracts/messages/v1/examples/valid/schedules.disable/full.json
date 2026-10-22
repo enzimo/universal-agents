@@ -1,0 +1,29 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.disable",
+  "message_id": "01928f3a-7b2c-7437-8000-000000000437",
+  "idempotency_key": "schedules.disable:example_1079",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.schedules.disable",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_1",
+    "schedule_id": "schedule_id_1",
+    "seen_version": "v3"
+  },
+  "body_digest": "b5tjEx2Z-Ue8rHcxFf7eA1zJQumyNDPkTt2ZlBLouY8",
+  "signature": "FJ2t_dgaln2Y-drW6ecoD4aUEt2ruCwfD1OUcOhWmQ3cibtTeLMRpQnLnzmo3IvlmbcD-LT6jReOKYn1va-HDA"
+}
