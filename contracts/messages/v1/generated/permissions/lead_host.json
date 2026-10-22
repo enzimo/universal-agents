@@ -1,11 +1,14 @@
 {
   "publish": [
     "_INBOX.*.>",
+    "ua.v1._install.{self}.svc.host.join",
+    "ua.v1._install.{self}.svc.host.renew",
     "ua.v1.{team}.{self}.ctl.agent.*.exit",
     "ua.v1.{team}.{self}.ctl.agent.*.pause",
     "ua.v1.{team}.{self}.ctl.agent.*.resume",
     "ua.v1.{team}.{self}.ctl.agent.*.status",
     "ua.v1.{team}.{self}.ctl.agent.*.task.probe",
+    "ua.v1.{team}.{self}.dlq.notice.*",
     "ua.v1.{team}.{self}.evt.skills_changed",
     "ua.v1.{team}.{self}.svc.team.access.withdraw",
     "ua.v1.{team}.{self}.svc.team.custody.decide",

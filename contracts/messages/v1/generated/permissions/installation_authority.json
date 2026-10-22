@@ -1,7 +1,12 @@
 {
-  "publish": [],
+  "publish": [
+    "_INBOX.*.>",
+    "ua.v1.{team}.{self}.dlq.notice.*"
+  ],
   "role": "installation_authority",
   "subscribe": [
-    "_INBOX.{self}.>"
+    "_INBOX.{self}.>",
+    "ua.v1._install.*.svc.host.join",
+    "ua.v1._install.*.svc.host.renew"
   ]
 }

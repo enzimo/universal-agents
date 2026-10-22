@@ -119,7 +119,7 @@
       "type": "object",
       "properties": {
         "team": {
-          "$ref": "#/$defs/team_id"
+          "$ref": "#/$defs/scope_id"
         },
         "runtime": {
           "$ref": "#/$defs/runtime_id"
@@ -154,7 +154,7 @@
       "type": "object",
       "properties": {
         "team": {
-          "$ref": "#/$defs/team_id"
+          "$ref": "#/$defs/scope_id"
         },
         "target": {
           "type": "string",
@@ -507,6 +507,25 @@
           },
           "required": [
             "category"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "category": {
+              "const": "outcome_unknown"
+            },
+            "attempts": {
+              "$ref": "#/$defs/count"
+            },
+            "message": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "category",
+            "attempts"
           ],
           "additionalProperties": false
         }
@@ -966,6 +985,112 @@
         "undefined",
         "waiting"
       ]
+    },
+    "scope_id": {
+      "description": "A team, or _install for installation-wide traffic.",
+      "type": "string",
+      "pattern": "^(_install|[A-Za-z0-9][A-Za-z0-9_-]{0,63})$"
+    },
+    "host_role": {
+      "type": "string",
+      "enum": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "installation_authority",
+        "scheduler"
+      ]
+    },
+    "protocol_label": {
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]{0,3})-pre$"
+    },
+    "nats_user_key": {
+      "type": "string",
+      "pattern": "^U[A-Z2-7]{55}$"
+    },
+    "application_key": {
+      "type": "object",
+      "properties": {
+        "key_id": {
+          "$ref": "#/$defs/key_id"
+        },
+        "public_key": {
+          "$ref": "#/$defs/ed25519_public_key"
+        }
+      },
+      "required": [
+        "key_id",
+        "public_key"
+      ],
+      "additionalProperties": false
+    },
+    "software": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,6}([-+][0-9A-Za-z.-]{1,32})?$"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "placement_label": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+    },
+    "certificate_ref": {
+      "type": "object",
+      "properties": {
+        "certificate_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "membership_epoch": {
+          "$ref": "#/$defs/epoch"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256_digest"
+        }
+      },
+      "required": [
+        "certificate_id",
+        "membership_epoch",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "connection_credential": {
+      "type": "object",
+      "description": "The credential a host connects to NATS with. Never logged.",
+      "properties": {
+        "type": {
+          "const": "nats_user_jwt"
+        },
+        "jwt": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
+          "maxLength": 16384
+        },
+        "expires_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "type",
+        "jwt",
+        "expires_at"
+      ],
+      "additionalProperties": false
     }
   }
 }

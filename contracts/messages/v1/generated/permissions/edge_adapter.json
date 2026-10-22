@@ -1,5 +1,8 @@
 {
   "publish": [
+    "ua.v1._install.{self}.svc.host.join",
+    "ua.v1._install.{self}.svc.host.renew",
+    "ua.v1.{team}.{self}.dlq.notice.*",
     "ua.v1.{team}.{self}.work.agent.*",
     "ua.v1.{team}.{self}.work.edge.*",
     "ua.v1.{team}.{self}.work.pool.*",

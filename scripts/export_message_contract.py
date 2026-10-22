@@ -39,7 +39,8 @@ GENERATED = CONTRACT / "generated"
 WIRE = REPO_ROOT / "custom_messages" / "wire"
 SCHEMA_BASE = "https://universal-agents.local/contracts/messages/v1/schemas/"
 
-CLASSES = {"durable", "request_reply", "event"}
+CLASSES = {"durable", "request_reply", "event", "dead_letter"}
+VERIFICATION = {"standard", "proof_of_possession"}
 AUTHORITY = {"none", "optional", "required"}
 ROUTING = {"requester", "holder", "team", "person", "named", "broadcast", "sender"}
 EDGES = {"up", "down", "person", "sideways", "out", "none"}
@@ -49,9 +50,9 @@ PRIORITIES = {"low", "normal", "high"}
 ENTRY_FIELDS = {
     "description", "class", "address", "body", "reply", "senders", "receivers", "expiry_seconds",
     "authority", "idempotency", "admission", "routing", "topology_edge", "ledger", "wakes_model",
-    "rendering", "covered_change", "copy_to",
+    "rendering", "covered_change", "copy_to", "verification",
 }
-REQUIRED_ENTRY_FIELDS = ENTRY_FIELDS - {"reply", "covered_change", "copy_to"}
+REQUIRED_ENTRY_FIELDS = ENTRY_FIELDS - {"reply", "covered_change", "copy_to", "verification"}
 
 # The schema subset (contracts/messages/v1/README.md).
 ALLOWED_KEYWORDS = {
@@ -62,8 +63,9 @@ ALLOWED_KEYWORDS = {
 ALLOWED_TYPES = {"object", "string", "integer", "boolean", "array"}
 MAX_SAFE_INTEGER = 2**53 - 1
 UNPORTABLE_PATTERN = re.compile(r"\(\?[=!<>:]|\\[1-9]|[*+?}]\+|\\[AZzbBpP]")
-# The frame's body is the one open object: its kind's schema checks it.
-OPEN_OBJECTS = {("frame.schema.json", "/properties/body")}
+# The frame's and the state document's bodies are the open objects: the schema
+# their kind or record names checks them.
+OPEN_OBJECTS = {("frame.schema.json", "/properties/body"), ("state.schema.json", "/properties/body")}
 
 
 class ContractError(ValueError):
@@ -159,6 +161,7 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         for role, allowed in spec["allowed_edges"].items():
             if role not in topologies["agent_roles"] or not set(allowed) <= edges:
                 raise ContractError(f"team-topologies.yaml: {topology}.{role} names an unknown role or edge")
+    check_state_records(registry, transport, schemas)
     for name, entry in registry["kinds"].items():
         where = f"registry.yaml kinds.{name}"
         if not re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+", name) or name.endswith(".reply"):
@@ -193,8 +196,40 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
             if not any(address_matches(address, template, name)
                        for template in class_addresses(transport, entry["class"])):
                 raise ContractError(f"{where}: address {address!r} fits no {entry['class']} address")
+        if entry.get("verification", "standard") not in VERIFICATION:
+            raise ContractError(f"{where}: verification must be one of {sorted(VERIFICATION)}")
+        if entry.get("verification") == "proof_of_possession" and entry["class"] != "request_reply":
+            raise ContractError(f"{where}: only an installation request proves possession of its own key")
         if entry.get("copy_to") and entry["class"] != "durable":
             raise ContractError(f"{where}: only durable kinds are copied to other inboxes")
+
+
+STATE_FIELDS = {"description", "bucket", "key", "writers", "body", "ttl_seconds", "write_rule"}
+
+
+def check_state_records(registry: dict[str, Any], transport: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """Each state record names its bucket, key form, writer roles and body schema."""
+
+    roles = set(registry["host_roles"])
+    state_enum = set(schemas["state.schema.json"]["properties"]["record"]["enum"])
+    if set(registry["state_records"]) != state_enum:
+        raise ContractError("registry.yaml state_records and state.schema.json record names differ")
+    for name, entry in registry["state_records"].items():
+        where = f"registry.yaml state_records.{name}"
+        if set(entry) - STATE_FIELDS or {"description", "bucket", "key", "writers", "body"} - set(entry):
+            raise ContractError(f"{where}: fields must be {sorted(STATE_FIELDS)}")
+        if entry["bucket"] not in transport["key_value"]:
+            raise ContractError(f"{where}: bucket {entry['bucket']} is not in transport.yaml")
+        if not set(entry["writers"]) <= roles or entry["body"] not in schemas:
+            raise ContractError(f"{where}: writers must be host roles and the body schema must exist")
+
+
+def full_subject(address: str, owner: str) -> str:
+    """The NATS subject of an address: team addresses sit under ua.v1.<team>.<sender>, installation ones under ua.v1._install."""
+
+    if address.startswith("_install."):
+        return "ua.v1." + address.replace("{sender}", owner)
+    return f"ua.v1.{{team}}.{owner}." + address
 
 
 def entry_addresses(entry: dict[str, Any]) -> list[str]:
@@ -232,22 +267,23 @@ def address_matches(address: str, template: str, kind: str) -> bool:
 # -- generated JSON ------------------------------------------------------------------------------
 
 def subject_pattern(address: str) -> str:
-    return re.sub(r"\{[a-z_]+\}", "*", address)
+    """An address with its placeholders as wildcards, except the sender, which permissions bind to the publisher."""
+
+    return re.sub(r"\{(?!sender\})[a-z_]+\}", "*", address)
 
 
 def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Per host role: subjects it may publish (only under its own id) and subscribe to."""
 
-    prefix = "ua.v1.{team}.{self}."
     result = {}
     for role in registry["host_roles"]:
         publish, subscribe = set(), {f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"}
         for name, entry in registry["kinds"].items():
             for address in map(subject_pattern, entry_addresses(entry)):
                 if role in entry["senders"]:
-                    publish.add(prefix + address)
-                if role in entry["receivers"] and entry["class"] != "durable":
-                    subscribe.add("ua.v1.{team}.*." + address)
+                    publish.add(full_subject(address, "{self}"))
+                if role in entry["receivers"] and entry["class"] not in {"durable", "dead_letter"}:
+                    subscribe.add(full_subject(address, "*"))
             if role in entry["receivers"] and entry["class"] == "request_reply":
                 publish.add("_INBOX.*.>")
         result[role] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
@@ -420,6 +456,11 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) 
     for fragment in schemas["common.schema.json"]["$defs"]:
         writer.named("common.schema.json", f"/$defs/{fragment}")
     writer.named("frame.schema.json", "")
+    writer.named("state.schema.json", "")
+    states = []
+    for name, entry in sorted(registry["state_records"].items()):
+        body = writer.type_of(entry["body"], schemas[entry["body"]], class_name(name) + "State")
+        states.append((name, entry, body))
     kinds = []
     for name, entry in sorted(registry["kinds"].items()):
         body = writer.type_of(f"bodies/{Path(entry['body']).name}", schemas[entry["body"]], class_name(name) + "Body")
@@ -442,6 +483,8 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) 
         adapters.append(f"{class_name(name)}BodyAdapter = TypeAdapter({body})")
         if reply:
             adapters.append(f"{class_name(name)}ReplyAdapter = TypeAdapter({reply})")
+    for name, _entry, body in states:
+        adapters.append(f"{class_name(name)}StateAdapter = TypeAdapter({body})")
     models += "\n\n" + "\n".join(adapters) + "\n"
 
     specs = []
@@ -474,12 +517,13 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) 
             f"        rendering={entry['rendering']!r},\n"
             f"        body_shape={shape(writer, body_file, schemas[body_file])!r},\n"
             f"        reply_shape={reply_shape},\n"
+            f"        verification={entry.get('verification', 'standard')!r},\n"
             "    ),"
         )
     kinds_text = header + (
         "from __future__ import annotations\n\n"
         "from custom_messages.wire import models\n"
-        "from custom_messages.wire.spec import KindSpec\n\n"
+        "from custom_messages.wire.spec import KindSpec, StateSpec\n\n"
         f"PROTOCOL = {registry['protocol']!r}\n"
         f"SIGNING_DOMAIN = {registry['signing_domain']!r}\n"
         f"MAX_FRAME_BYTES = {registry['max_frame_bytes']!r}\n"
@@ -487,7 +531,15 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) 
         f"CHANGE_REFUSALS = {tuple(item['code'] for item in registry['change_refusals'])!r}\n"
         f"HOST_ROLES = {tuple(registry['host_roles'])!r}\n"
         f"FRAME_SHAPE = {shape(writer, 'frame.schema.json', schemas['frame.schema.json'])!r}\n\n"
-        "KINDS: dict[str, KindSpec] = {\n" + "\n".join(specs) + "\n}\n"
+        "KINDS: dict[str, KindSpec] = {\n" + "\n".join(specs) + "\n}\n\n"
+        f"STATE_SIGNING_DOMAIN = {registry['state_signing_domain']!r}\n"
+        "STATE_RECORDS: dict[str, StateSpec] = {\n"
+        + "\n".join(
+            f"    {name!r}: StateSpec(name={name!r}, bucket={entry['bucket']!r}, key={entry['key']!r}, "
+            f"writers={tuple(entry['writers'])!r}, ttl_seconds={entry.get('ttl_seconds')!r}, "
+            f"body_model=models.{class_name(name)}StateAdapter),"
+            for name, entry, _body in states)
+        + "\n}\n"
     )
     return {WIRE / "models.py": models, WIRE / "kinds.py": kinds_text}
 

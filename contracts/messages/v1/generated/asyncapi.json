@@ -161,6 +161,14 @@
         }
       }
     },
+    "dlq_notice": {
+      "address": "ua.v1.{team}.{sender}.dlq.notice.{copy}",
+      "messages": {
+        "dlq_notice": {
+          "$ref": "#/components/messages/dlq_notice"
+        }
+      }
+    },
     "heartbeat_items_add": {
       "address": "ua.v1.{team}.{sender}.svc.team.heartbeat_items.add",
       "messages": {
@@ -198,6 +206,22 @@
       "messages": {
         "heartbeat_items_update": {
           "$ref": "#/components/messages/heartbeat_items_update"
+        }
+      }
+    },
+    "host_join": {
+      "address": "ua.v1.{team}.{sender}._install.{sender}.svc.host.join",
+      "messages": {
+        "host_join": {
+          "$ref": "#/components/messages/host_join"
+        }
+      }
+    },
+    "host_renew": {
+      "address": "ua.v1.{team}.{sender}._install.{sender}.svc.host.renew",
+      "messages": {
+        "host_renew": {
+          "$ref": "#/components/messages/host_renew"
         }
       }
     },
@@ -1094,6 +1118,13 @@
         },
         "summary": "A receiver refused a message; sent back to its sender."
       },
+      "dlq_notice": {
+        "name": "dlq.notice",
+        "payload": {
+          "$ref": "../schemas/bodies/dlq.notice.schema.json"
+        },
+        "summary": "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only."
+      },
       "heartbeat_items_add": {
         "name": "heartbeat_items.add",
         "payload": {
@@ -1157,6 +1188,32 @@
         "name": "heartbeat_items.update.reply",
         "payload": {
           "$ref": "../schemas/bodies/heartbeat_items.update.reply.schema.json"
+        }
+      },
+      "host_join": {
+        "name": "host.join",
+        "payload": {
+          "$ref": "../schemas/bodies/host.join.schema.json"
+        },
+        "summary": "A new host asks to join the installation; the frame is signed with the key it presents."
+      },
+      "host_join_reply": {
+        "name": "host.join.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/host.join.reply.schema.json"
+        }
+      },
+      "host_renew": {
+        "name": "host.renew",
+        "payload": {
+          "$ref": "../schemas/bodies/host.renew.schema.json"
+        },
+        "summary": "A host renews its certificate and connection credential, or rotates its keys."
+      },
+      "host_renew_reply": {
+        "name": "host.renew.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/host.renew.reply.schema.json"
         }
       },
       "intent_set": {
@@ -2174,6 +2231,12 @@
         "$ref": "#/channels/delivery_refused"
       }
     },
+    "receive_dlq_notice": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/dlq_notice"
+      }
+    },
     "receive_heartbeat_items_add": {
       "action": "receive",
       "channel": {
@@ -2202,6 +2265,18 @@
       "action": "receive",
       "channel": {
         "$ref": "#/channels/heartbeat_items_update"
+      }
+    },
+    "receive_host_join": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/host_join"
+      }
+    },
+    "receive_host_renew": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/host_renew"
       }
     },
     "receive_intent_set": {
@@ -2844,6 +2919,12 @@
         "$ref": "#/channels/delivery_refused"
       }
     },
+    "send_dlq_notice": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/dlq_notice"
+      }
+    },
     "send_heartbeat_items_add": {
       "action": "send",
       "channel": {
@@ -2905,6 +2986,32 @@
         "messages": [
           {
             "$ref": "#/components/messages/heartbeat_items_update_reply"
+          }
+        ]
+      }
+    },
+    "send_host_join": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/host_join"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/host_join_reply"
+          }
+        ]
+      }
+    },
+    "send_host_renew": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/host_renew"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/host_renew_reply"
           }
         ]
       }

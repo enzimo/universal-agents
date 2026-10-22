@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/state.schema.json",
+  "title": "Signed state document of protocol 1",
+  "description": "Every key-value record is one state document, signed with Ed25519 over the domain prefix universal-agents/state-record/v1 and a newline, then the RFC 8785 canonical JSON of the document without its signature. The body is checked against the schema its record names in the registry.",
+  "type": "object",
+  "properties": {
+    "record": {
+      "type": "string",
+      "enum": [
+        "certificate",
+        "revocations",
+        "host",
+        "agent",
+        "placement",
+        "team_view"
+      ]
+    },
+    "key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}(\\.[A-Za-z0-9_-]{1,64}){0,3}$"
+    },
+    "writer": {
+      "type": "object",
+      "properties": {
+        "runtime": {
+          "$ref": "common.schema.json#/$defs/runtime_id"
+        },
+        "team": {
+          "$ref": "common.schema.json#/$defs/scope_id"
+        },
+        "membership_epoch": {
+          "$ref": "common.schema.json#/$defs/epoch"
+        },
+        "revocation_epoch": {
+          "$ref": "common.schema.json#/$defs/epoch"
+        },
+        "key_id": {
+          "$ref": "common.schema.json#/$defs/key_id"
+        }
+      },
+      "required": [
+        "runtime",
+        "membership_epoch",
+        "revocation_epoch",
+        "key_id"
+      ],
+      "additionalProperties": false
+    },
+    "sequence": {
+      "description": "The writer's counter for this key; readers ignore a lower one.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "issued_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "expires_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "algorithm": {
+      "const": "ed25519"
+    },
+    "body_digest": {
+      "$ref": "common.schema.json#/$defs/sha256_digest"
+    },
+    "body": {
+      "type": "object"
+    },
+    "signature": {
+      "$ref": "common.schema.json#/$defs/ed25519_signature"
+    }
+  },
+  "required": [
+    "record",
+    "key",
+    "writer",
+    "sequence",
+    "issued_at",
+    "algorithm",
+    "body_digest",
+    "body",
+    "signature"
+  ],
+  "additionalProperties": false
+}

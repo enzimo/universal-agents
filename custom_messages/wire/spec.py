@@ -51,5 +51,19 @@ class KindSpec:
     body_shape: Any
     reply_shape: Any
 
+    verification: str = "standard"
+
     def prune(self, body: Any) -> Any:
         return prune(body, self.body_shape)
+
+
+@dataclass(frozen=True)
+class StateSpec:
+    """A signed key-value record: its bucket, key form, the roles that may write it and its body model."""
+
+    name: str
+    bucket: str
+    key: str
+    writers: tuple[str, ...]
+    ttl_seconds: Optional[int]
+    body_model: TypeAdapter[Any]

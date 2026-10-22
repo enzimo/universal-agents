@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/state/placement.schema.json",
+  "title": "placement state record body",
+  "description": "Which host runs an agent; its key-value revision is the fencing token.",
+  "type": "object",
+  "properties": {
+    "team": {
+      "$ref": "../common.schema.json#/$defs/team_id"
+    },
+    "agent": {
+      "$ref": "../common.schema.json#/$defs/agent_id"
+    },
+    "agent_type": {
+      "$ref": "../common.schema.json#/$defs/agent_type"
+    },
+    "host": {
+      "$ref": "../common.schema.json#/$defs/runtime_id"
+    },
+    "host_epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "definition_sha256": {
+      "$ref": "../common.schema.json#/$defs/sha256_digest"
+    },
+    "required_labels": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/placement_label"
+      },
+      "maxItems": 32
+    },
+    "placed_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "initial",
+        "host_lost",
+        "rebalanced",
+        "drained",
+        "operator"
+      ]
+    },
+    "previous_host": {
+      "$ref": "../common.schema.json#/$defs/runtime_id"
+    }
+  },
+  "required": [
+    "team",
+    "agent",
+    "agent_type",
+    "host",
+    "host_epoch",
+    "definition_sha256",
+    "placed_at",
+    "reason"
+  ],
+  "additionalProperties": false
+}

@@ -93,6 +93,9 @@ consumers:
     max_deliveries: 20
 
 key_value:
+  UA1_CERTS:
+    description: host certificates and the installation's revocations; written only by the installation authority
+    per_key_ttl_seconds: 0
   UA1_HOSTS:
     description: one record per runtime host; written every 20 s, expires after 60 s
     per_key_ttl_seconds: 60

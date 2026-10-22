@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/state/team_view.schema.json",
+  "title": "team_view state record body",
+  "description": "One entry of a team's shared view of its members, requests, tasks and Objectives.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "entry": {
+          "const": "roster"
+        },
+        "agent": {
+          "$ref": "../common.schema.json#/$defs/agent_id"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "agent_type": {
+          "$ref": "../common.schema.json#/$defs/agent_type"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "lead",
+            "worker"
+          ]
+        },
+        "availability": {
+          "type": "string",
+          "enum": [
+            "available",
+            "busy",
+            "paused",
+            "exiting",
+            "offline"
+          ]
+        },
+        "updated_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "entry",
+        "agent",
+        "agent_type",
+        "role",
+        "availability",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "entry": {
+          "const": "task"
+        },
+        "task_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "request_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "number": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "holder": {
+          "$ref": "../common.schema.json#/$defs/agent_id"
+        },
+        "requester": {
+          "$ref": "../common.schema.json#/$defs/agent_id"
+        },
+        "state": {
+          "$ref": "../common.schema.json#/$defs/progress_state"
+        },
+        "custody_token": {
+          "$ref": "../common.schema.json#/$defs/custody_token"
+        },
+        "since": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "objective_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        }
+      },
+      "required": [
+        "entry",
+        "task_id",
+        "request_id",
+        "number",
+        "requester",
+        "state",
+        "since"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "entry": {
+          "const": "request"
+        },
+        "request_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "topology": {
+          "type": "string",
+          "enum": [
+            "hub_and_spoke",
+            "same_type_peers",
+            "all_peers",
+            "nested"
+          ]
+        },
+        "intent_version": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "lead": {
+          "$ref": "../common.schema.json#/$defs/agent_id"
+        },
+        "person": {
+          "$ref": "../common.schema.json#/$defs/person_ref"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "open",
+            "held",
+            "paused",
+            "closing"
+          ]
+        },
+        "opened_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "entry",
+        "request_id",
+        "topology",
+        "intent_version",
+        "lead",
+        "person",
+        "state",
+        "opened_at"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "entry": {
+          "const": "objective"
+        },
+        "objective_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "proposed",
+            "active",
+            "paused",
+            "blocked",
+            "satisfied",
+            "failed",
+            "cancelled",
+            "abandoned",
+            "deleting",
+            "deleted"
+          ]
+        },
+        "owner": {
+          "$ref": "../common.schema.json#/$defs/person_ref"
+        },
+        "updated_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "entry",
+        "objective_id",
+        "title",
+        "state",
+        "owner",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "entry": {
+          "const": "topologies"
+        },
+        "allowed": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "hub_and_spoke",
+              "same_type_peers",
+              "all_peers",
+              "nested"
+            ]
+          },
+          "maxItems": 4,
+          "minItems": 1
+        },
+        "default": {
+          "type": "string",
+          "enum": [
+            "hub_and_spoke",
+            "same_type_peers",
+            "all_peers",
+            "nested"
+          ]
+        }
+      },
+      "required": [
+        "entry",
+        "allowed",
+        "default"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

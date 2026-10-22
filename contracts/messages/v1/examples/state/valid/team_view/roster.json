@@ -1,0 +1,25 @@
+{
+  "record": "team_view",
+  "key": "team_example.roster.researcher-2",
+  "writer": {
+    "runtime": "team-services-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1",
+    "team": "team_example"
+  },
+  "sequence": 6,
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "entry": "roster",
+    "agent": "researcher-2",
+    "display_name": "Researcher",
+    "agent_type": "Researcher",
+    "role": "worker",
+    "availability": "busy",
+    "updated_at": "2026-10-22T04:29:00.000Z"
+  },
+  "body_digest": "Dm_GCU3iF06isl4zHgHtKpJb3xJc6E8MqKhuQYukJX8",
+  "signature": "N3DnKFMOt3mfGaVZn39HeuHCVrFPzPVdFMZ3ATvV-dWUe_wCbgji0Dy3vaynLm51KXaxrI__sD0bqPv_hqfcBA"
+}

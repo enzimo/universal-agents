@@ -76,10 +76,13 @@ class BlobRef(WireModel):
     name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=255)]] = Field(default=None)
 
 
+ScopeId = Annotated[str, StringConstraints(pattern='^(_install|[A-Za-z0-9][A-Za-z0-9_-]{0,63})$')]
+
+
 class Issuer(WireModel):
     "Who signed the frame: the host, and the agent session it signed for."
 
-    team: TeamId
+    team: ScopeId
     runtime: RuntimeId
     agent: Optional[AgentId] = Field(default=None)
     session: Optional[TokenId] = Field(default=None)
@@ -91,7 +94,7 @@ class Issuer(WireModel):
 class Audience(WireModel):
     "Who the frame is for. Agents are named by id, never by the host that runs them."
 
-    team: TeamId
+    team: ScopeId
     target: Literal['agent', 'pool', 'team_services', 'edge', 'installation_service']
     id: TokenId
     runtime: Optional[RuntimeId] = Field(default=None)
@@ -206,7 +209,13 @@ class FailureError(WireModel):
     message: Optional[NoteText] = Field(default=None)
 
 
-Failure = Annotated[Union[FailureProviderLimited, FailureWorkerLost, FailureAdmissionRefused, FailureBudgetExhausted, FailureDeadlineReached, FailureNotAllowed, FailureError], Field(discriminator='category')]
+class FailureOutcomeUnknown(WireModel):
+    category: Literal['outcome_unknown']
+    attempts: Count
+    message: Optional[NoteText] = Field(default=None)
+
+
+Failure = Annotated[Union[FailureProviderLimited, FailureWorkerLost, FailureAdmissionRefused, FailureBudgetExhausted, FailureDeadlineReached, FailureNotAllowed, FailureError, FailureOutcomeUnknown], Field(discriminator='category')]
 
 
 class QuestionChoice(WireModel):
@@ -335,6 +344,42 @@ RecordVersion = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$
 ProgressState = Literal['abandoned', 'accepted', 'cancelled', 'completed', 'finalizing_plan', 'failed', 'in_progress', 'not_started', 'partial', 'paused', 'preparing', 'retrying', 'undefined', 'waiting']
 
 
+HostRole = Literal['gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler']
+
+
+ProtocolLabel = Annotated[str, StringConstraints(pattern='^1\\.(0|[1-9][0-9]{0,3})-pre$')]
+
+
+NatsUserKey = Annotated[str, StringConstraints(pattern='^U[A-Z2-7]{55}$')]
+
+
+class ApplicationKey(WireModel):
+    key_id: KeyId
+    public_key: Ed25519PublicKey
+
+
+class Software(WireModel):
+    name: Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_-]{0,63}$')]
+    version: Annotated[str, StringConstraints(pattern='^[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,6}([-+][0-9A-Za-z.-]{1,32})?$')]
+
+
+PlacementLabel = Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,31}:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')]
+
+
+class CertificateRef(WireModel):
+    certificate_id: RecordId
+    membership_epoch: Epoch
+    sha256: Sha256Digest
+
+
+class ConnectionCredential(WireModel):
+    "The credential a host connects to NATS with. Never logged."
+
+    type: Literal['nats_user_jwt']
+    jwt: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$', max_length=16384)]
+    expires_at: Timestamp
+
+
 class Frame(WireModel):
     "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The body is checked against the schema its kind names in the registry."
 
@@ -354,6 +399,172 @@ class Frame(WireModel):
     body_digest: Sha256Digest
     body: dict[str, Any]
     signature: Ed25519Signature
+
+
+class StateWriter(WireModel):
+    runtime: RuntimeId
+    team: Optional[ScopeId] = Field(default=None)
+    membership_epoch: Epoch
+    revocation_epoch: Epoch
+    key_id: KeyId
+
+
+class State(WireModel):
+    "Every key-value record is one state document, signed with Ed25519 over the domain prefix universal-agents/state-record/v1 and a newline, then the RFC 8785 canonical JSON of the document without its signature. The body is checked against the schema its record names in the registry."
+
+    record: Literal['certificate', 'revocations', 'host', 'agent', 'placement', 'team_view']
+    key: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,64}(\\.[A-Za-z0-9_-]{1,64}){0,3}$')]
+    writer: StateWriter
+    sequence: Annotated[int, Field(ge=1, le=9007199254740991)]
+    issued_at: Timestamp
+    expires_at: Optional[Timestamp] = Field(default=None)
+    algorithm: Literal['ed25519']
+    body_digest: Sha256Digest
+    body: dict[str, Any]
+    signature: Ed25519Signature
+
+
+class AgentState(WireModel):
+    "An agent's state, written by the host it is placed on when the state changes."
+
+    team: TeamId
+    agent: AgentId
+    agent_type: AgentType
+    session: TokenId
+    state: Literal['starting', 'idle', 'busy', 'paused', 'exiting', 'stopped']
+    accepting_work: bool
+    since: Timestamp
+
+
+class CertificateState(WireModel):
+    "A host's membership certificate, issued by the installation authority."
+
+    certificate_id: RecordId
+    installation: TokenId
+    runtime: RuntimeId
+    teams: Annotated[list[TeamId], Field(min_length=1, max_length=64)]
+    roles: Annotated[list[HostRole], Field(min_length=1, max_length=7)]
+    membership_epoch: Annotated[int, Field(ge=1, le=9007199254740991)]
+    revocation_epoch: Epoch
+    application_key: ApplicationKey
+    nats_public_key: NatsUserKey
+    agent_types: Annotated[list[AgentType], Field(max_length=256)]
+    session_limit: Annotated[int, Field(ge=0, le=100000)]
+    protocol: ProtocolLabel
+    deployment: Literal['local', 'operator_managed', 'third_party']
+    profile_sha256: Sha256Digest
+    software: Optional[Software] = Field(default=None)
+    issued_at: Timestamp
+    expires_at: Timestamp
+    replaces: Optional[RecordId] = Field(default=None)
+
+
+class HostStateComponentsItem(WireModel):
+    component: TokenId
+    state: Literal['healthy', 'degraded', 'unhealthy']
+    code: Optional[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]] = Field(default=None)
+
+
+class HostState(WireModel):
+    "A runtime host's liveness and capacity, written every 20 seconds."
+
+    runtime: RuntimeId
+    certificate: CertificateRef
+    roles: Annotated[list[HostRole], Field(min_length=1, max_length=7)]
+    teams: Annotated[list[TeamId], Field(min_length=1, max_length=64)]
+    agent_types: Annotated[list[AgentType], Field(max_length=256)]
+    session_limit: Annotated[int, Field(ge=0, le=100000)]
+    sessions_active: Count
+    protocol: ProtocolLabel
+    state: Literal['starting', 'accepting', 'draining', 'drained']
+    health: Literal['healthy', 'degraded', 'unhealthy']
+    components: Annotated[list[HostStateComponentsItem], Field(max_length=16)]
+    placement_labels: Annotated[list[PlacementLabel], Field(max_length=64)]
+    outbox_depth: Count
+    revocation_epoch_seen: Epoch
+    started_at: Timestamp
+    heartbeat_at: Timestamp
+    software: Optional[Software] = Field(default=None)
+
+
+class PlacementState(WireModel):
+    "Which host runs an agent; its key-value revision is the fencing token."
+
+    team: TeamId
+    agent: AgentId
+    agent_type: AgentType
+    host: RuntimeId
+    host_epoch: Annotated[int, Field(ge=1, le=9007199254740991)]
+    definition_sha256: Sha256Digest
+    required_labels: Optional[Annotated[list[PlacementLabel], Field(max_length=32)]] = Field(default=None)
+    placed_at: Timestamp
+    reason: Literal['initial', 'host_lost', 'rebalanced', 'drained', 'operator']
+    previous_host: Optional[RuntimeId] = Field(default=None)
+
+
+class RevocationsStateEntriesItem(WireModel):
+    certificate_id: RecordId
+    runtime: RuntimeId
+    membership_epoch: Epoch
+    revoked_at: Timestamp
+    reason: Literal['compromised', 'decommissioned', 'quarantined']
+
+
+class RevocationsState(WireModel):
+    "The installation's revoked certificates; a listed certificate refuses all its frames and records."
+
+    installation: TokenId
+    revocation_epoch: Annotated[int, Field(ge=1, le=9007199254740991)]
+    entries: Annotated[list[RevocationsStateEntriesItem], Field(max_length=2000)]
+
+
+class TeamViewStateRoster(WireModel):
+    entry: Literal['roster']
+    agent: AgentId
+    display_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=80)]] = Field(default=None)
+    agent_type: AgentType
+    role: Literal['lead', 'worker']
+    availability: Literal['available', 'busy', 'paused', 'exiting', 'offline']
+    updated_at: Timestamp
+
+
+class TeamViewStateTask(WireModel):
+    entry: Literal['task']
+    task_id: RecordId
+    request_id: RecordId
+    number: Count
+    holder: Optional[AgentId] = Field(default=None)
+    requester: AgentId
+    state: ProgressState
+    custody_token: Optional[CustodyToken] = Field(default=None)
+    since: Timestamp
+    objective_id: Optional[RecordId] = Field(default=None)
+
+
+class TeamViewStateRequest(WireModel):
+    entry: Literal['request']
+    request_id: RecordId
+    topology: Literal['hub_and_spoke', 'same_type_peers', 'all_peers', 'nested']
+    intent_version: Count
+    lead: AgentId
+    person: PersonRef
+    state: Literal['open', 'held', 'paused', 'closing']
+    opened_at: Timestamp
+
+
+class TeamViewStateObjective(WireModel):
+    entry: Literal['objective']
+    objective_id: RecordId
+    title: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    state: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
+    owner: PersonRef
+    updated_at: Timestamp
+
+
+class TeamViewStateTopologies(WireModel):
+    entry: Literal['topologies']
+    allowed: Annotated[list[Literal['hub_and_spoke', 'same_type_peers', 'all_peers', 'nested']], Field(min_length=1, max_length=4)]
+    default: Literal['hub_and_spoke', 'same_type_peers', 'all_peers', 'nested']
 
 
 class AccessDecisionBodyStatusHandedDown(WireModel):
@@ -888,6 +1099,43 @@ class DeliveryRefusedBody(WireModel):
     current_custody_token: Optional[CustodyToken] = Field(default=None)
 
 
+class DlqNoticeBodyOriginal(WireModel):
+    subject: Annotated[str, StringConstraints(min_length=1, max_length=512)]
+    stream: TokenId
+    stream_sequence: Count
+    deliveries: Count
+
+
+class DlqNoticeBodyClaimed(WireModel):
+    "What the set-aside message claimed about itself, unverified."
+
+    kind: Optional[Kind] = Field(default=None)
+    message_id: Optional[MessageId] = Field(default=None)
+    issuer_team: Optional[ScopeId] = Field(default=None)
+    issuer_runtime: Optional[RuntimeId] = Field(default=None)
+    protocol: Optional[ProtocolLabel] = Field(default=None)
+
+
+class DlqNoticeBodyRaw(WireModel):
+    stored: bool
+    size: Count
+    sha256: Sha256Digest
+
+
+class DlqNoticeBody(WireModel):
+    "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only."
+
+    copy_id: Annotated[str, StringConstraints(pattern='^[0-9a-f]{64}$')]
+    stage: Literal['verification', 'handler', 'delivery_limit', 'upgrade']
+    reason: Literal['too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'access_denied', 'handler_failed', 'delivery_limit', 'upgrade_drain']
+    pointer: Optional[Annotated[str, StringConstraints(min_length=1, max_length=512)]] = Field(default=None)
+    detail: Optional[ShortText] = Field(default=None)
+    original: DlqNoticeBodyOriginal
+    claimed: Optional[DlqNoticeBodyClaimed] = Field(default=None)
+    raw: DlqNoticeBodyRaw
+    release: Annotated[str, StringConstraints(min_length=1, max_length=64)]
+
+
 class HeartbeatItemsAddBody(WireModel):
     "The lead adds a heartbeat item."
 
@@ -1241,6 +1489,99 @@ class HeartbeatItemsUpdateReplyRecordBusy(WireModel):
 
 class HeartbeatItemsUpdateReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HostJoinBody(WireModel):
+    "A new host asks to join the installation; the frame is signed with the key it presents."
+
+    join_id: RecordId
+    installation: TokenId
+    runtime: RuntimeId
+    teams: Annotated[list[TeamId], Field(min_length=1, max_length=64)]
+    roles: Annotated[list[HostRole], Field(min_length=1, max_length=7)]
+    application_key: ApplicationKey
+    nats_public_key: NatsUserKey
+    agent_types: Annotated[list[AgentType], Field(max_length=256)]
+    session_limit: Annotated[int, Field(ge=0, le=100000)]
+    protocol: ProtocolLabel
+    deployment: Literal['local', 'operator_managed', 'third_party']
+    profile_sha256: Sha256Digest
+    software: Optional[Software] = Field(default=None)
+
+
+class HostJoinReplyOk(WireModel):
+    outcome: Literal['ok']
+    certificate: State
+    connection: ConnectionCredential
+
+
+class HostJoinReplyPending(WireModel):
+    outcome: Literal['pending']
+    join_id: RecordId
+    review_code: Annotated[str, StringConstraints(pattern='^[A-Z2-9]{8}$')]
+    retry_after_seconds: Annotated[int, Field(ge=1, le=3600)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HostJoinReplyDenied(WireModel):
+    outcome: Literal['denied']
+    reason: Literal['not_approved', 'key_mismatch', 'team_not_allowed', 'role_not_allowed', 'over_limit']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HostJoinReplyProtocolMismatch(WireModel):
+    outcome: Literal['protocol_mismatch']
+    accepted: ProtocolLabel
+    install: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HostJoinReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HostRenewBody(WireModel):
+    "A host renews its certificate and connection credential, or rotates its keys."
+
+    renew_id: RecordId
+    certificate_id: RecordId
+    membership_epoch: Epoch
+    profile_sha256: Sha256Digest
+    software: Optional[Software] = Field(default=None)
+    new_application_key: Optional[ApplicationKey] = Field(default=None)
+    new_key_proof: Optional[Ed25519Signature] = Field(default=None)
+    new_nats_public_key: Optional[NatsUserKey] = Field(default=None)
+
+
+class HostRenewReplyOk(WireModel):
+    outcome: Literal['ok']
+    certificate: State
+    connection: ConnectionCredential
+
+
+class HostRenewReplyRevoked(WireModel):
+    outcome: Literal['revoked']
+    revocation_epoch: Epoch
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HostRenewReplyNeedsApproval(WireModel):
+    outcome: Literal['needs_approval']
+    join_id: RecordId
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HostRenewReplyProtocolMismatch(WireModel):
+    outcome: Literal['protocol_mismatch']
+    accepted: ProtocolLabel
+    install: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    message: Optional[ShortText] = Field(default=None)
+
+
+class HostRenewReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
     message: Optional[ShortText] = Field(default=None)
 
 
@@ -6097,6 +6438,7 @@ DebugDumpBodyAdapter = TypeAdapter(DebugDumpBody)
 DebugDumpReplyAdapter = TypeAdapter(Annotated[Union[DebugDumpReplyOk, DebugDumpReplyNotAllowed], Field(discriminator='outcome')])
 DeliveryReceiptBodyAdapter = TypeAdapter(DeliveryReceiptBody)
 DeliveryRefusedBodyAdapter = TypeAdapter(DeliveryRefusedBody)
+DlqNoticeBodyAdapter = TypeAdapter(DlqNoticeBody)
 HeartbeatItemsAddBodyAdapter = TypeAdapter(HeartbeatItemsAddBody)
 HeartbeatItemsAddReplyAdapter = TypeAdapter(Annotated[Union[HeartbeatItemsAddReplyOk, HeartbeatItemsAddReplyNotFound, HeartbeatItemsAddReplyObjectiveLinkRefused, HeartbeatItemsAddReplyChangedSinceRead, HeartbeatItemsAddReplyChangeConflict, HeartbeatItemsAddReplyRequestClosed, HeartbeatItemsAddReplyNeedsPersonDecision, HeartbeatItemsAddReplyRecordBusy, HeartbeatItemsAddReplyRuntimeError], Field(discriminator='outcome')])
 HeartbeatItemsDisableBodyAdapter = TypeAdapter(HeartbeatItemsDisableBody)
@@ -6107,6 +6449,10 @@ HeartbeatItemsRemoveBodyAdapter = TypeAdapter(HeartbeatItemsRemoveBody)
 HeartbeatItemsRemoveReplyAdapter = TypeAdapter(Annotated[Union[HeartbeatItemsRemoveReplyOk, HeartbeatItemsRemoveReplyNotFound, HeartbeatItemsRemoveReplyObjectiveLinkRefused, HeartbeatItemsRemoveReplyChangedSinceRead, HeartbeatItemsRemoveReplyChangeConflict, HeartbeatItemsRemoveReplyRequestClosed, HeartbeatItemsRemoveReplyNeedsPersonDecision, HeartbeatItemsRemoveReplyRecordBusy, HeartbeatItemsRemoveReplyRuntimeError], Field(discriminator='outcome')])
 HeartbeatItemsUpdateBodyAdapter = TypeAdapter(HeartbeatItemsUpdateBody)
 HeartbeatItemsUpdateReplyAdapter = TypeAdapter(Annotated[Union[HeartbeatItemsUpdateReplyOk, HeartbeatItemsUpdateReplyNotFound, HeartbeatItemsUpdateReplyObjectiveLinkRefused, HeartbeatItemsUpdateReplyChangedSinceRead, HeartbeatItemsUpdateReplyChangeConflict, HeartbeatItemsUpdateReplyRequestClosed, HeartbeatItemsUpdateReplyNeedsPersonDecision, HeartbeatItemsUpdateReplyRecordBusy, HeartbeatItemsUpdateReplyRuntimeError], Field(discriminator='outcome')])
+HostJoinBodyAdapter = TypeAdapter(HostJoinBody)
+HostJoinReplyAdapter = TypeAdapter(Annotated[Union[HostJoinReplyOk, HostJoinReplyPending, HostJoinReplyDenied, HostJoinReplyProtocolMismatch, HostJoinReplyNotAllowed], Field(discriminator='outcome')])
+HostRenewBodyAdapter = TypeAdapter(HostRenewBody)
+HostRenewReplyAdapter = TypeAdapter(Annotated[Union[HostRenewReplyOk, HostRenewReplyRevoked, HostRenewReplyNeedsApproval, HostRenewReplyProtocolMismatch, HostRenewReplyNotAllowed], Field(discriminator='outcome')])
 IntentSetBodyAdapter = TypeAdapter(IntentSetBody)
 IntentSetReplyAdapter = TypeAdapter(Annotated[Union[IntentSetReplyOk, IntentSetReplyChangedSinceRead, IntentSetReplyNotFound, IntentSetReplyRequestClosed, IntentSetReplyNotOwnRequest], Field(discriminator='outcome')])
 KnowledgeAddNoteBodyAdapter = TypeAdapter(KnowledgeAddNoteBody)
@@ -6244,3 +6590,9 @@ TopicsListTagsBodyAdapter = TypeAdapter(TopicsListTagsBody)
 TopicsListTagsReplyAdapter = TypeAdapter(Annotated[Union[TopicsListTagsReplyOk, TopicsListTagsReplyRuntimeError], Field(discriminator='outcome')])
 TopicsTagThreadBodyAdapter = TypeAdapter(TopicsTagThreadBody)
 TopicsTagThreadReplyAdapter = TypeAdapter(Annotated[Union[TopicsTagThreadReplyOk, TopicsTagThreadReplyNotFound, TopicsTagThreadReplyInvalidRequest, TopicsTagThreadReplyRuntimeError], Field(discriminator='outcome')])
+AgentStateAdapter = TypeAdapter(AgentState)
+CertificateStateAdapter = TypeAdapter(CertificateState)
+HostStateAdapter = TypeAdapter(HostState)
+PlacementStateAdapter = TypeAdapter(PlacementState)
+RevocationsStateAdapter = TypeAdapter(RevocationsState)
+TeamViewStateAdapter = TypeAdapter(Annotated[Union[TeamViewStateRoster, TeamViewStateTask, TeamViewStateRequest, TeamViewStateObjective, TeamViewStateTopologies], Field(discriminator='entry')])

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from custom_messages.wire import models
-from custom_messages.wire.spec import KindSpec
+from custom_messages.wire.spec import KindSpec, StateSpec
 
 PROTOCOL = '1.0-pre'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
@@ -35,6 +35,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'task_id': None, 'status': {'one_of': 'state', 'variants': {'handed_down': {'properties': {'state': None, 'level': None, 'lifetime': None}}, 'waiting': {'properties': {'state': None, 'decider': None}}, 'granted': {'properties': {'state': None, 'level': None, 'lifetime': None, 'expires_at': None}}, 'denied': {'properties': {'state': None, 'note': None}}, 'withdrawn': {'properties': {'state': None, 'by': None}}, 'already_held': {'properties': {'state': None}}, 'refused': {'properties': {'state': None, 'code': None, 'message': None}}}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'access.request': KindSpec(
         name='access.request',
@@ -57,6 +58,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'task_id': None, 'reason': None, 'what': {'one_of': 'type', 'variants': {'access': {'properties': {'type': None, 'target': {'properties': {'kind': None, 'id': None}}, 'level': None, 'lifetime': None, 'hours': None, 'hand_on': None, 'action_digest': None}}, 'change': {'properties': {'type': None, 'change_kind': None, 'change_id': None, 'plan_digest': None}}}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'access.resolved': KindSpec(
         name='access.resolved',
@@ -79,6 +81,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'choice': None, 'note': None, 'kept_item_ids': {'items': None}, 'keep_hours': None}},
         reply_shape=None,
+        verification='standard',
     ),
     'access.withdraw': KindSpec(
         name='access.withdraw',
@@ -101,6 +104,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'access_request_id': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'decided_state': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_own_request': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'agent.exit': KindSpec(
         name='agent.exit',
@@ -123,6 +127,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}}},
+        verification='standard',
     ),
     'agent.pause': KindSpec(
         name='agent.pause',
@@ -145,6 +150,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'agent_exiting': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'agent.resume': KindSpec(
         name='agent.resume',
@@ -167,6 +173,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'agent_exiting': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'agent.status': KindSpec(
         name='agent.status',
@@ -189,6 +196,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'level': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'agent_type': None, 'is_lead': None, 'paused': None, 'executing': None, 'has_capacity': None, 'accepting_work': None, 'exiting': None, 'queued': None, 'waiting': None, 'deferred': None, 'current_task_id': None, 'current_task_age_seconds': None, 'context': {'properties': {'window_tokens': None, 'estimated_tokens': None, 'fill_per_mille': None, 'pressure': None}}, 'tool_call_budget_per_mille': None, 'tool_result_budget_per_mille': None, 'tools': {'items': None}, 'skills': {'items': None}, 'findings': {'items': {'properties': {'finding_id': None, 'severity': None, 'title': None, 'summary': None, 'action': None, 'source': None, 'since': None, 'details': None}}}, 'diagnostic_json': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'conflicts.cancel': KindSpec(
         name='conflicts.cancel',
@@ -211,6 +219,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'case_id': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'administrator_required': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'conflicts.decide': KindSpec(
         name='conflicts.decide',
@@ -233,6 +242,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'case_id': None, 'question_id': None, 'values_digest': None, 'choice': {'one_of': 'type', 'variants': {'keep_current': {'properties': {'type': None}}, 'use_this_change': {'properties': {'type': None}}, 'redo_with_note': {'properties': {'type': None, 'note': None}}, 'stop_request': {'properties': {'type': None}}}}}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'case_id': None, 'choice': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'case_closed': {'properties': {'outcome': None, 'message': None}}, 'values_changed': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'conflicts.list': KindSpec(
         name='conflicts.list',
@@ -255,6 +265,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'offset': None, 'limit': None, 'state': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'cases': {'items': {'properties': {'case_id': None, 'record_kind': None, 'opened_at': None, 'state': None}}}, 'total': None}}, 'administrator_required': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'credential.form.request': KindSpec(
         name='credential.form.request',
@@ -277,6 +288,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'form_id': None, 'task_id': None, 'delivery_ref': None, 'continue_task': None, 'user_approved': None, 'flow': {'one_of': 'type', 'variants': {'collect': {'properties': {'type': None, 'service_name': None, 'credential_key': None, 'display_name': None, 'purpose': None, 'store_target': None, 'signup_url': None, 'fields': {'items': {'properties': {'name': None, 'required': None, 'kind': None, 'visibility': None, 'value_source': None, 'value': None, 'generation_policy': None, 'label': None, 'description': None, 'placeholder': None, 'form': {'properties': {'input_control': None, 'autocomplete': None, 'accept': None, 'help_text': None}}}}}}}, 'manual_signup': {'properties': {'type': None, 'service_name': None, 'credential_key': None, 'display_name': None, 'purpose': None, 'store_target': None, 'signup_url': None, 'fields': {'items': {'properties': {'name': None, 'required': None, 'kind': None, 'visibility': None, 'value_source': None, 'value': None, 'generation_policy': None, 'label': None, 'description': None, 'placeholder': None, 'form': {'properties': {'input_control': None, 'autocomplete': None, 'accept': None, 'help_text': None}}}}}, 'automation_steps': {'items': None}}}, 'delete': {'properties': {'type': None, 'credential_key': None, 'service_name': None, 'source': None, 'source_item_id': None, 'source_item_name': None}}}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'credential.form.result': KindSpec(
         name='credential.form.result',
@@ -299,6 +311,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='summary',
         body_shape={'properties': {'form_id': None, 'task_id': None, 'status': None, 'continue_task': None, 'credential_key': None, 'service_name': None, 'display_name': None, 'broker_session_id': None, 'flow': None, 'message': None, 'error': None, 'credential': {'properties': {'fields': {'items': {'properties': {'name': None, 'kind': None, 'visibility': None, 'value_source': None, 'secret': None, 'value': None}}}, 'purpose': None}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'custody.decide': KindSpec(
         name='custody.decide',
@@ -321,6 +334,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'task_id': None, 'seen_custody_token': None, 'decision': {'one_of': 'type', 'variants': {'reassign': {'properties': {'type': None, 'to': {'one_of': 'target', 'variants': {'agent': {'properties': {'target': None, 'agent': None}}, 'pool': {'properties': {'target': None, 'pool': None}}}}, 'from_checkpoint': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}}}, 'adopt_late_work': {'properties': {'type': None, 'late_message_id': None, 'stop_current': None}}}}}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'custody_token': None, 'holder': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'stale_custody': {'properties': {'outcome': None, 'current_custody_token': None, 'message': None}}, 'late_work_not_found': {'properties': {'outcome': None, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'message': None}}, 'not_own_request': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'custody.moved': KindSpec(
         name='custody.moved',
@@ -343,6 +357,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'task_id': None, 'custody_token': None, 'reason': None}},
         reply_shape=None,
+        verification='standard',
     ),
     'debug.dump': KindSpec(
         name='debug.dump',
@@ -365,6 +380,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'enabled': None, 'mode': None, 'agent': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'enabled': None, 'mode': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'delivery.receipt': KindSpec(
         name='delivery.receipt',
@@ -387,6 +403,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'receipt_id': None, 'delivered_message_id': None, 'task_id': None, 'conversation_id': None, 'schedule_id': None, 'via': None}},
         reply_shape=None,
+        verification='standard',
     ),
     'delivery.refused': KindSpec(
         name='delivery.refused',
@@ -409,6 +426,30 @@ KINDS: dict[str, KindSpec] = {
         rendering='summary',
         body_shape={'properties': {'refused_message_id': None, 'refused_kind': None, 'task_id': None, 'reason': None, 'current_custody_token': None}},
         reply_shape=None,
+        verification='standard',
+    ),
+    'dlq.notice': KindSpec(
+        name='dlq.notice',
+        delivery_class='dead_letter',
+        addresses=('dlq.notice.{copy}',),
+        body_model=models.DlqNoticeBodyAdapter,
+        reply_model=None,
+        reply_errors=(),
+        senders=('gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler'),
+        receivers=('team_services', 'installation_authority'),
+        expiry_seconds=2592000,
+        authority='none',
+        execution_slot=False,
+        accepted_while_paused=True,
+        priority='normal',
+        routing='team',
+        topology_edge='none',
+        ledger='none',
+        wakes_model='never',
+        rendering='none',
+        body_shape={'properties': {'copy_id': None, 'stage': None, 'reason': None, 'pointer': None, 'detail': None, 'original': {'properties': {'subject': None, 'stream': None, 'stream_sequence': None, 'deliveries': None}}, 'claimed': {'properties': {'kind': None, 'message_id': None, 'issuer_team': None, 'issuer_runtime': None, 'protocol': None}}, 'raw': {'properties': {'stored': None, 'size': None, 'sha256': None}}, 'release': None}},
+        reply_shape=None,
+        verification='standard',
     ),
     'heartbeat_items.add': KindSpec(
         name='heartbeat_items.add',
@@ -431,6 +472,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'instruction': None, 'title': None, 'target_agent_type': None, 'objective_id': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'item': {'properties': {'heartbeat_item_id': None, 'title': None, 'instruction': None, 'target_agent_type': None, 'objective_id': None, 'enabled': None, 'seen_version': None}}, 'warning': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'objective_link_refused': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'heartbeat_items.disable': KindSpec(
         name='heartbeat_items.disable',
@@ -453,6 +495,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'heartbeat_item_id': None, 'seen_version': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'item': {'properties': {'heartbeat_item_id': None, 'title': None, 'instruction': None, 'target_agent_type': None, 'objective_id': None, 'enabled': None, 'seen_version': None}}, 'warning': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'objective_link_refused': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'heartbeat_items.enable': KindSpec(
         name='heartbeat_items.enable',
@@ -475,6 +518,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'heartbeat_item_id': None, 'seen_version': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'item': {'properties': {'heartbeat_item_id': None, 'title': None, 'instruction': None, 'target_agent_type': None, 'objective_id': None, 'enabled': None, 'seen_version': None}}, 'warning': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'objective_link_refused': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'heartbeat_items.remove': KindSpec(
         name='heartbeat_items.remove',
@@ -497,6 +541,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'heartbeat_item_id': None, 'seen_version': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'item': {'properties': {'heartbeat_item_id': None, 'title': None, 'instruction': None, 'target_agent_type': None, 'objective_id': None, 'enabled': None, 'seen_version': None}}, 'warning': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'objective_link_refused': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'heartbeat_items.update': KindSpec(
         name='heartbeat_items.update',
@@ -519,6 +564,53 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'heartbeat_item_id': None, 'seen_version': None, 'instruction': None, 'title': None, 'target_agent_type': None, 'objective_id': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'item': {'properties': {'heartbeat_item_id': None, 'title': None, 'instruction': None, 'target_agent_type': None, 'objective_id': None, 'enabled': None, 'seen_version': None}}, 'warning': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'objective_link_refused': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
+    ),
+    'host.join': KindSpec(
+        name='host.join',
+        delivery_class='request_reply',
+        addresses=('_install.{sender}.svc.host.join',),
+        body_model=models.HostJoinBodyAdapter,
+        reply_model=models.HostJoinReplyAdapter,
+        reply_errors=('pending', 'denied', 'protocol_mismatch', 'not_allowed'),
+        senders=('gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'scheduler'),
+        receivers=('installation_authority',),
+        expiry_seconds=30,
+        authority='none',
+        execution_slot=False,
+        accepted_while_paused=True,
+        priority='high',
+        routing='named',
+        topology_edge='none',
+        ledger='none',
+        wakes_model='never',
+        rendering='none',
+        body_shape={'properties': {'join_id': None, 'installation': None, 'runtime': None, 'teams': {'items': None}, 'roles': {'items': None}, 'application_key': {'properties': {'key_id': None, 'public_key': None}}, 'nats_public_key': None, 'agent_types': {'items': None}, 'session_limit': None, 'protocol': None, 'deployment': None, 'profile_sha256': None, 'software': {'properties': {'name': None, 'version': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'certificate': {'properties': {'record': None, 'key': None, 'writer': {'properties': {'runtime': None, 'team': None, 'membership_epoch': None, 'revocation_epoch': None, 'key_id': None}}, 'sequence': None, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'body_digest': None, 'body': None, 'signature': None}}, 'connection': {'properties': {'type': None, 'jwt': None, 'expires_at': None}}}}, 'pending': {'properties': {'outcome': None, 'join_id': None, 'review_code': None, 'retry_after_seconds': None, 'message': None}}, 'denied': {'properties': {'outcome': None, 'reason': None, 'message': None}}, 'protocol_mismatch': {'properties': {'outcome': None, 'accepted': None, 'install': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
+        verification='proof_of_possession',
+    ),
+    'host.renew': KindSpec(
+        name='host.renew',
+        delivery_class='request_reply',
+        addresses=('_install.{sender}.svc.host.renew',),
+        body_model=models.HostRenewBodyAdapter,
+        reply_model=models.HostRenewReplyAdapter,
+        reply_errors=('revoked', 'needs_approval', 'protocol_mismatch', 'not_allowed'),
+        senders=('gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'scheduler'),
+        receivers=('installation_authority',),
+        expiry_seconds=30,
+        authority='none',
+        execution_slot=False,
+        accepted_while_paused=True,
+        priority='high',
+        routing='named',
+        topology_edge='none',
+        ledger='none',
+        wakes_model='never',
+        rendering='none',
+        body_shape={'properties': {'renew_id': None, 'certificate_id': None, 'membership_epoch': None, 'profile_sha256': None, 'software': {'properties': {'name': None, 'version': None}}, 'new_application_key': {'properties': {'key_id': None, 'public_key': None}}, 'new_key_proof': None, 'new_nats_public_key': None}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'certificate': {'properties': {'record': None, 'key': None, 'writer': {'properties': {'runtime': None, 'team': None, 'membership_epoch': None, 'revocation_epoch': None, 'key_id': None}}, 'sequence': None, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'body_digest': None, 'body': None, 'signature': None}}, 'connection': {'properties': {'type': None, 'jwt': None, 'expires_at': None}}}}, 'revoked': {'properties': {'outcome': None, 'revocation_epoch': None, 'message': None}}, 'needs_approval': {'properties': {'outcome': None, 'join_id': None, 'message': None}}, 'protocol_mismatch': {'properties': {'outcome': None, 'accepted': None, 'install': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'intent.set': KindSpec(
         name='intent.set',
@@ -541,6 +633,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'root_task_id': None, 'seen_version': None, 'text': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'version': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'message': None}}, 'not_own_request': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.add_note': KindSpec(
         name='knowledge.add_note',
@@ -563,6 +656,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'space': None, 'page': None, 'note': None, 'confirm_review': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'page': {'properties': {'space': None, 'page': None, 'title': None, 'summary': None, 'body': None, 'body_ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'tags': {'items': None}, 'status': None, 'seen_version': None, 'updated_at': None, 'updated_by': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}, 'review_flags': {'items': None}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'page_exists': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'merged': {'properties': {'outcome': None, 'merged_into': None, 'message': None}}, 'review_required': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'sensitive_content': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'limit_reached': {'properties': {'outcome': None, 'message': None}}, 'page_frozen': {'properties': {'outcome': None, 'message': None}}, 'repeats_recent_revision': {'properties': {'outcome': None, 'message': None}}, 'personal_space_unavailable': {'properties': {'outcome': None, 'message': None}}, 'saved_write_mismatch': {'properties': {'outcome': None, 'message': None}}, 'contribution_not_pending': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.archive': KindSpec(
         name='knowledge.archive',
@@ -585,6 +679,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'space': None, 'page': None, 'seen_version': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'page': {'properties': {'space': None, 'page': None, 'title': None, 'summary': None, 'body': None, 'body_ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'tags': {'items': None}, 'status': None, 'seen_version': None, 'updated_at': None, 'updated_by': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'page_exists': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'merged': {'properties': {'outcome': None, 'merged_into': None, 'message': None}}, 'review_required': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'sensitive_content': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'limit_reached': {'properties': {'outcome': None, 'message': None}}, 'page_frozen': {'properties': {'outcome': None, 'message': None}}, 'repeats_recent_revision': {'properties': {'outcome': None, 'message': None}}, 'personal_space_unavailable': {'properties': {'outcome': None, 'message': None}}, 'saved_write_mismatch': {'properties': {'outcome': None, 'message': None}}, 'contribution_not_pending': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.count_contributions': KindSpec(
         name='knowledge.count_contributions',
@@ -607,6 +702,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'total': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.freeze': KindSpec(
         name='knowledge.freeze',
@@ -629,6 +725,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'space': None, 'page': None, 'seen_version': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'page': {'properties': {'space': None, 'page': None, 'title': None, 'summary': None, 'body': None, 'body_ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'tags': {'items': None}, 'status': None, 'seen_version': None, 'updated_at': None, 'updated_by': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'page_exists': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'merged': {'properties': {'outcome': None, 'merged_into': None, 'message': None}}, 'review_required': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'sensitive_content': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'limit_reached': {'properties': {'outcome': None, 'message': None}}, 'page_frozen': {'properties': {'outcome': None, 'message': None}}, 'repeats_recent_revision': {'properties': {'outcome': None, 'message': None}}, 'personal_space_unavailable': {'properties': {'outcome': None, 'message': None}}, 'saved_write_mismatch': {'properties': {'outcome': None, 'message': None}}, 'contribution_not_pending': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.history': KindSpec(
         name='knowledge.history',
@@ -651,6 +748,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'space': None, 'page': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'page': {'properties': {'space': None, 'page': None, 'title': None, 'summary': None, 'body': None, 'body_ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'tags': {'items': None}, 'status': None, 'seen_version': None, 'updated_at': None, 'updated_by': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}, 'revisions': {'items': {'properties': {'revision': None, 'updated_at': None, 'updated_by': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}, 'change_summary': None}}}, 'total': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.list': KindSpec(
         name='knowledge.list',
@@ -673,6 +771,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'space': None, 'status': None, 'query': None, 'offset': None, 'limit': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'pages': {'items': {'properties': {'space': None, 'page': None, 'title': None, 'summary': None, 'body': None, 'body_ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'tags': {'items': None}, 'status': None, 'seen_version': None, 'updated_at': None, 'updated_by': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}}, 'total': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.list_contributions': KindSpec(
         name='knowledge.list_contributions',
@@ -695,6 +794,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'offset': None, 'limit': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'contributions': {'items': {'properties': {'contribution_id': None, 'page': None, 'title': None, 'state': None, 'seen_version': None, 'created_at': None, 'author': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}}, 'total': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.merge': KindSpec(
         name='knowledge.merge',
@@ -717,6 +817,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'space': None, 'page': None, 'seen_version': None, 'into': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'page': {'properties': {'space': None, 'page': None, 'title': None, 'summary': None, 'body': None, 'body_ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'tags': {'items': None}, 'status': None, 'seen_version': None, 'updated_at': None, 'updated_by': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'page_exists': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'merged': {'properties': {'outcome': None, 'merged_into': None, 'message': None}}, 'review_required': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'sensitive_content': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'limit_reached': {'properties': {'outcome': None, 'message': None}}, 'page_frozen': {'properties': {'outcome': None, 'message': None}}, 'repeats_recent_revision': {'properties': {'outcome': None, 'message': None}}, 'personal_space_unavailable': {'properties': {'outcome': None, 'message': None}}, 'saved_write_mismatch': {'properties': {'outcome': None, 'message': None}}, 'contribution_not_pending': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.publish_contribution': KindSpec(
         name='knowledge.publish_contribution',
@@ -739,6 +840,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'contribution_id': None, 'seen_version': None, 'edited': None, 'title': None, 'summary': None, 'body': None, 'tags': {'items': None}}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'page': {'properties': {'space': None, 'page': None, 'title': None, 'summary': None, 'body': None, 'body_ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'tags': {'items': None}, 'status': None, 'seen_version': None, 'updated_at': None, 'updated_by': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'page_exists': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'merged': {'properties': {'outcome': None, 'merged_into': None, 'message': None}}, 'review_required': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'sensitive_content': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'limit_reached': {'properties': {'outcome': None, 'message': None}}, 'page_frozen': {'properties': {'outcome': None, 'message': None}}, 'repeats_recent_revision': {'properties': {'outcome': None, 'message': None}}, 'personal_space_unavailable': {'properties': {'outcome': None, 'message': None}}, 'saved_write_mismatch': {'properties': {'outcome': None, 'message': None}}, 'contribution_not_pending': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.read': KindSpec(
         name='knowledge.read',
@@ -761,6 +863,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'space': None, 'page': None, 'revision': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'page': {'properties': {'space': None, 'page': None, 'title': None, 'summary': None, 'body': None, 'body_ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'tags': {'items': None}, 'status': None, 'seen_version': None, 'updated_at': None, 'updated_by': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.read_contribution': KindSpec(
         name='knowledge.read_contribution',
@@ -783,6 +886,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'contribution_id': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'contribution': {'properties': {'contribution_id': None, 'page': None, 'title': None, 'state': None, 'seen_version': None, 'created_at': None, 'author': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}, 'body': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.reject_contribution': KindSpec(
         name='knowledge.reject_contribution',
@@ -805,6 +909,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'contribution_id': None, 'seen_version': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'contribution': {'properties': {'contribution_id': None, 'page': None, 'title': None, 'state': None, 'seen_version': None, 'created_at': None, 'author': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'page_exists': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'merged': {'properties': {'outcome': None, 'merged_into': None, 'message': None}}, 'review_required': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'sensitive_content': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'limit_reached': {'properties': {'outcome': None, 'message': None}}, 'page_frozen': {'properties': {'outcome': None, 'message': None}}, 'repeats_recent_revision': {'properties': {'outcome': None, 'message': None}}, 'personal_space_unavailable': {'properties': {'outcome': None, 'message': None}}, 'saved_write_mismatch': {'properties': {'outcome': None, 'message': None}}, 'contribution_not_pending': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.resolve_note': KindSpec(
         name='knowledge.resolve_note',
@@ -827,6 +932,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'space': None, 'page': None, 'seen_version': None, 'note_id': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'page': {'properties': {'space': None, 'page': None, 'title': None, 'summary': None, 'body': None, 'body_ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'tags': {'items': None}, 'status': None, 'seen_version': None, 'updated_at': None, 'updated_by': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'page_exists': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'merged': {'properties': {'outcome': None, 'merged_into': None, 'message': None}}, 'review_required': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'sensitive_content': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'limit_reached': {'properties': {'outcome': None, 'message': None}}, 'page_frozen': {'properties': {'outcome': None, 'message': None}}, 'repeats_recent_revision': {'properties': {'outcome': None, 'message': None}}, 'personal_space_unavailable': {'properties': {'outcome': None, 'message': None}}, 'saved_write_mismatch': {'properties': {'outcome': None, 'message': None}}, 'contribution_not_pending': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.revert': KindSpec(
         name='knowledge.revert',
@@ -849,6 +955,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'space': None, 'page': None, 'to_revision': None, 'seen_version': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'page': {'properties': {'space': None, 'page': None, 'title': None, 'summary': None, 'body': None, 'body_ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'tags': {'items': None}, 'status': None, 'seen_version': None, 'updated_at': None, 'updated_by': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'page_exists': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'merged': {'properties': {'outcome': None, 'merged_into': None, 'message': None}}, 'review_required': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'sensitive_content': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'limit_reached': {'properties': {'outcome': None, 'message': None}}, 'page_frozen': {'properties': {'outcome': None, 'message': None}}, 'repeats_recent_revision': {'properties': {'outcome': None, 'message': None}}, 'personal_space_unavailable': {'properties': {'outcome': None, 'message': None}}, 'saved_write_mismatch': {'properties': {'outcome': None, 'message': None}}, 'contribution_not_pending': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.unfreeze': KindSpec(
         name='knowledge.unfreeze',
@@ -871,6 +978,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'space': None, 'page': None, 'seen_version': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'page': {'properties': {'space': None, 'page': None, 'title': None, 'summary': None, 'body': None, 'body_ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'tags': {'items': None}, 'status': None, 'seen_version': None, 'updated_at': None, 'updated_by': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'page_exists': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'merged': {'properties': {'outcome': None, 'merged_into': None, 'message': None}}, 'review_required': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'sensitive_content': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'limit_reached': {'properties': {'outcome': None, 'message': None}}, 'page_frozen': {'properties': {'outcome': None, 'message': None}}, 'repeats_recent_revision': {'properties': {'outcome': None, 'message': None}}, 'personal_space_unavailable': {'properties': {'outcome': None, 'message': None}}, 'saved_write_mismatch': {'properties': {'outcome': None, 'message': None}}, 'contribution_not_pending': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.withdraw_contribution': KindSpec(
         name='knowledge.withdraw_contribution',
@@ -893,6 +1001,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'contribution_id': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'contribution': {'properties': {'contribution_id': None, 'page': None, 'title': None, 'state': None, 'seen_version': None, 'created_at': None, 'author': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'contribution_not_pending': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'knowledge.write': KindSpec(
         name='knowledge.write',
@@ -915,6 +1024,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'space': None, 'page': None, 'seen_version': None, 'title': None, 'summary': None, 'body': None, 'body_ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'tags': {'items': None}, 'page_type': None, 'change_summary': None, 'confirm_review': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'page': {'properties': {'space': None, 'page': None, 'title': None, 'summary': None, 'body': None, 'body_ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'tags': {'items': None}, 'status': None, 'seen_version': None, 'updated_at': None, 'updated_by': {'one_of': 'kind', 'variants': {'agent': {'properties': {'kind': None, 'agent_type': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'system': {'properties': {'kind': None}}}}}}, 'review_flags': {'items': None}}}, 'pending_review': {'properties': {'outcome': None, 'contribution_id': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'page_exists': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'merged': {'properties': {'outcome': None, 'merged_into': None, 'message': None}}, 'review_required': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'sensitive_content': {'properties': {'outcome': None, 'review_flags': {'items': None}, 'message': None}}, 'limit_reached': {'properties': {'outcome': None, 'message': None}}, 'page_frozen': {'properties': {'outcome': None, 'message': None}}, 'repeats_recent_revision': {'properties': {'outcome': None, 'message': None}}, 'personal_space_unavailable': {'properties': {'outcome': None, 'message': None}}, 'saved_write_mismatch': {'properties': {'outcome': None, 'message': None}}, 'contribution_not_pending': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'ledger.fact': KindSpec(
         name='ledger.fact',
@@ -937,6 +1047,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='summary',
         body_shape={'properties': {'fact_id': None, 'task_id': None, 'fact': {'one_of': 'type', 'variants': {'custody_confirmed': {'properties': {'type': None, 'holder': None, 'custody_token': None}}, 'access_requested': {'properties': {'type': None, 'request_id': None, 'by': None, 'target': {'properties': {'kind': None, 'id': None}}, 'level': None}}, 'access_decided': {'properties': {'type': None, 'request_id': None, 'status': None}}, 'decision_ahead_used': {'properties': {'type': None, 'decision_id': None, 'produced_message_id': None}}, 'colleague_exchange': {'properties': {'type': None, 'question_id': None, 'asker': None, 'answerer': None, 'state': None}}, 'steering_seen': {'properties': {'type': None, 'steer_id': None, 'holder': None}}, 'wait': {'properties': {'type': None, 'kind': None, 'case_id': None, 'state': None, 'until': None}}, 'hold_timed_out': {'properties': {'type': None, 'person_steering_id': None}}, 'late_work': {'properties': {'type': None, 'former_holder': None, 'message_id': None}}, 'intent_changed': {'properties': {'type': None, 'root_task_id': None, 'version': None, 'text': None}}}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'memory.create': KindSpec(
         name='memory.create',
@@ -959,6 +1070,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'bank': None, 'fact_text': None, 'tags': {'items': None}, 'valid_from': None, 'expires': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'fact': {'properties': {'memory_id': None, 'fact_text': None, 'valid_from': None, 'expires': None, 'tags': {'items': None}, 'created_at': None, 'updated_at': None, 'seen_version': None}}, 'event_id': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'capacity_reached': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'memory.delete': KindSpec(
         name='memory.delete',
@@ -981,6 +1093,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'bank': None, 'memory_id': None, 'seen_version': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'memory_id': None, 'event_id': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'capacity_reached': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'memory.list': KindSpec(
         name='memory.list',
@@ -1003,6 +1116,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'bank': None, 'sort': None, 'offset': None, 'limit': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'facts': {'items': {'properties': {'memory_id': None, 'fact_text': None, 'valid_from': None, 'expires': None, 'tags': {'items': None}, 'created_at': None, 'updated_at': None, 'seen_version': None}}}, 'total': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'memory.replace': KindSpec(
         name='memory.replace',
@@ -1025,6 +1139,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'bank': None, 'memory_id': None, 'seen_version': None, 'fact_text': None, 'tags': {'items': None}, 'valid_from': None, 'expires': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'fact': {'properties': {'memory_id': None, 'fact_text': None, 'valid_from': None, 'expires': None, 'tags': {'items': None}, 'created_at': None, 'updated_at': None, 'seen_version': None}}, 'event_id': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'capacity_reached': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'memory.show': KindSpec(
         name='memory.show',
@@ -1047,6 +1162,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'bank': None, 'memory_id': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'fact': {'properties': {'memory_id': None, 'fact_text': None, 'valid_from': None, 'expires': None, 'tags': {'items': None}, 'created_at': None, 'updated_at': None, 'seen_version': None}}}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'memory.undo': KindSpec(
         name='memory.undo',
@@ -1069,6 +1185,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'bank': None, 'event_id': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'event_id': None, 'undone_event_id': None, 'undone_event_type': None, 'fact': {'properties': {'memory_id': None, 'fact_text': None, 'valid_from': None, 'expires': None, 'tags': {'items': None}, 'created_at': None, 'updated_at': None, 'seen_version': None}}, 'deleted': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'capacity_reached': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'objectives.abandon': KindSpec(
         name='objectives.abandon',
@@ -1091,6 +1208,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'objective_id': None, 'seen_version': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'objective_id': None, 'status': None, 'seen_version': None, 'incomplete': {'items': {'properties': {'part': None, 'id': None}}}, 'receipts': {'items': {'properties': {'root_task_id': None, 'cancelled_task_count': None, 'stop_signals_sent': None, 'unconfirmed_worker_count': None, 'state': None}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'action_unavailable': {'properties': {'outcome': None, 'current_status': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'objectives.create': KindSpec(
         name='objectives.create',
@@ -1113,6 +1231,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'title': None, 'desired_outcome': None, 'horizon': None, 'priority': None, 'success_criteria': {'items': None}}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'objective_id': None, 'seen_version': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'status_not_settable': {'properties': {'outcome': None, 'message': None}}, 'confirmation_required': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'objectives.delete': KindSpec(
         name='objectives.delete',
@@ -1135,6 +1254,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'objective_id': None, 'seen_version': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'objective_id': None, 'status': None, 'seen_version': None, 'incomplete': {'items': {'properties': {'part': None, 'id': None}}}, 'receipts': {'items': {'properties': {'root_task_id': None, 'cancelled_task_count': None, 'stop_signals_sent': None, 'unconfirmed_worker_count': None, 'state': None}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'action_unavailable': {'properties': {'outcome': None, 'current_status': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'objectives.list': KindSpec(
         name='objectives.list',
@@ -1157,6 +1277,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'objectives': {'items': {'properties': {'objective_id': None, 'seen_version': None, 'title': None, 'status': None, 'horizon': None, 'priority': None, 'desired_outcome': None, 'progress_summary': None, 'subgoals': {'items': None}, 'success_criteria': {'items': None}, 'schedule_ids': {'items': None}, 'heartbeat_item_ids': {'items': None}, 'available_actions': {'items': None}}}}}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'objectives.pause': KindSpec(
         name='objectives.pause',
@@ -1179,6 +1300,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'objective_id': None, 'seen_version': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'objective_id': None, 'status': None, 'seen_version': None, 'incomplete': {'items': {'properties': {'part': None, 'id': None}}}, 'receipts': {'items': {'properties': {'root_task_id': None, 'cancelled_task_count': None, 'stop_signals_sent': None, 'unconfirmed_worker_count': None, 'state': None}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'action_unavailable': {'properties': {'outcome': None, 'current_status': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'objectives.resume': KindSpec(
         name='objectives.resume',
@@ -1201,6 +1323,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'objective_id': None, 'seen_version': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'objective_id': None, 'status': None, 'seen_version': None, 'incomplete': {'items': {'properties': {'part': None, 'id': None}}}, 'receipts': {'items': {'properties': {'root_task_id': None, 'cancelled_task_count': None, 'stop_signals_sent': None, 'unconfirmed_worker_count': None, 'state': None}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'action_unavailable': {'properties': {'outcome': None, 'current_status': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'objectives.stop': KindSpec(
         name='objectives.stop',
@@ -1223,6 +1346,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'objective_id': None, 'seen_version': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'objective_id': None, 'status': None, 'seen_version': None, 'incomplete': {'items': {'properties': {'part': None, 'id': None}}}, 'receipts': {'items': {'properties': {'root_task_id': None, 'cancelled_task_count': None, 'stop_signals_sent': None, 'unconfirmed_worker_count': None, 'state': None}}}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'action_unavailable': {'properties': {'outcome': None, 'current_status': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'objectives.update_progress': KindSpec(
         name='objectives.update_progress',
@@ -1245,6 +1369,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'objective_id': None, 'seen_version': None, 'progress_summary': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'objective_id': None, 'seen_version': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'status_not_settable': {'properties': {'outcome': None, 'message': None}}, 'confirmation_required': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'objectives.update_status': KindSpec(
         name='objectives.update_status',
@@ -1267,6 +1392,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'objective_id': None, 'seen_version': None, 'status': None, 'note': None, 'confirmed': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'objective_id': None, 'status': None, 'seen_version': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'status_not_settable': {'properties': {'outcome': None, 'message': None}}, 'confirmation_required': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'people.set_standing': KindSpec(
         name='people.set_standing',
@@ -1289,6 +1415,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'person': None, 'expected_standing': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'standing': None, 'tasks_stopped': None, 'schedules_paused': None, 'schedules_moved': None, 'grants_revoked': None, 'requests_closed': None, 'memory_kept': None, 'pages_kept': None, 'threads_closed': None, 'forms_closed': None, 'team_schedules_moved': {'items': {'properties': {'schedule_id': None, 'schedule_name': None, 'new_owner': None}}}, 'problems': {'items': None}}}, 'administrator_required': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'person.notify': KindSpec(
         name='person.notify',
@@ -1311,6 +1438,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'notice_id': None, 'delivery_ref': None, 'task_id': None, 'conversation_id': None, 'text': None, 'urgency': None, 'reason': {'one_of': 'source', 'variants': {'agent': {'properties': {'source': None, 'note': None}}, 'code': {'properties': {'source': None, 'code': None}}}}, 'attachments': {'items': {'properties': {'blob': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'kind': None, 'caption': None}}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'question.closed': KindSpec(
         name='question.closed',
@@ -1333,6 +1461,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='summary',
         body_shape={'properties': {'question_id': None, 'task_id': None, 'reason': None}},
         reply_shape=None,
+        verification='standard',
     ),
     'requests.pause': KindSpec(
         name='requests.pause',
@@ -1355,6 +1484,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'root_task_id': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'held': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'message': None}}, 'not_own_request': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'requests.resume': KindSpec(
         name='requests.resume',
@@ -1377,6 +1507,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'root_task_id': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'message': None}}, 'not_own_request': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'run_context.sign': KindSpec(
         name='run_context.sign',
@@ -1399,6 +1530,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'schedule_id': None, 'claim_token': None, 'scheduled_job_id': None, 'conversation_id': None, 'heartbeat_item_id': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'system_work': None, 'authority': {'properties': {'token_id': None, 'issuer': {'properties': {'team': None, 'runtime': None, 'key_id': None}}, 'person': None, 'team': None, 'bound_to': {'properties': {'type': None, 'id': None}}, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'signature': None}}}}, 'signer_missing': {'properties': {'outcome': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'claim_not_held': {'properties': {'outcome': None, 'message': None}}, 'schedule_stopped': {'properties': {'outcome': None, 'message': None}}, 'scheduled_job_mismatch': {'properties': {'outcome': None, 'message': None}}, 'heartbeat_item_not_found': {'properties': {'outcome': None, 'message': None}}, 'owner_inactive': {'properties': {'outcome': None, 'message': None}}, 'check_failed': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'schedules.disable': KindSpec(
         name='schedules.disable',
@@ -1421,6 +1553,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'schedule_id': None, 'seen_version': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'schedule_id': None, 'seen_version': None}}, 'approval_required': {'properties': {'outcome': None, 'change_id': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'schedules.install': KindSpec(
         name='schedules.install',
@@ -1443,6 +1576,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'schedule_id': None, 'mode': None, 'seen_version': None, 'name': None, 'management_class': None, 'system_schedule_kind': None, 'objective_id': None, 'worker': {'properties': {'agent_type': None, 'agent_id': None}}, 'timing': {'one_of': 'kind', 'variants': {'interval': {'properties': {'kind': None, 'interval_ms': None}}, 'cron': {'properties': {'kind': None, 'expression': None, 'time_zone': None}}, 'once': {'properties': {'kind': None, 'at': None}}}}, 'repeat_count': None, 'expires_at': None, 'paused_until': None, 'enabled': None, 'action': {'one_of': 'type', 'variants': {'task': {'properties': {'type': None, 'instruction': None, 'attachments': {'items': {'properties': {'attachment_id': None, 'blob': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'kind': None, 'caption': None}}}}}, 'fixed_message': {'properties': {'type': None, 'text': None, 'attachments': {'items': {'properties': {'attachment_id': None, 'blob': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'kind': None, 'caption': None}}}}}}}, 'run_notes': {'properties': {'schedule_kind': None, 'policy': {'properties': {'notify': None, 'notify_on_failure': None, 'evidence_required': None}}}}, 'decisions_ahead': {'items': {'properties': {'decision_id': None, 'kind': None}}}, 'deliver_to': {'properties': {'delivery_ref': None, 'conversation_id': None, 'time_zone': None}}}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'schedule_id': None, 'seen_version': None, 'timing_revision': None, 'next_fire_at': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'id_in_use': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_system_managed': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}}},
+        verification='standard',
     ),
     'schedules.list': KindSpec(
         name='schedules.list',
@@ -1465,6 +1599,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'offset': None, 'limit': None, 'delivery_ref': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'schedules': {'items': {'properties': {'schedule_id': None, 'name': None, 'management_class': None, 'system_schedule_kind': None, 'objective_id': None, 'instruction_preview': None, 'timing': {'one_of': 'kind', 'variants': {'interval': {'properties': {'kind': None, 'interval_ms': None}}, 'cron': {'properties': {'kind': None, 'expression': None, 'time_zone': None}}, 'once': {'properties': {'kind': None, 'at': None}}}}, 'next_fire_at': None, 'paused_until': None, 'expires_at': None, 'enabled': None, 'timing_revision': None, 'seen_version': None, 'worker': {'properties': {'agent_type': None, 'agent_id': None}}}}}, 'total': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'schedules.pause': KindSpec(
         name='schedules.pause',
@@ -1487,6 +1622,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'schedule_id': None, 'seen_version': None, 'paused_until': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'schedule_id': None, 'seen_version': None}}, 'approval_required': {'properties': {'outcome': None, 'change_id': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'schedules.remove': KindSpec(
         name='schedules.remove',
@@ -1509,6 +1645,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'schedule_id': None, 'seen_version': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'schedule_id': None, 'seen_version': None}}, 'approval_required': {'properties': {'outcome': None, 'change_id': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'schedules.resume': KindSpec(
         name='schedules.resume',
@@ -1531,6 +1668,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'schedule_id': None, 'seen_version': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'schedule_id': None, 'seen_version': None}}, 'approval_required': {'properties': {'outcome': None, 'change_id': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'schedules.set_worker': KindSpec(
         name='schedules.set_worker',
@@ -1553,6 +1691,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'schedule_id': None, 'seen_version': None, 'worker': {'properties': {'agent_type': None, 'agent_id': None}}}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'schedule_id': None, 'seen_version': None}}, 'approval_required': {'properties': {'outcome': None, 'change_id': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'schedules.update': KindSpec(
         name='schedules.update',
@@ -1575,6 +1714,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'schedule_id': None, 'seen_version': None, 'name': None, 'instruction': None, 'timing': {'one_of': 'kind', 'variants': {'interval': {'properties': {'kind': None, 'interval_ms': None}}, 'cron': {'properties': {'kind': None, 'expression': None, 'time_zone': None}}, 'once': {'properties': {'kind': None, 'at': None}}}}, 'expires_at': None, 'repeat_count': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'schedule_id': None, 'seen_version': None}}, 'approval_required': {'properties': {'outcome': None, 'change_id': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'skills.changed': KindSpec(
         name='skills.changed',
@@ -1597,6 +1737,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'one_of': 'operation', 'variants': {'install': {'properties': {'operation': None, 'change_id': None, 'skill_name': None, 'installed_tree_sha256': None}}, 'uninstall': {'properties': {'operation': None, 'change_id': None, 'skill_name': None, 'installed_tree_sha256': None}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'staged_changes.apply': KindSpec(
         name='staged_changes.apply',
@@ -1619,6 +1760,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'change_id': None, 'seen_version': None, 'reason': None, 'confirmed': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'waiting': {'properties': {'outcome': None, 'access_request_id': None, 'message': None}}, 'agreement_required': {'properties': {'outcome': None, 'title': None, 'effect': {'items': None}, 'message': None}}, 'already_applied': {'properties': {'outcome': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'denied': {'properties': {'outcome': None, 'message': None}}, 'withdrawn': {'properties': {'outcome': None, 'message': None}}, 'changed_since_read': {'properties': {'outcome': None, 'current_version': None, 'message': None}}, 'change_conflict': {'properties': {'outcome': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'message': None}}, 'request_closed': {'properties': {'outcome': None, 'request_state': None, 'message': None}}, 'needs_person_decision': {'properties': {'outcome': None, 'case_id': None, 'message': None}}, 'record_busy': {'properties': {'outcome': None, 'retry_at': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'steering.decide': KindSpec(
         name='steering.decide',
@@ -1641,6 +1783,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'person_steering_id': None, 'root_task_id': None, 'decision': {'one_of': 'type', 'variants': {'decided': {'properties': {'type': None, 'actions': {'items': {'properties': {'task_id': None, 'action': {'one_of': 'type', 'variants': {'guidance': {'properties': {'type': None, 'text': None, 'source': None, 'attachments': {'items': {'properties': {'attachment_id': None, 'blob': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'kind': None, 'caption': None}}}}}, 'release': {'properties': {'type': None}}, 'stop': {'properties': {'type': None, 'reason': None}}}}}}}, 'note': None}}, 'extend_hold': {'properties': {'type': None, 'until': None}}}}}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'hold_until': None, 'sent': {'items': {'properties': {'task_id': None, 'steer_id': None}}}, 'unreachable': {'items': None}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'hold_expired': {'properties': {'outcome': None, 'message': None}}, 'extension_used': {'properties': {'outcome': None, 'message': None}}, 'tasks_not_covered': {'properties': {'outcome': None, 'task_ids': {'items': None}, 'message': None}}, 'not_own_request': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'task.account': KindSpec(
         name='task.account',
@@ -1663,6 +1806,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='summary',
         body_shape={'properties': {'task_id': None, 'steer_id': None, 'sequence': None, 'stage': {'one_of': 'type', 'variants': {'immediate': {'properties': {'type': None, 'current_step': None, 'checkpoint': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'tools_in_progress': {'items': None}, 'held_actions': {'items': {'properties': {'action_id': None, 'action_type': None, 'summary': None, 'state': None}}}, 'assumptions': {'items': {'properties': {'assumption_id': None, 'text': None, 'affects': {'items': None}}}}}}, 'safe_point': {'properties': {'type': None, 'note': None}}}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'task.answer': KindSpec(
         name='task.answer',
@@ -1685,6 +1829,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='full',
         body_shape={'properties': {'question_id': None, 'task_id': None, 'text': None, 'selected_choice_ids': {'items': None}, 'decision': None, 'replied_message': {'properties': {'author': None, 'author_name': None, 'text': None, 'shortened': None, 'quoted_text': None, 'sent_at': None}}, 'passed_on': {'properties': {'from': None, 'original_message_id': None}}, 'decision_token': {'properties': {'token_id': None, 'case_id': None, 'choice': None, 'values_digest': None, 'issuer': {'properties': {'team': None, 'runtime': None, 'key_id': None}}, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'signature': None}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'task.claimed': KindSpec(
         name='task.claimed',
@@ -1707,6 +1852,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'claim_id': None, 'task_id': None, 'parent_task_id': None, 'recovered': None}},
         reply_shape=None,
+        verification='standard',
     ),
     'task.handback': KindSpec(
         name='task.handback',
@@ -1729,6 +1875,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='summary',
         body_shape={'properties': {'handback_id': None, 'task_id': None, 'disposition': None, 'launch_id': None, 'interrupted_at': None, 'reason': None, 'scheduler_errors': {'items': None}, 'actions': {'items': {'properties': {'action_id': None, 'action_type': None, 'summary': None, 'state': None}}}, 'ledger': {'properties': {'plan': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'checkpoint': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'history_summary': None, 'delegations': {'items': {'properties': {'task_id': None, 'number': None, 'holder': None, 'state': None}}}, 'questions': {'items': {'properties': {'question_id': None, 'number': None, 'purpose': None}}}, 'assumptions': {'items': {'properties': {'assumption_id': None, 'text': None, 'affects': {'items': None}}}}, 'held_actions': {'items': {'properties': {'action_id': None, 'action_type': None, 'summary': None, 'state': None}}}, 'counters': {'properties': {'subtask': None, 'question': None, 'attachment': None, 'report': None}}}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'task.probe': KindSpec(
         name='task.probe',
@@ -1751,6 +1898,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'task_id': None, 'custody_token': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'known': None, 'current': None, 'state': None, 'last_update_at': None, 'executing': None, 'exiting': None}}}},
+        verification='standard',
     ),
     'task.progress': KindSpec(
         name='task.progress',
@@ -1773,6 +1921,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='summary',
         body_shape={'properties': {'task_id': None, 'sequence': None, 'custody_token': None, 'status': None, 'state': None, 'checkpoint': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'assumptions': {'items': {'properties': {'assumption_id': None, 'text': None, 'affects': {'items': None}}}}, 'held_actions': {'items': {'properties': {'action_id': None, 'action_type': None, 'summary': None, 'state': None}}}, 'expected_finish': None, 'steering_seen': None}},
         reply_shape=None,
+        verification='standard',
     ),
     'task.question': KindSpec(
         name='task.question',
@@ -1795,6 +1944,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='full',
         body_shape={'properties': {'question_id': None, 'task_id': None, 'sequence': None, 'text': None, 'can_answer': None, 'relays_question_id': None, 'deadline': None, 'assumption': {'properties': {'assumption_id': None, 'text': None, 'affects': {'items': None}}}, 'purpose': {'one_of': 'type', 'variants': {'input': {'properties': {'type': None, 'choice_mode': None, 'choices': {'items': {'properties': {'choice_id': None, 'label': None, 'description': None, 'recommended': None}}}, 'allow_free_text': None}}, 'setup': {'properties': {'type': None, 'service': None, 'need': None}}, 'scope': {'properties': {'type': None, 'proposal': None, 'proposed_changes': {'items': {'properties': {'name': None, 'value': None}}}}}, 'budget': {'properties': {'type': None, 'asked': None, 'until': None}}, 'coordination': {'properties': {'type': None, 'needs_task_id': None}}, 'help': {'properties': {'type': None, 'agent_type': None}}, 'outside_help': {'properties': {'type': None, 'party': None}}, 'change_conflict': {'properties': {'type': None, 'case_id': None, 'brief': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'choices': {'items': None}}}, 'runtime_pause': {'properties': {'type': None, 'trigger': None, 'allowed_decisions': {'items': None}}}, 'recovery_checkpoint': {'properties': {'type': None, 'choices': {'items': {'properties': {'choice_id': None, 'label': None, 'description': None, 'recommended': None}}}}}}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'task.report': KindSpec(
         name='task.report',
@@ -1817,6 +1967,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='full',
         body_shape={'properties': {'report_id': None, 'task_id': None, 'sequence': None, 'for_person': None, 'summary': None, 'kind': {'one_of': 'type', 'variants': {'lessons': {'properties': {'type': None, 'durable_context': {'items': None}, 'risks_or_followups': {'items': None}, 'evidence': {'items': None}, 'importance': None}}, 'worker_result': {'properties': {'type': None, 'text': None, 'attachments': {'items': {'properties': {'attachment_id': None, 'blob': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'kind': None, 'caption': None}}}}}, 'record_changed': {'properties': {'type': None, 'record_kind': None, 'record_id': None, 'summary': None}}, 'notice': {'properties': {'type': None, 'text': None, 'urgency': None}}}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'task.request': KindSpec(
         name='task.request',
@@ -1839,6 +1990,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='full',
         body_shape={'properties': {'task_id': None, 'work': {'properties': {'origin': None, 'root_task_id': None, 'parent_task_id': None, 'conversation_id': None, 'follows_task_id': None, 'objective_id': None, 'schedule_id': None, 'time_zone': None, 'delivery_ref': None, 'started_on_purpose': None, 'topology': None, 'intent': {'properties': {'version': None, 'text': None}}, 'root_request': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'deadline': {'properties': {'at': None, 'rule': None}}, 'expected_offline_until': None, 'decisions_ahead': {'items': {'properties': {'decision_id': None, 'kind': None}}}}}, 'instructions': None, 'replied_message': {'properties': {'author': None, 'author_name': None, 'text': None, 'shortened': None, 'quoted_text': None, 'sent_at': None}}, 'attachments': {'items': {'properties': {'attachment_id': None, 'blob': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'kind': None, 'caption': None}}}, 'reassignment': {'properties': {'handback_id': None, 'prior_holder': None, 'prior_disposition': None, 'interruption_count': None, 'interrupted_at': None, 'actions': {'items': {'properties': {'action_id': None, 'action_type': None, 'summary': None, 'state': None}}}, 'checkpoint': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'task.result': KindSpec(
         name='task.result',
@@ -1859,8 +2011,9 @@ KINDS: dict[str, KindSpec] = {
         ledger='delegated_resolved',
         wakes_model={'by': 'outcome.state', 'values': {'completed': 'next_turn', 'partial': 'next_turn', 'failed': 'always', 'cancelled': 'next_turn', 'paused': 'always', 'yielded': 'next_turn', 'rejected': 'always'}},
         rendering='full',
-        body_shape={'properties': {'task_id': None, 'sequence': None, 'custody_token': None, 'intent_version': None, 'steering_seen': None, 'assumptions': {'items': {'properties': {'assumption_id': None, 'text': None, 'affects': {'items': None}}}}, 'summary': None, 'outcome': {'one_of': 'state', 'variants': {'completed': {'properties': {'state': None, 'answer': {'one_of': 'form', 'variants': {'text': {'properties': {'form': None, 'text': None}}, 'from_subtask': {'properties': {'form': None, 'from_task_id': None, 'note': None}}}}, 'artifacts': {'items': {'properties': {'attachment_id': None, 'blob': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'kind': None, 'caption': None}}}}}, 'partial': {'properties': {'state': None, 'answer': {'one_of': 'form', 'variants': {'text': {'properties': {'form': None, 'text': None}}, 'from_subtask': {'properties': {'form': None, 'from_task_id': None, 'note': None}}}}, 'missing': None, 'artifacts': {'items': {'properties': {'attachment_id': None, 'blob': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'kind': None, 'caption': None}}}}}, 'failed': {'properties': {'state': None, 'failure': {'one_of': 'category', 'variants': {'provider_limited': {'properties': {'category': None, 'provider': None, 'model_id': None, 'status_code': None, 'attempts': None, 'message': None}}, 'worker_lost': {'properties': {'category': None, 'attempts': None, 'message': None}}, 'admission_refused': {'properties': {'category': None, 'message': None}}, 'budget_exhausted': {'properties': {'category': None, 'message': None}}, 'deadline_reached': {'properties': {'category': None, 'message': None}}, 'not_allowed': {'properties': {'category': None, 'message': None}}, 'error': {'properties': {'category': None, 'message': None}}}}}}, 'cancelled': {'properties': {'state': None, 'reason': None}}, 'paused': {'properties': {'state': None, 'trigger': None, 'detail': None}}, 'yielded': {'properties': {'state': None, 'reason': None}}, 'rejected': {'properties': {'state': None, 'reason': None, 'detail': None}}}}}},
+        body_shape={'properties': {'task_id': None, 'sequence': None, 'custody_token': None, 'intent_version': None, 'steering_seen': None, 'assumptions': {'items': {'properties': {'assumption_id': None, 'text': None, 'affects': {'items': None}}}}, 'summary': None, 'outcome': {'one_of': 'state', 'variants': {'completed': {'properties': {'state': None, 'answer': {'one_of': 'form', 'variants': {'text': {'properties': {'form': None, 'text': None}}, 'from_subtask': {'properties': {'form': None, 'from_task_id': None, 'note': None}}}}, 'artifacts': {'items': {'properties': {'attachment_id': None, 'blob': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'kind': None, 'caption': None}}}}}, 'partial': {'properties': {'state': None, 'answer': {'one_of': 'form', 'variants': {'text': {'properties': {'form': None, 'text': None}}, 'from_subtask': {'properties': {'form': None, 'from_task_id': None, 'note': None}}}}, 'missing': None, 'artifacts': {'items': {'properties': {'attachment_id': None, 'blob': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'kind': None, 'caption': None}}}}}, 'failed': {'properties': {'state': None, 'failure': {'one_of': 'category', 'variants': {'provider_limited': {'properties': {'category': None, 'provider': None, 'model_id': None, 'status_code': None, 'attempts': None, 'message': None}}, 'worker_lost': {'properties': {'category': None, 'attempts': None, 'message': None}}, 'admission_refused': {'properties': {'category': None, 'message': None}}, 'budget_exhausted': {'properties': {'category': None, 'message': None}}, 'deadline_reached': {'properties': {'category': None, 'message': None}}, 'not_allowed': {'properties': {'category': None, 'message': None}}, 'error': {'properties': {'category': None, 'message': None}}, 'outcome_unknown': {'properties': {'category': None, 'attempts': None, 'message': None}}}}}}, 'cancelled': {'properties': {'state': None, 'reason': None}}, 'paused': {'properties': {'state': None, 'trigger': None, 'detail': None}}, 'yielded': {'properties': {'state': None, 'reason': None}}, 'rejected': {'properties': {'state': None, 'reason': None, 'detail': None}}}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'task.steer': KindSpec(
         name='task.steer',
@@ -1883,6 +2036,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='full',
         body_shape={'properties': {'task_id': None, 'steer_id': None, 'person_steering_id': None, 'action': {'one_of': 'type', 'variants': {'hold': {'properties': {'type': None}}, 'guidance': {'properties': {'type': None, 'source': None, 'text': None, 'attachments': {'items': {'properties': {'attachment_id': None, 'blob': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'kind': None, 'caption': None}}}, 'replied_message': {'properties': {'author': None, 'author_name': None, 'text': None, 'shortened': None, 'quoted_text': None, 'sent_at': None}}}}, 'release': {'properties': {'type': None}}}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'task.stop': KindSpec(
         name='task.stop',
@@ -1905,6 +2059,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'task_id': None, 'stop_id': None, 'reason': None, 'cascade_to_subtasks': None}},
         reply_shape=None,
+        verification='standard',
     ),
     'tasks.cancel': KindSpec(
         name='tasks.cancel',
@@ -1927,6 +2082,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'reason': None, 'selector': {'one_of': 'by', 'variants': {'task': {'properties': {'by': None, 'task_id': None}}, 'conversation': {'properties': {'by': None, 'conversation_id': None}}, 'delivery': {'properties': {'by': None, 'delivery_ref': None}}, 'all': {'properties': {'by': None}}}}}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'receipts': {'items': {'properties': {'root_task_id': None, 'cancelled_task_count': None, 'stop_signals_sent': None, 'unconfirmed_worker_count': None, 'state': None}}}, 'all_confirmed': None}}, 'no_matching_work': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'tasks.inventory': KindSpec(
         name='tasks.inventory',
@@ -1949,6 +2105,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'roots': {'items': {'properties': {'root_task_id': None, 'state': None, 'conversation_id': None, 'objective_id': None, 'objective_work_session_id': None, 'plan_id': None, 'latest_activity_at': None, 'latest_activity': None, 'blocker': None, 'children': {'items': {'properties': {'task_id': None, 'state': None, 'last_updated_at': None, 'agent_id': None, 'agent_type': None}}}}}}, 'schedules': {'items': {'properties': {'schedule_id': None, 'name': None, 'next_fire_at': None, 'enabled': None}}}}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'tasks.list': KindSpec(
         name='tasks.list',
@@ -1971,6 +2128,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'agent': None, 'offset': None, 'limit': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'tasks': {'items': {'properties': {'task_id': None, 'state': None, 'problem_statement': None, 'is_current': None, 'queue_position': None, 'last_updated_at': None}}}, 'total': None, 'queued_count': None, 'current_count': None, 'queue_digest': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'tasks.list_finished': KindSpec(
         name='tasks.list_finished',
@@ -1993,6 +2151,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'agent': None, 'offset': None, 'limit': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'tasks': {'items': {'properties': {'task_id': None, 'state': None, 'problem_statement': None, 'owner_agent_id': None, 'finished_at': None, 'answer': None}}}, 'total': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'tasks.probe': KindSpec(
         name='tasks.probe',
@@ -2015,6 +2174,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'task_id': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'known': None, 'state': None, 'last_update_at': None}}}},
+        verification='standard',
     ),
     'tasks.progress': KindSpec(
         name='tasks.progress',
@@ -2037,6 +2197,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'conversation_id': None, 'delivery_ref': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'root_task_id': None, 'root_state': None, 'plan_phase': None, 'plan_status': None, 'children': {'items': {'properties': {'task_id': None, 'agent_type': None, 'state': None, 'queue_status': None, 'holder': None, 'last_updated_at': None}}}, 'last_activity_at': None, 'last_activity': None, 'blocker': None, 'steering': {'properties': {'state': None, 'held': None, 'reached': None, 'total': None}}}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'tasks.purge': KindSpec(
         name='tasks.purge',
@@ -2059,6 +2220,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'agent': None, 'seen_queue_digest': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'receipts': {'items': {'properties': {'root_task_id': None, 'cancelled_task_count': None, 'stop_signals_sent': None, 'unconfirmed_worker_count': None, 'state': None}}}, 'removed': None, 'queue_digest': None, 'all_confirmed': None}}, 'queue_changed': {'properties': {'outcome': None, 'current_digest': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'tasks.remove': KindSpec(
         name='tasks.remove',
@@ -2081,6 +2243,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'agent': None, 'task_id': None, 'seen_queue_digest': None, 'reason': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'receipts': {'items': {'properties': {'root_task_id': None, 'cancelled_task_count': None, 'stop_signals_sent': None, 'unconfirmed_worker_count': None, 'state': None}}}, 'removed': None, 'queue_digest': None, 'all_confirmed': None}}, 'queue_changed': {'properties': {'outcome': None, 'current_digest': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'tasks.steer': KindSpec(
         name='tasks.steer',
@@ -2103,6 +2266,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'steer_id': None, 'task_id': None, 'text': None, 'attachments': {'items': {'properties': {'attachment_id': None, 'blob': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'kind': None, 'caption': None}}}, 'replied_message': {'properties': {'author': None, 'author_name': None, 'text': None, 'shortened': None, 'quoted_text': None, 'sent_at': None}}}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'holds_sent': None, 'duplicate': None}}, 'not_started': {'properties': {'outcome': None, 'message': None}}, 'request_finished': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'tool.setup.request': KindSpec(
         name='tool.setup.request',
@@ -2125,6 +2289,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'setup_request_id': None, 'task_id': None, 'delivery_ref': None, 'tool_id': None, 'reason': None, 'setup': {'one_of': 'type', 'variants': {'sign_in': {'properties': {'type': None, 'owner': None}}, 'account_link': {'properties': {'type': None, 'owner': None}}, 'team_sign_in_app': {'properties': {'type': None, 'owner': None}}, 'external_step': {'properties': {'type': None, 'owner': None, 'step_id': None}}}}}},
         reply_shape=None,
+        verification='standard',
     ),
     'tool.setup.result': KindSpec(
         name='tool.setup.result',
@@ -2147,6 +2312,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='summary',
         body_shape={'properties': {'setup_request_id': None, 'task_id': None, 'status': None, 'tool_id': None, 'setup': {'one_of': 'type', 'variants': {'sign_in': {'properties': {'type': None, 'owner': None}}, 'account_link': {'properties': {'type': None, 'owner': None}}, 'team_sign_in_app': {'properties': {'type': None, 'owner': None}}, 'external_step': {'properties': {'type': None, 'owner': None, 'step_id': None}}}}, 'source': None, 'attempt': None, 'account_label': None, 'needs_administrator': None, 'reason_code': None, 'message': None, 'link_id': None, 'broker_session_id': None}},
         reply_shape=None,
+        verification='standard',
     ),
     'topics.find_threads': KindSpec(
         name='topics.find_threads',
@@ -2169,6 +2335,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'tags': {'items': None}}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'matches': {'items': {'properties': {'conversation_id': None, 'latest_task_id': None, 'status': None, 'subject_preview': None, 'updated_at': None, 'matched_tags': {'items': None}}}}}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'topics.list_tags': KindSpec(
         name='topics.list_tags',
@@ -2191,6 +2358,7 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'tags': {'items': {'properties': {'tag': None, 'thread_count': None, 'updated_at': None}}}}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
     'topics.tag_thread': KindSpec(
         name='topics.tag_thread',
@@ -2213,5 +2381,16 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'request_id': None, 'conversation_id': None, 'tags': {'items': None}, 'private': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'applied_tags': {'items': None}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
     ),
+}
+
+STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
+STATE_RECORDS: dict[str, StateSpec] = {
+    'agent': StateSpec(name='agent', bucket='UA1_AGENTS', key='<team>.<agent>', writers=('lead_host', 'worker_host'), ttl_seconds=None, body_model=models.AgentStateAdapter),
+    'certificate': StateSpec(name='certificate', bucket='UA1_CERTS', key='<runtime>.<membership_epoch>', writers=('installation_authority',), ttl_seconds=None, body_model=models.CertificateStateAdapter),
+    'host': StateSpec(name='host', bucket='UA1_HOSTS', key='<runtime>', writers=('gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler'), ttl_seconds=60, body_model=models.HostStateAdapter),
+    'placement': StateSpec(name='placement', bucket='UA1_PLACEMENT', key='<team>.<agent>', writers=('team_services',), ttl_seconds=None, body_model=models.PlacementStateAdapter),
+    'revocations': StateSpec(name='revocations', bucket='UA1_CERTS', key='revocations', writers=('installation_authority',), ttl_seconds=None, body_model=models.RevocationsStateAdapter),
+    'team_view': StateSpec(name='team_view', bucket='UA1_TEAM_VIEW', key='<team>.<entry>.<id>', writers=('team_services',), ttl_seconds=None, body_model=models.TeamViewStateAdapter),
 }

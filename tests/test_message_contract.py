@@ -144,12 +144,12 @@ def test_permissions_publish_only_under_the_senders_own_id() -> None:
     for role in REGISTRY["host_roles"]:
         document = json.loads((folder / f"{role}.json").read_text(encoding="utf-8"))
         for subject in document["publish"]:
-            assert subject.startswith(("ua.v1.{team}.{self}.", "_INBOX.")), (role, subject)
+            assert subject.startswith(("ua.v1.{team}.{self}.", "ua.v1._install.{self}.", "_INBOX.")), (role, subject)
         assert "_INBOX.{self}.>" in document["subscribe"]
         for name, entry in REGISTRY["kinds"].items():
             if role in entry["senders"]:
                 for address in EXPORT.entry_addresses(entry):
-                    assert "ua.v1.{team}.{self}." + EXPORT.subject_pattern(address) in document["publish"]
+                    assert EXPORT.full_subject(EXPORT.subject_pattern(address), "{self}") in document["publish"]
 
 
 # -- canonical form ---------------------------------------------------------------------------------
@@ -240,3 +240,35 @@ def test_every_kind_and_reply_has_a_valid_example() -> None:
     examples = {path.parent.name for path in valid_examples()}
     expected = set(REGISTRY["kinds"]) | {f"{name}.reply" for name, entry in REGISTRY["kinds"].items() if "reply" in entry}
     assert expected <= examples, sorted(expected - examples)
+
+
+STATE_EXAMPLES = EXAMPLES / "state"
+
+
+@pytest.mark.parametrize("path", sorted((STATE_EXAMPLES / "valid").rglob("*.json")),
+                         ids=lambda path: path.relative_to(STATE_EXAMPLES / "valid").as_posix())
+def test_valid_state_records_are_accepted(path: Path) -> None:
+    from custom_messages.wire.state import verify_state
+
+    document = json.loads(path.read_text(encoding="utf-8"))
+    validator("state.schema.json").validate(document)
+    validator(REGISTRY["state_records"][document["record"]]["body"]).validate(document["body"])
+    verified = verify_state(path.read_bytes(), keys=trusted_keys())
+    assert verified.document.record == path.parent.name
+    model = kinds.STATE_RECORDS[document["record"]].body_model
+    assert model.dump_python(verified.body, mode="json", exclude_none=True, by_alias=True) == document["body"]
+
+
+@pytest.mark.parametrize("path", sorted((STATE_EXAMPLES / "invalid").glob("*.json")), ids=lambda path: path.stem)
+def test_invalid_state_records_are_refused_with_their_code(path: Path) -> None:
+    from custom_messages.wire.state import verify_state
+
+    case = json.loads(path.read_text(encoding="utf-8"))
+    with pytest.raises(FrameRefused) as refused:
+        verify_state(json.dumps(case["document"]).encode("utf-8"), keys=trusted_keys())
+    assert refused.value.code == case["refusal"], refused.value
+
+
+def test_every_state_record_has_a_valid_example() -> None:
+    examples = {path.parent.name for path in (STATE_EXAMPLES / "valid").rglob("*.json")}
+    assert set(REGISTRY["state_records"]) <= examples

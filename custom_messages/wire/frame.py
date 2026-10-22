@@ -26,6 +26,8 @@ from custom_messages.wire.models import Frame
 from custom_messages.wire.spec import prune
 
 _DOMAIN_PREFIX = SIGNING_DOMAIN.encode("ascii") + b"\n"
+# Installation-wide traffic (joining, renewing) names this scope instead of a team.
+INSTALLATION_SCOPE = "_install"
 
 
 class FrameRefused(ValueError):
@@ -152,19 +154,36 @@ def verify_frame(
         frame = Frame.model_validate(prune(raw, FRAME_SHAPE) if newer_minor else raw)
     except (CanonicalJsonError, ValidationError) as error:
         raise FrameRefused("malformed", str(error).splitlines()[0]) from error
+    spec = KINDS.get(frame.kind)
     trusted = keys.get(frame.issuer.key_id)
-    if trusted is None or trusted.team != frame.issuer.team or trusted.runtime != frame.issuer.runtime:
+    proven = trusted is None and spec is not None and spec.verification == "proof_of_possession"
+    if proven:
+        # A joining host has no certificate yet: it signs with the key its request presents.
+        presented = raw["body"].get("application_key") if isinstance(raw["body"], dict) else None
+        if not isinstance(presented, dict) or presented.get("key_id") != frame.issuer.key_id:
+            raise FrameRefused("unknown_key", frame.issuer.key_id)
+        try:
+            public_key = Ed25519PublicKey.from_public_bytes(b64url_decode(str(presented.get("public_key", ""))))
+        except ValueError as error:
+            raise FrameRefused("unknown_key", frame.issuer.key_id) from error
+    elif (trusted is None or trusted.runtime != frame.issuer.runtime
+          or frame.issuer.team not in {trusted.team, INSTALLATION_SCOPE}):
         raise FrameRefused("unknown_key", frame.issuer.key_id)
+    else:
+        public_key = trusted.public_key
     try:
-        trusted.public_key.verify(b64url_decode(frame.signature), signing_bytes(raw))
+        public_key.verify(b64url_decode(frame.signature), signing_bytes(raw))
     except (InvalidSignature, ValueError) as error:
         raise FrameRefused("bad_signature") from error
     if body_digest(raw["body"]) != frame.body_digest:
         raise FrameRefused("bad_digest")
-    issued_at = parse_timestamp(frame.issued_at)
-    if trusted.revoked_at is not None and issued_at >= trusted.revoked_at:
+    # Queued work is verified with the certificate valid when it was issued; a revoked
+    # certificate refuses it whenever it was revoked (contracts/messages/v1/README.md).
+    if trusted is not None and trusted.revoked_at is not None:
         raise FrameRefused("revoked")
-    if (frame.issuer.membership_epoch < trusted.min_membership_epoch
+    queued = spec is not None and spec.delivery_class in {"durable", "dead_letter"}
+    if trusted is not None and not queued and (
+            frame.issuer.membership_epoch < trusted.min_membership_epoch
             or frame.issuer.revocation_epoch < trusted.min_revocation_epoch):
         raise FrameRefused("epoch_too_old")
     if receiver is not None:

@@ -39,9 +39,9 @@ verification_refusals:
   - code: bad_digest
     meaning: the body digest does not match the body
   - code: revoked
-    meaning: the issuer's certificate was revoked before the frame was issued
+    meaning: the issuer's certificate is on the installation's revocations record, whenever it was revoked
   - code: epoch_too_old
-    meaning: the issuer's membership or revocation epoch is below the receiver's minimum
+    meaning: the issuer's membership or revocation epoch is below the receiver's minimum (request/reply and events only; queued work is checked against the certificate valid when it was issued) (request/reply and events only; queued work is checked against the certificate valid when it was issued) (request/reply and events only; queued work is checked against the certificate valid when it was issued)
   - code: wrong_team
     meaning: the frame is for another team
   - code: wrong_audience
@@ -81,6 +81,54 @@ host_roles:
   edge_adapter: connects outside agents (A2A)
   installation_authority: issues and revokes certificates and authority keys
   scheduler: fires schedules
+
+# Signed key-value records (state.schema.json). Readers verify each with the writer's
+# certificate that was valid when it was written, unless that certificate was revoked since.
+state_signing_domain: universal-agents/state-record/v1
+state_records:
+  certificate:
+    description: A host's membership certificate, issued by the installation authority.
+    bucket: UA1_CERTS
+    key: "<runtime>.<membership_epoch>"
+    writers: [installation_authority]
+    body: state/certificate.schema.json
+    write_rule: kept until its expiry plus the replay record's retention
+  revocations:
+    description: The installation's revoked certificates; a listed certificate refuses all its frames and records.
+    bucket: UA1_CERTS
+    key: revocations
+    writers: [installation_authority]
+    body: state/revocations.schema.json
+    write_rule: rewritten on each revocation; the revocation epoch only grows
+  host:
+    description: A runtime host's liveness and capacity, written every 20 seconds.
+    bucket: UA1_HOSTS
+    key: "<runtime>"
+    writers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
+    body: state/host.schema.json
+    ttl_seconds: 60
+    write_rule: written by the host itself every 20 seconds
+  agent:
+    description: An agent's state, written by the host it is placed on when the state changes.
+    bucket: UA1_AGENTS
+    key: "<team>.<agent>"
+    writers: [lead_host, worker_host]
+    body: state/agent.schema.json
+    write_rule: written on change, at most once per 2 seconds; readers accept it only from the placement's host
+  placement:
+    description: Which host runs an agent; its key-value revision is the fencing token.
+    bucket: UA1_PLACEMENT
+    key: "<team>.<agent>"
+    writers: [team_services]
+    body: state/placement.schema.json
+    write_rule: compare-and-set on the last revision; the revision is the fencing token
+  team_view:
+    description: One entry of a team's shared view of its members, requests, tasks and Objectives.
+    bucket: UA1_TEAM_VIEW
+    key: "<team>.<entry>.<id>"
+    writers: [team_services]
+    body: state/team_view.schema.json
+    write_rule: deleted when the item closes; each entry at most 4 KiB
 
 kinds:
   task.stop:
@@ -2068,3 +2116,64 @@ kinds:
     rendering: none
 
   # -- end of team operations --
+
+  # -- installation and dead letters --
+  host.join:
+    description: A new host asks to join the installation; the frame is signed with the key it presents.
+    class: request_reply
+    address: _install.{sender}.svc.host.join
+    body: bodies/host.join.schema.json
+    reply:
+      body: bodies/host.join.reply.schema.json
+      errors: [pending, denied, protocol_mismatch, not_allowed]
+    senders: [gateway, lead_host, worker_host, team_services, edge_adapter, scheduler]
+    receivers: [installation_authority]
+    expiry_seconds: 30
+    authority: none
+    idempotency: host.join:<join_id>
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: named
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+    verification: proof_of_possession
+
+  host.renew:
+    description: A host renews its certificate and connection credential, or rotates its keys.
+    class: request_reply
+    address: _install.{sender}.svc.host.renew
+    body: bodies/host.renew.schema.json
+    reply:
+      body: bodies/host.renew.reply.schema.json
+      errors: [revoked, needs_approval, protocol_mismatch, not_allowed]
+    senders: [gateway, lead_host, worker_host, team_services, edge_adapter, scheduler]
+    receivers: [installation_authority]
+    expiry_seconds: 30
+    authority: none
+    idempotency: host.renew:<renew_id>
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: named
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  dlq.notice:
+    description: A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only.
+    class: dead_letter
+    address: dlq.notice.{copy}
+    body: bodies/dlq.notice.schema.json
+    senders: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
+    receivers: [team_services, installation_authority]
+    expiry_seconds: 2592000
+    authority: none
+    idempotency: dlq.notice:<copy_id>
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  # -- end of installation and dead letters --

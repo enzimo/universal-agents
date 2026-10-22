@@ -63,6 +63,36 @@ never over a re-serialized object.
   `2026-10-22T04:30:00.000Z`.
 - Keys, digests and signatures are unpadded base64url.
 
+## Trust over time
+
+A queued message can wait days, for example while a host is cut off.
+- **Certificate at issue time.** Receivers verify every frame and state record with the writer's certificate that was valid when it was issued, even if that certificate has expired since.
+- **Revocation.** A certificate on the installation's revocations record refuses all of its frames and records, whenever it was revoked.
+- **Epochs.** The receiver's minimum membership and revocation epochs apply to request/reply messages and events only. Queued work is never refused for an old epoch.
+- **Expiry.** Each delivery class has an expiry in `transport.yaml`. Receivers keep their replay record at least as long as the longest expiry.
+
+## Installation traffic
+
+Joining an installation and renewing a certificate use addresses under `ua.v1._install.<sender>`, and their frames name the scope `_install` instead of a team.
+- **Joining.** A new host has no certificate yet. It signs `host.join` with the key the request presents; the registry marks this as `verification: proof_of_possession`, and it applies to that one operation only.
+- **Afterwards.** The authority returns a certificate and a connection credential, and later requests are verified as usual.
+
+## State records
+
+Hosts, agents, placements and the team view are key-value records, not messages. Each value is a signed state document (`schemas/state.schema.json`):
+- the record type, its key and its writer;
+- a sequence that only grows;
+- issue and expiry times;
+- the body, its digest and an Ed25519 signature over the domain prefix `universal-agents/state-record/v1` and a newline, followed by the RFC 8785 canonical JSON of the document without its signature.
+
+The registry's `state_records` section names each record's bucket, key form, writer roles and body schema.
+- **Placement.** A placement record's key-value revision is its fencing token.
+- **Agent records.** A reader accepts an agent record only from the host its placement names.
+
+## Dead letters
+
+A receiver that sets a message aside keeps the exact bytes at `dlq.raw.<copy>` and sends a `dlq.notice`. The notice holds identifiers only: the stage, the reason (a verification refusal or a handler failure) and the set-aside message's unverified claims. It never holds the content.
+
 ## Versions
 
 Within one protocol label:

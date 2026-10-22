@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/state/host.schema.json",
+  "title": "host state record body",
+  "description": "A runtime host's liveness and capacity, written every 20 seconds.",
+  "type": "object",
+  "properties": {
+    "runtime": {
+      "$ref": "../common.schema.json#/$defs/runtime_id"
+    },
+    "certificate": {
+      "$ref": "../common.schema.json#/$defs/certificate_ref"
+    },
+    "roles": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/host_role"
+      },
+      "maxItems": 7,
+      "minItems": 1
+    },
+    "teams": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/team_id"
+      },
+      "maxItems": 64,
+      "minItems": 1
+    },
+    "agent_types": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/agent_type"
+      },
+      "maxItems": 256
+    },
+    "session_limit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "sessions_active": {
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "protocol": {
+      "$ref": "../common.schema.json#/$defs/protocol_label"
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "starting",
+        "accepting",
+        "draining",
+        "drained"
+      ]
+    },
+    "health": {
+      "type": "string",
+      "enum": [
+        "healthy",
+        "degraded",
+        "unhealthy"
+      ]
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "component": {
+            "$ref": "../common.schema.json#/$defs/token_id"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded",
+              "unhealthy"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          }
+        },
+        "required": [
+          "component",
+          "state"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 16
+    },
+    "placement_labels": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/placement_label"
+      },
+      "maxItems": 64
+    },
+    "outbox_depth": {
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "revocation_epoch_seen": {
+      "$ref": "../common.schema.json#/$defs/epoch"
+    },
+    "started_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "heartbeat_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "software": {
+      "$ref": "../common.schema.json#/$defs/software"
+    }
+  },
+  "required": [
+    "runtime",
+    "certificate",
+    "roles",
+    "teams",
+    "agent_types",
+    "session_limit",
+    "sessions_active",
+    "protocol",
+    "state",
+    "health",
+    "components",
+    "placement_labels",
+    "outbox_depth",
+    "revocation_epoch_seen",
+    "started_at",
+    "heartbeat_at"
+  ],
+  "additionalProperties": false
+}

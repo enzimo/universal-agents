@@ -1,0 +1,51 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "host.join",
+  "message_id": "01928f3a-7b2c-7701-8000-000000000701",
+  "idempotency_key": "host.join:join_1",
+  "issuer": {
+    "team": "_install",
+    "runtime": "new-host-1",
+    "membership_epoch": 0,
+    "revocation_epoch": 0,
+    "key_id": "new-host-key-1"
+  },
+  "audience": {
+    "team": "_install",
+    "target": "installation_service",
+    "id": "authority"
+  },
+  "subject": "ua.v1._install.new-host-1.svc.host.join",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "profile_sha256": "DQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0",
+    "join_id": "join_1",
+    "installation": "install_example",
+    "runtime": "new-host-1",
+    "teams": [
+      "team_example"
+    ],
+    "roles": [
+      "worker_host"
+    ],
+    "application_key": {
+      "key_id": "new-host-key-1",
+      "public_key": "AgvUJ0RrcjQk2A0srTUro982SdDvj6rgyn6yVEOUGyk"
+    },
+    "nats_public_key": "UBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+    "agent_types": [
+      "Researcher"
+    ],
+    "session_limit": 8,
+    "protocol": "1.0-pre",
+    "deployment": "operator_managed",
+    "software": {
+      "name": "universal-agents",
+      "version": "0.9.8"
+    }
+  },
+  "body_digest": "I_x2jpmTsnNTJDmG8jGB0Ynds5LPHHPKwTPtRtdiwng",
+  "signature": "ZrJTXzGKto4Ol12EbSgkUc9Nr21pT8nVK3GJXu_1NLRfvF1Z624i7UfDqGm3bndzEuOrfNEG4_ncCbS2ujdRCQ"
+}

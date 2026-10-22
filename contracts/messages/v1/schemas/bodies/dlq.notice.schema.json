@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/dlq.notice.schema.json",
+  "title": "dlq.notice body",
+  "description": "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only.",
+  "type": "object",
+  "properties": {
+    "copy_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "stage": {
+      "type": "string",
+      "enum": [
+        "verification",
+        "handler",
+        "delivery_limit",
+        "upgrade"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "too_large",
+        "malformed",
+        "unknown_key",
+        "bad_signature",
+        "bad_digest",
+        "revoked",
+        "epoch_too_old",
+        "wrong_team",
+        "wrong_audience",
+        "subject_mismatch",
+        "expired",
+        "not_yet_valid",
+        "replayed",
+        "unknown_kind",
+        "invalid_body",
+        "access_denied",
+        "handler_failed",
+        "delivery_limit",
+        "upgrade_drain"
+      ]
+    },
+    "pointer": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "detail": {
+      "$ref": "../common.schema.json#/$defs/short_text"
+    },
+    "original": {
+      "type": "object",
+      "properties": {
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "stream": {
+          "$ref": "../common.schema.json#/$defs/token_id"
+        },
+        "stream_sequence": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "deliveries": {
+          "$ref": "../common.schema.json#/$defs/count"
+        }
+      },
+      "required": [
+        "subject",
+        "stream",
+        "stream_sequence",
+        "deliveries"
+      ],
+      "additionalProperties": false
+    },
+    "claimed": {
+      "type": "object",
+      "description": "What the set-aside message claimed about itself, unverified.",
+      "properties": {
+        "kind": {
+          "$ref": "../common.schema.json#/$defs/kind"
+        },
+        "message_id": {
+          "$ref": "../common.schema.json#/$defs/message_id"
+        },
+        "issuer_team": {
+          "$ref": "../common.schema.json#/$defs/scope_id"
+        },
+        "issuer_runtime": {
+          "$ref": "../common.schema.json#/$defs/runtime_id"
+        },
+        "protocol": {
+          "$ref": "../common.schema.json#/$defs/protocol_label"
+        }
+      },
+      "additionalProperties": false
+    },
+    "raw": {
+      "type": "object",
+      "properties": {
+        "stored": {
+          "type": "boolean"
+        },
+        "size": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "sha256": {
+          "$ref": "../common.schema.json#/$defs/sha256_digest"
+        }
+      },
+      "required": [
+        "stored",
+        "size",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "release": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    }
+  },
+  "required": [
+    "copy_id",
+    "stage",
+    "reason",
+    "original",
+    "raw",
+    "release"
+  ],
+  "additionalProperties": false
+}

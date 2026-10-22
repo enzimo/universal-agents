@@ -82,6 +82,10 @@
       "description": "one record per agent (availability, busy, idle, paused, exiting), written only on change",
       "per_key_ttl_seconds": 0
     },
+    "UA1_CERTS": {
+      "description": "host certificates and the installation's revocations; written only by the installation authority",
+      "per_key_ttl_seconds": 0
+    },
     "UA1_HOSTS": {
       "description": "one record per runtime host; written every 20 s, expires after 60 s",
       "per_key_ttl_seconds": 60
