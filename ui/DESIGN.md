@@ -1822,8 +1822,8 @@ its history. Steps with linked requests cannot use this correction.
 - The brand/UA icon in the config editor returns to Web Chat.
 - The input placeholder is `Type your message here...`.
 - The send action uses an ocean-blue icon button.
-- A compact **Separate request** switch sits below Send, off by default. Its
-  always-visible help says "Send this message and its files in a new chat."
+- A compact **Launch parallel thread** switch sits below Send, off by default,
+  with no helper sentence.
   It applies to one ordinary message; slash commands keep their usual behavior.
   Create the new chat before clearing the composer, then show the message,
   files, name and replies only there. Keep the earlier chat in the sidebar.
