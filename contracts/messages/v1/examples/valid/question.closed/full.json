@@ -1,7 +1,7 @@
 {
   "protocol": "1.0-pre",
   "kind": "question.closed",
-  "message_id": "01928f3a-7b2c-7123-8000-000000000123",
+  "message_id": "01928f3a-7b2c-7124-8000-000000000124",
   "idempotency_key": "question_closed:q_2",
   "issuer": {
     "team": "team_example",
@@ -25,5 +25,5 @@
     "reason": "withdrawn_by_guidance"
   },
   "body_digest": "hocbQCsOyMzXVXnPDZQzBkR34b9CaHqgZua3E3aBW5E",
-  "signature": "LnIVbSwkbpNEY3ct1oiJDUgStx3F_dpYKagZH0v6_5rW6EuvygDdrxfXLgp1mUCfrGrFLOLf4dsZA6MMHBbpCQ"
+  "signature": "vq9yrjK93bKkJR4PfRJ13CdrzhiPxfKLxqP9cRCI0-fhfekazfD5GzsgLOdbS1kDJ72OA4QQJH1uO420x5d7AQ"
 }

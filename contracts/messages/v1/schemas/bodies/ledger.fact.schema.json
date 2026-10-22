@@ -235,6 +235,30 @@
             "message_id"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "intent_changed"
+            },
+            "root_task_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            },
+            "version": {
+              "$ref": "../common.schema.json#/$defs/count"
+            },
+            "text": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            }
+          },
+          "required": [
+            "type",
+            "root_task_id",
+            "version",
+            "text"
+          ],
+          "additionalProperties": false
         }
       ]
     }

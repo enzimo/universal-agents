@@ -652,12 +652,19 @@ class LedgerFactBodyFactLateWork(WireModel):
     message_id: MessageId
 
 
+class LedgerFactBodyFactIntentChanged(WireModel):
+    type: Literal['intent_changed']
+    root_task_id: RecordId
+    version: Count
+    text: NoteText
+
+
 class LedgerFactBody(WireModel):
     "A fact for an agent's work ledger from the team services."
 
     fact_id: RecordId
     task_id: Optional[RecordId] = Field(default=None)
-    fact: Annotated[Union[LedgerFactBodyFactCustodyConfirmed, LedgerFactBodyFactAccessRequested, LedgerFactBodyFactAccessDecided, LedgerFactBodyFactDecisionAheadUsed, LedgerFactBodyFactColleagueExchange, LedgerFactBodyFactSteeringSeen, LedgerFactBodyFactWait, LedgerFactBodyFactHoldTimedOut, LedgerFactBodyFactLateWork], Field(discriminator='type')]
+    fact: Annotated[Union[LedgerFactBodyFactCustodyConfirmed, LedgerFactBodyFactAccessRequested, LedgerFactBodyFactAccessDecided, LedgerFactBodyFactDecisionAheadUsed, LedgerFactBodyFactColleagueExchange, LedgerFactBodyFactSteeringSeen, LedgerFactBodyFactWait, LedgerFactBodyFactHoldTimedOut, LedgerFactBodyFactLateWork, LedgerFactBodyFactIntentChanged], Field(discriminator='type')]
 
 
 class PersonNotifyBodyReasonAgent(WireModel):
