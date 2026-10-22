@@ -61,7 +61,7 @@ async function main() {
   });
   try {
     await page.goto("http://submission.test/webchat");
-    const input = page.locator("#message-input"), separate = page.getByRole("switch", { name: "Separate request" });
+    const input = page.locator("#message-input"), separate = page.getByRole("switch", { name: "Launch parallel thread" });
     await page.getByRole("button", { name: "Earlier request", exact: true }).waitFor();
     assert.equal(await separate.isChecked(), false);
     await input.fill("New research request");
@@ -121,7 +121,7 @@ async function main() {
     assert.equal(sends.length, 4);
     assert.equal(sends[3].session_key, "original");
     assert.deepEqual(errors, []);
-    console.log("Separate request: keyboard, text/files, failed creation, stable Retry, reply routing and narrow-screen themes passed.");
+    console.log("Launch parallel thread: keyboard, text/files, failed creation, stable Retry, reply routing and narrow-screen themes passed.");
   } finally { await browser.close(); }
 }
 
