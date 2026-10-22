@@ -1,0 +1,7 @@
+{
+  "publish": [],
+  "role": "edge_adapter",
+  "subscribe": [
+    "_INBOX.{self}.>"
+  ]
+}

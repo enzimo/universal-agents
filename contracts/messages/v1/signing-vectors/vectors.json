@@ -1,0 +1,174 @@
+{
+  "description": "Ed25519 over the domain prefix and the RFC 8785 canonical frame without its signature. Each implementation re-signs from the seed and must produce the same bytes.",
+  "domain_prefix": "universal-agents/message-frame/v1\n",
+  "frames": [
+    {
+      "name": "ascii",
+      "key_id": "test-lead-key-1",
+      "seed": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
+      "public_key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+      "frame": {
+        "protocol": "1.0-pre",
+        "kind": "task.stop",
+        "message_id": "01928f3a-7b2c-7001-8000-000000000001",
+        "idempotency_key": "task_stop:task_7f3a:stop_1",
+        "issuer": {
+          "team": "team_example",
+          "runtime": "lead-host-1",
+          "agent": "lead",
+          "membership_epoch": 3,
+          "revocation_epoch": 1,
+          "key_id": "test-lead-key-1"
+        },
+        "audience": {
+          "team": "team_example",
+          "target": "agent",
+          "id": "researcher-2"
+        },
+        "subject": "ua.v1.team_example.lead-host-1.work.agent.researcher-2",
+        "issued_at": "2026-10-22T04:30:00.000Z",
+        "expires_at": "2026-10-23T04:30:00.000Z",
+        "algorithm": "ed25519",
+        "body": {
+          "task_id": "task_7f3a",
+          "stop_id": "stop_1",
+          "reason": "The person cancelled the request.",
+          "cascade_to_subtasks": true
+        },
+        "body_digest": "NQVHb1wr_tFo5VU7huWwM0jQ7uKDjMvo8rcS0SxcgyQ",
+        "signature": "2kHDHhE2dIRDWZPtKKMJbCJ11YHw5wZ4YQf8HLK5ERa58EtGskBn19USU3KtxlccgRrKLo8sEVtrZNohmkdEAQ"
+      },
+      "signing_bytes_hex": "756e6976657273616c2d6167656e74732f6d6573736167652d6672616d652f76310a7b22616c676f726974686d223a2265643235353139222c2261756469656e6365223a7b226964223a22726573656172636865722d32222c22746172676574223a226167656e74222c227465616d223a227465616d5f6578616d706c65227d2c22626f6479223a7b22636173636164655f746f5f7375627461736b73223a747275652c22726561736f6e223a2254686520706572736f6e2063616e63656c6c65642074686520726571756573742e222c2273746f705f6964223a2273746f705f31222c227461736b5f6964223a227461736b5f37663361227d2c22626f64795f646967657374223a224e515648623177725f74466f35565537687557774d306a5137754b446a4d766f3872635330537863677951222c22657870697265735f6174223a22323032362d31302d32335430343a33303a30302e3030305a222c226964656d706f74656e63795f6b6579223a227461736b5f73746f703a7461736b5f376633613a73746f705f31222c226973737565645f6174223a22323032362d31302d32325430343a33303a30302e3030305a222c22697373756572223a7b226167656e74223a226c656164222c226b65795f6964223a22746573742d6c6561642d6b65792d31222c226d656d626572736869705f65706f6368223a332c227265766f636174696f6e5f65706f6368223a312c2272756e74696d65223a226c6561642d686f73742d31222c227465616d223a227465616d5f6578616d706c65227d2c226b696e64223a227461736b2e73746f70222c226d6573736167655f6964223a2230313932386633612d376232632d373030312d383030302d303030303030303030303031222c2270726f746f636f6c223a22312e302d707265222c227375626a656374223a2275612e76312e7465616d5f6578616d706c652e6c6561642d686f73742d312e776f726b2e6167656e742e726573656172636865722d32227d",
+      "body_digest": "NQVHb1wr_tFo5VU7huWwM0jQ7uKDjMvo8rcS0SxcgyQ",
+      "signature": "2kHDHhE2dIRDWZPtKKMJbCJ11YHw5wZ4YQf8HLK5ERa58EtGskBn19USU3KtxlccgRrKLo8sEVtrZNohmkdEAQ"
+    },
+    {
+      "name": "non-ascii",
+      "key_id": "test-lead-key-1",
+      "seed": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
+      "public_key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+      "frame": {
+        "protocol": "1.0-pre",
+        "kind": "task.stop",
+        "message_id": "01928f3a-7b2c-7005-8000-000000000005",
+        "idempotency_key": "task_stop:task_7f3b:stop_2",
+        "issuer": {
+          "team": "team_example",
+          "runtime": "lead-host-1",
+          "agent": "lead",
+          "membership_epoch": 3,
+          "revocation_epoch": 1,
+          "key_id": "test-lead-key-1"
+        },
+        "audience": {
+          "team": "team_example",
+          "target": "agent",
+          "id": "researcher-2"
+        },
+        "subject": "ua.v1.team_example.lead-host-1.work.agent.researcher-2",
+        "issued_at": "2026-10-22T04:30:00.000Z",
+        "expires_at": "2026-10-23T04:30:00.000Z",
+        "algorithm": "ed25519",
+        "body": {
+          "task_id": "task_7f3b",
+          "stop_id": "stop_2",
+          "reason": "Arrêt demandé — 停止 ☕ 😀",
+          "cascade_to_subtasks": false
+        },
+        "body_digest": "LFkJOWJ3Ued7kT_sr2_SrGwSWw5QdHXfx2lTVr9O5Z8",
+        "signature": "g86ya3ZdXl4HmuZsqkNtXXW5BjLpA9_412zlFKIEo_5XP0wgzU2SC9a9ejgx4jJTbZYgNd2FJ9dBrpHcqIxpBg"
+      },
+      "signing_bytes_hex": "756e6976657273616c2d6167656e74732f6d6573736167652d6672616d652f76310a7b22616c676f726974686d223a2265643235353139222c2261756469656e6365223a7b226964223a22726573656172636865722d32222c22746172676574223a226167656e74222c227465616d223a227465616d5f6578616d706c65227d2c22626f6479223a7b22636173636164655f746f5f7375627461736b73223a66616c73652c22726561736f6e223a22417272c3aa742064656d616e64c3a920e2809420e5819ce6ada220e2989520f09f9880222c2273746f705f6964223a2273746f705f32222c227461736b5f6964223a227461736b5f37663362227d2c22626f64795f646967657374223a224c466b4a4f574a33556564376b545f7372325f5372477753577735516448586678326c545672394f355a38222c22657870697265735f6174223a22323032362d31302d32335430343a33303a30302e3030305a222c226964656d706f74656e63795f6b6579223a227461736b5f73746f703a7461736b5f376633623a73746f705f32222c226973737565645f6174223a22323032362d31302d32325430343a33303a30302e3030305a222c22697373756572223a7b226167656e74223a226c656164222c226b65795f6964223a22746573742d6c6561642d6b65792d31222c226d656d626572736869705f65706f6368223a332c227265766f636174696f6e5f65706f6368223a312c2272756e74696d65223a226c6561642d686f73742d31222c227465616d223a227465616d5f6578616d706c65227d2c226b696e64223a227461736b2e73746f70222c226d6573736167655f6964223a2230313932386633612d376232632d373030352d383030302d303030303030303030303035222c2270726f746f636f6c223a22312e302d707265222c227375626a656374223a2275612e76312e7465616d5f6578616d706c652e6c6561642d686f73742d312e776f726b2e6167656e742e726573656172636865722d32227d",
+      "body_digest": "LFkJOWJ3Ued7kT_sr2_SrGwSWw5QdHXfx2lTVr9O5Z8",
+      "signature": "g86ya3ZdXl4HmuZsqkNtXXW5BjLpA9_412zlFKIEo_5XP0wgzU2SC9a9ejgx4jJTbZYgNd2FJ9dBrpHcqIxpBg"
+    },
+    {
+      "name": "reply",
+      "key_id": "test-worker-key-1",
+      "seed": "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A",
+      "public_key": "5_FioQvsVZr-oZXk3OhLaVaNXSywlj60RsBoXisX8vA",
+      "frame": {
+        "protocol": "1.0-pre",
+        "kind": "agent.pause.reply",
+        "message_id": "01928f3a-7b2c-7003-8000-000000000003",
+        "idempotency_key": "agent_pause:researcher-2:pause_1:reply",
+        "issuer": {
+          "team": "team_example",
+          "runtime": "worker-host-1",
+          "agent": "researcher-2",
+          "membership_epoch": 3,
+          "revocation_epoch": 1,
+          "key_id": "test-worker-key-1"
+        },
+        "audience": {
+          "team": "team_example",
+          "target": "agent",
+          "id": "lead"
+        },
+        "subject": "ua.v1.team_example.worker-host-1.ctl.agent.researcher-2.pause",
+        "issued_at": "2026-10-22T04:30:00.000Z",
+        "expires_at": "2026-10-22T04:30:30.000Z",
+        "algorithm": "ed25519",
+        "body": {
+          "outcome": "ok",
+          "state": "paused"
+        },
+        "causation_id": "01928f3a-7b2c-7002-8000-000000000002",
+        "body_digest": "cDA0KmsbnQZWBb290esk-O08S0ZXDJsIwSCUFoB7djE",
+        "signature": "s0pF2TOfw0Zgym4Euv_dr1dPsp_0PHT0JHnBCbtSayp7SbvOC9OLxSZiqIJo8FFIlgGGixEgPOy4Rje4tSzBDw"
+      },
+      "signing_bytes_hex": "756e6976657273616c2d6167656e74732f6d6573736167652d6672616d652f76310a7b22616c676f726974686d223a2265643235353139222c2261756469656e6365223a7b226964223a226c656164222c22746172676574223a226167656e74222c227465616d223a227465616d5f6578616d706c65227d2c22626f6479223a7b226f7574636f6d65223a226f6b222c227374617465223a22706175736564227d2c22626f64795f646967657374223a22634441304b6d73626e515a57426232393065736b2d4f303853305a58444a734977534355466f4237646a45222c22636175736174696f6e5f6964223a2230313932386633612d376232632d373030322d383030302d303030303030303030303032222c22657870697265735f6174223a22323032362d31302d32325430343a33303a33302e3030305a222c226964656d706f74656e63795f6b6579223a226167656e745f70617573653a726573656172636865722d323a70617573655f313a7265706c79222c226973737565645f6174223a22323032362d31302d32325430343a33303a30302e3030305a222c22697373756572223a7b226167656e74223a22726573656172636865722d32222c226b65795f6964223a22746573742d776f726b65722d6b65792d31222c226d656d626572736869705f65706f6368223a332c227265766f636174696f6e5f65706f6368223a312c2272756e74696d65223a22776f726b65722d686f73742d31222c227465616d223a227465616d5f6578616d706c65227d2c226b696e64223a226167656e742e70617573652e7265706c79222c226d6573736167655f6964223a2230313932386633612d376232632d373030332d383030302d303030303030303030303033222c2270726f746f636f6c223a22312e302d707265222c227375626a656374223a2275612e76312e7465616d5f6578616d706c652e776f726b65722d686f73742d312e63746c2e6167656e742e726573656172636865722d322e7061757365227d",
+      "body_digest": "cDA0KmsbnQZWBb290esk-O08S0ZXDJsIwSCUFoB7djE",
+      "signature": "s0pF2TOfw0Zgym4Euv_dr1dPsp_0PHT0JHnBCbtSayp7SbvOC9OLxSZiqIJo8FFIlgGGixEgPOy4Rje4tSzBDw"
+    }
+  ],
+  "canonical": [
+    {
+      "name": "sorted-keys",
+      "input": "{\"b\":1,\"a\":{\"d\":true,\"c\":null}}",
+      "canonical": "{\"a\":{\"c\":null,\"d\":true},\"b\":1}"
+    },
+    {
+      "name": "utf16-key-order",
+      "input": "{\"\\ue000\":1,\"\\ud83d\\ude00\":2,\"a\":3}",
+      "canonical": "{\"a\":3,\"😀\":2,\"\":1}"
+    },
+    {
+      "name": "escapes",
+      "input": "{\"text\":\"tab\\t newline\\n quote\\\" slash/ control\\u0001 \\u00e9\"}",
+      "canonical": "{\"text\":\"tab\\t newline\\n quote\\\" slash/ control\\u0001 é\"}"
+    },
+    {
+      "name": "integers",
+      "input": "{\"max\":9007199254740991,\"min\":-9007199254740991,\"zero\":0}",
+      "canonical": "{\"max\":9007199254740991,\"min\":-9007199254740991,\"zero\":0}"
+    },
+    {
+      "name": "nested-arrays",
+      "input": "{\"list\":[3,[2,[1]],{\"z\":0,\"y\":[]}]}",
+      "canonical": "{\"list\":[3,[2,[1]],{\"y\":[],\"z\":0}]}"
+    }
+  ],
+  "canonical_refused": [
+    {
+      "name": "repeated-key",
+      "input": "{\"a\":1,\"a\":2}"
+    },
+    {
+      "name": "float",
+      "input": "{\"a\":1.5}"
+    },
+    {
+      "name": "exponent",
+      "input": "{\"a\":1e3}"
+    },
+    {
+      "name": "too-large-integer",
+      "input": "{\"a\":9007199254740992}"
+    },
+    {
+      "name": "not-an-object",
+      "input": "[1,2]"
+    }
+  ]
+}

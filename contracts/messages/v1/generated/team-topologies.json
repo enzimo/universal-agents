@@ -1,0 +1,91 @@
+{
+  "agent_roles": {
+    "lead": "holds conversations with people, splits work and decides for its team",
+    "worker": "does the work its lead or a person's own schedule gives it"
+  },
+  "fixed_rules": [
+    "access requests and decisions go to the team services, never to a model",
+    "the output of work a person gave a worker directly (a run of the person's own schedule, or system work with a configured route) goes to the person",
+    "notifications for delegated work come from the lead",
+    "a receiver refuses a message whose edge its topology does not allow, and the sender gets delivery.refused",
+    "a message from an agent that does not hold the task it names is refused"
+  ],
+  "topologies": {
+    "all_peers": {
+      "allowed_edges": {
+        "lead": [
+          "down",
+          "person",
+          "out",
+          "sideways"
+        ],
+        "worker": [
+          "up",
+          "sideways"
+        ]
+      },
+      "contact_text": {
+        "lead": "You may give work to anyone in your team, answer people, and ask other teams.",
+        "worker": "Send results to your lead. You may ask anyone in your team for help."
+      },
+      "description": "Any agent of the team may ask any other; only the lead talks to people and other teams.",
+      "status": "later"
+    },
+    "hub_and_spoke": {
+      "allowed_edges": {
+        "lead": [
+          "down",
+          "person",
+          "out"
+        ],
+        "worker": [
+          "up"
+        ]
+      },
+      "contact_text": {
+        "lead": "You may give work to your team's workers, answer people, and ask other teams.",
+        "worker": "Send everything you need, and every result, to your lead."
+      },
+      "description": "Workers talk only to their lead; the lead talks to people and to other teams.",
+      "status": "default"
+    },
+    "nested": {
+      "allowed_edges": {
+        "lead": [
+          "down",
+          "person",
+          "out"
+        ],
+        "worker": [
+          "up",
+          "down"
+        ]
+      },
+      "contact_text": {
+        "lead": "You may give work to your team's workers, answer people, and ask other teams.",
+        "worker": "Send results to your lead. You may give work to your own sub-team."
+      },
+      "description": "A worker may lead a sub-team of its own, which follows hub_and_spoke inside.",
+      "status": "later"
+    },
+    "same_type_peers": {
+      "allowed_edges": {
+        "lead": [
+          "down",
+          "person",
+          "out"
+        ],
+        "worker": [
+          "up",
+          "sideways"
+        ]
+      },
+      "contact_text": {
+        "lead": "You may give work to your team's workers, answer people, and ask other teams.",
+        "worker": "Send results to your lead. You may ask workers of your own type for help."
+      },
+      "description": "As hub_and_spoke, and workers of one type may also ask each other.",
+      "status": "later"
+    }
+  }
+}

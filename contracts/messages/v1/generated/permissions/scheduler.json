@@ -1,0 +1,7 @@
+{
+  "publish": [],
+  "role": "scheduler",
+  "subscribe": [
+    "_INBOX.{self}.>"
+  ]
+}

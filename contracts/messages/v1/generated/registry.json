@@ -1,0 +1,191 @@
+{
+  "change_refusals": [
+    {
+      "code": "changed_since_read",
+      "meaning": "the record changed after the writer read it; carries the current version"
+    },
+    {
+      "code": "change_conflict",
+      "meaning": "another request changed the record; carries the case id and the brief reference"
+    },
+    {
+      "code": "request_closed",
+      "meaning": "the request was stopped or ended"
+    },
+    {
+      "code": "needs_person_decision",
+      "meaning": "the person must decide before the change is saved"
+    },
+    {
+      "code": "record_busy",
+      "meaning": "another request is writing the file or sign-in; carries when to try again"
+    }
+  ],
+  "frame_schema": "frame.schema.json",
+  "host_roles": {
+    "edge_adapter": "connects outside agents (A2A)",
+    "gateway": "talks to people through channels and the web",
+    "installation_authority": "issues and revokes certificates and authority keys",
+    "lead_host": "runs a team's lead agent",
+    "scheduler": "fires schedules",
+    "team_services": "the team's operations, steering, access and custody services",
+    "worker_host": "runs worker agents"
+  },
+  "kinds": {
+    "agent.pause": {
+      "address": "ctl.agent.{agent}.pause",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/agent.pause.schema.json",
+      "class": "request_reply",
+      "description": "Pause one agent at its next safe point; it keeps its queued work.",
+      "expiry_seconds": 30,
+      "idempotency": "agent_pause:<agent>:<request_id>",
+      "ledger": "none",
+      "receivers": [
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/agent.pause.reply.schema.json",
+        "errors": [
+          "agent_exiting"
+        ]
+      },
+      "routing": "named",
+      "senders": [
+        "lead_host",
+        "team_services"
+      ],
+      "topology_edge": "down",
+      "wakes_model": "never"
+    },
+    "skills.changed": {
+      "address": "evt.skills_changed",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/skills.changed.schema.json",
+      "class": "event",
+      "description": "Hint that a managed skill was installed or removed. Receivers verify the stored receipt before they refresh.",
+      "expiry_seconds": 300,
+      "idempotency": "skills_changed:<change_id>",
+      "ledger": "none",
+      "receivers": [
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "none",
+      "routing": "broadcast",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "task.stop": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "optional",
+      "body": "bodies/task.stop.schema.json",
+      "class": "durable",
+      "description": "Stop one task. Sent only to the task's current holder.",
+      "expiry_seconds": 86400,
+      "idempotency": "task_stop:<task_id>:<stop_id>",
+      "ledger": "task_stopped",
+      "receivers": [
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "none",
+      "routing": "holder",
+      "senders": [
+        "lead_host",
+        "team_services"
+      ],
+      "topology_edge": "down",
+      "wakes_model": "never"
+    }
+  },
+  "max_frame_bytes": 262144,
+  "protocol": "1.0-pre",
+  "signing_domain": "universal-agents/message-frame/v1",
+  "verification_refusals": [
+    {
+      "code": "too_large",
+      "meaning": "the serialized frame is larger than max_frame_bytes"
+    },
+    {
+      "code": "malformed",
+      "meaning": "the frame is not one JSON object, repeats a key, holds a non-integer number or breaks the frame schema"
+    },
+    {
+      "code": "unknown_key",
+      "meaning": "the issuer's key id is not in the trusted key registry"
+    },
+    {
+      "code": "bad_signature",
+      "meaning": "the signature does not verify over the canonical frame"
+    },
+    {
+      "code": "bad_digest",
+      "meaning": "the body digest does not match the body"
+    },
+    {
+      "code": "revoked",
+      "meaning": "the issuer's certificate was revoked before the frame was issued"
+    },
+    {
+      "code": "epoch_too_old",
+      "meaning": "the issuer's membership or revocation epoch is below the receiver's minimum"
+    },
+    {
+      "code": "wrong_team",
+      "meaning": "the frame is for another team"
+    },
+    {
+      "code": "wrong_audience",
+      "meaning": "the frame names another receiver"
+    },
+    {
+      "code": "subject_mismatch",
+      "meaning": "the frame arrived on another subject, or the subject's sender token is not the issuer's runtime"
+    },
+    {
+      "code": "expired",
+      "meaning": "the frame's expiry has passed"
+    },
+    {
+      "code": "not_yet_valid",
+      "meaning": "the frame's not-before time is still ahead"
+    },
+    {
+      "code": "replayed",
+      "meaning": "a frame with the same issuer, epoch and message id was already handled with another digest"
+    },
+    {
+      "code": "unknown_kind",
+      "meaning": "the kind is not in this registry"
+    },
+    {
+      "code": "invalid_body",
+      "meaning": "the body breaks the kind's schema"
+    },
+    {
+      "code": "access_denied",
+      "meaning": "the receiver's access decision refused the sender"
+    }
+  ]
+}

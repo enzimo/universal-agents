@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/common.schema.json",
+  "title": "Shared values of protocol 1",
+  "$defs": {
+    "token_id": {
+      "description": "An id that is one NATS subject token. Ids starting with an underscore are reserved for the system; ids starting with x- name other installations.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
+    "team_id": {
+      "$ref": "#/$defs/token_id"
+    },
+    "runtime_id": {
+      "description": "One runtime host: a supervisor process that runs agent sessions. Unique within an installation.",
+      "$ref": "#/$defs/token_id"
+    },
+    "agent_id": {
+      "description": "An agent's stable id. It stays the same when the agent restarts or moves to another host.",
+      "$ref": "#/$defs/token_id"
+    },
+    "agent_type": {
+      "$ref": "#/$defs/token_id"
+    },
+    "record_id": {
+      "description": "An id that names a task, command, question or other record. It may hold colons and dots, so it is never used as a subject token.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "message_id": {
+      "description": "A UUIDv7 in lower-case text form.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "idempotency_key": {
+      "description": "The sender's key for one logical send. The same key always means the same message.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$"
+    },
+    "kind": {
+      "description": "A message kind or operation name: lower-case words joined by dots.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+      "maxLength": 96
+    },
+    "timestamp": {
+      "description": "A UTC time with exactly three fractional digits.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "key_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256_digest": {
+      "description": "A SHA-256 digest in unpadded base64url.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "ed25519_signature": {
+      "description": "An Ed25519 signature in unpadded base64url.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{86}$"
+    },
+    "ed25519_public_key": {
+      "description": "An Ed25519 public key in unpadded base64url.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "person_ref": {
+      "description": "An opaque reference to a person. It never holds a channel address, name or account id.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    },
+    "delivery_ref": {
+      "description": "An opaque reference to where a person is reached. Only the gateway can resolve it.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    },
+    "blob_ref": {
+      "description": "A file or long text in the object store, named by its digest.",
+      "type": "object",
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/sha256_digest"
+        },
+        "size": {
+          "$ref": "#/$defs/count"
+        },
+        "media_type": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "sha256",
+        "size",
+        "media_type"
+      ],
+      "additionalProperties": false
+    },
+    "issuer": {
+      "description": "Who signed the frame: the host, and the agent session it signed for.",
+      "type": "object",
+      "properties": {
+        "team": {
+          "$ref": "#/$defs/team_id"
+        },
+        "runtime": {
+          "$ref": "#/$defs/runtime_id"
+        },
+        "agent": {
+          "$ref": "#/$defs/agent_id"
+        },
+        "session": {
+          "$ref": "#/$defs/token_id"
+        },
+        "membership_epoch": {
+          "$ref": "#/$defs/epoch"
+        },
+        "revocation_epoch": {
+          "$ref": "#/$defs/epoch"
+        },
+        "key_id": {
+          "$ref": "#/$defs/key_id"
+        }
+      },
+      "required": [
+        "team",
+        "runtime",
+        "membership_epoch",
+        "revocation_epoch",
+        "key_id"
+      ],
+      "additionalProperties": false
+    },
+    "audience": {
+      "description": "Who the frame is for. Agents are named by id, never by the host that runs them.",
+      "type": "object",
+      "properties": {
+        "team": {
+          "$ref": "#/$defs/team_id"
+        },
+        "target": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "pool",
+            "team_services",
+            "edge",
+            "installation_service"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/token_id"
+        },
+        "runtime": {
+          "$ref": "#/$defs/runtime_id"
+        }
+      },
+      "required": [
+        "team",
+        "target",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "authority_token": {
+      "description": "Proof that work acts for a person, issued by the gateway or the scheduler and bound to one root task or one command. It is copied unchanged down a delegation tree.",
+      "type": "object",
+      "properties": {
+        "token_id": {
+          "$ref": "#/$defs/message_id"
+        },
+        "issuer": {
+          "type": "object",
+          "properties": {
+            "team": {
+              "$ref": "#/$defs/team_id"
+            },
+            "runtime": {
+              "$ref": "#/$defs/runtime_id"
+            },
+            "key_id": {
+              "$ref": "#/$defs/key_id"
+            }
+          },
+          "required": [
+            "team",
+            "runtime",
+            "key_id"
+          ],
+          "additionalProperties": false
+        },
+        "person": {
+          "$ref": "#/$defs/person_ref"
+        },
+        "team": {
+          "$ref": "#/$defs/team_id"
+        },
+        "bound_to": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "root_task",
+                "command"
+              ]
+            },
+            "id": {
+              "$ref": "#/$defs/record_id"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "issued_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "algorithm": {
+          "const": "ed25519"
+        },
+        "signature": {
+          "$ref": "#/$defs/ed25519_signature"
+        }
+      },
+      "required": [
+        "token_id",
+        "issuer",
+        "person",
+        "team",
+        "bound_to",
+        "issued_at",
+        "expires_at",
+        "algorithm",
+        "signature"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

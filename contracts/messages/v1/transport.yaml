@@ -1,0 +1,114 @@
+# Protocol 1 transport: streams, consumers, buckets and limits.
+#
+# Every subject starts with ua.v1.<team>.<sender>. where <sender> is the publishing
+# runtime's id; NATS permissions let a runtime publish only under its own id.
+# Edit by hand, then run scripts/export_message_contract.py.
+
+subject_prefix: ua.v1.{team}.{sender}
+reply_inbox_prefix: _INBOX.{runtime}
+nats_server_minimum: 2.15.1
+
+limits:
+  max_frame_bytes: 262144      # larger content goes to the object store by reference
+  nats_max_payload_bytes: 1048576
+
+classes:
+  durable:
+    description: at least once; the sender records before publishing, the receiver admits durably before acknowledging
+    stream: UA1_WORK
+    addresses:
+      - work.agent.{agent}
+      - work.pool.{pool}
+      - work.edge.{edge}
+      - work.team
+    default_expiry_seconds: 604800
+  request_reply:
+    description: answered at once or "no responders"; mutations carry an idempotency key and the receiver stores the outcome before replying
+    addresses:
+      - svc.team.{operation}
+      - ctl.agent.{agent}.{operation}
+    installation_addresses:
+      - _install.{sender}.svc.{operation}
+    default_expiry_seconds: 30
+  event:
+    description: at most once; never the only way something important happens
+    addresses:
+      - evt.{event}
+    default_expiry_seconds: 300
+  dead_letter:
+    description: set-aside copies and notices, under the receiving runtime's id
+    stream: UA1_DLQ
+    addresses:
+      - dlq.raw.{copy}
+      - dlq.notice.{copy}
+    default_expiry_seconds: 2592000
+
+streams:
+  UA1_WORK:
+    subjects: [ua.v1.*.*.work.>]
+    retention: workqueue
+    storage: file
+    sync_interval: always       # a confirmed write must survive power loss
+    duplicate_window_seconds: 120
+    max_consumers: 4096         # NATS 2.15 defaults to 1,000 per stream
+    max_message_bytes: 262144
+  UA1_DLQ:
+    subjects: [ua.v1.*.*.dlq.>]
+    retention: limits
+    storage: file
+    max_age_seconds: 2592000
+
+consumers:
+  agent_inbox:
+    stream: UA1_WORK
+    name: agent_{team}_{agent}
+    filter: ua.v1.{team}.*.work.agent.{agent}
+    mode: pull
+    ack: explicit
+    ack_wait_seconds: 60
+    max_deliveries: 20
+  pool:
+    stream: UA1_WORK
+    name: pool_{team}_{pool}
+    filter: ua.v1.{team}.*.work.pool.{pool}
+    mode: pull
+    ack: explicit
+    ack_wait_seconds: 60
+    max_deliveries: 20
+  team_services:
+    stream: UA1_WORK
+    name: team_{team}
+    filter: ua.v1.{team}.*.work.team
+    mode: pull
+    ack: explicit
+    ack_wait_seconds: 60
+    max_deliveries: 20
+  edge:
+    stream: UA1_WORK
+    name: edge_{team}_{edge}
+    filter: ua.v1.{team}.*.work.edge.{edge}
+    mode: pull
+    ack: explicit
+    ack_wait_seconds: 60
+    max_deliveries: 20
+
+key_value:
+  UA1_HOSTS:
+    description: one record per runtime host; written every 20 s, expires after 60 s
+    per_key_ttl_seconds: 60
+  UA1_AGENTS:
+    description: one record per agent (availability, busy, idle, paused, exiting), written only on change
+    per_key_ttl_seconds: 0
+  UA1_PLACEMENT:
+    description: which host runs an agent and that host's epoch; its revision is the fencing token
+    per_key_ttl_seconds: 0
+  UA1_TEAM_VIEW:
+    description: the team's shared view of open work
+    per_key_ttl_seconds: 0
+
+object_store:
+  UA1_BLOBS:
+    description: files and long text, named by SHA-256; the owner deletes them
+
+# How long a receiver keeps replay records: at least the longest expiry of any class.
+replay_ledger_retention_seconds: 2592000

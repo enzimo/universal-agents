@@ -1,0 +1,14 @@
+{
+  "publish": [
+    "_INBOX.*.>",
+    "ua.v1.{team}.{self}.ctl.agent.*.pause",
+    "ua.v1.{team}.{self}.evt.skills_changed",
+    "ua.v1.{team}.{self}.work.agent.*"
+  ],
+  "role": "lead_host",
+  "subscribe": [
+    "_INBOX.{self}.>",
+    "ua.v1.{team}.*.ctl.agent.*.pause",
+    "ua.v1.{team}.*.evt.skills_changed"
+  ]
+}

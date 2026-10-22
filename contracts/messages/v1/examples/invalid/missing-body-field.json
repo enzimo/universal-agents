@@ -1,0 +1,7 @@
+{
+  "description": "The body lacks a required field.",
+  "refusal": "invalid_body",
+  "at": "/body",
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.stop\", \"message_id\": \"01928f3a-7b2c-7001-8000-000000000001\", \"idempotency_key\": \"task_stop:task_7f3a:stop_1\", \"issuer\": {\"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.lead-host-1.work.agent.researcher-2\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_7f3a\", \"cascade_to_subtasks\": true}, \"body_digest\": \"VIyQnYvjbw565kr-UtWW0vDd0Bk82O7Ur6Ymk2Uy520\", \"signature\": \"5RfxUHP6m0O_ErOY1Bj-l-YXg8-Le5gshUHEuT_6qzCn8VzIUKRGQQGoyrTTBr-McyZtoEdafw3loY0K7nzCCg\"}"
+}

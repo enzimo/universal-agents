@@ -1,0 +1,110 @@
+{
+  "asyncapi": "3.1.0",
+  "channels": {
+    "agent_pause": {
+      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.pause",
+      "messages": {
+        "agent_pause": {
+          "$ref": "#/components/messages/agent_pause"
+        }
+      }
+    },
+    "skills_changed": {
+      "address": "ua.v1.{team}.{sender}.evt.skills_changed",
+      "messages": {
+        "skills_changed": {
+          "$ref": "#/components/messages/skills_changed"
+        }
+      }
+    },
+    "task_stop": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "task_stop": {
+          "$ref": "#/components/messages/task_stop"
+        }
+      }
+    }
+  },
+  "components": {
+    "messages": {
+      "agent_pause": {
+        "name": "agent.pause",
+        "payload": {
+          "$ref": "../schemas/bodies/agent.pause.schema.json"
+        },
+        "summary": "Pause one agent at its next safe point; it keeps its queued work."
+      },
+      "agent_pause_reply": {
+        "name": "agent.pause.reply",
+        "payload": {
+          "$ref": "../schemas/bodies/agent.pause.reply.schema.json"
+        }
+      },
+      "skills_changed": {
+        "name": "skills.changed",
+        "payload": {
+          "$ref": "../schemas/bodies/skills.changed.schema.json"
+        },
+        "summary": "Hint that a managed skill was installed or removed. Receivers verify the stored receipt before they refresh."
+      },
+      "task_stop": {
+        "name": "task.stop",
+        "payload": {
+          "$ref": "../schemas/bodies/task.stop.schema.json"
+        },
+        "summary": "Stop one task. Sent only to the task's current holder."
+      }
+    }
+  },
+  "defaultContentType": "application/json",
+  "info": {
+    "title": "Universal Agents messages",
+    "version": "1.0-pre"
+  },
+  "operations": {
+    "receive_agent_pause": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/agent_pause"
+      }
+    },
+    "receive_skills_changed": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/skills_changed"
+      }
+    },
+    "receive_task_stop": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_stop"
+      }
+    },
+    "send_agent_pause": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/agent_pause"
+      },
+      "reply": {
+        "messages": [
+          {
+            "$ref": "#/components/messages/agent_pause_reply"
+          }
+        ]
+      }
+    },
+    "send_skills_changed": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/skills_changed"
+      }
+    },
+    "send_task_stop": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_stop"
+      }
+    }
+  }
+}

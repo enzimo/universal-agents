@@ -1,0 +1,31 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.stop",
+  "message_id": "01928f3a-7b2c-7005-8000-000000000005",
+  "idempotency_key": "task_stop:task_7f3b:stop_2",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "agent",
+    "id": "researcher-2"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.work.agent.researcher-2",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_7f3b",
+    "stop_id": "stop_2",
+    "reason": "Arrêt demandé — 停止 ☕ 😀",
+    "cascade_to_subtasks": false
+  },
+  "body_digest": "LFkJOWJ3Ued7kT_sr2_SrGwSWw5QdHXfx2lTVr9O5Z8",
+  "signature": "g86ya3ZdXl4HmuZsqkNtXXW5BjLpA9_412zlFKIEo_5XP0wgzU2SC9a9ejgx4jJTbZYgNd2FJ9dBrpHcqIxpBg"
+}

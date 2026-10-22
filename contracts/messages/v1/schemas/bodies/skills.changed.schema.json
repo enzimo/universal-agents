@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/skills.changed.schema.json",
+  "title": "skills.changed body",
+  "description": "Names a committed managed-skill change. It carries no path, instructions or permission.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "const": "install"
+        },
+        "change_id": {
+          "type": "string",
+          "pattern": "^skill_install_[0-9a-f]{12}$"
+        },
+        "skill_name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$"
+        },
+        "installed_tree_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "operation",
+        "change_id",
+        "skill_name",
+        "installed_tree_sha256"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "const": "uninstall"
+        },
+        "change_id": {
+          "type": "string",
+          "pattern": "^skill_uninstall_[0-9a-f]{12}$"
+        },
+        "skill_name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$"
+        },
+        "installed_tree_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "operation",
+        "change_id",
+        "skill_name",
+        "installed_tree_sha256"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

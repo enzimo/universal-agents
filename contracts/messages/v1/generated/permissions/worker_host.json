@@ -1,0 +1,11 @@
+{
+  "publish": [
+    "_INBOX.*.>"
+  ],
+  "role": "worker_host",
+  "subscribe": [
+    "_INBOX.{self}.>",
+    "ua.v1.{team}.*.ctl.agent.*.pause",
+    "ua.v1.{team}.*.evt.skills_changed"
+  ]
+}

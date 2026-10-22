@@ -60,3 +60,6 @@ twilio>=9.5.2
 
 # Schema validation
 jsonschema>=4.26.0
+
+# Canonical JSON (RFC 8785) for signed messages
+rfc8785>=0.1.4

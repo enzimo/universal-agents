@@ -1,0 +1,17 @@
+{
+  "description": "Test keys for the examples. The seeds are public test data; never use them for anything else.",
+  "keys": {
+    "test-lead-key-1": {
+      "seed": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
+      "public_key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+      "team": "team_example",
+      "runtime": "lead-host-1"
+    },
+    "test-worker-key-1": {
+      "seed": "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A",
+      "public_key": "5_FioQvsVZr-oZXk3OhLaVaNXSywlj60RsBoXisX8vA",
+      "team": "team_example",
+      "runtime": "worker-host-1"
+    }
+  }
+}

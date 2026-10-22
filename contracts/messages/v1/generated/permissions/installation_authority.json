@@ -1,0 +1,7 @@
+{
+  "publish": [],
+  "role": "installation_authority",
+  "subscribe": [
+    "_INBOX.{self}.>"
+  ]
+}
