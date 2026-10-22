@@ -1,0 +1,36 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "access.request",
+  "message_id": "01928f3a-7b2c-7115-8000-000000000115",
+  "idempotency_key": "access_request:areq_2",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.work.team",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "areq_2",
+    "task_id": "task_sub_4",
+    "reason": "Apply the reviewed schedule change.",
+    "what": {
+      "type": "change",
+      "change_kind": "schedule",
+      "change_id": "chg_1",
+      "plan_digest": "d41d8cd98f"
+    }
+  },
+  "body_digest": "Z0C15V7Ek1MOSlojtCqgfHnTCeBH0GrLwITaC1tpWVs",
+  "signature": "YfBsaxRQKLBm7GtqaOZF8jgQbnmqQS6pddhL4ioFiFZDgKyjrIF-QlH73HotP29zwQDTrSo_sgY07Q5aBrSNCg"
+}

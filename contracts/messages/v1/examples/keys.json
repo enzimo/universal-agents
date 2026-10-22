@@ -12,6 +12,18 @@
       "public_key": "5_FioQvsVZr-oZXk3OhLaVaNXSywlj60RsBoXisX8vA",
       "team": "team_example",
       "runtime": "worker-host-1"
+    },
+    "test-gateway-key-1": {
+      "seed": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2A",
+      "public_key": "rcFAEfgtHFbZVqpPnXPYhYNhpgYEhSXg0Ixjjcdd2Mc",
+      "team": "team_example",
+      "runtime": "gateway-1"
+    },
+    "test-services-key-1": {
+      "seed": "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1-f4A",
+      "public_key": "iC0Oo7KGTnpYfz5pjOpEWZmDEuZV4F-l6LURnYuqyM0",
+      "team": "team_example",
+      "runtime": "team-services-1"
     }
   }
 }

@@ -32,7 +32,7 @@ def prune(value: Any, shape: Any) -> Any:
 class KindSpec:
     name: str
     delivery_class: str
-    address: str
+    addresses: tuple[str, ...]
     body_model: TypeAdapter[Any]
     reply_model: Optional[TypeAdapter[Any]]
     reply_errors: tuple[str, ...]
@@ -46,7 +46,7 @@ class KindSpec:
     routing: str
     topology_edge: str
     ledger: str
-    wakes_model: str
+    wakes_model: Any
     rendering: str
     body_shape: Any
     reply_shape: Any

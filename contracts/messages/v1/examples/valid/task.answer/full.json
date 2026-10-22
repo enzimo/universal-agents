@@ -1,0 +1,59 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.answer",
+  "message_id": "01928f3a-7b2c-710a-8000-00000000010a",
+  "idempotency_key": "question_answer:q_2",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.gateway-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "question_id": "q_2",
+    "task_id": "task_root_1",
+    "text": "Use my change.",
+    "selected_choice_ids": [
+      "use_this_change"
+    ],
+    "decision": "resume",
+    "replied_message": {
+      "author": "assistant",
+      "text": "Here is the draft you asked for.",
+      "shortened": false,
+      "quoted_text": "the draft",
+      "sent_at": "2026-10-22T04:00:00.000Z"
+    },
+    "passed_on": {
+      "from": "person",
+      "original_message_id": "01928f3a-7b2c-7fee-8000-00000000ffee"
+    },
+    "decision_token": {
+      "token_id": "01928f3a-7b2c-7fff-8000-00000000ffff",
+      "case_id": "case_1",
+      "choice": "use_this_change",
+      "values_digest": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "issuer": {
+        "team": "team_example",
+        "runtime": "team-services-1",
+        "key_id": "test-services-key-1"
+      },
+      "issued_at": "2026-10-22T04:20:00.000Z",
+      "expires_at": "2026-10-22T05:20:00.000Z",
+      "algorithm": "ed25519",
+      "signature": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA"
+    }
+  },
+  "body_digest": "EjRBMrUiPVoO0lUaxBaYkN5ZgngE9xoU9r9XerTjbRM",
+  "signature": "gLHG67z-htMb5hRTZyrlw1lGXgLWIFkrjUQpL874cb5Luwp7ZssheEeD7oLPceXi-BDDkITqGG1FmjjkL0tFAA"
+}

@@ -1,0 +1,55 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.steer",
+  "message_id": "01928f3a-7b2c-710c-8000-00000000010c",
+  "idempotency_key": "task_steer:task_sub_1:steer_2",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "agent",
+    "id": "researcher-2"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.work.agent.researcher-2",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_sub_1",
+    "steer_id": "steer_2",
+    "person_steering_id": "psteer_1",
+    "action": {
+      "type": "guidance",
+      "source": "person_as_is",
+      "text": "Leave out the travel costs.",
+      "attachments": [
+        {
+          "attachment_id": "att_1",
+          "blob": {
+            "sha256": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+            "size": 2048,
+            "media_type": "application/pdf",
+            "name": "costs.pdf"
+          },
+          "kind": "document",
+          "caption": "Last quarter's invoices"
+        }
+      ],
+      "replied_message": {
+        "author": "assistant",
+        "text": "Here is the draft you asked for.",
+        "shortened": false,
+        "quoted_text": "the draft",
+        "sent_at": "2026-10-22T04:00:00.000Z"
+      }
+    }
+  },
+  "body_digest": "2xS1moP84KHoTOPxXQECuslk9Lo6eIUOZuk5Q_SAvko",
+  "signature": "7vlXoLudNg46KBlK70mcoN_kM_kq1gcmCAtu41bB1-sntVibAF6qLvPiX4gMJ2j97Sdv05ZpHbkTObABeoiqBw"
+}

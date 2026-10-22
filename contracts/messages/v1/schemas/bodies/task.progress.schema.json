@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/task.progress.schema.json",
+  "title": "task.progress body",
+  "description": "Where a task stands, from its holder to its requester.",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "sequence": {
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "custody_token": {
+      "$ref": "../common.schema.json#/$defs/custody_token"
+    },
+    "status": {
+      "$ref": "../common.schema.json#/$defs/short_text"
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "working",
+        "waiting",
+        "blocked",
+        "holding"
+      ]
+    },
+    "checkpoint": {
+      "$ref": "../common.schema.json#/$defs/blob_ref"
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/assumption"
+      },
+      "maxItems": 20
+    },
+    "held_actions": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/held_action"
+      },
+      "maxItems": 50
+    },
+    "expected_finish": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "steering_seen": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    }
+  },
+  "required": [
+    "task_id",
+    "sequence",
+    "custody_token",
+    "status",
+    "state"
+  ],
+  "additionalProperties": false
+}

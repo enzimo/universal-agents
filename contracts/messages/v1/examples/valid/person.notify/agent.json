@@ -1,0 +1,49 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "person.notify",
+  "message_id": "01928f3a-7b2c-7118-8000-000000000118",
+  "idempotency_key": "notify:notice_1",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.work.edge.web",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "notice_id": "notice_1",
+    "delivery_ref": "dref_1",
+    "task_id": "task_root_1",
+    "conversation_id": "conv_1",
+    "text": "The cost report is ready.",
+    "urgency": "normal",
+    "reason": {
+      "source": "agent",
+      "note": "Report ready."
+    },
+    "attachments": [
+      {
+        "blob": {
+          "sha256": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+          "size": 9216,
+          "media_type": "application/pdf",
+          "name": "report.pdf"
+        },
+        "kind": "document",
+        "caption": "Cost report"
+      }
+    ]
+  },
+  "body_digest": "nWRZd0JSziRuO0C-cRzw08avVueFCLCg8b2V4Ne-5-4",
+  "signature": "ZHBge152B4GwnBA_OliL5JD7k4_sCGZi33Law3L55IXP-Jlg5b6UHkH8DY_tJ_W4h4RLpDdy9dqMUkAHGdPIDQ"
+}

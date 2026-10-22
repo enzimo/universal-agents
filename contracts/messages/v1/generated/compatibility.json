@@ -5,9 +5,32 @@
     "minors": "any; a newer minor's unknown optional fields are ignored"
   },
   "kinds": [
+    "access.decision",
+    "access.request",
+    "access.resolved",
     "agent.pause",
+    "credential.form.request",
+    "credential.form.result",
+    "custody.moved",
+    "delivery.receipt",
+    "delivery.refused",
+    "ledger.fact",
+    "person.notify",
+    "question.closed",
     "skills.changed",
-    "task.stop"
+    "task.account",
+    "task.answer",
+    "task.claimed",
+    "task.handback",
+    "task.progress",
+    "task.question",
+    "task.report",
+    "task.request",
+    "task.result",
+    "task.steer",
+    "task.stop",
+    "tool.setup.request",
+    "tool.setup.result"
   ],
   "protocol": "1.0-pre",
   "signing_domain": "universal-agents/message-frame/v1"

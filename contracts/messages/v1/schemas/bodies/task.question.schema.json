@@ -1,0 +1,310 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/task.question.schema.json",
+  "title": "task.question body",
+  "description": "A question from a task's holder to the one who can answer it.",
+  "type": "object",
+  "properties": {
+    "question_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "sequence": {
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "text": {
+      "$ref": "../common.schema.json#/$defs/long_text"
+    },
+    "can_answer": {
+      "type": "string",
+      "enum": [
+        "lead",
+        "person"
+      ]
+    },
+    "relays_question_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "deadline": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "assumption": {
+      "$ref": "../common.schema.json#/$defs/assumption"
+    },
+    "purpose": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "input"
+            },
+            "choice_mode": {
+              "type": "string",
+              "enum": [
+                "single",
+                "multiple"
+              ]
+            },
+            "choices": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/question_choice"
+              },
+              "maxItems": 20
+            },
+            "allow_free_text": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "choices",
+            "allow_free_text"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "setup"
+            },
+            "service": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "need": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            }
+          },
+          "required": [
+            "type",
+            "service",
+            "need"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "scope"
+            },
+            "proposal": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            },
+            "proposed_changes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  }
+                },
+                "required": [
+                  "name",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "type",
+            "proposal"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "budget"
+            },
+            "asked": {
+              "type": "string",
+              "enum": [
+                "time",
+                "budget"
+              ]
+            },
+            "until": {
+              "$ref": "../common.schema.json#/$defs/timestamp"
+            }
+          },
+          "required": [
+            "type",
+            "asked"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "coordination"
+            },
+            "needs_task_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            }
+          },
+          "required": [
+            "type",
+            "needs_task_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "help"
+            },
+            "agent_type": {
+              "$ref": "../common.schema.json#/$defs/agent_type"
+            }
+          },
+          "required": [
+            "type",
+            "agent_type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "outside_help"
+            },
+            "party": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "type",
+            "party"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "change_conflict"
+            },
+            "case_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            },
+            "brief": {
+              "$ref": "../common.schema.json#/$defs/blob_ref"
+            },
+            "choices": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "keep_current",
+                  "use_this_change",
+                  "redo_with_note",
+                  "stop_request"
+                ]
+              },
+              "maxItems": 4,
+              "minItems": 1
+            }
+          },
+          "required": [
+            "type",
+            "case_id",
+            "brief",
+            "choices"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "runtime_pause"
+            },
+            "trigger": {
+              "type": "string",
+              "enum": [
+                "tool_call_budget_exceeded",
+                "context_budget_exceeded",
+                "delegated_subtask_timeout",
+                "specialist_runtime_budget_pause",
+                "provider_overloaded"
+              ]
+            },
+            "allowed_decisions": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "resume",
+                  "partial",
+                  "cancel",
+                  "retry",
+                  "retry_in_5_minutes",
+                  "retry_in_10_minutes"
+                ]
+              },
+              "maxItems": 6,
+              "minItems": 1
+            }
+          },
+          "required": [
+            "type",
+            "trigger",
+            "allowed_decisions"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "recovery_checkpoint"
+            },
+            "choices": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/question_choice"
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "question_id",
+    "task_id",
+    "sequence",
+    "text",
+    "can_answer",
+    "purpose"
+  ],
+  "additionalProperties": false
+}

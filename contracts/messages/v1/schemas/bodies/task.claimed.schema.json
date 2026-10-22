@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/task.claimed.schema.json",
+  "title": "task.claimed body",
+  "description": "A holder took a task.",
+  "type": "object",
+  "properties": {
+    "claim_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "parent_task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "recovered": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "claim_id",
+    "task_id",
+    "recovered"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,43 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tool.setup.result",
+  "message_id": "01928f3a-7b2c-7120-8000-000000000120",
+  "idempotency_key": "secure_result:tool_setup:setup_1",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.gateway-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "setup_request_id": "setup_1",
+    "task_id": "task_root_1",
+    "status": "completed",
+    "tool_id": "mcp:example.calendar",
+    "setup": {
+      "type": "external_step",
+      "owner": "person",
+      "step_id": "connect_calendar"
+    },
+    "source": "task_request",
+    "attempt": 1,
+    "account_label": "Work calendar",
+    "needs_administrator": false,
+    "reason_code": "linked",
+    "message": "Connected.",
+    "link_id": "link_1",
+    "broker_session_id": "bs_2"
+  },
+  "body_digest": "0c5Gn03nBNW65IlTxojv63eivnYY0zumQYD9c5yGmb0",
+  "signature": "ES0ooHu2N1hNAodf6sW7t9PracWqepT2oUnJCoRY9m7KcPJXLfgyZQxBa9dSz6x7hbCFWBEXnOfQ1mIjN542CQ"
+}

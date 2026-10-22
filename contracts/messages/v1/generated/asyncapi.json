@@ -1,11 +1,115 @@
 {
   "asyncapi": "3.1.0",
   "channels": {
+    "access_decision": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "access_decision": {
+          "$ref": "#/components/messages/access_decision"
+        }
+      }
+    },
+    "access_request": {
+      "address": "ua.v1.{team}.{sender}.work.team",
+      "messages": {
+        "access_request": {
+          "$ref": "#/components/messages/access_request"
+        }
+      }
+    },
+    "access_resolved": {
+      "address": "ua.v1.{team}.{sender}.work.team",
+      "messages": {
+        "access_resolved": {
+          "$ref": "#/components/messages/access_resolved"
+        }
+      }
+    },
     "agent_pause": {
       "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.pause",
       "messages": {
         "agent_pause": {
           "$ref": "#/components/messages/agent_pause"
+        }
+      }
+    },
+    "credential_form_request": {
+      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
+      "messages": {
+        "credential_form_request": {
+          "$ref": "#/components/messages/credential_form_request"
+        }
+      }
+    },
+    "credential_form_result": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "credential_form_result": {
+          "$ref": "#/components/messages/credential_form_result"
+        }
+      }
+    },
+    "custody_moved": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "custody_moved": {
+          "$ref": "#/components/messages/custody_moved"
+        }
+      }
+    },
+    "delivery_receipt": {
+      "address": "ua.v1.{team}.{sender}.work.team",
+      "messages": {
+        "delivery_receipt": {
+          "$ref": "#/components/messages/delivery_receipt"
+        }
+      }
+    },
+    "delivery_refused": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "delivery_refused": {
+          "$ref": "#/components/messages/delivery_refused"
+        }
+      }
+    },
+    "delivery_refused_1": {
+      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
+      "messages": {
+        "delivery_refused": {
+          "$ref": "#/components/messages/delivery_refused"
+        }
+      }
+    },
+    "delivery_refused_2": {
+      "address": "ua.v1.{team}.{sender}.work.team",
+      "messages": {
+        "delivery_refused": {
+          "$ref": "#/components/messages/delivery_refused"
+        }
+      }
+    },
+    "ledger_fact": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "ledger_fact": {
+          "$ref": "#/components/messages/ledger_fact"
+        }
+      }
+    },
+    "person_notify": {
+      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
+      "messages": {
+        "person_notify": {
+          "$ref": "#/components/messages/person_notify"
+        }
+      }
+    },
+    "question_closed": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "question_closed": {
+          "$ref": "#/components/messages/question_closed"
         }
       }
     },
@@ -17,6 +121,142 @@
         }
       }
     },
+    "task_account": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "task_account": {
+          "$ref": "#/components/messages/task_account"
+        }
+      }
+    },
+    "task_answer": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "task_answer": {
+          "$ref": "#/components/messages/task_answer"
+        }
+      }
+    },
+    "task_claimed": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "task_claimed": {
+          "$ref": "#/components/messages/task_claimed"
+        }
+      }
+    },
+    "task_claimed_1": {
+      "address": "ua.v1.{team}.{sender}.work.team",
+      "messages": {
+        "task_claimed": {
+          "$ref": "#/components/messages/task_claimed"
+        }
+      }
+    },
+    "task_handback": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "task_handback": {
+          "$ref": "#/components/messages/task_handback"
+        }
+      }
+    },
+    "task_handback_1": {
+      "address": "ua.v1.{team}.{sender}.work.team",
+      "messages": {
+        "task_handback": {
+          "$ref": "#/components/messages/task_handback"
+        }
+      }
+    },
+    "task_progress": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "task_progress": {
+          "$ref": "#/components/messages/task_progress"
+        }
+      }
+    },
+    "task_question": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "task_question": {
+          "$ref": "#/components/messages/task_question"
+        }
+      }
+    },
+    "task_question_1": {
+      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
+      "messages": {
+        "task_question": {
+          "$ref": "#/components/messages/task_question"
+        }
+      }
+    },
+    "task_report": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "task_report": {
+          "$ref": "#/components/messages/task_report"
+        }
+      }
+    },
+    "task_request": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "task_request": {
+          "$ref": "#/components/messages/task_request"
+        }
+      }
+    },
+    "task_request_1": {
+      "address": "ua.v1.{team}.{sender}.work.pool.{pool}",
+      "messages": {
+        "task_request": {
+          "$ref": "#/components/messages/task_request"
+        }
+      }
+    },
+    "task_request_2": {
+      "address": "ua.v1.{team}.{sender}.work.team",
+      "messages": {
+        "task_request": {
+          "$ref": "#/components/messages/task_request"
+        }
+      }
+    },
+    "task_result": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "task_result": {
+          "$ref": "#/components/messages/task_result"
+        }
+      }
+    },
+    "task_result_1": {
+      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
+      "messages": {
+        "task_result": {
+          "$ref": "#/components/messages/task_result"
+        }
+      }
+    },
+    "task_result_2": {
+      "address": "ua.v1.{team}.{sender}.work.team",
+      "messages": {
+        "task_result": {
+          "$ref": "#/components/messages/task_result"
+        }
+      }
+    },
+    "task_steer": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "task_steer": {
+          "$ref": "#/components/messages/task_steer"
+        }
+      }
+    },
     "task_stop": {
       "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
       "messages": {
@@ -24,10 +264,47 @@
           "$ref": "#/components/messages/task_stop"
         }
       }
+    },
+    "tool_setup_request": {
+      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
+      "messages": {
+        "tool_setup_request": {
+          "$ref": "#/components/messages/tool_setup_request"
+        }
+      }
+    },
+    "tool_setup_result": {
+      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
+      "messages": {
+        "tool_setup_result": {
+          "$ref": "#/components/messages/tool_setup_result"
+        }
+      }
     }
   },
   "components": {
     "messages": {
+      "access_decision": {
+        "name": "access.decision",
+        "payload": {
+          "$ref": "../schemas/bodies/access.decision.schema.json"
+        },
+        "summary": "What became of an access request, sent to the waiting task."
+      },
+      "access_request": {
+        "name": "access.request",
+        "payload": {
+          "$ref": "../schemas/bodies/access.request.schema.json"
+        },
+        "summary": "A task asks the team services for access; no model decides it."
+      },
+      "access_resolved": {
+        "name": "access.resolved",
+        "payload": {
+          "$ref": "../schemas/bodies/access.resolved.schema.json"
+        },
+        "summary": "A person's decision on an access request, from the gateway to the team services."
+      },
       "agent_pause": {
         "name": "agent.pause",
         "payload": {
@@ -41,6 +318,62 @@
           "$ref": "../schemas/bodies/agent.pause.reply.schema.json"
         }
       },
+      "credential_form_request": {
+        "name": "credential.form.request",
+        "payload": {
+          "$ref": "../schemas/bodies/credential.form.request.schema.json"
+        },
+        "summary": "Ask the gateway to collect, set up or delete a credential through a secure form."
+      },
+      "credential_form_result": {
+        "name": "credential.form.result",
+        "payload": {
+          "$ref": "../schemas/bodies/credential.form.result.schema.json"
+        },
+        "summary": "What became of a credential form."
+      },
+      "custody_moved": {
+        "name": "custody.moved",
+        "payload": {
+          "$ref": "../schemas/bodies/custody.moved.schema.json"
+        },
+        "summary": "Tells a former holder that its task moved; later results are kept as late work."
+      },
+      "delivery_receipt": {
+        "name": "delivery.receipt",
+        "payload": {
+          "$ref": "../schemas/bodies/delivery.receipt.schema.json"
+        },
+        "summary": "The gateway delivered an answer or notice to a person."
+      },
+      "delivery_refused": {
+        "name": "delivery.refused",
+        "payload": {
+          "$ref": "../schemas/bodies/delivery.refused.schema.json"
+        },
+        "summary": "A receiver refused a message; sent back to its sender."
+      },
+      "ledger_fact": {
+        "name": "ledger.fact",
+        "payload": {
+          "$ref": "../schemas/bodies/ledger.fact.schema.json"
+        },
+        "summary": "A fact for an agent's work ledger from the team services."
+      },
+      "person_notify": {
+        "name": "person.notify",
+        "payload": {
+          "$ref": "../schemas/bodies/person.notify.schema.json"
+        },
+        "summary": "A notice for a person, delivered by the gateway."
+      },
+      "question_closed": {
+        "name": "question.closed",
+        "payload": {
+          "$ref": "../schemas/bodies/question.closed.schema.json"
+        },
+        "summary": "A question ended without an answer."
+      },
       "skills_changed": {
         "name": "skills.changed",
         "payload": {
@@ -48,12 +381,96 @@
         },
         "summary": "Hint that a managed skill was installed or removed. Receivers verify the stored receipt before they refresh."
       },
+      "task_account": {
+        "name": "task.account",
+        "payload": {
+          "$ref": "../schemas/bodies/task.account.schema.json"
+        },
+        "summary": "A held holder's account of where its task stopped."
+      },
+      "task_answer": {
+        "name": "task.answer",
+        "payload": {
+          "$ref": "../schemas/bodies/task.answer.schema.json"
+        },
+        "summary": "The answer to one question."
+      },
+      "task_claimed": {
+        "name": "task.claimed",
+        "payload": {
+          "$ref": "../schemas/bodies/task.claimed.schema.json"
+        },
+        "summary": "A holder took a task."
+      },
+      "task_handback": {
+        "name": "task.handback",
+        "payload": {
+          "$ref": "../schemas/bodies/task.handback.schema.json"
+        },
+        "summary": "A holder that lost its lease returns a task."
+      },
+      "task_progress": {
+        "name": "task.progress",
+        "payload": {
+          "$ref": "../schemas/bodies/task.progress.schema.json"
+        },
+        "summary": "Where a task stands, from its holder to its requester."
+      },
+      "task_question": {
+        "name": "task.question",
+        "payload": {
+          "$ref": "../schemas/bodies/task.question.schema.json"
+        },
+        "summary": "A question from a task's holder to the one who can answer it."
+      },
+      "task_report": {
+        "name": "task.report",
+        "payload": {
+          "$ref": "../schemas/bodies/task.report.schema.json"
+        },
+        "summary": "A report from a holder to its requester; the lead decides whether a person sees it."
+      },
+      "task_request": {
+        "name": "task.request",
+        "payload": {
+          "$ref": "../schemas/bodies/task.request.schema.json"
+        },
+        "summary": "Give a task to an agent or a pool."
+      },
+      "task_result": {
+        "name": "task.result",
+        "payload": {
+          "$ref": "../schemas/bodies/task.result.schema.json"
+        },
+        "summary": "The final answer of a task, sent by its holder."
+      },
+      "task_steer": {
+        "name": "task.steer",
+        "payload": {
+          "$ref": "../schemas/bodies/task.steer.schema.json"
+        },
+        "summary": "Steering for the holder of one named task."
+      },
       "task_stop": {
         "name": "task.stop",
         "payload": {
           "$ref": "../schemas/bodies/task.stop.schema.json"
         },
         "summary": "Stop one task. Sent only to the task's current holder."
+      },
+      "tool_setup_request": {
+        "name": "tool.setup.request",
+        "payload": {
+          "$ref": "../schemas/bodies/tool.setup.request.schema.json"
+        },
+        "summary": "Ask the gateway to have a person or administrator set a tool up."
+      },
+      "tool_setup_result": {
+        "name": "tool.setup.result",
+        "payload": {
+          "$ref": "../schemas/bodies/tool.setup.result.schema.json"
+        },
+        "summary": "What became of a tool setup."
       }
     }
   },
@@ -63,10 +480,76 @@
     "version": "1.0-pre"
   },
   "operations": {
+    "receive_access_decision": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/access_decision"
+      }
+    },
+    "receive_access_request": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/access_request"
+      }
+    },
+    "receive_access_resolved": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/access_resolved"
+      }
+    },
     "receive_agent_pause": {
       "action": "receive",
       "channel": {
         "$ref": "#/channels/agent_pause"
+      }
+    },
+    "receive_credential_form_request": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/credential_form_request"
+      }
+    },
+    "receive_credential_form_result": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/credential_form_result"
+      }
+    },
+    "receive_custody_moved": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/custody_moved"
+      }
+    },
+    "receive_delivery_receipt": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/delivery_receipt"
+      }
+    },
+    "receive_delivery_refused": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/delivery_refused"
+      }
+    },
+    "receive_ledger_fact": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/ledger_fact"
+      }
+    },
+    "receive_person_notify": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/person_notify"
+      }
+    },
+    "receive_question_closed": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/question_closed"
       }
     },
     "receive_skills_changed": {
@@ -75,10 +558,100 @@
         "$ref": "#/channels/skills_changed"
       }
     },
+    "receive_task_account": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_account"
+      }
+    },
+    "receive_task_answer": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_answer"
+      }
+    },
+    "receive_task_claimed": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_claimed"
+      }
+    },
+    "receive_task_handback": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_handback"
+      }
+    },
+    "receive_task_progress": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_progress"
+      }
+    },
+    "receive_task_question": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_question"
+      }
+    },
+    "receive_task_report": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_report"
+      }
+    },
+    "receive_task_request": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_request"
+      }
+    },
+    "receive_task_result": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_result"
+      }
+    },
+    "receive_task_steer": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_steer"
+      }
+    },
     "receive_task_stop": {
       "action": "receive",
       "channel": {
         "$ref": "#/channels/task_stop"
+      }
+    },
+    "receive_tool_setup_request": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/tool_setup_request"
+      }
+    },
+    "receive_tool_setup_result": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/tool_setup_result"
+      }
+    },
+    "send_access_decision": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/access_decision"
+      }
+    },
+    "send_access_request": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/access_request"
+      }
+    },
+    "send_access_resolved": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/access_resolved"
       }
     },
     "send_agent_pause": {
@@ -94,16 +667,136 @@
         ]
       }
     },
+    "send_credential_form_request": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/credential_form_request"
+      }
+    },
+    "send_credential_form_result": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/credential_form_result"
+      }
+    },
+    "send_custody_moved": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/custody_moved"
+      }
+    },
+    "send_delivery_receipt": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/delivery_receipt"
+      }
+    },
+    "send_delivery_refused": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/delivery_refused"
+      }
+    },
+    "send_ledger_fact": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/ledger_fact"
+      }
+    },
+    "send_person_notify": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/person_notify"
+      }
+    },
+    "send_question_closed": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/question_closed"
+      }
+    },
     "send_skills_changed": {
       "action": "send",
       "channel": {
         "$ref": "#/channels/skills_changed"
       }
     },
+    "send_task_account": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_account"
+      }
+    },
+    "send_task_answer": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_answer"
+      }
+    },
+    "send_task_claimed": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_claimed"
+      }
+    },
+    "send_task_handback": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_handback"
+      }
+    },
+    "send_task_progress": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_progress"
+      }
+    },
+    "send_task_question": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_question"
+      }
+    },
+    "send_task_report": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_report"
+      }
+    },
+    "send_task_request": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_request"
+      }
+    },
+    "send_task_result": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_result"
+      }
+    },
+    "send_task_steer": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_steer"
+      }
+    },
     "send_task_stop": {
       "action": "send",
       "channel": {
         "$ref": "#/channels/task_stop"
+      }
+    },
+    "send_tool_setup_request": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/tool_setup_request"
+      }
+    },
+    "send_tool_setup_result": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/tool_setup_result"
       }
     }
   }

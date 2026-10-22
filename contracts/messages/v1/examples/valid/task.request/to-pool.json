@@ -1,0 +1,34 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.request",
+  "message_id": "01928f3a-7b2c-7102-8000-000000000102",
+  "idempotency_key": "task_request:task_sub_2",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "pool",
+    "id": "researcher"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.work.pool.researcher",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_sub_2",
+    "work": {
+      "origin": "delegation",
+      "root_task_id": "task_root_1",
+      "topology": "hub_and_spoke"
+    },
+    "instructions": "Find the three largest invoices."
+  },
+  "body_digest": "ygtS-U5oy6ENBUSZU7avbXfb74FFcz6lrIiGKUjXlcE",
+  "signature": "lCRRxEaafRZoVuxaps3gAoiHEUnRkM_xd9tMvaI7bJGhp_RN8Bp1OoEWTNffL8aUKlEvzdLqCjbtPmcxrjYwBg"
+}

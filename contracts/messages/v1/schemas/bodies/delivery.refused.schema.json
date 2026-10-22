@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/delivery.refused.schema.json",
+  "title": "delivery.refused body",
+  "description": "A receiver refused a message; sent back to its sender.",
+  "type": "object",
+  "properties": {
+    "refused_message_id": {
+      "$ref": "../common.schema.json#/$defs/message_id"
+    },
+    "refused_kind": {
+      "$ref": "../common.schema.json#/$defs/kind"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "edge_not_allowed",
+        "not_holder",
+        "stale_custody",
+        "task_unknown",
+        "task_closed"
+      ]
+    },
+    "current_custody_token": {
+      "$ref": "../common.schema.json#/$defs/custody_token"
+    }
+  },
+  "required": [
+    "refused_message_id",
+    "refused_kind",
+    "reason"
+  ],
+  "additionalProperties": false
+}

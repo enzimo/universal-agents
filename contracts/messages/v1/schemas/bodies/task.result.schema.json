@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/task.result.schema.json",
+  "title": "task.result body",
+  "description": "The final answer of a task, sent by its holder.",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "sequence": {
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "custody_token": {
+      "$ref": "../common.schema.json#/$defs/custody_token"
+    },
+    "intent_version": {
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "steering_seen": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/assumption"
+      },
+      "maxItems": 20
+    },
+    "summary": {
+      "$ref": "../common.schema.json#/$defs/short_text"
+    },
+    "outcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "completed"
+            },
+            "answer": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "form": {
+                      "const": "text"
+                    },
+                    "text": {
+                      "$ref": "../common.schema.json#/$defs/long_text"
+                    }
+                  },
+                  "required": [
+                    "form",
+                    "text"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "form": {
+                      "const": "from_subtask"
+                    },
+                    "from_task_id": {
+                      "$ref": "../common.schema.json#/$defs/record_id"
+                    },
+                    "note": {
+                      "$ref": "../common.schema.json#/$defs/note_text"
+                    }
+                  },
+                  "required": [
+                    "form",
+                    "from_task_id"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/attachment"
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "state",
+            "answer"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "partial"
+            },
+            "answer": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "form": {
+                      "const": "text"
+                    },
+                    "text": {
+                      "$ref": "../common.schema.json#/$defs/long_text"
+                    }
+                  },
+                  "required": [
+                    "form",
+                    "text"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "form": {
+                      "const": "from_subtask"
+                    },
+                    "from_task_id": {
+                      "$ref": "../common.schema.json#/$defs/record_id"
+                    },
+                    "note": {
+                      "$ref": "../common.schema.json#/$defs/note_text"
+                    }
+                  },
+                  "required": [
+                    "form",
+                    "from_task_id"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "missing": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/attachment"
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "state",
+            "answer",
+            "missing"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "failed"
+            },
+            "failure": {
+              "$ref": "../common.schema.json#/$defs/failure"
+            }
+          },
+          "required": [
+            "state",
+            "failure"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "cancelled"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "stopped",
+                "parent_ended",
+                "request_closed",
+                "conflict_not_decided",
+                "custody_moved"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "paused"
+            },
+            "trigger": {
+              "type": "string",
+              "enum": [
+                "tool_call_budget_exceeded",
+                "context_budget_exceeded",
+                "delegated_subtask_timeout",
+                "specialist_runtime_budget_pause",
+                "provider_overloaded"
+              ]
+            },
+            "detail": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            }
+          },
+          "required": [
+            "state",
+            "trigger"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "yielded"
+            },
+            "reason": {
+              "$ref": "../common.schema.json#/$defs/short_text"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "rejected"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "queue_full",
+                "not_allowed"
+              ]
+            },
+            "detail": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "task_id",
+    "sequence",
+    "custody_token",
+    "outcome"
+  ],
+  "additionalProperties": false
+}

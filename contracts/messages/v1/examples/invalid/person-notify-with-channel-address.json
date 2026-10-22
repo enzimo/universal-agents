@@ -1,0 +1,7 @@
+{
+  "description": "A delivery reference is opaque; a phone number is refused.",
+  "refusal": "invalid_body",
+  "at": "/body/delivery_ref",
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"person.notify\", \"message_id\": \"01928f3a-7b2c-7129-8000-000000000129\", \"idempotency_key\": \"invalid:person-notify-with-channel-address\", \"issuer\": {\"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"team\": \"team_example\", \"target\": \"edge\", \"id\": \"web\"}, \"subject\": \"ua.v1.team_example.lead-host-1.work.edge.web\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"notice_id\": \"notice_9\", \"delivery_ref\": \"+1 555 0100\", \"text\": \"Hello.\", \"urgency\": \"normal\", \"reason\": {\"source\": \"agent\", \"note\": \"hi\"}}, \"body_digest\": \"rfk-tgi41AQOZum8GfSIsMyvx9KTOKymq2WiJ4gog58\", \"signature\": \"UiCLtZ-EFScfoKXLoA3CnFZBeFgZz0CpXvjpQXI0GBnEJuk90dxLz1Jy0UrpVQBl4pkCfKfJoUgQJQRxnA2KDg\"}"
+}

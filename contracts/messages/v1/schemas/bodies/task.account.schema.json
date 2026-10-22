@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/task.account.schema.json",
+  "title": "task.account body",
+  "description": "A held holder's account of where its task stopped.",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "steer_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "sequence": {
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "stage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "immediate"
+            },
+            "current_step": {
+              "$ref": "../common.schema.json#/$defs/short_text"
+            },
+            "checkpoint": {
+              "$ref": "../common.schema.json#/$defs/blob_ref"
+            },
+            "tools_in_progress": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/tool_id"
+              },
+              "maxItems": 20
+            },
+            "held_actions": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/held_action"
+              },
+              "maxItems": 50
+            },
+            "assumptions": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/assumption"
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "type",
+            "tools_in_progress",
+            "held_actions",
+            "assumptions"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "safe_point"
+            },
+            "note": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            }
+          },
+          "required": [
+            "type",
+            "note"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "task_id",
+    "steer_id",
+    "sequence",
+    "stage"
+  ],
+  "additionalProperties": false
+}

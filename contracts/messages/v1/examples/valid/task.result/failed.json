@@ -1,0 +1,41 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.result",
+  "message_id": "01928f3a-7b2c-7105-8000-000000000105",
+  "idempotency_key": "task_result:task_sub_2:1",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_sub_2",
+    "sequence": 2,
+    "custody_token": 1,
+    "outcome": {
+      "state": "failed",
+      "failure": {
+        "category": "provider_limited",
+        "provider": "example-provider",
+        "model_id": "example-model",
+        "status_code": 429,
+        "attempts": 3,
+        "message": "The model provider kept refusing requests."
+      }
+    }
+  },
+  "body_digest": "PI8nLmFmC4U9etvamq9Y_g8dVq-atfTM_FsSmrjDdDo",
+  "signature": "FcpI7ucRP1DlqK0-eAizBVTJiDKeUS_FOjb-jnFp14bf-lvsl6MMdJ8ZXGXmuREErg_ll9fJrmaUB4XJYbQ2Ag"
+}

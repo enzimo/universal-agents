@@ -134,7 +134,8 @@ def test_every_kind_has_a_model_and_every_model_a_kind() -> None:
         entry = REGISTRY["kinds"][name]
         assert (spec.reply_model is not None) == ("reply" in entry)
         assert spec.reply_errors == tuple(entry.get("reply", {}).get("errors", ()))
-        assert (spec.delivery_class, spec.address, spec.expiry_seconds) == (entry["class"], entry["address"], entry["expiry_seconds"])
+        assert (spec.delivery_class, spec.addresses, spec.expiry_seconds) == (
+            entry["class"], tuple(EXPORT.entry_addresses(entry)), entry["expiry_seconds"])
     assert kinds.VERIFICATION_REFUSALS == tuple(item["code"] for item in REGISTRY["verification_refusals"])
 
 
@@ -147,7 +148,8 @@ def test_permissions_publish_only_under_the_senders_own_id() -> None:
         assert "_INBOX.{self}.>" in document["subscribe"]
         for name, entry in REGISTRY["kinds"].items():
             if role in entry["senders"]:
-                assert "ua.v1.{team}.{self}." + EXPORT.subject_pattern(entry["address"]) in document["publish"]
+                for address in EXPORT.entry_addresses(entry):
+                    assert "ua.v1.{team}.{self}." + EXPORT.subject_pattern(address) in document["publish"]
 
 
 # -- canonical form ---------------------------------------------------------------------------------
@@ -232,3 +234,9 @@ def test_invalid_bodies_fail_their_schema_where_named(path: Path) -> None:
     locations = {"/body" + "".join(f"/{part}" for part in error.absolute_path) for error in errors}
     nested = {"/body" + "".join(f"/{part}" for part in sub.absolute_path) for error in errors for sub in error.context or ()}
     assert case["at"] in locations | nested, (locations, nested)
+
+
+def test_every_kind_and_reply_has_a_valid_example() -> None:
+    examples = {path.parent.name for path in valid_examples()}
+    expected = set(REGISTRY["kinds"]) | {f"{name}.reply" for name, entry in REGISTRY["kinds"].items() if "reply" in entry}
+    assert expected <= examples, sorted(expected - examples)

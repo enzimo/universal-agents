@@ -1,0 +1,60 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "credential.form.request",
+  "message_id": "01928f3a-7b2c-711c-8000-00000000011c",
+  "idempotency_key": "credential_form:form_1",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.work.edge.web",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "form_id": "form_1",
+    "task_id": "task_root_1",
+    "delivery_ref": "dref_1",
+    "continue_task": true,
+    "user_approved": true,
+    "flow": {
+      "type": "collect",
+      "service_name": "Example Analytics",
+      "credential_key": "example_analytics.api_key",
+      "display_name": "Example Analytics key",
+      "purpose": "Read last quarter's usage figures.",
+      "store_target": "team",
+      "signup_url": "https://analytics.example.com/signup",
+      "fields": [
+        {
+          "name": "api_key",
+          "required": true,
+          "kind": "api_key",
+          "visibility": "secret",
+          "value_source": "user_input",
+          "generation_policy": "none",
+          "label": "API key",
+          "description": "The key from the service's settings page.",
+          "placeholder": "sk-...",
+          "form": {
+            "input_control": "password",
+            "autocomplete": "off",
+            "accept": "text/plain",
+            "help_text": "Paste the key; it goes straight to the credential store."
+          }
+        }
+      ]
+    }
+  },
+  "body_digest": "WmhCbXkKb-9DSjBfgQ5yLPPmrIGAmApW-uieckuJSLs",
+  "signature": "rXrvEjpV3LN9XLHQv3DIyp9B5Qfj7bmYCC-xpS09Iyvu9B-kPWsEfDAPq4Uwn5hTV1W33cEeSg7fdScVzHtkDw"
+}

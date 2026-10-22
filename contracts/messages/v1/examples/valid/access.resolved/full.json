@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "access.resolved",
+  "message_id": "01928f3a-7b2c-7117-8000-000000000117",
+  "idempotency_key": "access_res:areq_1",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.work.team",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "areq_1",
+    "choice": "approve_task",
+    "note": "Read only, please.",
+    "kept_item_ids": [
+      "item_1"
+    ],
+    "keep_hours": 24
+  },
+  "body_digest": "oHt_L1bJy8ZC7f8ffhNdPXw1rEUMwD4zGzTl7M7wGRk",
+  "signature": "eFP0eJvIQW5mYxA_EXIw8DD4ih4HoBgC-ERk3GURNP094NaYDSJtT-DoLMpL6_HxnwpmpnEVKprijYsU6TnxBg"
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/access.resolved.schema.json",
+  "title": "access.resolved body",
+  "description": "A person's decision on an access request, from the gateway to the team services.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "choice": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "approve_read",
+        "approve_task",
+        "approve_all",
+        "deny"
+      ]
+    },
+    "note": {
+      "$ref": "../common.schema.json#/$defs/note_text"
+    },
+    "kept_item_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/record_id"
+      },
+      "maxItems": 80
+    },
+    "keep_hours": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2160
+    }
+  },
+  "required": [
+    "request_id",
+    "choice"
+  ],
+  "additionalProperties": false
+}

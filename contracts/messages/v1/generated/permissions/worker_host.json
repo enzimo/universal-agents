@@ -1,6 +1,9 @@
 {
   "publish": [
-    "_INBOX.*.>"
+    "_INBOX.*.>",
+    "ua.v1.{team}.{self}.work.agent.*",
+    "ua.v1.{team}.{self}.work.edge.*",
+    "ua.v1.{team}.{self}.work.team"
   ],
   "role": "worker_host",
   "subscribe": [

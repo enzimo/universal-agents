@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/ledger.fact.schema.json",
+  "title": "ledger.fact body",
+  "description": "A fact for an agent's work ledger from the team services.",
+  "type": "object",
+  "properties": {
+    "fact_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "fact": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "custody_confirmed"
+            },
+            "holder": {
+              "$ref": "../common.schema.json#/$defs/agent_id"
+            },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
+            }
+          },
+          "required": [
+            "type",
+            "holder",
+            "custody_token"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "access_requested"
+            },
+            "request_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            },
+            "by": {
+              "$ref": "../common.schema.json#/$defs/agent_id"
+            },
+            "target": {
+              "$ref": "../common.schema.json#/$defs/access_target"
+            },
+            "level": {
+              "type": "string",
+              "enum": [
+                "read",
+                "write",
+                "full"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "request_id",
+            "by",
+            "target",
+            "level"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "access_decided"
+            },
+            "request_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "handed_down",
+                "granted",
+                "denied",
+                "withdrawn",
+                "refused"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "request_id",
+            "status"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "decision_ahead_used"
+            },
+            "decision_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            },
+            "produced_message_id": {
+              "$ref": "../common.schema.json#/$defs/message_id"
+            }
+          },
+          "required": [
+            "type",
+            "decision_id",
+            "produced_message_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "colleague_exchange"
+            },
+            "question_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            },
+            "asker": {
+              "$ref": "../common.schema.json#/$defs/agent_id"
+            },
+            "answerer": {
+              "$ref": "../common.schema.json#/$defs/agent_id"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "asked",
+                "answered",
+                "closed"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "question_id",
+            "asker",
+            "answerer",
+            "state"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "steering_seen"
+            },
+            "steer_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            },
+            "holder": {
+              "$ref": "../common.schema.json#/$defs/agent_id"
+            }
+          },
+          "required": [
+            "type",
+            "steer_id",
+            "holder"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "wait"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "change_conflict",
+                "other_request_form"
+              ]
+            },
+            "case_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "open",
+                "resolved"
+              ]
+            },
+            "until": {
+              "$ref": "../common.schema.json#/$defs/timestamp"
+            }
+          },
+          "required": [
+            "type",
+            "kind",
+            "state"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "hold_timed_out"
+            },
+            "person_steering_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            }
+          },
+          "required": [
+            "type",
+            "person_steering_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "late_work"
+            },
+            "former_holder": {
+              "$ref": "../common.schema.json#/$defs/agent_id"
+            },
+            "message_id": {
+              "$ref": "../common.schema.json#/$defs/message_id"
+            }
+          },
+          "required": [
+            "type",
+            "former_holder",
+            "message_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "fact_id",
+    "fact"
+  ],
+  "additionalProperties": false
+}

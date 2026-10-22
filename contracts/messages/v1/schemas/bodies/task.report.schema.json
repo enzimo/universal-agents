@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/task.report.schema.json",
+  "title": "task.report body",
+  "description": "A report from a holder to its requester; the lead decides whether a person sees it.",
+  "type": "object",
+  "properties": {
+    "report_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "sequence": {
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "for_person": {
+      "type": "boolean"
+    },
+    "summary": {
+      "$ref": "../common.schema.json#/$defs/long_text"
+    },
+    "kind": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "lessons"
+            },
+            "durable_context": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/note_text"
+              },
+              "maxItems": 20
+            },
+            "risks_or_followups": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/note_text"
+              },
+              "maxItems": 20
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "maxItems": 20
+            },
+            "importance": {
+              "type": "string",
+              "enum": [
+                "low",
+                "normal",
+                "high",
+                "critical"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "durable_context",
+            "risks_or_followups",
+            "evidence",
+            "importance"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "worker_result"
+            },
+            "text": {
+              "$ref": "../common.schema.json#/$defs/long_text"
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/attachment"
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "record_changed"
+            },
+            "record_kind": {
+              "$ref": "../common.schema.json#/$defs/change_record_kind"
+            },
+            "record_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            },
+            "summary": {
+              "$ref": "../common.schema.json#/$defs/short_text"
+            }
+          },
+          "required": [
+            "type",
+            "record_kind",
+            "record_id",
+            "summary"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "notice"
+            },
+            "text": {
+              "$ref": "../common.schema.json#/$defs/long_text"
+            },
+            "urgency": {
+              "type": "string",
+              "enum": [
+                "normal",
+                "urgent"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "text",
+            "urgency"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "report_id",
+    "task_id",
+    "sequence",
+    "for_person",
+    "summary",
+    "kind"
+  ],
+  "additionalProperties": false
+}

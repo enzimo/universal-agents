@@ -122,6 +122,213 @@ class AuthorityToken(WireModel):
     signature: Ed25519Signature
 
 
+ShortText = Annotated[str, StringConstraints(min_length=1, max_length=500)]
+
+
+NoteText = Annotated[str, StringConstraints(min_length=1, max_length=2000)]
+
+
+LongText = Annotated[str, StringConstraints(min_length=1, max_length=32768)]
+
+
+TimeZone = Annotated[str, StringConstraints(pattern='^[A-Za-z][A-Za-z0-9_+-]{0,31}(/[A-Za-z0-9_+-]{1,31}){0,2}$')]
+
+
+ToolId = Annotated[str, StringConstraints(pattern='^(fn|cli|http|mcp|procedure|code):[a-z0-9][a-z0-9_.-]{0,95}$')]
+
+
+CredentialKey = Annotated[str, StringConstraints(pattern='^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}$')]
+
+
+ChangeRecordKind = Literal['memory_fact', 'knowledge_page', 'schedule', 'objective', 'heartbeat_item', 'file', 'staged_change']
+
+
+CustodyToken = Annotated[int, Field(ge=1, le=9007199254740991)]
+
+
+class Attachment(WireModel):
+    "A file sent with a message, held in the object store."
+
+    attachment_id: RecordId
+    blob: BlobRef
+    kind: Literal['image', 'document', 'audio', 'video', 'other']
+    caption: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+
+
+class RepliedMessage(WireModel):
+    "The message the person replied to."
+
+    author: Literal['assistant', 'requester', 'other']
+    author_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=128)]] = Field(default=None)
+    text: Annotated[str, StringConstraints(min_length=1, max_length=16000)]
+    shortened: bool
+    quoted_text: Optional[Annotated[str, StringConstraints(min_length=1, max_length=16000)]] = Field(default=None)
+    sent_at: Optional[Timestamp] = Field(default=None)
+
+
+class FailureProviderLimited(WireModel):
+    category: Literal['provider_limited']
+    provider: Annotated[str, StringConstraints(min_length=1, max_length=120)]
+    model_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    status_code: Optional[Annotated[int, Field(ge=100, le=599)]] = Field(default=None)
+    attempts: Count
+    message: Optional[NoteText] = Field(default=None)
+
+
+class FailureWorkerLost(WireModel):
+    category: Literal['worker_lost']
+    attempts: Count
+    message: Optional[NoteText] = Field(default=None)
+
+
+class FailureAdmissionRefused(WireModel):
+    category: Literal['admission_refused']
+    message: Optional[NoteText] = Field(default=None)
+
+
+class FailureBudgetExhausted(WireModel):
+    category: Literal['budget_exhausted']
+    message: Optional[NoteText] = Field(default=None)
+
+
+class FailureDeadlineReached(WireModel):
+    category: Literal['deadline_reached']
+    message: Optional[NoteText] = Field(default=None)
+
+
+class FailureNotAllowed(WireModel):
+    category: Literal['not_allowed']
+    message: Optional[NoteText] = Field(default=None)
+
+
+class FailureError(WireModel):
+    category: Literal['error']
+    message: Optional[NoteText] = Field(default=None)
+
+
+Failure = Annotated[Union[FailureProviderLimited, FailureWorkerLost, FailureAdmissionRefused, FailureBudgetExhausted, FailureDeadlineReached, FailureNotAllowed, FailureError], Field(discriminator='category')]
+
+
+class QuestionChoice(WireModel):
+    choice_id: Annotated[str, StringConstraints(pattern='^[a-z0-9_-]{1,64}$')]
+    label: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    description: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    recommended: bool
+
+
+class Assumption(WireModel):
+    "Something the work relied on that later steering may change."
+
+    assumption_id: RecordId
+    text: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    affects: Optional[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=200)]], Field(max_length=20)]] = Field(default=None)
+
+
+class HeldAction(WireModel):
+    "An outward action and how far it got."
+
+    action_id: RecordId
+    action_type: Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,119}$')]
+    summary: ShortText
+    state: Literal['held', 'outcome_unknown', 'sent', 'completed']
+
+
+class DecisionAhead(WireModel):
+    "A decision the lead made in advance for one task or schedule."
+
+    decision_id: RecordId
+    kind: Literal['forward_result_to_person', 'forward_progress_to_person', 'forward_steering_to_holders']
+
+
+class DecisionTokenIssuer(WireModel):
+    team: TeamId
+    runtime: RuntimeId
+    key_id: KeyId
+
+
+class DecisionToken(WireModel):
+    "A person's decision on a change conflict, bound to a digest of the values they were shown."
+
+    token_id: MessageId
+    case_id: RecordId
+    choice: Literal['keep_current', 'use_this_change', 'redo_with_note', 'stop_request']
+    values_digest: Sha256Digest
+    issuer: DecisionTokenIssuer
+    issued_at: Timestamp
+    expires_at: Timestamp
+    algorithm: Literal['ed25519']
+    signature: Ed25519Signature
+
+
+class AccessTarget(WireModel):
+    kind: Literal['tool', 'tool_set', 'folder']
+    id: Annotated[str, StringConstraints(min_length=1, max_length=400)]
+
+
+class WorkContextIntent(WireModel):
+    version: Count
+    text: NoteText
+
+
+class WorkContextDeadline(WireModel):
+    at: Timestamp
+    rule: Literal['partial_result', 'stop', 'continue']
+
+
+class WorkContext(WireModel):
+    "Where a task sits in its request and how it should run."
+
+    origin: Literal['person_request', 'delegation', 'schedule_run', 'system_work', 'other_team', 'outside_agent']
+    root_task_id: RecordId
+    parent_task_id: Optional[RecordId] = Field(default=None)
+    conversation_id: Optional[RecordId] = Field(default=None)
+    follows_task_id: Optional[RecordId] = Field(default=None)
+    objective_id: Optional[RecordId] = Field(default=None)
+    schedule_id: Optional[RecordId] = Field(default=None)
+    time_zone: Optional[TimeZone] = Field(default=None)
+    delivery_ref: Optional[DeliveryRef] = Field(default=None)
+    started_on_purpose: Optional[bool] = Field(default=None)
+    topology: Literal['hub_and_spoke', 'same_type_peers', 'all_peers', 'nested']
+    intent: Optional[WorkContextIntent] = Field(default=None)
+    root_request: Optional[BlobRef] = Field(default=None)
+    deadline: Optional[WorkContextDeadline] = Field(default=None)
+    expected_offline_until: Optional[Timestamp] = Field(default=None)
+    decisions_ahead: Optional[Annotated[list[DecisionAhead], Field(max_length=8)]] = Field(default=None)
+
+
+class LedgerSnapshotDelegationsItem(WireModel):
+    task_id: RecordId
+    number: Count
+    holder: Optional[AgentId] = Field(default=None)
+    state: Literal['open', 'standin', 'resolved', 'late_work']
+
+
+class LedgerSnapshotQuestionsItem(WireModel):
+    question_id: RecordId
+    number: Count
+    purpose: Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]
+
+
+class LedgerSnapshotCounters(WireModel):
+    subtask: Count
+    question: Count
+    attachment: Count
+    report: Count
+
+
+class LedgerSnapshot(WireModel):
+    "A task's open work, carried by a handback so its new holder keeps the same labels."
+
+    plan: Optional[BlobRef] = Field(default=None)
+    checkpoint: Optional[BlobRef] = Field(default=None)
+    history_summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    delegations: Annotated[list[LedgerSnapshotDelegationsItem], Field(max_length=200)]
+    questions: Annotated[list[LedgerSnapshotQuestionsItem], Field(max_length=50)]
+    assumptions: Annotated[list[Assumption], Field(max_length=50)]
+    held_actions: Annotated[list[HeldAction], Field(max_length=50)]
+    counters: LedgerSnapshotCounters
+
+
 class Frame(WireModel):
     "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The body is checked against the schema its kind names in the registry."
 
@@ -143,6 +350,88 @@ class Frame(WireModel):
     signature: Ed25519Signature
 
 
+class AccessDecisionBodyStatusHandedDown(WireModel):
+    state: Literal['handed_down']
+    level: Literal['read', 'write', 'full']
+    lifetime: Literal['one_time', 'task', 'until', 'until_revoked']
+
+
+class AccessDecisionBodyStatusWaiting(WireModel):
+    state: Literal['waiting']
+    decider: Literal['person', 'administrator']
+
+
+class AccessDecisionBodyStatusGranted(WireModel):
+    state: Literal['granted']
+    level: Literal['read', 'write', 'full']
+    lifetime: Literal['one_time', 'task', 'until', 'until_revoked']
+    expires_at: Optional[Timestamp] = Field(default=None)
+
+
+class AccessDecisionBodyStatusDenied(WireModel):
+    state: Literal['denied']
+    note: Optional[NoteText] = Field(default=None)
+
+
+class AccessDecisionBodyStatusWithdrawn(WireModel):
+    state: Literal['withdrawn']
+    by: Literal['lead', 'task_ended']
+
+
+class AccessDecisionBodyStatusAlreadyHeld(WireModel):
+    state: Literal['already_held']
+
+
+class AccessDecisionBodyStatusRefused(WireModel):
+    state: Literal['refused']
+    code: Literal['blocked', 'invalid_target', 'not_allowed']
+    message: NoteText
+
+
+class AccessDecisionBody(WireModel):
+    "What became of an access request, sent to the waiting task."
+
+    request_id: RecordId
+    task_id: RecordId
+    status: Annotated[Union[AccessDecisionBodyStatusHandedDown, AccessDecisionBodyStatusWaiting, AccessDecisionBodyStatusGranted, AccessDecisionBodyStatusDenied, AccessDecisionBodyStatusWithdrawn, AccessDecisionBodyStatusAlreadyHeld, AccessDecisionBodyStatusRefused], Field(discriminator='state')]
+
+
+class AccessRequestBodyWhatAccess(WireModel):
+    type: Literal['access']
+    target: AccessTarget
+    level: Literal['read', 'write', 'full']
+    lifetime: Literal['one_time', 'task', 'until', 'until_revoked']
+    hours: Optional[Annotated[int, Field(ge=1, le=2160)]] = Field(default=None)
+    hand_on: bool
+    action_digest: Optional[Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$')]] = Field(default=None)
+
+
+class AccessRequestBodyWhatChange(WireModel):
+    type: Literal['change']
+    change_kind: Annotated[str, StringConstraints(min_length=1, max_length=80)]
+    change_id: RecordId
+    plan_digest: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$')]
+
+
+class AccessRequestBody(WireModel):
+    "A task asks the team services for access; no model decides it."
+
+    request_id: RecordId
+    task_id: RecordId
+    reason: NoteText
+    what: Annotated[Union[AccessRequestBodyWhatAccess, AccessRequestBodyWhatChange], Field(discriminator='type')]
+
+
+class AccessResolvedBody(WireModel):
+    "A person's decision on an access request, from the gateway to the team services."
+
+    request_id: RecordId
+    choice: Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny']
+    note: Optional[NoteText] = Field(default=None)
+    kept_item_ids: Optional[Annotated[list[RecordId], Field(max_length=80)]] = Field(default=None)
+    keep_hours: Optional[Annotated[int, Field(ge=1, le=2160)]] = Field(default=None)
+
+
 class AgentPauseBody(WireModel):
     request_id: RecordId
     reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
@@ -159,6 +448,255 @@ class AgentPauseReplyError(WireModel):
     message: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
 
 
+class CredentialFormRequestBodyFlowCollectFieldsItemForm(WireModel):
+    input_control: Literal['text', 'password', 'textarea', 'file']
+    autocomplete: Optional[Annotated[str, StringConstraints(min_length=1, max_length=64)]] = Field(default=None)
+    accept: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    help_text: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+
+
+class CredentialFormRequestBodyFlowCollectFieldsItem(WireModel):
+    name: Annotated[str, StringConstraints(min_length=1, max_length=120)]
+    required: bool
+    kind: Literal['username', 'email', 'password', 'token', 'api_key', 'custom']
+    visibility: Literal['metadata_visible', 'secret']
+    value_source: Literal['user_input', 'agent_supplied_metadata', 'user_or_agent_supplied_metadata', 'store_generated_secret']
+    value: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    generation_policy: Optional[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]] = Field(default=None)
+    label: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    description: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    placeholder: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    form: Optional[CredentialFormRequestBodyFlowCollectFieldsItemForm] = Field(default=None)
+
+
+class CredentialFormRequestBodyFlowCollect(WireModel):
+    type: Literal['collect']
+    service_name: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    credential_key: CredentialKey
+    display_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    purpose: NoteText
+    store_target: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    signup_url: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    fields: Annotated[list[CredentialFormRequestBodyFlowCollectFieldsItem], Field(min_length=1, max_length=20)]
+
+
+class CredentialFormRequestBodyFlowManualSignupFieldsItemForm(WireModel):
+    input_control: Literal['text', 'password', 'textarea', 'file']
+    autocomplete: Optional[Annotated[str, StringConstraints(min_length=1, max_length=64)]] = Field(default=None)
+    accept: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    help_text: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+
+
+class CredentialFormRequestBodyFlowManualSignupFieldsItem(WireModel):
+    name: Annotated[str, StringConstraints(min_length=1, max_length=120)]
+    required: bool
+    kind: Literal['username', 'email', 'password', 'token', 'api_key', 'custom']
+    visibility: Literal['metadata_visible', 'secret']
+    value_source: Literal['user_input', 'agent_supplied_metadata', 'user_or_agent_supplied_metadata', 'store_generated_secret']
+    value: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    generation_policy: Optional[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]] = Field(default=None)
+    label: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    description: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    placeholder: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    form: Optional[CredentialFormRequestBodyFlowManualSignupFieldsItemForm] = Field(default=None)
+
+
+class CredentialFormRequestBodyFlowManualSignup(WireModel):
+    type: Literal['manual_signup']
+    service_name: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    credential_key: CredentialKey
+    display_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    purpose: NoteText
+    store_target: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    signup_url: Annotated[str, StringConstraints(min_length=1, max_length=2000)]
+    fields: Annotated[list[CredentialFormRequestBodyFlowManualSignupFieldsItem], Field(min_length=1, max_length=20)]
+    automation_steps: Optional[Annotated[list[ShortText], Field(max_length=20)]] = Field(default=None)
+
+
+class CredentialFormRequestBodyFlowDelete(WireModel):
+    type: Literal['delete']
+    credential_key: CredentialKey
+    service_name: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    source: Optional[Annotated[str, StringConstraints(min_length=1, max_length=120)]] = Field(default=None)
+    source_item_id: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    source_item_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+
+
+class CredentialFormRequestBody(WireModel):
+    "Ask the gateway to collect, set up or delete a credential through a secure form."
+
+    form_id: RecordId
+    task_id: RecordId
+    delivery_ref: Optional[DeliveryRef] = Field(default=None)
+    continue_task: bool
+    user_approved: bool
+    flow: Annotated[Union[CredentialFormRequestBodyFlowCollect, CredentialFormRequestBodyFlowManualSignup, CredentialFormRequestBodyFlowDelete], Field(discriminator='type')]
+
+
+class CredentialFormResultBodyCredentialFieldsItem(WireModel):
+    name: Annotated[str, StringConstraints(min_length=1, max_length=120)]
+    kind: Literal['username', 'email', 'password', 'token', 'api_key', 'custom']
+    visibility: Literal['metadata_visible', 'secret']
+    value_source: Literal['user_input', 'agent_supplied_metadata', 'user_or_agent_supplied_metadata', 'store_generated_secret']
+    secret: bool
+    value: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+
+
+class CredentialFormResultBodyCredential(WireModel):
+    fields: Annotated[list[CredentialFormResultBodyCredentialFieldsItem], Field(max_length=20)]
+    purpose: Optional[NoteText] = Field(default=None)
+
+
+class CredentialFormResultBody(WireModel):
+    "What became of a credential form."
+
+    form_id: RecordId
+    task_id: RecordId
+    status: Literal['signup_completed', 'manual_signup_required', 'manual_signup_collected', 'signup_failed', 'credential_stored', 'credential_deleted', 'credential_unavailable']
+    continue_task: bool
+    credential_key: CredentialKey
+    service_name: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    display_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    broker_session_id: Optional[RecordId] = Field(default=None)
+    flow: Literal['collect', 'manual_signup', 'delete']
+    message: Optional[NoteText] = Field(default=None)
+    error: Optional[NoteText] = Field(default=None)
+    credential: Optional[CredentialFormResultBodyCredential] = Field(default=None)
+
+
+class CustodyMovedBody(WireModel):
+    "Tells a former holder that its task moved; later results are kept as late work."
+
+    task_id: RecordId
+    custody_token: CustodyToken
+    reason: Literal['reassigned', 'adopted_elsewhere', 'cancelled']
+
+
+class DeliveryReceiptBody(WireModel):
+    "The gateway delivered an answer or notice to a person."
+
+    receipt_id: RecordId
+    delivered_message_id: MessageId
+    task_id: RecordId
+    conversation_id: RecordId
+    schedule_id: Optional[RecordId] = Field(default=None)
+    via: Literal['immediate', 'digest']
+
+
+class DeliveryRefusedBody(WireModel):
+    "A receiver refused a message; sent back to its sender."
+
+    refused_message_id: MessageId
+    refused_kind: Kind
+    task_id: Optional[RecordId] = Field(default=None)
+    reason: Literal['edge_not_allowed', 'not_holder', 'stale_custody', 'task_unknown', 'task_closed']
+    current_custody_token: Optional[CustodyToken] = Field(default=None)
+
+
+class LedgerFactBodyFactCustodyConfirmed(WireModel):
+    type: Literal['custody_confirmed']
+    holder: AgentId
+    custody_token: CustodyToken
+
+
+class LedgerFactBodyFactAccessRequested(WireModel):
+    type: Literal['access_requested']
+    request_id: RecordId
+    by: AgentId
+    target: AccessTarget
+    level: Literal['read', 'write', 'full']
+
+
+class LedgerFactBodyFactAccessDecided(WireModel):
+    type: Literal['access_decided']
+    request_id: RecordId
+    status: Literal['handed_down', 'granted', 'denied', 'withdrawn', 'refused']
+
+
+class LedgerFactBodyFactDecisionAheadUsed(WireModel):
+    type: Literal['decision_ahead_used']
+    decision_id: RecordId
+    produced_message_id: MessageId
+
+
+class LedgerFactBodyFactColleagueExchange(WireModel):
+    type: Literal['colleague_exchange']
+    question_id: RecordId
+    asker: AgentId
+    answerer: AgentId
+    state: Literal['asked', 'answered', 'closed']
+
+
+class LedgerFactBodyFactSteeringSeen(WireModel):
+    type: Literal['steering_seen']
+    steer_id: RecordId
+    holder: AgentId
+
+
+class LedgerFactBodyFactWait(WireModel):
+    type: Literal['wait']
+    kind: Literal['change_conflict', 'other_request_form']
+    case_id: Optional[RecordId] = Field(default=None)
+    state: Literal['open', 'resolved']
+    until: Optional[Timestamp] = Field(default=None)
+
+
+class LedgerFactBodyFactHoldTimedOut(WireModel):
+    type: Literal['hold_timed_out']
+    person_steering_id: RecordId
+
+
+class LedgerFactBodyFactLateWork(WireModel):
+    type: Literal['late_work']
+    former_holder: AgentId
+    message_id: MessageId
+
+
+class LedgerFactBody(WireModel):
+    "A fact for an agent's work ledger from the team services."
+
+    fact_id: RecordId
+    task_id: Optional[RecordId] = Field(default=None)
+    fact: Annotated[Union[LedgerFactBodyFactCustodyConfirmed, LedgerFactBodyFactAccessRequested, LedgerFactBodyFactAccessDecided, LedgerFactBodyFactDecisionAheadUsed, LedgerFactBodyFactColleagueExchange, LedgerFactBodyFactSteeringSeen, LedgerFactBodyFactWait, LedgerFactBodyFactHoldTimedOut, LedgerFactBodyFactLateWork], Field(discriminator='type')]
+
+
+class PersonNotifyBodyReasonAgent(WireModel):
+    source: Literal['agent']
+    note: ShortText
+
+
+class PersonNotifyBodyReasonCode(WireModel):
+    source: Literal['code']
+    code: Literal['delegated_work_started', 'delegated_work_progress', 'scheduled_fire_coalesced', 'task_queue_near_capacity', 'task_queue_safety', 'model_provider_failover', 'task_wait_limit_reached', 'tool_setup_workflow', 'messages_set_aside', 'work_stuck', 'work_recovered', 'schedule_run_missed', 'reasoning_summary_unsupported_repaired', 'conflict_outcome', 'fixed_reminder']
+
+
+class PersonNotifyBodyAttachmentsItem(WireModel):
+    blob: BlobRef
+    kind: Literal['auto', 'image', 'document', 'audio', 'video']
+    caption: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+
+
+class PersonNotifyBody(WireModel):
+    "A notice for a person, delivered by the gateway."
+
+    notice_id: RecordId
+    delivery_ref: Optional[DeliveryRef] = Field(default=None)
+    task_id: Optional[RecordId] = Field(default=None)
+    conversation_id: Optional[RecordId] = Field(default=None)
+    text: LongText
+    urgency: Literal['normal', 'urgent']
+    reason: Annotated[Union[PersonNotifyBodyReasonAgent, PersonNotifyBodyReasonCode], Field(discriminator='source')]
+    attachments: Optional[Annotated[list[PersonNotifyBodyAttachmentsItem], Field(max_length=10)]] = Field(default=None)
+
+
+class QuestionClosedBody(WireModel):
+    "A question ended without an answer."
+
+    question_id: RecordId
+    task_id: RecordId
+    reason: Literal['answered_elsewhere', 'expired', 'withdrawn_by_guidance', 'request_ended', 'replaced', 'case_closed']
+
+
 class SkillsChangedBodyInstall(WireModel):
     operation: Literal['install']
     change_id: Annotated[str, StringConstraints(pattern='^skill_install_[0-9a-f]{12}$')]
@@ -173,6 +711,321 @@ class SkillsChangedBodyUninstall(WireModel):
     installed_tree_sha256: Annotated[str, StringConstraints(pattern='^[0-9a-f]{64}$')]
 
 
+class TaskAccountBodyStageImmediate(WireModel):
+    type: Literal['immediate']
+    current_step: Optional[ShortText] = Field(default=None)
+    checkpoint: Optional[BlobRef] = Field(default=None)
+    tools_in_progress: Annotated[list[ToolId], Field(max_length=20)]
+    held_actions: Annotated[list[HeldAction], Field(max_length=50)]
+    assumptions: Annotated[list[Assumption], Field(max_length=20)]
+
+
+class TaskAccountBodyStageSafePoint(WireModel):
+    type: Literal['safe_point']
+    note: NoteText
+
+
+class TaskAccountBody(WireModel):
+    "A held holder's account of where its task stopped."
+
+    task_id: RecordId
+    steer_id: RecordId
+    sequence: Count
+    stage: Annotated[Union[TaskAccountBodyStageImmediate, TaskAccountBodyStageSafePoint], Field(discriminator='type')]
+
+
+class TaskAnswerBodyPassedOn(WireModel):
+    from_: Literal['person', 'lead'] = Field(alias='from')
+    original_message_id: MessageId
+
+
+class TaskAnswerBody(WireModel):
+    "The answer to one question."
+
+    question_id: RecordId
+    task_id: RecordId
+    text: Optional[LongText] = Field(default=None)
+    selected_choice_ids: Optional[Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z0-9_-]{1,64}$')]], Field(max_length=20)]] = Field(default=None)
+    decision: Optional[Literal['resume', 'partial', 'cancel', 'retry', 'retry_in_5_minutes', 'retry_in_10_minutes']] = Field(default=None)
+    replied_message: Optional[RepliedMessage] = Field(default=None)
+    passed_on: Optional[TaskAnswerBodyPassedOn] = Field(default=None)
+    decision_token: Optional[DecisionToken] = Field(default=None)
+
+
+class TaskClaimedBody(WireModel):
+    "A holder took a task."
+
+    claim_id: RecordId
+    task_id: RecordId
+    parent_task_id: Optional[RecordId] = Field(default=None)
+    recovered: bool
+
+
+class TaskHandbackBody(WireModel):
+    "A holder that lost its lease returns a task."
+
+    handback_id: RecordId
+    task_id: RecordId
+    disposition: Literal['not_started', 'interrupted']
+    launch_id: RecordId
+    interrupted_at: Optional[Timestamp] = Field(default=None)
+    reason: ShortText
+    scheduler_errors: Optional[Annotated[list[ShortText], Field(max_length=10)]] = Field(default=None)
+    actions: Annotated[list[HeldAction], Field(max_length=50)]
+    ledger: Optional[LedgerSnapshot] = Field(default=None)
+
+
+class TaskProgressBody(WireModel):
+    "Where a task stands, from its holder to its requester."
+
+    task_id: RecordId
+    sequence: Count
+    custody_token: CustodyToken
+    status: ShortText
+    state: Literal['working', 'waiting', 'blocked', 'holding']
+    checkpoint: Optional[BlobRef] = Field(default=None)
+    assumptions: Optional[Annotated[list[Assumption], Field(max_length=20)]] = Field(default=None)
+    held_actions: Optional[Annotated[list[HeldAction], Field(max_length=50)]] = Field(default=None)
+    expected_finish: Optional[Timestamp] = Field(default=None)
+    steering_seen: Optional[RecordId] = Field(default=None)
+
+
+class TaskQuestionBodyPurposeInput(WireModel):
+    type: Literal['input']
+    choice_mode: Optional[Literal['single', 'multiple']] = Field(default=None)
+    choices: Annotated[list[QuestionChoice], Field(max_length=20)]
+    allow_free_text: bool
+
+
+class TaskQuestionBodyPurposeSetup(WireModel):
+    type: Literal['setup']
+    service: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    need: NoteText
+
+
+class TaskQuestionBodyPurposeScopeProposedChangesItem(WireModel):
+    name: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    value: Annotated[str, StringConstraints(min_length=1, max_length=2000)]
+
+
+class TaskQuestionBodyPurposeScope(WireModel):
+    type: Literal['scope']
+    proposal: NoteText
+    proposed_changes: Optional[Annotated[list[TaskQuestionBodyPurposeScopeProposedChangesItem], Field(max_length=20)]] = Field(default=None)
+
+
+class TaskQuestionBodyPurposeBudget(WireModel):
+    type: Literal['budget']
+    asked: Literal['time', 'budget']
+    until: Optional[Timestamp] = Field(default=None)
+
+
+class TaskQuestionBodyPurposeCoordination(WireModel):
+    type: Literal['coordination']
+    needs_task_id: RecordId
+
+
+class TaskQuestionBodyPurposeHelp(WireModel):
+    type: Literal['help']
+    agent_type: AgentType
+
+
+class TaskQuestionBodyPurposeOutsideHelp(WireModel):
+    type: Literal['outside_help']
+    party: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+
+
+class TaskQuestionBodyPurposeChangeConflict(WireModel):
+    type: Literal['change_conflict']
+    case_id: RecordId
+    brief: BlobRef
+    choices: Annotated[list[Literal['keep_current', 'use_this_change', 'redo_with_note', 'stop_request']], Field(min_length=1, max_length=4)]
+
+
+class TaskQuestionBodyPurposeRuntimePause(WireModel):
+    type: Literal['runtime_pause']
+    trigger: Literal['tool_call_budget_exceeded', 'context_budget_exceeded', 'delegated_subtask_timeout', 'specialist_runtime_budget_pause', 'provider_overloaded']
+    allowed_decisions: Annotated[list[Literal['resume', 'partial', 'cancel', 'retry', 'retry_in_5_minutes', 'retry_in_10_minutes']], Field(min_length=1, max_length=6)]
+
+
+class TaskQuestionBodyPurposeRecoveryCheckpoint(WireModel):
+    type: Literal['recovery_checkpoint']
+    choices: Optional[Annotated[list[QuestionChoice], Field(max_length=20)]] = Field(default=None)
+
+
+class TaskQuestionBody(WireModel):
+    "A question from a task's holder to the one who can answer it."
+
+    question_id: RecordId
+    task_id: RecordId
+    sequence: Count
+    text: LongText
+    can_answer: Literal['lead', 'person']
+    relays_question_id: Optional[RecordId] = Field(default=None)
+    deadline: Optional[Timestamp] = Field(default=None)
+    assumption: Optional[Assumption] = Field(default=None)
+    purpose: Annotated[Union[TaskQuestionBodyPurposeInput, TaskQuestionBodyPurposeSetup, TaskQuestionBodyPurposeScope, TaskQuestionBodyPurposeBudget, TaskQuestionBodyPurposeCoordination, TaskQuestionBodyPurposeHelp, TaskQuestionBodyPurposeOutsideHelp, TaskQuestionBodyPurposeChangeConflict, TaskQuestionBodyPurposeRuntimePause, TaskQuestionBodyPurposeRecoveryCheckpoint], Field(discriminator='type')]
+
+
+class TaskReportBodyKindLessons(WireModel):
+    type: Literal['lessons']
+    durable_context: Annotated[list[NoteText], Field(max_length=20)]
+    risks_or_followups: Annotated[list[NoteText], Field(max_length=20)]
+    evidence: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=500)]], Field(max_length=20)]
+    importance: Literal['low', 'normal', 'high', 'critical']
+
+
+class TaskReportBodyKindWorkerResult(WireModel):
+    type: Literal['worker_result']
+    text: LongText
+    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+
+
+class TaskReportBodyKindRecordChanged(WireModel):
+    type: Literal['record_changed']
+    record_kind: ChangeRecordKind
+    record_id: RecordId
+    summary: ShortText
+
+
+class TaskReportBodyKindNotice(WireModel):
+    type: Literal['notice']
+    text: LongText
+    urgency: Literal['normal', 'urgent']
+
+
+class TaskReportBody(WireModel):
+    "A report from a holder to its requester; the lead decides whether a person sees it."
+
+    report_id: RecordId
+    task_id: RecordId
+    sequence: Count
+    for_person: bool
+    summary: LongText
+    kind: Annotated[Union[TaskReportBodyKindLessons, TaskReportBodyKindWorkerResult, TaskReportBodyKindRecordChanged, TaskReportBodyKindNotice], Field(discriminator='type')]
+
+
+class TaskRequestBodyReassignment(WireModel):
+    handback_id: Optional[RecordId] = Field(default=None)
+    prior_holder: AgentId
+    prior_disposition: Literal['not_started', 'interrupted']
+    interruption_count: Count
+    interrupted_at: Optional[Timestamp] = Field(default=None)
+    actions: Annotated[list[HeldAction], Field(max_length=50)]
+    checkpoint: Optional[BlobRef] = Field(default=None)
+
+
+class TaskRequestBody(WireModel):
+    "Give a task to an agent or a pool."
+
+    task_id: RecordId
+    work: WorkContext
+    instructions: LongText
+    replied_message: Optional[RepliedMessage] = Field(default=None)
+    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+    reassignment: Optional[TaskRequestBodyReassignment] = Field(default=None)
+
+
+class TaskResultBodyOutcomeCompletedAnswerText(WireModel):
+    form: Literal['text']
+    text: LongText
+
+
+class TaskResultBodyOutcomeCompletedAnswerFromSubtask(WireModel):
+    form: Literal['from_subtask']
+    from_task_id: RecordId
+    note: Optional[NoteText] = Field(default=None)
+
+
+class TaskResultBodyOutcomeCompleted(WireModel):
+    state: Literal['completed']
+    answer: Annotated[Union[TaskResultBodyOutcomeCompletedAnswerText, TaskResultBodyOutcomeCompletedAnswerFromSubtask], Field(discriminator='form')]
+    artifacts: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+
+
+class TaskResultBodyOutcomePartialAnswerText(WireModel):
+    form: Literal['text']
+    text: LongText
+
+
+class TaskResultBodyOutcomePartialAnswerFromSubtask(WireModel):
+    form: Literal['from_subtask']
+    from_task_id: RecordId
+    note: Optional[NoteText] = Field(default=None)
+
+
+class TaskResultBodyOutcomePartial(WireModel):
+    state: Literal['partial']
+    answer: Annotated[Union[TaskResultBodyOutcomePartialAnswerText, TaskResultBodyOutcomePartialAnswerFromSubtask], Field(discriminator='form')]
+    missing: NoteText
+    artifacts: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+
+
+class TaskResultBodyOutcomeFailed(WireModel):
+    state: Literal['failed']
+    failure: Failure
+
+
+class TaskResultBodyOutcomeCancelled(WireModel):
+    state: Literal['cancelled']
+    reason: Literal['stopped', 'parent_ended', 'request_closed', 'conflict_not_decided', 'custody_moved']
+
+
+class TaskResultBodyOutcomePaused(WireModel):
+    state: Literal['paused']
+    trigger: Literal['tool_call_budget_exceeded', 'context_budget_exceeded', 'delegated_subtask_timeout', 'specialist_runtime_budget_pause', 'provider_overloaded']
+    detail: Optional[NoteText] = Field(default=None)
+
+
+class TaskResultBodyOutcomeYielded(WireModel):
+    state: Literal['yielded']
+    reason: ShortText
+
+
+class TaskResultBodyOutcomeRejected(WireModel):
+    state: Literal['rejected']
+    reason: Literal['queue_full', 'not_allowed']
+    detail: Optional[NoteText] = Field(default=None)
+
+
+class TaskResultBody(WireModel):
+    "The final answer of a task, sent by its holder."
+
+    task_id: RecordId
+    sequence: Count
+    custody_token: CustodyToken
+    intent_version: Optional[Count] = Field(default=None)
+    steering_seen: Optional[RecordId] = Field(default=None)
+    assumptions: Optional[Annotated[list[Assumption], Field(max_length=20)]] = Field(default=None)
+    summary: Optional[ShortText] = Field(default=None)
+    outcome: Annotated[Union[TaskResultBodyOutcomeCompleted, TaskResultBodyOutcomePartial, TaskResultBodyOutcomeFailed, TaskResultBodyOutcomeCancelled, TaskResultBodyOutcomePaused, TaskResultBodyOutcomeYielded, TaskResultBodyOutcomeRejected], Field(discriminator='state')]
+
+
+class TaskSteerBodyActionHold(WireModel):
+    type: Literal['hold']
+
+
+class TaskSteerBodyActionGuidance(WireModel):
+    type: Literal['guidance']
+    source: Literal['lead', 'person_as_is', 'person_after_timeout']
+    text: LongText
+    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+    replied_message: Optional[RepliedMessage] = Field(default=None)
+
+
+class TaskSteerBodyActionRelease(WireModel):
+    type: Literal['release']
+
+
+class TaskSteerBody(WireModel):
+    "Steering for the holder of one named task."
+
+    task_id: RecordId
+    steer_id: RecordId
+    person_steering_id: Optional[RecordId] = Field(default=None)
+    action: Annotated[Union[TaskSteerBodyActionHold, TaskSteerBodyActionGuidance, TaskSteerBodyActionRelease], Field(discriminator='type')]
+
+
 class TaskStopBody(WireModel):
     "Stop one task. The holder stops at its next safe point, never in the middle of an outward action."
 
@@ -182,7 +1035,101 @@ class TaskStopBody(WireModel):
     cascade_to_subtasks: bool
 
 
+class ToolSetupRequestBodySetupSignIn(WireModel):
+    type: Literal['sign_in']
+    owner: Literal['person']
+
+
+class ToolSetupRequestBodySetupAccountLink(WireModel):
+    type: Literal['account_link']
+    owner: Literal['team', 'person']
+
+
+class ToolSetupRequestBodySetupTeamSignInApp(WireModel):
+    type: Literal['team_sign_in_app']
+    owner: Literal['team']
+
+
+class ToolSetupRequestBodySetupExternalStep(WireModel):
+    type: Literal['external_step']
+    owner: Literal['team', 'person']
+    step_id: Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,39}$')]
+
+
+class ToolSetupRequestBody(WireModel):
+    "Ask the gateway to have a person or administrator set a tool up."
+
+    setup_request_id: RecordId
+    task_id: RecordId
+    delivery_ref: Optional[DeliveryRef] = Field(default=None)
+    tool_id: ToolId
+    reason: NoteText
+    setup: Annotated[Union[ToolSetupRequestBodySetupSignIn, ToolSetupRequestBodySetupAccountLink, ToolSetupRequestBodySetupTeamSignInApp, ToolSetupRequestBodySetupExternalStep], Field(discriminator='type')]
+
+
+class ToolSetupResultBodySetupSignIn(WireModel):
+    type: Literal['sign_in']
+    owner: Literal['person']
+
+
+class ToolSetupResultBodySetupAccountLink(WireModel):
+    type: Literal['account_link']
+    owner: Literal['team', 'person']
+
+
+class ToolSetupResultBodySetupTeamSignInApp(WireModel):
+    type: Literal['team_sign_in_app']
+    owner: Literal['team']
+
+
+class ToolSetupResultBodySetupExternalStep(WireModel):
+    type: Literal['external_step']
+    owner: Literal['team', 'person']
+    step_id: Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,39}$')]
+
+
+class ToolSetupResultBody(WireModel):
+    "What became of a tool setup."
+
+    setup_request_id: RecordId
+    task_id: RecordId
+    status: Literal['completed', 'declined', 'expired', 'unavailable']
+    tool_id: ToolId
+    setup: Annotated[Union[ToolSetupResultBodySetupSignIn, ToolSetupResultBodySetupAccountLink, ToolSetupResultBodySetupTeamSignInApp, ToolSetupResultBodySetupExternalStep], Field(discriminator='type')]
+    source: Literal['task_request', 'person_action']
+    attempt: Annotated[int, Field(ge=0, le=3)]
+    account_label: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    needs_administrator: bool
+    reason_code: Optional[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]] = Field(default=None)
+    message: Optional[NoteText] = Field(default=None)
+    link_id: Optional[RecordId] = Field(default=None)
+    broker_session_id: Optional[RecordId] = Field(default=None)
+
+
+AccessDecisionBodyAdapter = TypeAdapter(AccessDecisionBody)
+AccessRequestBodyAdapter = TypeAdapter(AccessRequestBody)
+AccessResolvedBodyAdapter = TypeAdapter(AccessResolvedBody)
 AgentPauseBodyAdapter = TypeAdapter(AgentPauseBody)
 AgentPauseReplyAdapter = TypeAdapter(Annotated[Union[AgentPauseReplyOk, AgentPauseReplyError], Field(discriminator='outcome')])
+CredentialFormRequestBodyAdapter = TypeAdapter(CredentialFormRequestBody)
+CredentialFormResultBodyAdapter = TypeAdapter(CredentialFormResultBody)
+CustodyMovedBodyAdapter = TypeAdapter(CustodyMovedBody)
+DeliveryReceiptBodyAdapter = TypeAdapter(DeliveryReceiptBody)
+DeliveryRefusedBodyAdapter = TypeAdapter(DeliveryRefusedBody)
+LedgerFactBodyAdapter = TypeAdapter(LedgerFactBody)
+PersonNotifyBodyAdapter = TypeAdapter(PersonNotifyBody)
+QuestionClosedBodyAdapter = TypeAdapter(QuestionClosedBody)
 SkillsChangedBodyAdapter = TypeAdapter(Annotated[Union[SkillsChangedBodyInstall, SkillsChangedBodyUninstall], Field(discriminator='operation')])
+TaskAccountBodyAdapter = TypeAdapter(TaskAccountBody)
+TaskAnswerBodyAdapter = TypeAdapter(TaskAnswerBody)
+TaskClaimedBodyAdapter = TypeAdapter(TaskClaimedBody)
+TaskHandbackBodyAdapter = TypeAdapter(TaskHandbackBody)
+TaskProgressBodyAdapter = TypeAdapter(TaskProgressBody)
+TaskQuestionBodyAdapter = TypeAdapter(TaskQuestionBody)
+TaskReportBodyAdapter = TypeAdapter(TaskReportBody)
+TaskRequestBodyAdapter = TypeAdapter(TaskRequestBody)
+TaskResultBodyAdapter = TypeAdapter(TaskResultBody)
+TaskSteerBodyAdapter = TypeAdapter(TaskSteerBody)
 TaskStopBodyAdapter = TypeAdapter(TaskStopBody)
+ToolSetupRequestBodyAdapter = TypeAdapter(ToolSetupRequestBody)
+ToolSetupResultBodyAdapter = TypeAdapter(ToolSetupResultBody)

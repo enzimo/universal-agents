@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/delivery.receipt.schema.json",
+  "title": "delivery.receipt body",
+  "description": "The gateway delivered an answer or notice to a person.",
+  "type": "object",
+  "properties": {
+    "receipt_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "delivered_message_id": {
+      "$ref": "../common.schema.json#/$defs/message_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "conversation_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "schedule_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "via": {
+      "type": "string",
+      "enum": [
+        "immediate",
+        "digest"
+      ]
+    }
+  },
+  "required": [
+    "receipt_id",
+    "delivered_message_id",
+    "task_id",
+    "conversation_id",
+    "via"
+  ],
+  "additionalProperties": false
+}

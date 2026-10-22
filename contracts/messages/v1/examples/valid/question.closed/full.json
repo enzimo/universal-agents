@@ -1,0 +1,29 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "question.closed",
+  "message_id": "01928f3a-7b2c-7123-8000-000000000123",
+  "idempotency_key": "question_closed:q_2",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.gateway-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "question_id": "q_2",
+    "task_id": "task_root_1",
+    "reason": "withdrawn_by_guidance"
+  },
+  "body_digest": "hocbQCsOyMzXVXnPDZQzBkR34b9CaHqgZua3E3aBW5E",
+  "signature": "LnIVbSwkbpNEY3ct1oiJDUgStx3F_dpYKagZH0v6_5rW6EuvygDdrxfXLgp1mUCfrGrFLOLf4dsZA6MMHBbpCQ"
+}

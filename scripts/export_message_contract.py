@@ -41,7 +41,7 @@ SCHEMA_BASE = "https://universal-agents.local/contracts/messages/v1/schemas/"
 
 CLASSES = {"durable", "request_reply", "event"}
 AUTHORITY = {"none", "optional", "required"}
-ROUTING = {"requester", "holder", "team", "person", "named", "broadcast"}
+ROUTING = {"requester", "holder", "team", "person", "named", "broadcast", "sender"}
 EDGES = {"up", "down", "person", "sideways", "out", "none"}
 WAKES = {"never", "always", "next_turn"}
 RENDERING = {"none", "sender_line", "summary", "full"}
@@ -49,9 +49,9 @@ PRIORITIES = {"low", "normal", "high"}
 ENTRY_FIELDS = {
     "description", "class", "address", "body", "reply", "senders", "receivers", "expiry_seconds",
     "authority", "idempotency", "admission", "routing", "topology_edge", "ledger", "wakes_model",
-    "rendering", "covered_change",
+    "rendering", "covered_change", "copy_to",
 }
-REQUIRED_ENTRY_FIELDS = ENTRY_FIELDS - {"reply", "covered_change"}
+REQUIRED_ENTRY_FIELDS = ENTRY_FIELDS - {"reply", "covered_change", "copy_to"}
 
 # The schema subset (contracts/messages/v1/README.md).
 ALLOWED_KEYWORDS = {
@@ -170,12 +170,13 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         checks = {
             "class": (entry["class"], CLASSES), "authority": (entry["authority"], AUTHORITY),
             "routing": (entry["routing"], ROUTING), "topology_edge": (entry["topology_edge"], EDGES),
-            "wakes_model": (entry["wakes_model"], WAKES), "rendering": (entry["rendering"], RENDERING),
+            "rendering": (entry["rendering"], RENDERING),
             "admission.priority": (entry["admission"].get("priority"), PRIORITIES),
         }
         for field_name, (value, allowed) in checks.items():
             if value not in allowed:
                 raise ContractError(f"{where}: {field_name} {value!r} is not one of {sorted(allowed)}")
+        check_wakes(where, entry["wakes_model"])
         if set(entry["admission"]) != {"execution_slot", "accepted_while_paused", "priority"}:
             raise ContractError(f"{where}: admission states execution_slot, accepted_while_paused and priority")
         if not set(entry["senders"]) <= roles or not set(entry["receivers"]) <= roles:
@@ -188,9 +189,33 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
             raise ContractError(f"{where}: request/reply kinds, and only they, have a reply")
         if "reply" in entry and entry["reply"]["body"] not in schemas:
             raise ContractError(f"{where}: reply schema {entry['reply']['body']} is missing")
-        if not any(address_matches(entry["address"], template, name)
-                   for template in class_addresses(transport, entry["class"])):
-            raise ContractError(f"{where}: address {entry['address']!r} fits no {entry['class']} address")
+        for address in entry_addresses(entry):
+            if not any(address_matches(address, template, name)
+                       for template in class_addresses(transport, entry["class"])):
+                raise ContractError(f"{where}: address {address!r} fits no {entry['class']} address")
+        if entry.get("copy_to") and entry["class"] != "durable":
+            raise ContractError(f"{where}: only durable kinds are copied to other inboxes")
+
+
+def entry_addresses(entry: dict[str, Any]) -> list[str]:
+    """Every address a kind is published to: its own, then the copies (``copy_to``)."""
+
+    own = entry["address"] if isinstance(entry["address"], list) else [entry["address"]]
+    return list(own) + list(entry.get("copy_to", []))
+
+
+def check_wakes(where: str, wakes: Any) -> None:
+    """``wakes_model`` is one value, or one value per alternative of a body property."""
+
+    if isinstance(wakes, str):
+        if wakes not in WAKES:
+            raise ContractError(f"{where}: wakes_model {wakes!r} is not one of {sorted(WAKES)}")
+        return
+    if not isinstance(wakes, dict) or set(wakes) != {"by", "values"} or not wakes["values"]:
+        raise ContractError(f"{where}: wakes_model is a value or {{by, values}}")
+    for variant, value in wakes["values"].items():
+        if value not in WAKES:
+            raise ContractError(f"{where}: wakes_model for {variant!r} is not one of {sorted(WAKES)}")
 
 
 def class_addresses(transport: dict[str, Any], delivery_class: str) -> list[str]:
@@ -218,11 +243,11 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
     for role in registry["host_roles"]:
         publish, subscribe = set(), {f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"}
         for name, entry in registry["kinds"].items():
-            address = subject_pattern(entry["address"])
-            if role in entry["senders"]:
-                publish.add(prefix + address)
-            if role in entry["receivers"] and entry["class"] != "durable":
-                subscribe.add("ua.v1.{team}.*." + address)
+            for address in map(subject_pattern, entry_addresses(entry)):
+                if role in entry["senders"]:
+                    publish.add(prefix + address)
+                if role in entry["receivers"] and entry["class"] != "durable":
+                    subscribe.add("ua.v1.{team}.*." + address)
             if role in entry["receivers"] and entry["class"] == "request_reply":
                 publish.add("_INBOX.*.>")
         result[role] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
@@ -233,10 +258,12 @@ def asyncapi(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, A
     channels, operations, messages = {}, {}, {}
     for name, entry in sorted(registry["kinds"].items()):
         key = name.replace(".", "_")
-        channels[key] = {
-            "address": transport["subject_prefix"] + "." + entry["address"],
-            "messages": {key: {"$ref": f"#/components/messages/{key}"}},
-        }
+        for index, address in enumerate(entry_addresses(entry)):
+            channel = key if index == 0 else f"{key}_{index}"
+            channels[channel] = {
+                "address": transport["subject_prefix"] + "." + address,
+                "messages": {key: {"$ref": f"#/components/messages/{key}"}},
+            }
         messages[key] = {
             "name": name,
             "summary": entry["description"],
@@ -429,7 +456,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) 
             f"    {name!r}: KindSpec(\n"
             f"        name={name!r},\n"
             f"        delivery_class={entry['class']!r},\n"
-            f"        address={entry['address']!r},\n"
+            f"        addresses={tuple(entry_addresses(entry))!r},\n"
             f"        body_model=models.{class_name(name)}BodyAdapter,\n"
             f"        reply_model={reply_text},\n"
             f"        reply_errors={tuple(entry.get('reply', {}).get('errors', ()))!r},\n"

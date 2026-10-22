@@ -1,0 +1,49 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "credential.form.result",
+  "message_id": "01928f3a-7b2c-711e-8000-00000000011e",
+  "idempotency_key": "secure_result:credential_form:form_1",
+  "issuer": {
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.gateway-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "form_id": "form_1",
+    "task_id": "task_root_1",
+    "status": "credential_stored",
+    "continue_task": true,
+    "credential_key": "example_analytics.api_key",
+    "service_name": "Example Analytics",
+    "display_name": "Example Analytics key",
+    "broker_session_id": "bs_1",
+    "flow": "collect",
+    "message": "Stored.",
+    "error": "none",
+    "credential": {
+      "fields": [
+        {
+          "name": "api_key",
+          "kind": "api_key",
+          "visibility": "secret",
+          "value_source": "user_input",
+          "secret": true
+        }
+      ],
+      "purpose": "Read last quarter's usage figures."
+    }
+  },
+  "body_digest": "LRSJZqMpSST2jZ1JXqvpIHfIpuj0lvcaNElqzK10M-0",
+  "signature": "xfjgvwsSYUAPZwk5Fb9YeeMJ2xPMLZ06v5d5CZviwKOttx9Bs4bvY3yTSofA2tVTNldbePK9yiO7t5lZyWemDg"
+}
