@@ -148,7 +148,9 @@ kinds:
     receivers: [lead_host, worker_host, edge_adapter, team_services]
     expiry_seconds: 604800
     authority: optional
-    idempotency: task_request:<task_id>
+    # A returned task keeps its task id but gets a new dispatch frame. Retries
+    # of that dispatch reuse the saved frame, including its message id.
+    idempotency: task_request:<task_id>:<message_id>
     admission: {execution_slot: true, accepted_while_paused: false, priority: normal}
     routing: named
     topology_edge: down

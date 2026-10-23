@@ -9,8 +9,13 @@ re-sign to the same bytes.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
+import logging
+import os
+import shutil
+import socket
 from datetime import datetime
 from pathlib import Path
 
@@ -101,6 +106,13 @@ def invalid_examples() -> list[Path]:
     return sorted((EXAMPLES / "invalid").glob("*.json"))
 
 
+def task_request_key(frame: dict) -> str:
+    """Resolve the registry's frame and body placeholders for a dispatch."""
+
+    rule = REGISTRY["kinds"]["task.request"]["idempotency"]
+    return rule.replace("<task_id>", frame["body"]["task_id"]).replace("<message_id>", frame["message_id"])
+
+
 # -- generated files and the schema subset -----------------------------------------------------------
 
 def test_generated_files_are_current() -> None:
@@ -152,6 +164,112 @@ def test_permissions_publish_only_under_the_senders_own_id() -> None:
                     assert "ua.v1.{team}.{self}." + EXPORT.subject_pattern(address) in document["publish"]
 
 
+def test_asyncapi_describes_both_operations_for_every_address() -> None:
+    document = json.loads((CONTRACT / "generated" / "asyncapi.json").read_text(encoding="utf-8"))
+    operations = document["operations"]
+    for channel, spec in document["channels"].items():
+        actions = {
+            operation["action"]
+            for operation in operations.values()
+            if operation["channel"]["$ref"] == f"#/channels/{channel}"
+        }
+        assert actions == {"send", "receive"}, spec["address"]
+    for name, entry in REGISTRY["kinds"].items():
+        if "reply" not in entry:
+            continue
+        message = name.replace(".", "_")
+        for operation in operations.values():
+            channel = document["channels"][operation["channel"]["$ref"].rsplit("/", 1)[1]]
+            if operation["action"] == "send" and message in channel["messages"]:
+                assert operation["reply"]["messages"] == [{"$ref": f"#/components/messages/{message}_reply"}]
+
+
+def test_reassignment_preserves_the_task_but_changes_the_dispatch_key() -> None:
+    original = json.loads((EXAMPLES / "valid" / "task.request" / "to-pool.json").read_text(encoding="utf-8"))
+    replacement = json.loads((EXAMPLES / "valid" / "task.request" / "reassignment.json").read_text(encoding="utf-8"))
+    assert replacement["body"]["task_id"] == original["body"]["task_id"]
+    assert task_request_key(replacement) != task_request_key(original)
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.live
+@pytest.mark.nats
+@pytest.mark.skipif(shutil.which("nats-server") is None, reason="nats-server binary is not installed")
+async def test_jetstream_delivers_reassignment_and_deduplicates_its_retry(tmp_path: Path, monkeypatch) -> None:
+    """A handback cannot lose its replacement dispatch to the first send's replay record."""
+
+    import nats
+    from nats.js.api import AckPolicy, ConsumerConfig, RetentionPolicy, StorageType, StreamConfig
+
+    import docker.nats_service as nats_service
+
+    with socket.socket() as client_port, socket.socket() as monitor_port:
+        client_port.bind(("127.0.0.1", 0))
+        monitor_port.bind(("127.0.0.1", 0))
+        port = client_port.getsockname()[1]
+        monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", port)
+        monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", monitor_port.getsockname()[1])
+    env = {"PATH": os.environ["PATH"]}
+    process = nats_service.start_local_nats(
+        env=env,
+        logger=logging.getLogger(__name__),
+        cwd=tmp_path,
+        service_root=tmp_path / "nats",
+    )
+    client = None
+    try:
+        async with asyncio.timeout(10):
+            client = await nats.connect(
+                f"nats://127.0.0.1:{port}",
+                user=env["NATS_USER"],
+                password=env["NATS_PASSWORD"],
+                allow_reconnect=False,
+            )
+            js = client.jetstream()
+            transport = json.loads((CONTRACT / "generated" / "transport.json").read_text(encoding="utf-8"))
+            stream = transport["streams"]["UA1_WORK"]
+            await js.add_stream(config=StreamConfig(
+                name="UA1_WORK",
+                subjects=stream["subjects"],
+                retention=RetentionPolicy.WORK_QUEUE,
+                storage=StorageType.FILE,
+                duplicate_window=stream["duplicate_window_seconds"],
+            ))
+            original = json.loads((EXAMPLES / "valid" / "task.request" / "to-pool.json").read_text(encoding="utf-8"))
+            replacement = json.loads((EXAMPLES / "valid" / "task.request" / "reassignment.json").read_text(encoding="utf-8"))
+            subscription = await js.pull_subscribe(
+                original["subject"], durable="pool", config=ConsumerConfig(ack_policy=AckPolicy.EXPLICIT),
+            )
+
+            async def publish(frame):
+                return await js.publish(
+                    frame["subject"], canonical.canonical_bytes(frame),
+                    headers={"Nats-Msg-Id": task_request_key(frame)},
+                )
+
+            first = await publish(original)
+            assert not first.duplicate
+            admitted = (await subscription.fetch(1, timeout=2))[0]
+            await admitted.ack_sync()
+
+            second = await publish(replacement)
+            assert not second.duplicate
+            assert second.seq > first.seq
+            retry = await publish(replacement)
+            assert retry.duplicate
+            assert retry.seq == second.seq
+            received = (await subscription.fetch(1, timeout=2))[0]
+            assert canonical.parse(received.data) == replacement
+            await received.ack_sync()
+            assert (await js.stream_info("UA1_WORK")).state.messages == 0
+    finally:
+        if client is not None:
+            await client.close()
+        process.terminate()
+        process.wait(timeout=10)
+
+
 # -- canonical form ---------------------------------------------------------------------------------
 
 VECTORS = json.loads((CONTRACT / "signing-vectors" / "vectors.json").read_text(encoding="utf-8"))
@@ -201,6 +319,8 @@ def test_valid_examples_are_accepted(path: Path) -> None:
         assert set(dumped) < set(document["body"]), "a newer minor's unknown fields were not dropped"
     else:
         assert dumped == document["body"], "the body did not survive a round trip"
+    if document["kind"] == "task.request":
+        assert document["idempotency_key"] == task_request_key(document)
 
 
 @pytest.mark.parametrize("path", invalid_examples(), ids=lambda path: path.stem)

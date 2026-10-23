@@ -258,23 +258,24 @@ def asyncapi(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, A
     channels, operations, messages = {}, {}, {}
     for name, entry in sorted(registry["kinds"].items()):
         key = name.replace(".", "_")
+        messages[key] = {
+            "name": name,
+            "summary": entry["description"],
+            "payload": {"$ref": f"../schemas/{entry['body']}"},
+        }
+        if "reply" in entry:
+            reply_key = f"{key}_reply"
+            messages[reply_key] = {"name": f"{name}.reply", "payload": {"$ref": f"../schemas/{entry['reply']['body']}"}}
         for index, address in enumerate(entry_addresses(entry)):
             channel = key if index == 0 else f"{key}_{index}"
             channels[channel] = {
                 "address": transport["subject_prefix"] + "." + address,
                 "messages": {key: {"$ref": f"#/components/messages/{key}"}},
             }
-        messages[key] = {
-            "name": name,
-            "summary": entry["description"],
-            "payload": {"$ref": f"../schemas/{entry['body']}"},
-        }
-        operations[f"send_{key}"] = {"action": "send", "channel": {"$ref": f"#/channels/{key}"}}
-        operations[f"receive_{key}"] = {"action": "receive", "channel": {"$ref": f"#/channels/{key}"}}
-        if "reply" in entry:
-            reply_key = f"{key}_reply"
-            messages[reply_key] = {"name": f"{name}.reply", "payload": {"$ref": f"../schemas/{entry['reply']['body']}"}}
-            operations[f"send_{key}"]["reply"] = {"messages": [{"$ref": f"#/components/messages/{reply_key}"}]}
+            operations[f"send_{channel}"] = {"action": "send", "channel": {"$ref": f"#/channels/{channel}"}}
+            operations[f"receive_{channel}"] = {"action": "receive", "channel": {"$ref": f"#/channels/{channel}"}}
+            if "reply" in entry:
+                operations[f"send_{channel}"]["reply"] = {"messages": [{"$ref": f"#/components/messages/{reply_key}"}]}
     return {
         "asyncapi": "3.1.0",
         "info": {"title": "Universal Agents messages", "version": registry["protocol"]},

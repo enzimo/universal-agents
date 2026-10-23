@@ -35,6 +35,26 @@ python scripts/export_message_contract.py
 `--check` regenerates in memory and fails on any difference, and on any file in a generated
 folder that the script did not write. `tests/test_message_contract.py` runs it.
 
+The AsyncAPI document defines send and receive operations for every permitted address,
+including pool destinations and durable copies. A client must be able to discover the
+same delivery choices in AsyncAPI as in the registry.
+
+## Task dispatch and retries
+
+A task id names the work; a frame's `message_id` names one dispatch of it. A new dispatch,
+including reassignment after a handback, gets a new `message_id` even when the task id stays
+the same. Its key is `task_request:<task_id>:<message_id>`. This keeps the replacement from
+being discarded as a duplicate of the first dispatch.
+
+The sender saves the signed frame before publishing and retries that saved frame unchanged.
+Retries keep the same message id and idempotency key so they cannot enqueue the same dispatch
+twice. The task body and task id do not change.
+
+Verification combines schema, signing and generated-file tests with a live delivery test in
+`tests/test_message_contract.py`. The test marked `live` and `nats` starts an isolated,
+authenticated server from `nats-server` on `PATH`. It checks that an acknowledged task can
+be dispatched again and that retrying its replacement does not create another queued task.
+
 ## Schema subset
 
 Schemas use only what every implementation reads the same way. `tests/test_message_contract.py`

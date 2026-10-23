@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.request",
   "message_id": "01928f3a-7b2c-7102-8000-000000000102",
-  "idempotency_key": "task_request:task_sub_2",
+  "idempotency_key": "task_request:task_sub_2:01928f3a-7b2c-7102-8000-000000000102",
   "issuer": {
     "team": "team_example",
     "runtime": "lead-host-1",
@@ -30,5 +30,5 @@
     "instructions": "Find the three largest invoices."
   },
   "body_digest": "ygtS-U5oy6ENBUSZU7avbXfb74FFcz6lrIiGKUjXlcE",
-  "signature": "lCRRxEaafRZoVuxaps3gAoiHEUnRkM_xd9tMvaI7bJGhp_RN8Bp1OoEWTNffL8aUKlEvzdLqCjbtPmcxrjYwBg"
+  "signature": "aXuBAU9KLV0coJ9E1CLN-HYqz3dxeNNPkIuPlJfOftKV3tWFmGkfDNPBrl-eJ6WdJRId8ZiM2S8jMjp1-tMcDg"
 }

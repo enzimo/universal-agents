@@ -617,7 +617,7 @@
       ],
       "description": "Give a task to an agent or a pool.",
       "expiry_seconds": 604800,
-      "idempotency": "task_request:<task_id>",
+      "idempotency": "task_request:<task_id>:<message_id>",
       "ledger": "task_held",
       "receivers": [
         "lead_host",

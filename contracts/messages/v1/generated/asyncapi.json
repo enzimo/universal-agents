@@ -534,6 +534,18 @@
         "$ref": "#/channels/delivery_refused"
       }
     },
+    "receive_delivery_refused_1": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/delivery_refused_1"
+      }
+    },
+    "receive_delivery_refused_2": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/delivery_refused_2"
+      }
+    },
     "receive_ledger_fact": {
       "action": "receive",
       "channel": {
@@ -576,10 +588,22 @@
         "$ref": "#/channels/task_claimed"
       }
     },
+    "receive_task_claimed_1": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_claimed_1"
+      }
+    },
     "receive_task_handback": {
       "action": "receive",
       "channel": {
         "$ref": "#/channels/task_handback"
+      }
+    },
+    "receive_task_handback_1": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_handback_1"
       }
     },
     "receive_task_progress": {
@@ -594,6 +618,12 @@
         "$ref": "#/channels/task_question"
       }
     },
+    "receive_task_question_1": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_question_1"
+      }
+    },
     "receive_task_report": {
       "action": "receive",
       "channel": {
@@ -606,10 +636,34 @@
         "$ref": "#/channels/task_request"
       }
     },
+    "receive_task_request_1": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_request_1"
+      }
+    },
+    "receive_task_request_2": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_request_2"
+      }
+    },
     "receive_task_result": {
       "action": "receive",
       "channel": {
         "$ref": "#/channels/task_result"
+      }
+    },
+    "receive_task_result_1": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_result_1"
+      }
+    },
+    "receive_task_result_2": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_result_2"
       }
     },
     "receive_task_steer": {
@@ -697,6 +751,18 @@
         "$ref": "#/channels/delivery_refused"
       }
     },
+    "send_delivery_refused_1": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/delivery_refused_1"
+      }
+    },
+    "send_delivery_refused_2": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/delivery_refused_2"
+      }
+    },
     "send_ledger_fact": {
       "action": "send",
       "channel": {
@@ -739,10 +805,22 @@
         "$ref": "#/channels/task_claimed"
       }
     },
+    "send_task_claimed_1": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_claimed_1"
+      }
+    },
     "send_task_handback": {
       "action": "send",
       "channel": {
         "$ref": "#/channels/task_handback"
+      }
+    },
+    "send_task_handback_1": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_handback_1"
       }
     },
     "send_task_progress": {
@@ -757,6 +835,12 @@
         "$ref": "#/channels/task_question"
       }
     },
+    "send_task_question_1": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_question_1"
+      }
+    },
     "send_task_report": {
       "action": "send",
       "channel": {
@@ -769,10 +853,34 @@
         "$ref": "#/channels/task_request"
       }
     },
+    "send_task_request_1": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_request_1"
+      }
+    },
+    "send_task_request_2": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_request_2"
+      }
+    },
     "send_task_result": {
       "action": "send",
       "channel": {
         "$ref": "#/channels/task_result"
+      }
+    },
+    "send_task_result_1": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_result_1"
+      }
+    },
+    "send_task_result_2": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_result_2"
       }
     },
     "send_task_steer": {
