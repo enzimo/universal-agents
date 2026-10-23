@@ -844,6 +844,7 @@
       "reply": {
         "body": "bodies/knowledge.add_note.reply.schema.json",
         "errors": [
+          "pending_review",
           "not_found",
           "not_allowed",
           "feature_off",
@@ -900,6 +901,7 @@
       "reply": {
         "body": "bodies/knowledge.archive.reply.schema.json",
         "errors": [
+          "pending_review",
           "not_found",
           "not_allowed",
           "feature_off",
@@ -3570,7 +3572,7 @@
       "class": "request_reply",
       "description": "The person's guidance for a running request; stored before it is accepted.",
       "expiry_seconds": 30,
-      "idempotency": "tasks.steer:<request_id>",
+      "idempotency": "tasks.steer:<steer_id>",
       "ledger": "none",
       "receivers": [
         "team_services"

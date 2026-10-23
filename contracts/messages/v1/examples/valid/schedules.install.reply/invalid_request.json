@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.install.reply",
   "message_id": "01928f3a-7b2c-743f-8000-00000000043f",
-  "idempotency_key": "schedules.install:example_1087:reply",
+  "idempotency_key": "schedules.install:request_id_1:reply",
   "issuer": {
     "team": "team_example",
     "runtime": "team-services-1",
@@ -25,5 +25,5 @@
   },
   "causation_id": "01928f3a-7b2c-743d-8000-00000000043d",
   "body_digest": "Wb7pwT_XEZMJ0bZaiqTqRGC9zbnVYfR8Cpz0le0MVnU",
-  "signature": "Yrn3Ma1JEOlRK0jmrq5zRFWqU6c2UB1m-CisRRHmd0bwnJ0gQPC3qnA3NnB8_DAXSwqsy015vz0NShkWh9dUBw"
+  "signature": "hQGQh4h2LMbse7zxVUBuEFiacvBHMF6d5NTNSIWNQ3Bqi1XZLWK-M1-oYe981WKZfnAESfl1pRAvLrRvATK8BA"
 }

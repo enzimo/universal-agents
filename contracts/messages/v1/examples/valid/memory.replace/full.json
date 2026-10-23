@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "memory.replace",
   "message_id": "01928f3a-7b2c-7452-8000-000000000452",
-  "idempotency_key": "memory.replace:example_1106",
+  "idempotency_key": "memory.replace:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -32,5 +32,5 @@
     "expires": "2026-10-22T04:30:00.000Z"
   },
   "body_digest": "LRNhvs0O98zjaHmDEeZNxix4LAzd9cRuZIL3PaNwV7g",
-  "signature": "HNyasGKPIc-w_4BMFjqKzmJuxIOzpyF7KYlxkfcsvUyQZprxwWJ6TPWY_3HOQn1fUw7R1Z5xe4BnmlLsJ446AA"
+  "signature": "nQLK0sLmtXxWzBmO5aDgGpdgh6LAXMzpMQ8_1CQI_gaPhiyseTDn3ehG0JiFDEwSyGQqlIID-zffsy219w_RDA"
 }

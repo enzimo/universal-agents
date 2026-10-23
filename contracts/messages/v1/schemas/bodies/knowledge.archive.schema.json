@@ -22,13 +22,17 @@
     },
     "seen_version": {
       "$ref": "../common.schema.json#/$defs/record_version"
+    },
+    "reason": {
+      "$ref": "../common.schema.json#/$defs/short_text"
     }
   },
   "required": [
     "request_id",
     "space",
     "page",
-    "seen_version"
+    "seen_version",
+    "reason"
   ],
   "additionalProperties": false
 }

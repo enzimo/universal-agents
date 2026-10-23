@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "objectives.stop",
   "message_id": "01928f3a-7b2c-741c-8000-00000000041c",
-  "idempotency_key": "objectives.stop:example_1052",
+  "idempotency_key": "objectives.stop:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -26,5 +26,5 @@
     "reason": "Example reason"
   },
   "body_digest": "PlFs1kjif6fl-bOlTwpb1kM-cJkvohI_O6at30iyjec",
-  "signature": "zn68SacOZbM4iJWjBYCR7q8zvZVDH7j01hMc7EyLk8CckW0rvjaafxKXhBrv15TNl2USNIkRvE3d_QPdGJnlBQ"
+  "signature": "S0S17hg5IlhJfoyOcu8aLH6NobR7_wUOH-h8FnOczF5cTdBK5kvO1qu6i_kDYwpXGFjAWV_78EKlXyjpQrGzDg"
 }

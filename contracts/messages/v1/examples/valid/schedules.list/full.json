@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.list",
   "message_id": "01928f3a-7b2c-742e-8000-00000000042e",
-  "idempotency_key": "schedules.list:example_1070",
+  "idempotency_key": "schedules.list:01928f3a-7b2c-742e-8000-00000000042e",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -25,5 +25,5 @@
     "delivery_ref": "dref_1"
   },
   "body_digest": "86Aqgu_PADN1ARY8s2Pp8RYUnYMsV4mXVHNGoVOK2-8",
-  "signature": "8A3d_WPM0glLsOVkNysk8NUJNAdBXSqObYgmXPS13g1t5ks617ba18pWSx8s7vcknlR__z5p4VIMGUYmKFaQAg"
+  "signature": "lSCsDGkeuvntUMXzgbml_lAwlsK0OR4jX_OwTgq_i22dXJSJV3MWYSuAfCSxd1-LVRRpJxy3GD6j91DDVunDBA"
 }

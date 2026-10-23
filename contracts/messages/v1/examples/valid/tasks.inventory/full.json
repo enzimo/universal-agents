@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "tasks.inventory",
   "message_id": "01928f3a-7b2c-7401-8000-000000000401",
-  "idempotency_key": "tasks.inventory:example_1025",
+  "idempotency_key": "tasks.inventory:01928f3a-7b2c-7401-8000-000000000401",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -21,5 +21,5 @@
   "algorithm": "ed25519",
   "body": {},
   "body_digest": "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o",
-  "signature": "xwlB1M_CsOQZF6HQPaduYSlks7QXzDErh4HnBoOWUNRqvMNhT03CnNyGDiJ7nNKrz2jOSuV5wuLkt60NMLxzCA"
+  "signature": "BA6Nz-JDFI9Fh4_pWAUUeIsko_7kmERX1LqHK0imDb4TJncd7jlxzZwg4eupKhBjvQ7hA_teLxJmG0stV8BaCw"
 }

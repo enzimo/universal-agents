@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "steering.decide",
   "message_id": "01928f3a-7b2c-74ae-8000-0000000004ae",
-  "idempotency_key": "steering.decide:example_1198",
+  "idempotency_key": "steering.decide:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "lead-host-1",
@@ -53,5 +53,5 @@
     }
   },
   "body_digest": "EkMgA4g-i7j_xs_XHPuFdANv2nc3uU-5b-_krXXyHuI",
-  "signature": "d7vEGginCLRC3Gh9KtvtawkTYLQL5Jr7e_ic6KeSiP39d2H-IZcyfv14gGUkzV-lyMord5m5zWqoARAi4UOLBw"
+  "signature": "r8Zgb77_NQKul0EeHw2XKl6XiyeGE30EqVbi1WBwEIJw6v0A3INVwuy4Lhys72uLeSdUwX2op3DfBQoYpSDXDQ"
 }

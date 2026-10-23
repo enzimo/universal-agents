@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "tasks.cancel",
   "message_id": "01928f3a-7b2c-7404-8000-000000000404",
-  "idempotency_key": "tasks.cancel:example_1028",
+  "idempotency_key": "tasks.cancel:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -28,5 +28,5 @@
     }
   },
   "body_digest": "S-iy6A3tnuPMOJ3IJLeqzj0sAPJrJfLUZyfB1jEMqIA",
-  "signature": "rNJSD0rWyaJf9cDamvd-mbSu2bVRz1Gc32yEYgmO8I3ZecMxZrZv6RxyWuSa4bEwf-92iMNKTT5u0S9k7vyeDA"
+  "signature": "ujXGRVjftP3hySHUVBa2aU1Z_qwcZIA6jH7C70_fNlVH0Gp411Y-cKgX0Dpqb9V4Jkvb_iLq9D0mVOPXaBwvAQ"
 }

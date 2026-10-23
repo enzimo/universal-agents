@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.archive",
   "message_id": "01928f3a-7b2c-7473-8000-000000000473",
-  "idempotency_key": "knowledge.archive:example_1139",
+  "idempotency_key": "knowledge.archive:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -23,8 +23,9 @@
     "request_id": "request_id_1",
     "space": "team",
     "page": "Example page",
-    "seen_version": "v3"
+    "seen_version": "v3",
+    "reason": "These instructions have been replaced."
   },
-  "body_digest": "UH6s6pN5KCymyrbcleMxmd1Ui1owFGUli2zgHppi_Ew",
-  "signature": "qaSRm13k_Ll_ttqZGLc_UbHqadFoQhtKp6JxXceoftGSRg8OfUiN23EVlhtqy6hpBK8w104Ts_DcwAZPj7p9CQ"
+  "body_digest": "6aQ_CbAuOi-orCDjHHVsjJrddKftTckfqOb-3i9MpSI",
+  "signature": "BrBz-9kd4dt9nb0pRr62LW4MQRJmILMsfeRLlIDEgq1Apal-qfevpt6FgfB_gnku7OHqk1TF5lcN8cEhCAjyBg"
 }

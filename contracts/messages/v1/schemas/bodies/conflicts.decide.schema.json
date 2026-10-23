@@ -71,9 +71,14 @@
           "additionalProperties": false
         }
       ]
+    },
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id",
+      "description": "One decision command. Repeats keep this id; a new decision after a refusal gets a new id."
     }
   },
   "required": [
+    "request_id",
     "case_id",
     "question_id",
     "values_digest",

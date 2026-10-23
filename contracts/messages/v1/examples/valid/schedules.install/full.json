@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.install",
   "message_id": "01928f3a-7b2c-743d-8000-00000000043d",
-  "idempotency_key": "schedules.install:example_1085",
+  "idempotency_key": "schedules.install:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -78,5 +78,5 @@
     }
   },
   "body_digest": "OvdRIEr1iHnPSOV0Jx21emuO83kse3oontRasl6zMdU",
-  "signature": "GRd8bc9eLqJiPYTBWRXTW0kY3fVoxgpeR6RIXRMuPlPJ9SJrqKT6KGqXsiEEeaLiNCtiH1-x1EMlWWVLnN78Cg"
+  "signature": "S9YFkprR0gY9ghp4aBVwHkDAzGAuFA6k5iaJcn8IYHJyXCmatGs4b4Bl9GsaOlZeEeKgySuLZUWCjEfzKcvlCg"
 }

@@ -74,6 +74,8 @@ NOT_SECRET_VALUES: dict[str, str] = {
     "SECURE_TOOL_BROKER_CREDENTIAL_STATE_BACKEND_FALLBACK_TO_FILES": "broker storage setting",
     "SECURE_TOOL_BROKER_DEFAULT_CREDENTIAL_WRITE_SOURCE": "broker storage setting",
     "INSTALL_CREDENTIAL_CLIS": "Docker build switch",
+    # The Photon trust-store test hands its child process a throwaway TLS key's path.
+    "TEST_KEY": "path of a test-only TLS key file, not a secret value",
     # Resolved by the migration script itself (see OWN_FILE_RESOLVERS): it runs
     # inside the old Postgres image, which has no copy of the shared list.
     "POSTGRES_MIGRATION_DSN": "migration script resolves its own _FILE form",

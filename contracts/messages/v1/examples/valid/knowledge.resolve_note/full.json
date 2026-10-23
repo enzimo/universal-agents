@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.resolve_note",
   "message_id": "01928f3a-7b2c-748b-8000-00000000048b",
-  "idempotency_key": "knowledge.resolve_note:example_1163",
+  "idempotency_key": "knowledge.resolve_note:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "lead-host-1",
@@ -25,8 +25,9 @@
     "space": "team",
     "page": "Example page",
     "seen_version": "v3",
-    "note_id": "note_id_1"
+    "note_id": "note_id_1",
+    "merged": true
   },
-  "body_digest": "fzz_c9cRZKB8b3ERN1Klu7TkRx2Fkwjx-PPDWQwwFNo",
-  "signature": "YWFflDoposs_aKcP6ncm_aNLkE9Rp-nVer7MV1chcKGxJESzxeAv_VQGDxKoZjzV8426dXo6eT432MsyOnUCBA"
+  "body_digest": "51n1S0YCpX3kVIZhB7_d40v_e5ctphCUhTzDjxOWpfo",
+  "signature": "Of_I08uQAgy17ZV3ErDRg99SxnZOMroONgrYpS5_uA0lNJZXO4Ejp8eq3hHKEhUIZuaaVAso9A3jLdcAPg69DA"
 }

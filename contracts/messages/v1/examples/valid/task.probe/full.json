@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.probe",
   "message_id": "01928f3a-7b2c-74da-8000-0000000004da",
-  "idempotency_key": "task.probe:example_1242",
+  "idempotency_key": "task.probe:01928f3a-7b2c-74da-8000-0000000004da",
   "issuer": {
     "team": "team_example",
     "runtime": "lead-host-1",
@@ -25,5 +25,5 @@
     "custody_token": 3
   },
   "body_digest": "LKCzUQctTh7pG5oUIepeRgp2sK7R1WirnyztjDcyjX4",
-  "signature": "4asurTwR4ihksibNLlrXPdY5P5TxCeTXfWWW3V1WeydlmwFM--p_UPj_0mp7bBe0mdluX4I0uNbNYynqlxwOBA"
+  "signature": "M5GqYbNk2qfVhUVHBSueiKqyn9TQGsqS9iwryeju0kLu4gxa1LtSAQH1sWlbmIyg7iN0vy3jOCEdDT6lBIz-Dg"
 }

@@ -335,6 +335,45 @@ RecordVersion = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$
 ProgressState = Literal['abandoned', 'accepted', 'cancelled', 'completed', 'finalizing_plan', 'failed', 'in_progress', 'not_started', 'partial', 'paused', 'preparing', 'retrying', 'undefined', 'waiting']
 
 
+class TextContentInline(WireModel):
+    type: Literal['inline']
+    text: LongText
+
+
+class TextContentBlob(WireModel):
+    type: Literal['blob']
+    ref: BlobRef
+
+
+TextContent = Annotated[Union[TextContentInline, TextContentBlob], Field(discriminator='type')]
+
+
+class KnowledgeEditorAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
+
+
+class KnowledgeEditorPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeEditorSystem(WireModel):
+    kind: Literal['system']
+
+
+KnowledgeEditor = Annotated[Union[KnowledgeEditorAgent, KnowledgeEditorPerson, KnowledgeEditorSystem], Field(discriminator='kind')]
+
+
+class KnowledgeNote(WireModel):
+    "An open note whose id can be passed to knowledge.resolve_note."
+
+    note_id: RecordId
+    content: TextContent
+    created_at: Timestamp
+    created_by: KnowledgeEditor
+
+
 class Frame(WireModel):
     "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The body is checked against the schema its kind names in the registry."
 
@@ -605,6 +644,7 @@ class ConflictsDecideBody(WireModel):
     question_id: RecordId
     values_digest: Sha256Digest
     choice: Annotated[Union[ConflictsDecideBodyChoiceKeepCurrent, ConflictsDecideBodyChoiceUseThisChange, ConflictsDecideBodyChoiceRedoWithNote, ConflictsDecideBodyChoiceStopRequest], Field(discriminator='type')]
+    request_id: RecordId
 
 
 class ConflictsDecideReplyOk(WireModel):
@@ -1321,6 +1361,13 @@ class KnowledgeAddNoteReplyOk(WireModel):
     outcome: Literal['ok']
     page: KnowledgeAddNoteReplyOkPage
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    note: KnowledgeNote
+
+
+class KnowledgeAddNoteReplyPendingReview(WireModel):
+    outcome: Literal['pending_review']
+    contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Optional[ShortText] = Field(default=None)
 
 
 class KnowledgeAddNoteReplyNotFound(WireModel):
@@ -1440,6 +1487,7 @@ class KnowledgeArchiveBody(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     seen_version: RecordVersion
+    reason: ShortText
 
 
 class KnowledgeArchiveReplyOkPageUpdatedByAgent(WireModel):
@@ -1473,6 +1521,12 @@ class KnowledgeArchiveReplyOkPage(WireModel):
 class KnowledgeArchiveReplyOk(WireModel):
     outcome: Literal['ok']
     page: KnowledgeArchiveReplyOkPage
+
+
+class KnowledgeArchiveReplyPendingReview(WireModel):
+    outcome: Literal['pending_review']
+    contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Optional[ShortText] = Field(default=None)
 
 
 class KnowledgeArchiveReplyNotFound(WireModel):
@@ -1617,6 +1671,7 @@ class KnowledgeFreezeBody(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     seen_version: RecordVersion
+    minutes: Annotated[int, Field(ge=1, le=10080)]
 
 
 class KnowledgeFreezeReplyOkPageUpdatedByAgent(WireModel):
@@ -1964,6 +2019,11 @@ class KnowledgeMergeBody(WireModel):
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     seen_version: RecordVersion
     into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    target_seen_version: RecordVersion
+    content: TextContent
+    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    summary: Optional[Annotated[str, StringConstraints(min_length=0, max_length=4000)]] = Field(default=None)
+    confirm_review: bool
 
 
 class KnowledgeMergeReplyOkPageUpdatedByAgent(WireModel):
@@ -2299,6 +2359,7 @@ class KnowledgeReadReplyOkPage(WireModel):
     seen_version: RecordVersion
     updated_at: Timestamp
     updated_by: Annotated[Union[KnowledgeReadReplyOkPageUpdatedByAgent, KnowledgeReadReplyOkPageUpdatedByPerson, KnowledgeReadReplyOkPageUpdatedBySystem], Field(discriminator='kind')]
+    open_notes: Annotated[list[KnowledgeNote], Field(max_length=5)]
 
 
 class KnowledgeReadReplyOk(WireModel):
@@ -2538,6 +2599,7 @@ class KnowledgeResolveNoteBody(WireModel):
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     seen_version: RecordVersion
     note_id: RecordId
+    merged: bool
 
 
 class KnowledgeResolveNoteReplyOkPageUpdatedByAgent(WireModel):
@@ -2691,6 +2753,7 @@ class KnowledgeRevertBody(WireModel):
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     to_revision: Count
     seen_version: RecordVersion
+    reason: ShortText
 
 
 class KnowledgeRevertReplyOkPageUpdatedByAgent(WireModel):
@@ -6110,9 +6173,9 @@ HeartbeatItemsUpdateReplyAdapter = TypeAdapter(Annotated[Union[HeartbeatItemsUpd
 IntentSetBodyAdapter = TypeAdapter(IntentSetBody)
 IntentSetReplyAdapter = TypeAdapter(Annotated[Union[IntentSetReplyOk, IntentSetReplyChangedSinceRead, IntentSetReplyNotFound, IntentSetReplyRequestClosed, IntentSetReplyNotOwnRequest], Field(discriminator='outcome')])
 KnowledgeAddNoteBodyAdapter = TypeAdapter(KnowledgeAddNoteBody)
-KnowledgeAddNoteReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeAddNoteReplyOk, KnowledgeAddNoteReplyNotFound, KnowledgeAddNoteReplyNotAllowed, KnowledgeAddNoteReplyFeatureOff, KnowledgeAddNoteReplyPageExists, KnowledgeAddNoteReplyMerged, KnowledgeAddNoteReplyReviewRequired, KnowledgeAddNoteReplySensitiveContent, KnowledgeAddNoteReplyLimitReached, KnowledgeAddNoteReplyPageFrozen, KnowledgeAddNoteReplyRepeatsRecentRevision, KnowledgeAddNoteReplyPersonalSpaceUnavailable, KnowledgeAddNoteReplySavedWriteMismatch, KnowledgeAddNoteReplyContributionNotPending, KnowledgeAddNoteReplyInvalidRequest, KnowledgeAddNoteReplyChangedSinceRead, KnowledgeAddNoteReplyChangeConflict, KnowledgeAddNoteReplyRequestClosed, KnowledgeAddNoteReplyNeedsPersonDecision, KnowledgeAddNoteReplyRecordBusy, KnowledgeAddNoteReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeAddNoteReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeAddNoteReplyOk, KnowledgeAddNoteReplyPendingReview, KnowledgeAddNoteReplyNotFound, KnowledgeAddNoteReplyNotAllowed, KnowledgeAddNoteReplyFeatureOff, KnowledgeAddNoteReplyPageExists, KnowledgeAddNoteReplyMerged, KnowledgeAddNoteReplyReviewRequired, KnowledgeAddNoteReplySensitiveContent, KnowledgeAddNoteReplyLimitReached, KnowledgeAddNoteReplyPageFrozen, KnowledgeAddNoteReplyRepeatsRecentRevision, KnowledgeAddNoteReplyPersonalSpaceUnavailable, KnowledgeAddNoteReplySavedWriteMismatch, KnowledgeAddNoteReplyContributionNotPending, KnowledgeAddNoteReplyInvalidRequest, KnowledgeAddNoteReplyChangedSinceRead, KnowledgeAddNoteReplyChangeConflict, KnowledgeAddNoteReplyRequestClosed, KnowledgeAddNoteReplyNeedsPersonDecision, KnowledgeAddNoteReplyRecordBusy, KnowledgeAddNoteReplyRuntimeError], Field(discriminator='outcome')])
 KnowledgeArchiveBodyAdapter = TypeAdapter(KnowledgeArchiveBody)
-KnowledgeArchiveReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeArchiveReplyOk, KnowledgeArchiveReplyNotFound, KnowledgeArchiveReplyNotAllowed, KnowledgeArchiveReplyFeatureOff, KnowledgeArchiveReplyPageExists, KnowledgeArchiveReplyMerged, KnowledgeArchiveReplyReviewRequired, KnowledgeArchiveReplySensitiveContent, KnowledgeArchiveReplyLimitReached, KnowledgeArchiveReplyPageFrozen, KnowledgeArchiveReplyRepeatsRecentRevision, KnowledgeArchiveReplyPersonalSpaceUnavailable, KnowledgeArchiveReplySavedWriteMismatch, KnowledgeArchiveReplyContributionNotPending, KnowledgeArchiveReplyInvalidRequest, KnowledgeArchiveReplyChangedSinceRead, KnowledgeArchiveReplyChangeConflict, KnowledgeArchiveReplyRequestClosed, KnowledgeArchiveReplyNeedsPersonDecision, KnowledgeArchiveReplyRecordBusy, KnowledgeArchiveReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeArchiveReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeArchiveReplyOk, KnowledgeArchiveReplyPendingReview, KnowledgeArchiveReplyNotFound, KnowledgeArchiveReplyNotAllowed, KnowledgeArchiveReplyFeatureOff, KnowledgeArchiveReplyPageExists, KnowledgeArchiveReplyMerged, KnowledgeArchiveReplyReviewRequired, KnowledgeArchiveReplySensitiveContent, KnowledgeArchiveReplyLimitReached, KnowledgeArchiveReplyPageFrozen, KnowledgeArchiveReplyRepeatsRecentRevision, KnowledgeArchiveReplyPersonalSpaceUnavailable, KnowledgeArchiveReplySavedWriteMismatch, KnowledgeArchiveReplyContributionNotPending, KnowledgeArchiveReplyInvalidRequest, KnowledgeArchiveReplyChangedSinceRead, KnowledgeArchiveReplyChangeConflict, KnowledgeArchiveReplyRequestClosed, KnowledgeArchiveReplyNeedsPersonDecision, KnowledgeArchiveReplyRecordBusy, KnowledgeArchiveReplyRuntimeError], Field(discriminator='outcome')])
 KnowledgeCountContributionsBodyAdapter = TypeAdapter(KnowledgeCountContributionsBody)
 KnowledgeCountContributionsReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeCountContributionsReplyOk, KnowledgeCountContributionsReplyNotAllowed, KnowledgeCountContributionsReplyFeatureOff, KnowledgeCountContributionsReplyRuntimeError], Field(discriminator='outcome')])
 KnowledgeFreezeBodyAdapter = TypeAdapter(KnowledgeFreezeBody)

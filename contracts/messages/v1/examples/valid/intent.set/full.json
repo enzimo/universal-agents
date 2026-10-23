@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "intent.set",
   "message_id": "01928f3a-7b2c-74b1-8000-0000000004b1",
-  "idempotency_key": "intent.set:example_1201",
+  "idempotency_key": "intent.set:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "lead-host-1",
@@ -27,5 +27,5 @@
     "text": "Example text"
   },
   "body_digest": "EOQeJYNPB8Yl1lUd0nipeTGXFQXryhvH8o6gcYHwQtQ",
-  "signature": "rVQHjfOhCcOz95Vd7243d7iqL12d3EehUAovsnWJVrXiJDWP3uCnwv1zW_0V8a3lGf1HkVXcHC2GeLKMYcb6Cg"
+  "signature": "EZODFqmtqxcMHt3IcO9hFxeinUHK9QHZBE0jPb-QWJFlL9XXlOdFCLueGQpkhmNpDoO47ESQhfMhE3INFcmrAg"
 }

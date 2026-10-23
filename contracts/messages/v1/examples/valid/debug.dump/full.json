@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "debug.dump",
   "message_id": "01928f3a-7b2c-74ab-8000-0000000004ab",
-  "idempotency_key": "debug.dump:example_1195",
+  "idempotency_key": "debug.dump:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -26,5 +26,5 @@
     "agent": "token_id_1"
   },
   "body_digest": "NcQWTqJmuRMrzpD3-NoPUGvr5QE6IAtuJ0-owEQrnjI",
-  "signature": "SfAWHw9DOyxtRC1teAFUe9D0VusbVuUnGIRg--kT05wdGs4hQiacUWjyQepODuN6Gh9kzmemF5VCy85Rda7hBg"
+  "signature": "lNgw0U3FL1ISkXVGORTe74HNkUBk259O2xA2mYbW-m7h9HgUdugZvBQkMxq9Te5hQBfs4LdiUqDp9NmGzTTDCg"
 }

@@ -189,12 +189,31 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
             raise ContractError(f"{where}: request/reply kinds, and only they, have a reply")
         if "reply" in entry and entry["reply"]["body"] not in schemas:
             raise ContractError(f"{where}: reply schema {entry['reply']['body']} is missing")
+        check_request_idempotency(where, entry, schemas)
         for address in entry_addresses(entry):
             if not any(address_matches(address, template, name)
                        for template in class_addresses(transport, entry["class"])):
                 raise ContractError(f"{where}: address {address!r} fits no {entry['class']} address")
         if entry.get("copy_to") and entry["class"] != "durable":
             raise ContractError(f"{where}: only durable kinds are copied to other inboxes")
+
+
+def check_request_idempotency(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """A retry key must be derivable from fields every caller supplies.
+
+    Placeholders name required body or frame fields, or address parameters.
+    Authority bindings are not implicit aliases for command identifiers.
+    """
+
+    if entry["class"] != "request_reply":
+        return
+    supplied = set(schemas[entry["body"]].get("required", []))
+    supplied.update(schemas["frame.schema.json"]["required"])
+    for address in entry_addresses(entry):
+        supplied.update(re.findall(r"\{([a-z_]+)\}", address))
+    missing = set(re.findall(r"<([^>]+)>", entry["idempotency"])) - supplied
+    if missing:
+        raise ContractError(f"{where}: idempotency names fields the request does not supply: {sorted(missing)}")
 
 
 def entry_addresses(entry: dict[str, Any]) -> list[str]:

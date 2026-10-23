@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.freeze",
   "message_id": "01928f3a-7b2c-748e-8000-00000000048e",
-  "idempotency_key": "knowledge.freeze:example_1166",
+  "idempotency_key": "knowledge.freeze:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "lead-host-1",
@@ -24,8 +24,9 @@
     "request_id": "request_id_1",
     "space": "team",
     "page": "Example page",
-    "seen_version": "v3"
+    "seen_version": "v3",
+    "minutes": 60
   },
-  "body_digest": "UH6s6pN5KCymyrbcleMxmd1Ui1owFGUli2zgHppi_Ew",
-  "signature": "aiwAA5v0AFspkZgu2B8_yq6GNqje-3iJq1oQ6hP8ThgQK5Ph-TUii0rYH6eGZEiZABksNnSP4RTsYhwhVojPCw"
+  "body_digest": "7CBg9W72sOMXE4zQ62FMSngUlD4hwjXGQmIYACNspjs",
+  "signature": "JSk8fOxqE3WYfKH3RPV_h1CSM17wh4piPdtQlckidoASeM42y_St9kRiDOU-O-AKA85cenoCzZOGsXCRmV7HAw"
 }

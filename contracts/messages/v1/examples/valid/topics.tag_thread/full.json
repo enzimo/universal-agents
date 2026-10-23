@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "topics.tag_thread",
   "message_id": "01928f3a-7b2c-7461-8000-000000000461",
-  "idempotency_key": "topics.tag_thread:example_1121",
+  "idempotency_key": "topics.tag_thread:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -28,5 +28,5 @@
     "private": true
   },
   "body_digest": "__EFIO8xZGGMZ9xjszQ04QzXm10i4N5sJL1GiHKQqmg",
-  "signature": "Qt6x1tZciPU7-0N8NiWOyxGCtB2eF-WYFToh5lqdGax_23FLHtkbjNrLNgO3UAppepbi-xWmugQmU0CdXT5oAg"
+  "signature": "scILf3V0Q6-IJil0n8Xybgu61N5SztrXgFhATeZT-XlZxhInlBtCsqYa2WHjb3JzXpa-3WLh82oXdmXxS99sCw"
 }

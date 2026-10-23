@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.pause",
   "message_id": "01928f3a-7b2c-7431-8000-000000000431",
-  "idempotency_key": "schedules.pause:example_1073",
+  "idempotency_key": "schedules.pause:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -26,5 +26,5 @@
     "paused_until": "2026-10-22T04:30:00.000Z"
   },
   "body_digest": "wLCxWI2WYn3PCLcOboe-uZtNS5-Elfvuei-XTpNVJpo",
-  "signature": "om8oFgnehoz4KfX7whLNlSIBDHjNJb_WYOKNrgR8Z9PVHURwkY4hc8odWC7XeHGpGfQYagE2BVCFAddSXgJFDg"
+  "signature": "PEny2zZMhbaor0bdkTlkkMamVUqU08kF6uKjxAZngbXe_1sBtx9iTn0P4czHh2ypjv0b0asEJEzL3RSy34crDg"
 }

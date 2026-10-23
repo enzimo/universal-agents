@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "memory.show",
   "message_id": "01928f3a-7b2c-744c-8000-00000000044c",
-  "idempotency_key": "memory.show:example_1100",
+  "idempotency_key": "memory.show:01928f3a-7b2c-744c-8000-00000000044c",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -24,5 +24,5 @@
     "memory_id": 3
   },
   "body_digest": "QEPzoHsIjBInuSWKKTtvDHXsZCLmoVFGcoEOUsnISsY",
-  "signature": "OigyNNmGzFSe_Mzqpxy2_-iEnwxupp1DBf9gpg4GUNyNfixlzUwNLuXXdweO4zcWXxgMGlv00sgAW_vfbTWfAQ"
+  "signature": "3DSQFVnifkHDbNNe4mVFHMJcsk5iwKG332e1xNQntzD0ckCvjIGFRG4lw6rbgxzY2t8BNSwzvRUTYpa1bZUdCw"
 }

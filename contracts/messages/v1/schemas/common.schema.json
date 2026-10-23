@@ -966,6 +966,116 @@
         "undefined",
         "waiting"
       ]
+    },
+    "text_content": {
+      "description": "UTF-8 plain text, inline or held in the object store. Use a blob when the whole serialized frame would exceed its size limit.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "inline"
+            },
+            "text": {
+              "$ref": "#/$defs/long_text"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "blob"
+            },
+            "ref": {
+              "$ref": "#/$defs/blob_ref"
+            }
+          },
+          "required": [
+            "type",
+            "ref"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "knowledge_editor": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "agent"
+            },
+            "agent_type": {
+              "$ref": "#/$defs/agent_type"
+            }
+          },
+          "required": [
+            "kind",
+            "agent_type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "person"
+            },
+            "person": {
+              "$ref": "#/$defs/person_ref"
+            }
+          },
+          "required": [
+            "kind",
+            "person"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "system"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "knowledge_note": {
+      "description": "An open note whose id can be passed to knowledge.resolve_note.",
+      "type": "object",
+      "properties": {
+        "note_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "content": {
+          "$ref": "#/$defs/text_content"
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "created_by": {
+          "$ref": "#/$defs/knowledge_editor"
+        }
+      },
+      "required": [
+        "note_id",
+        "content",
+        "created_at",
+        "created_by"
+      ],
+      "additionalProperties": false
     }
   }
 }

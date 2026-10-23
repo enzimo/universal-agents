@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "objectives.update_progress",
   "message_id": "01928f3a-7b2c-7428-8000-000000000428",
-  "idempotency_key": "objectives.update_progress:example_1064",
+  "idempotency_key": "objectives.update_progress:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "lead-host-1",
@@ -27,5 +27,5 @@
     "progress_summary": "Example progress summary"
   },
   "body_digest": "LQJnwlPo94lKByCpkQYFxKmL28S6ZMNn4dqj5C88D7o",
-  "signature": "kdLOOKao7vNUw4TTahzqmIYjoTdw-Q10PNipTWuR0CcNcDQg3JSFs6z8pWS_S9hG5gqk9WDpnHqh5oVqmNOSAQ"
+  "signature": "XZFcC8wtSetH7ii-cYeKgMn1QBMpkZORjsT7iUoOei0UpQuDvXOh9zdsvr96XOLqLh2WOQvxcfO26v3qfJjfDg"
 }

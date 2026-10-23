@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "agent.resume",
   "message_id": "01928f3a-7b2c-74d2-8000-0000000004d2",
-  "idempotency_key": "agent.resume:example_1234",
+  "idempotency_key": "agent.resume:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "lead-host-1",
@@ -25,5 +25,5 @@
     "reason": "Example reason"
   },
   "body_digest": "1kALOl9nlkMYLoqmYWYI-4ceMNA4eNzsp-Rc2NDmY8c",
-  "signature": "TvlOTJ1aQuuDATq1miZ9zQZdaFRMM4RiO79iMEPaKfbWuH00_Vk3ziEu0FE4bhwkCD2CGNBUiLsehU8LtSgxBQ"
+  "signature": "F0f49RyZutfqeuF2XF6xtxaFdwsv-ER3LPptMvWjBEwOEnz4nlfbjmYOTQCdHd1FhiK0LIVPVdBG0oGfhosjCg"
 }

@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "people.set_standing",
   "message_id": "01928f3a-7b2c-7497-8000-000000000497",
-  "idempotency_key": "people.set_standing:example_1175",
+  "idempotency_key": "people.set_standing:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -25,5 +25,5 @@
     "expected_standing": "active"
   },
   "body_digest": "r6_BhH5bnF54cC7ux_RPqxXiyTCqo-N1At51X0Jt9Rk",
-  "signature": "j6dmmKpczNYVf9_1zPPyxYMNKw9UJ9B1LY9-91-ge--4YKPTUgBNV2Uh1iTeRpc06r6dQf1MZCpHVcDZT0BUCw"
+  "signature": "yaNznhc_d5OTDWWrIFfLYWDkhERxLu1h11nOiPq0BxxA1LR2zjQhb604sfsAhNoa-TLTRRaUc0eniYyOzxOBCQ"
 }

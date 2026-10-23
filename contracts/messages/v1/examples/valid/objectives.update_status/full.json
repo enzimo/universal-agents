@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "objectives.update_status",
   "message_id": "01928f3a-7b2c-742b-8000-00000000042b",
-  "idempotency_key": "objectives.update_status:example_1067",
+  "idempotency_key": "objectives.update_status:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "lead-host-1",
@@ -29,5 +29,5 @@
     "confirmed": true
   },
   "body_digest": "pRw0NmZFYFTF_P8uF-3p8DpMO_Tl35_NRh_Cz5DUaHQ",
-  "signature": "BznNojLIOyhrQjIHKFgPeIKz0GSuDokxqgnyINCLk7lhz_wGbpkgqbZ5s8mhqkQAfGF8xNnfHQFW_voYJrBYDA"
+  "signature": "JAeiUC7_Y0vMFVRxOy2tHHKY8z5OOJkct-WDq6PJ0klvgEdP4sb8cP39gE2iYpJVWDhYSnh3-fnykiQjZyY9BA"
 }

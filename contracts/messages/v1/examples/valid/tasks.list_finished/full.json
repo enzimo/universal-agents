@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "tasks.list_finished",
   "message_id": "01928f3a-7b2c-740a-8000-00000000040a",
-  "idempotency_key": "tasks.list_finished:example_1034",
+  "idempotency_key": "tasks.list_finished:01928f3a-7b2c-740a-8000-00000000040a",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -25,5 +25,5 @@
     "limit": 3
   },
   "body_digest": "hBT4l3-Ianv07t5pQdk3QamhdidMnpSTTofn7jlk1p0",
-  "signature": "S2V8CtQkBle3zQod94JIg5cJ8Dcq9qepxgzLBKmnT1FD_veMYg-MIkbImRy7brOeHY2qy2zdr3usdSzTsRZcDQ"
+  "signature": "ezV7np60fXbiiX8h-pQCqtljfAwsNLm9KSJlYwmo4V7jkjNbAtg-YzLosmwTH3aG6SXLZLk1UlCNudVXv9HDAA"
 }

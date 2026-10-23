@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "memory.undo",
   "message_id": "01928f3a-7b2c-7458-8000-000000000458",
-  "idempotency_key": "memory.undo:example_1112",
+  "idempotency_key": "memory.undo:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -25,5 +25,5 @@
     "event_id": "event_id_1"
   },
   "body_digest": "an3c2ey6q8_LeKz2ufQKaReWOYL7gm0cWk3Whs_7zIs",
-  "signature": "u-6-ZsGoZ9w-10JjLOId78Nw1eqh7hlpSTiw09CGLSp245m9Qu0vbL6nVhNVclK26sTLS8zwkienO3W3XRBzDA"
+  "signature": "sbuhR5TXJpOS6jN7wqbXdLpaE72omhNn324-bapE_u4p_qDVes9AC4VKR8_lZ1oGe_kukYy9mBfQ8890RGwOAg"
 }

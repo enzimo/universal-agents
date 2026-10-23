@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.read.reply",
   "message_id": "01928f3a-7b2c-7468-8000-000000000468",
-  "idempotency_key": "knowledge.read:example_1128:reply",
+  "idempotency_key": "knowledge.read:01928f3a-7b2c-7467-8000-000000000467:reply",
   "issuer": {
     "team": "team_example",
     "runtime": "team-services-1",
@@ -42,10 +42,24 @@
       "updated_by": {
         "kind": "agent",
         "agent_type": "token_id_1"
-      }
+      },
+      "open_notes": [
+        {
+          "note_id": "note_1",
+          "content": {
+            "type": "inline",
+            "text": "Review the deployment checklist."
+          },
+          "created_at": "2026-10-22T04:30:00.000Z",
+          "created_by": {
+            "kind": "agent",
+            "agent_type": "KnowledgeCuratorAgent"
+          }
+        }
+      ]
     }
   },
   "causation_id": "01928f3a-7b2c-7467-8000-000000000467",
-  "body_digest": "sntrRbyZu3LR-SZItTgUA0wClhbP939cnrR3eG2ExIM",
-  "signature": "f_kdSvlJz8DiSzfC61KsGVz_ejAnmx0GcapZSPCgwMRshDJimmho63_UvnX9Ufh7ptgbGuWTE69c0M4_vhuNAg"
+  "body_digest": "lkbkDsJ_d0fSCWU4mm1_uCjiaqBDIFM-9b5A5dDYjA0",
+  "signature": "oMh4dcOb-OwkhdUa8UedMR_qxEPDm90wWn7cblkFZ16U9wp80bV3zRFDG_FXJQJmlwf3x4Qifh7VS0myL-2aCA"
 }

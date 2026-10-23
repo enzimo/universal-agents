@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.list",
   "message_id": "01928f3a-7b2c-7464-8000-000000000464",
-  "idempotency_key": "knowledge.list:example_1124",
+  "idempotency_key": "knowledge.list:01928f3a-7b2c-7464-8000-000000000464",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -27,5 +27,5 @@
     "limit": 3
   },
   "body_digest": "PcauUJFTr0ZVCKolcEOftd_9R_Vxp60JXPxWw_aRhw4",
-  "signature": "z_ImzRbU0euDXgvz-QsOg56kZezSMQ6B-JXkixWIAzL2cJ_CejgKdOqIX6Zllg9v6LyAjUR9ULnLgq2xvcMfCw"
+  "signature": "-yHSgCWLki-qcGtUcrxFTmVfvFPis3m9ZkSsvLcEFB_2_4SgRHv4UozXm1vtu_OxT7NK3jCxUqK8ANBMx9AjDA"
 }

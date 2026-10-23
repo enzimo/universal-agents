@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.update",
   "message_id": "01928f3a-7b2c-7440-8000-000000000440",
-  "idempotency_key": "schedules.update:example_1088",
+  "idempotency_key": "schedules.update:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -33,5 +33,5 @@
     "repeat_count": 3
   },
   "body_digest": "il9joaKwTsWFx7YiwAV8bgKKnGMZPXY6kvjmpnq6ZY4",
-  "signature": "_7qzvEgblH39XDs40cgGwunxsoUhuQTfIFIsU0Pu84cvcTuPRzUViyQZ7XTlumBOQBW5t7l4EPvIAyE1EE-dAA"
+  "signature": "Rt-Cum47rIRA6X-uSdjmGfxEuqNbBFW_bYoTo4NlCT7nWooJo4GvJSuFLP3TCiz4h5l31wYeYuXYJuFYEwqjDQ"
 }

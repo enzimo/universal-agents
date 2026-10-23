@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -107,6 +109,23 @@ def test_generated_files_are_current() -> None:
     assert EXPORT.stale(EXPORT.render()) == []
 
 
+@pytest.mark.parametrize("kind", ["tasks.steer", "conflicts.decide"])
+def test_export_refuses_retry_keys_with_missing_inputs(kind: str) -> None:
+    registry = deepcopy(REGISTRY)
+    registry["kinds"][kind]["idempotency"] = f"{kind}:<undefined_command_id>"
+    with pytest.raises(EXPORT.ContractError, match="undefined_command_id"):
+        EXPORT.check_registry(registry, EXPORT.load_yaml("transport.yaml"),
+                              EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+def test_export_refuses_a_retry_key_based_on_an_optional_field() -> None:
+    registry = deepcopy(REGISTRY)
+    registry["kinds"]["tasks.steer"]["idempotency"] = "tasks.steer:<replied_message>"
+    with pytest.raises(EXPORT.ContractError, match="replied_message"):
+        EXPORT.check_registry(registry, EXPORT.load_yaml("transport.yaml"),
+                              EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
 @pytest.mark.parametrize(
     ("schema", "problem"),
     [
@@ -191,6 +210,11 @@ def test_valid_examples_are_accepted(path: Path) -> None:
     if not newer_minor:
         validator("frame.schema.json").validate(document)
         validator(body_schema_file(document["kind"])).validate(document["body"])
+        entry = REGISTRY["kinds"].get(document["kind"])
+        if entry is not None and entry["class"] == "request_reply":
+            fields = {**document["body"], "message_id": document["message_id"], "agent": document["audience"]["id"]}
+            expected_key = re.sub(r"<([^>]+)>", lambda match: str(fields[match[1]]), entry["idempotency"])
+            assert document["idempotency_key"] == expected_key
     verified = verify_frame(data, keys=trusted_keys(), arrived_on=document["subject"],
                             receiver=Receiver(**document["audience"]) if "runtime" not in document["audience"] else None,
                             now=datetime(2026, 10, 22, 4, 30, 1, tzinfo=wire_frame.timezone.utc))

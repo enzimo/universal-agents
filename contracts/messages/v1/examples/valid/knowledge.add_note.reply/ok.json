@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.add_note.reply",
   "message_id": "01928f3a-7b2c-7471-8000-000000000471",
-  "idempotency_key": "knowledge.add_note:example_1137:reply",
+  "idempotency_key": "knowledge.add_note:request_id_1:reply",
   "issuer": {
     "team": "team_example",
     "runtime": "team-services-1",
@@ -46,9 +46,21 @@
     },
     "review_flags": [
       "review_flags_1"
-    ]
+    ],
+    "note": {
+      "note_id": "note_1",
+      "content": {
+        "type": "inline",
+        "text": "Review the deployment checklist."
+      },
+      "created_at": "2026-10-22T04:30:00.000Z",
+      "created_by": {
+        "kind": "agent",
+        "agent_type": "KnowledgeCuratorAgent"
+      }
+    }
   },
   "causation_id": "01928f3a-7b2c-7470-8000-000000000470",
-  "body_digest": "Nykn1tDfBuI-4O5AjF01V5_z8c-ZEAjBqtbk4_WT6bU",
-  "signature": "s7VrDUmFFSQAFjoKcvGdlPei-N4vhjhUVFys0xt1kTR446bCRBwFJ2gvwF1jUBKoiTJqVPBvRooug5lBvy8hBw"
+  "body_digest": "Ca6bdW7L6FSQT_aTabLgFUxNUE88S_P-K4qOXwlTZwI",
+  "signature": "SD_VJ2NWKSx4tRaXOEEG-R7Wye1KDFgK_t6v2fewsDXrhsvKlT15mrgfNan7j-8pfpVLYXsp0kzB1huAtVbhCQ"
 }

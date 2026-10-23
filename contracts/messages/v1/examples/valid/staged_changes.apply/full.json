@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "staged_changes.apply",
   "message_id": "01928f3a-7b2c-74cf-8000-0000000004cf",
-  "idempotency_key": "staged_changes.apply:example_1231",
+  "idempotency_key": "staged_changes.apply:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "lead-host-1",
@@ -28,5 +28,5 @@
     "confirmed": true
   },
   "body_digest": "kkbDBYdjkWktmMYFG56S-6i92cC4T98q1wj6jzlY-oA",
-  "signature": "-T221wM5O1IKwIAvbHVQgQHWCIKt6THO2x2kGa60qUbuGxZxrx3W3G6j3iULPdpfr3lP_DfQ5ZGjX9uiu0FbAA"
+  "signature": "PZy2ggbyjyRtQd22n0fHRwnx2MykT3EBkMHeOkDe_-PlV4HKiZpkIQ7P25ds9yyQmr_Uq4RFiZdesaRaETHKAg"
 }

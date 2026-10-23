@@ -71,3 +71,40 @@ Within one protocol label:
 
 The frame states its minor, so the receiver chooses before reading the body. A change that an
 older receiver must understand needs a new major, which brings new subjects and streams.
+
+## Operation inputs and outcomes
+
+An operation's retry key uses the registry's `idempotency` template. Each `<field>`
+names a required request-body field, a required frame field, or a parameter in the
+address. It never means a value inferred from an authority token. `tasks.steer`
+uses `steer_id`; `conflicts.decide` carries a separate `request_id` so a new
+decision after a refusal has a new key. Retrying the same command keeps its key.
+The exporter rejects templates whose inputs are missing or optional.
+
+Knowledge merges carry the source's `seen_version`, the destination's
+`target_seen_version`, and the merged `content`. Both versions must still match
+before either page changes. `content` is either `type: inline` with `text`, or
+`type: blob` with an object-store `ref` to UTF-8 plain text. An omitted merge title
+or summary keeps the destination's value; an empty summary clears it.
+`confirm_review` records the caller's confirmation when the content check asks
+for it; it grants no access. Archive and revert requests carry the caller's
+nonempty `reason`, rather than inventing an explanation at the receiver.
+
+An agent working for a person proposes team notes and archives. These operations
+return `pending_review` and a `contribution_id`, as `knowledge.write` does. This
+outcome means a proposal was saved; it does not mean the page changed.
+
+`knowledge.read` returns up to five `open_notes` on the page, oldest first, with
+their server-assigned ids, content, creation time and editor kind. Successful
+`knowledge.add_note` replies also return the note. Long note content uses the
+same inline-or-blob form as a merge. Receivers use blob references when inline
+content would exceed the serialized frame budget, including the rest of the
+page and its notes. Resolving a note requires `merged: true` after incorporating
+it into the page, or `false` to dismiss it. Reading again exposes the next open
+notes. Freezing a page requires `minutes`, between one minute and one week.
+
+Contract verification pairs schema/model round trips with real SQLite knowledge
+workflows, including stale source and destination versions, pending proposals,
+note discovery and resolution, archive and revert reasons, and freeze duration.
+The protocol adapters are not live yet; these checks do not prove NATS delivery
+or object-store integration.

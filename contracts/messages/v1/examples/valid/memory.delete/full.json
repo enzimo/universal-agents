@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "memory.delete",
   "message_id": "01928f3a-7b2c-7455-8000-000000000455",
-  "idempotency_key": "memory.delete:example_1109",
+  "idempotency_key": "memory.delete:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -26,5 +26,5 @@
     "seen_version": "v3"
   },
   "body_digest": "RE8F1D_c4OrG93utVqcI2GfkPyC3ifOjvO83suDy_rA",
-  "signature": "I1XroL9evEZY5aXuDlRJr3lCKrPu8LL45hupza8dCi4hZHrK57ZnXi1eH4pSN_JpKoAQDwzaeXbUkA1QS7_tBA"
+  "signature": "AmRsDCL2U4ZcvsiEg6qHoxojlmjqTEHBLPzOK0spJCyBaNOOeZKOjzEjDQn4-fnH-dut4MlqZQCFLg8LoGtvBQ"
 }

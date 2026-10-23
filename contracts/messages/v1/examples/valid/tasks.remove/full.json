@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "tasks.remove",
   "message_id": "01928f3a-7b2c-740d-8000-00000000040d",
-  "idempotency_key": "tasks.remove:example_1037",
+  "idempotency_key": "tasks.remove:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -27,5 +27,5 @@
     "reason": "Example reason"
   },
   "body_digest": "lDR-LsYS1b7Cpjvj4THmAoMB0vc7QQadwY-sSvAu8rs",
-  "signature": "2OPqpofJSdGG7zJ5ih_P1BSZu5Vk3S_pBy91tVoDL9UvucPT1cuTVOzHMrAcgIH7kmZr2SZ0qS_YFJAVa7k1Cg"
+  "signature": "qq_BpQtJD4r4ODk6K2E1g_KUpRQZ_ac5NdQH2S4-P9ASLkg3AhtqK43WuKbvYQq1xO-72atyoLv92b_SX-gdCQ"
 }

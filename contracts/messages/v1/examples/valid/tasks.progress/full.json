@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "tasks.progress",
   "message_id": "01928f3a-7b2c-749a-8000-00000000049a",
-  "idempotency_key": "tasks.progress:example_1178",
+  "idempotency_key": "tasks.progress:01928f3a-7b2c-749a-8000-00000000049a",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -24,5 +24,5 @@
     "delivery_ref": "dref_1"
   },
   "body_digest": "2R6H663G3PsGhG_gylu8NtlYKjCxIaP6EN0y_ODH3A4",
-  "signature": "w149PWaJesjux8zjPdfZGG8rVAI2da4NcnOeWYIw-LIBbCTN9Sz-ZgoG5GwA6CuMgIpbmHxl2FnjbPx-3v2zDA"
+  "signature": "rc2uLpvjvUfarawYxKntVpR0D45ybbJAmVKAFdwuKxHt79SRw14VdnriABMK7rRHgvNw8jSgWP7TiFHnQpeJCQ"
 }

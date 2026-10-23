@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.revert",
   "message_id": "01928f3a-7b2c-7476-8000-000000000476",
-  "idempotency_key": "knowledge.revert:example_1142",
+  "idempotency_key": "knowledge.revert:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "gateway-1",
@@ -24,8 +24,9 @@
     "space": "team",
     "page": "Example page",
     "to_revision": 3,
-    "seen_version": "v3"
+    "seen_version": "v3",
+    "reason": "Restore the last reviewed instructions."
   },
-  "body_digest": "E67ki-T1blCLwDbZEupm7qOLBAeq0R6zBk_QZw-7oLU",
-  "signature": "CSDwgOLEgikHCAfErtF6nyS0p40ay2ZxrCjl9BV6WfFOGuTvi0hxR73a8DViMewnXLLD24UHauu8hmNVbg1NAw"
+  "body_digest": "Kxzel9UrMsn5kirq4C1k48JnHyU7DS8ayJau6c3lf40",
+  "signature": "GZC9XXH4Az_msZ_SXvtuwsanBzJ2whkbKsiDFZ--Pmwipfi1LYRwAoi1EKaguv4KCSMHKJ9zsTvTcbLoi6WMCA"
 }

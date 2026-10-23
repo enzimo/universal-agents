@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.merge",
   "message_id": "01928f3a-7b2c-7494-8000-000000000494",
-  "idempotency_key": "knowledge.merge:example_1172",
+  "idempotency_key": "knowledge.merge:request_id_1",
   "issuer": {
     "team": "team_example",
     "runtime": "lead-host-1",
@@ -25,8 +25,14 @@
     "space": "team",
     "page": "Example page",
     "seen_version": "v3",
-    "into": "Example into"
+    "into": "Example into",
+    "target_seen_version": "2",
+    "content": {
+      "type": "inline",
+      "text": "Run the checks, then deploy the reviewed version."
+    },
+    "confirm_review": false
   },
-  "body_digest": "G4-3pV6Pzx6PQtddvTAp7-MOpnxVeK_nIckC80H6TpY",
-  "signature": "6OhxuQxjPW9xpF1UTx6fzfyoS5vGl1jkMsOR9Z11rhGzQQeRd0Dq4OiPqjh9R8k7pqnLvzfJrV4k3SH0RfkPAQ"
+  "body_digest": "YKcJGLVlnQ39oqQqWuIXwZt0ReXHLWnCnAuwHg_6Du8",
+  "signature": "viJQnaRE5toaUwcVGV3dAc4NK_uFh6w0m5PdIzHFOZ9HA67AHrKlYeCrVkneJj-HB7oNIYfx1I08cVIejBoeBw"
 }

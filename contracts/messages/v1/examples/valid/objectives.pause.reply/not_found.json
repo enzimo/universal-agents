@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "objectives.pause.reply",
   "message_id": "01928f3a-7b2c-7418-8000-000000000418",
-  "idempotency_key": "objectives.pause:example_1048:reply",
+  "idempotency_key": "objectives.pause:request_id_1:reply",
   "issuer": {
     "team": "team_example",
     "runtime": "team-services-1",
@@ -25,5 +25,5 @@
   },
   "causation_id": "01928f3a-7b2c-7416-8000-000000000416",
   "body_digest": "kjF9c_l0diFRNuvYGjQmkStmu5fcSEld8Fzu2xnpRcU",
-  "signature": "6NivMEdiSPKMyvU7_mJb0-vTqQt8eTFCCLmGWQx26tVxVWmBnxbRHxvNzsI3X6n7XlvyvlfFCt3oxKT5eaRqCw"
+  "signature": "QGsWZ6ohYxYkwnWxGDaILevT2iLIX4ZwG7jkplxtVRl6WKrrCPe_Hd_tmTGVkIEmwWDi6M5R9o6xiGARY0nJCQ"
 }
