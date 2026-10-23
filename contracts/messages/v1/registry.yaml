@@ -25,6 +25,7 @@ protocol: 1.0-pre
 signing_domain: universal-agents/message-frame/v1
 frame_schema: frame.schema.json
 max_frame_bytes: 262144
+max_nesting_depth: 64
 
 # Refusals a receiver gives before any handler runs, in the order it checks them.
 verification_refusals:
@@ -47,7 +48,7 @@ verification_refusals:
   - code: wrong_audience
     meaning: the frame names another receiver
   - code: subject_mismatch
-    meaning: the frame arrived on another subject, or the subject's sender token is not the issuer's runtime
+    meaning: the frame arrived on another subject, its address disagrees with the kind or audience, or its sender token is not the issuer's runtime; replies use the audience runtime's inbox
   - code: expired
     meaning: the frame's expiry has passed
   - code: not_yet_valid
@@ -92,7 +93,7 @@ kinds:
     receivers: [lead_host, worker_host]
     expiry_seconds: 86400
     authority: optional
-    idempotency: "task_stop:<task_id>:<stop_id>"
+    idempotency: "task.stop:<base64url(sha256(RFC8785([task_id, stop_id])))>"
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: holder
     topology_edge: down

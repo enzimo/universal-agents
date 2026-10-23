@@ -8,6 +8,8 @@ from custom_messages.wire.spec import KindSpec
 PROTOCOL = '1.0-pre'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
 MAX_FRAME_BYTES = 262144
+MAX_NESTING_DEPTH = 64
+REPLY_INBOX_PREFIX = '_INBOX.{runtime}'
 VERIFICATION_REFUSALS = ('too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'access_denied')
 CHANGE_REFUSALS = ('changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy')
 HOST_ROLES = ('gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler')

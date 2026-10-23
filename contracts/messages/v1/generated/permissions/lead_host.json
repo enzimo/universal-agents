@@ -1,5 +1,8 @@
 {
   "publish": [
+    "$JS.ACK.UA1_WORK.agent_{team}_{agent}.>",
+    "$JS.API.CONSUMER.INFO.UA1_WORK.agent_{team}_{agent}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.agent_{team}_{agent}",
     "_INBOX.*.>",
     "ua.v1.{team}.{self}.ctl.agent.*.pause",
     "ua.v1.{team}.{self}.evt.skills_changed",

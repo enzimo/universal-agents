@@ -42,9 +42,13 @@ refuses anything else.
 
 - **Keywords:** `$schema`, `$id`, `$ref` (local to this folder), `$defs`, `title`,
   `description`, `type`, `enum`, `const`, `properties`, `required`,
-  `additionalProperties: false`, `items`, `minItems`, `maxItems`, `uniqueItems`,
+  `additionalProperties: false`, `items`, `minItems`, `maxItems`,
   `minLength`, `maxLength`, `pattern`, `minimum`, `maximum`, `oneOf`, `examples`.
 - **Objects** list every property and set `additionalProperties: false`.
+- **Omission** differs from null. A property outside `required` may be absent,
+  but its value must satisfy its schema when present. No typed property accepts
+  null. Generated models use Pydantic's `MISSING` value so omitted fields also
+  remain absent when serialized. The runtime requires Pydantic 2.14.1 or later.
 - **Numbers** are integers only, within ±(2^53 - 1). Decimals travel as strings.
 - **Patterns** use only syntax that every common regular-expression engine reads the same
   way, including Python's `re`, Pydantic's validator and ECMAScript: no lookaround, no
@@ -59,9 +63,58 @@ never over a re-serialized object.
 
 - A document with a repeated key is refused.
 - A document with a non-integer number is refused.
+- Nesting is limited to `max_nesting_depth` containers, including the root object.
+  The receiver checks the limit before JSON decoding. Very large integer text,
+  invalid UTF-8 and unpaired Unicode surrogates are refused as `malformed`.
 - Timestamps are UTC strings with exactly three fractional digits, such as
-  `2026-10-22T04:30:00.000Z`.
+  `2026-10-22T04:30:00.000Z`. They must name real calendar dates and times,
+  without leap seconds. The generated models check this during form validation,
+  before looking up a key, including timestamps inside an authority token.
 - Keys, digests and signatures are unpadded base64url.
+
+## Delivery, expiry and idempotency
+
+Work, requests and events use `ua.v1.<team>.<issuer runtime>.<address>`. A known
+kind's address must match its registry entry and audience. Each reply is also a
+signed frame, with kind `<operation>.reply`. Its `subject` is the actual NATS
+reply inbox, `_INBOX.<requester runtime>.<one or more inbox tokens>`. Its
+`audience.runtime` names that requester runtime and `causation_id` names the
+request. The inbox is an explicit exception to the issuer-subject prefix rule;
+the frame signature still authenticates the issuer. Receivers compare the signed
+subject to the arrival subject for both paths. AsyncAPI describes complete frames
+and references replies through their inbox channel's message definitions.
+
+The topology owner creates pull consumers. Generated permission templates give
+receivers only the corresponding consumer-info, next-message and acknowledgement
+subjects. Before installing permissions, trusted membership code must expand
+`{team}`, `{self}` and each assigned `{agent}`, `{pool}` or `{edge}` to exact
+identities, unioning entries when a host runs several agents. These identity
+placeholders must never become wildcards. Clients use `_INBOX.<runtime>` as their
+inbox prefix. Workers cannot create consumers, fetch other consumers or acknowledge
+their work. The live conformance tests prove both allowed and refused operations.
+
+When a receiver has the current time, it accepts a frame only from `issued_at`
+through the earlier of `expires_at` and `issued_at + expiry_seconds` for its kind.
+The end is exclusive; a later `not_before` also applies. Replies use their
+operation's lifetime. This cap keeps sender-selected expiry within replay-record
+retention. Parsing checks always apply, even when a caller omits the clock.
+
+`task.stop` derives its idempotency key as `task.stop:` followed by the unpadded
+base64url SHA-256 of the RFC 8785 JSON array `[task_id, stop_id]`. The Python helper
+is `custom_messages.wire.frame.idempotency_key("task.stop", task_id, stop_id)`.
+An array preserves the boundary between ids that contain colons, and the digest
+keeps the result within the key's length limit for maximum-length ids.
+
+## Verification
+
+Run `tests/test_message_contract.py` for contract agreement and hostile input
+refusals. `tests/test_live_message_contract.py` starts a separate authenticated
+broker from `nats-server` on PATH, since the role-permission checks require their
+own users and authorization file. It uses public fixture signing keys and no
+operator credentials. Run it with NATS 2.15.1 or later. It checks real publish,
+pull, acknowledgement and signed inbox replies, plus denied cross-consumer
+operations. The NATS CI job supplies the same server version and binary. A team
+`config.yaml` or `debug.env` cannot supply this isolated authorization fixture.
 
 ## Versions
 

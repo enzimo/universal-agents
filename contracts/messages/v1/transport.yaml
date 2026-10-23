@@ -1,7 +1,8 @@
 # Protocol 1 transport: streams, consumers, buckets and limits.
 #
-# Every subject starts with ua.v1.<team>.<sender>. where <sender> is the publishing
-# runtime's id; NATS permissions let a runtime publish only under its own id.
+# Work, request and event subjects start with ua.v1.<team>.<sender>.
+# Replies use the requester's _INBOX.<runtime>.<token(s)> subject, signed in the
+# reply frame. Pull and acknowledgement API permissions name exact consumers.
 # Edit by hand, then run scripts/export_message_contract.py.
 
 subject_prefix: ua.v1.{team}.{sender}

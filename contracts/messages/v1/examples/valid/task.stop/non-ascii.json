@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.stop",
   "message_id": "01928f3a-7b2c-7005-8000-000000000005",
-  "idempotency_key": "task_stop:task_7f3b:stop_2",
+  "idempotency_key": "task.stop:UhjiqKHc78FaXTuyJ3f0gs3lQdA1qWs0SM7Dtx_DRGo",
   "issuer": {
     "team": "team_example",
     "runtime": "lead-host-1",
@@ -27,5 +27,5 @@
     "cascade_to_subtasks": false
   },
   "body_digest": "LFkJOWJ3Ued7kT_sr2_SrGwSWw5QdHXfx2lTVr9O5Z8",
-  "signature": "g86ya3ZdXl4HmuZsqkNtXXW5BjLpA9_412zlFKIEo_5XP0wgzU2SC9a9ejgx4jJTbZYgNd2FJ9dBrpHcqIxpBg"
+  "signature": "LFm9UysRqKtSZDEB87sfsf1WCNFk-vkpGBoy-QAFNuQu4HyFp5OgDpGOSLCOKwcr2s-1Mo6oAxse-vvdnSizDQ"
 }

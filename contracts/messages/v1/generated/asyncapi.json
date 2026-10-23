@@ -7,6 +7,33 @@
         "agent_pause": {
           "$ref": "#/components/messages/agent_pause"
         }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "agent_pause_reply": {
+      "address": "_INBOX.{runtime}.{inbox}",
+      "messages": {
+        "agent_pause_reply": {
+          "$ref": "#/components/messages/agent_pause_reply"
+        }
+      },
+      "parameters": {
+        "inbox": {
+          "description": "The inbox subject token."
+        },
+        "runtime": {
+          "description": "The runtime subject token."
+        }
       }
     },
     "skills_changed": {
@@ -14,6 +41,14 @@
       "messages": {
         "skills_changed": {
           "$ref": "#/components/messages/skills_changed"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -23,6 +58,17 @@
         "task_stop": {
           "$ref": "#/components/messages/task_stop"
         }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     }
   },
@@ -31,27 +77,87 @@
       "agent_pause": {
         "name": "agent.pause",
         "payload": {
-          "$ref": "../schemas/bodies/agent.pause.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/agent.pause.schema.json"
+                },
+                "kind": {
+                  "const": "agent.pause"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "Pause one agent at its next safe point; it keeps its queued work."
       },
       "agent_pause_reply": {
         "name": "agent.pause.reply",
         "payload": {
-          "$ref": "../schemas/bodies/agent.pause.reply.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/agent.pause.reply.schema.json"
+                },
+                "kind": {
+                  "const": "agent.pause.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
         }
       },
       "skills_changed": {
         "name": "skills.changed",
         "payload": {
-          "$ref": "../schemas/bodies/skills.changed.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/skills.changed.schema.json"
+                },
+                "kind": {
+                  "const": "skills.changed"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "Hint that a managed skill was installed or removed. Receivers verify the stored receipt before they refresh."
       },
       "task_stop": {
         "name": "task.stop",
         "payload": {
-          "$ref": "../schemas/bodies/task.stop.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/task.stop.schema.json"
+                },
+                "kind": {
+                  "const": "task.stop"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "Stop one task. Sent only to the task's current holder."
       }
@@ -67,6 +173,16 @@
       "action": "receive",
       "channel": {
         "$ref": "#/channels/agent_pause"
+      },
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/agent_pause_reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/agent_pause_reply/messages/agent_pause_reply"
+          }
+        ]
       }
     },
     "receive_skills_changed": {
@@ -87,9 +203,12 @@
         "$ref": "#/channels/agent_pause"
       },
       "reply": {
+        "channel": {
+          "$ref": "#/channels/agent_pause_reply"
+        },
         "messages": [
           {
-            "$ref": "#/components/messages/agent_pause_reply"
+            "$ref": "#/channels/agent_pause_reply/messages/agent_pause_reply"
           }
         ]
       }

@@ -14,9 +14,10 @@
   "audience": {
     "team": "team_example",
     "target": "agent",
-    "id": "lead"
+    "id": "lead",
+    "runtime": "lead-host-1"
   },
-  "subject": "ua.v1.team_example.worker-host-1.ctl.agent.researcher-2.pause",
+  "subject": "_INBOX.lead-host-1.pause_1",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
@@ -26,5 +27,5 @@
   },
   "causation_id": "01928f3a-7b2c-7002-8000-000000000002",
   "body_digest": "cDA0KmsbnQZWBb290esk-O08S0ZXDJsIwSCUFoB7djE",
-  "signature": "s0pF2TOfw0Zgym4Euv_dr1dPsp_0PHT0JHnBCbtSayp7SbvOC9OLxSZiqIJo8FFIlgGGixEgPOy4Rje4tSzBDw"
+  "signature": "0yFOGvYZMMD7oj6aQ2AyZgV6Ty7-7msAJ7Kl8tLdtxT4QkT5Xjw55hqQw3HvsWK1n9AOh6Eaa7eDwz7pbiBvCA"
 }

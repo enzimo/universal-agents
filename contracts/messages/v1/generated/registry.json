@@ -103,7 +103,7 @@
       "class": "durable",
       "description": "Stop one task. Sent only to the task's current holder.",
       "expiry_seconds": 86400,
-      "idempotency": "task_stop:<task_id>:<stop_id>",
+      "idempotency": "task.stop:<base64url(sha256(RFC8785([task_id, stop_id])))>",
       "ledger": "task_stopped",
       "receivers": [
         "lead_host",
@@ -120,6 +120,7 @@
     }
   },
   "max_frame_bytes": 262144,
+  "max_nesting_depth": 64,
   "protocol": "1.0-pre",
   "signing_domain": "universal-agents/message-frame/v1",
   "verification_refusals": [
@@ -161,7 +162,7 @@
     },
     {
       "code": "subject_mismatch",
-      "meaning": "the frame arrived on another subject, or the subject's sender token is not the issuer's runtime"
+      "meaning": "the frame arrived on another subject, its address disagrees with the kind or audience, or its sender token is not the issuer's runtime; replies use the audience runtime's inbox"
     },
     {
       "code": "expired",

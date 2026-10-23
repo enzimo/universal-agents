@@ -26,9 +26,9 @@
       "$ref": "common.schema.json#/$defs/audience"
     },
     "subject": {
-      "description": "The NATS subject the sender published on. A receiver refuses a frame that arrives on another subject.",
+      "description": "The exact NATS delivery subject. Requests, work and events use ua.v1 subjects. Operation replies use _INBOX.<audience.runtime>.<inbox token(s)> and name their request in causation_id.",
       "type": "string",
-      "pattern": "^ua\\.v1\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+$",
+      "pattern": "^(ua\\.v1\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+|_INBOX\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*)$",
       "maxLength": 512
     },
     "causation_id": {

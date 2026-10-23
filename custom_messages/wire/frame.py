@@ -13,17 +13,18 @@ from __future__ import annotations
 import base64
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Optional
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-from pydantic import ValidationError
+from pydantic import MISSING, ValidationError
 
 from custom_messages.wire.canonical import CanonicalJsonError, canonical_bytes, parse
-from custom_messages.wire.kinds import FRAME_SHAPE, KINDS, MAX_FRAME_BYTES, PROTOCOL, SIGNING_DOMAIN
+from custom_messages.wire.kinds import FRAME_SHAPE, KINDS, MAX_FRAME_BYTES, PROTOCOL, REPLY_INBOX_PREFIX, SIGNING_DOMAIN
 from custom_messages.wire.models import Frame
-from custom_messages.wire.spec import prune
+from custom_messages.wire.spec import KindSpec, prune
+from custom_messages.wire.values import parse_timestamp
 
 _DOMAIN_PREFIX = SIGNING_DOMAIN.encode("ascii") + b"\n"
 
@@ -52,8 +53,15 @@ def format_timestamp(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
 
 
-def parse_timestamp(text: str) -> datetime:
-    return datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+def idempotency_key(kind: str, *parts: str) -> str:
+    """A bounded key for a tuple of ids; JSON preserves their boundaries and order.
+
+    ``kind`` is a registry kind, and each part is a schema-validated record id.
+    Even a maximum-length kind and tuple produce at most 140 characters.
+    """
+
+    digest = hashlib.sha256(canonical_bytes(list(parts))).digest()
+    return f"{kind}:{b64url(digest)}"
 
 
 def body_digest(body: Mapping[str, Any]) -> str:
@@ -99,6 +107,7 @@ class Receiver:
     team: str
     target: str
     id: str
+    runtime: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +140,48 @@ def body_model(kind: str) -> tuple[Any, Any]:
         if spec is not None and spec.reply_model is not None:
             return spec.reply_model, spec.reply_shape
     raise FrameRefused("unknown_kind", kind)
+
+
+def _kind_spec(kind: str) -> Optional[KindSpec]:
+    """Look up known kinds without moving unknown_kind before earlier refusal checks."""
+
+    return KINDS.get(kind) or (KINDS.get(kind.removesuffix(".reply")) if kind.endswith(".reply") else None)
+
+
+def _verify_subject(frame: Frame, arrived_on: Optional[str]) -> None:
+    spec = _kind_spec(frame.kind)
+    reply = frame.kind.endswith(".reply") and spec is not None and spec.reply_model is not None
+    if reply:
+        prefix = REPLY_INBOX_PREFIX.partition("{runtime}")[0]
+        if (frame.audience.runtime is MISSING or frame.causation_id is MISSING
+                or not frame.subject.startswith(f"{prefix}{frame.audience.runtime}.")):
+            raise FrameRefused("subject_mismatch", "a reply names its request and the audience runtime's inbox")
+    else:
+        prefix = f"ua.v1.{frame.issuer.team}.{frame.issuer.runtime}."
+        if not frame.subject.startswith(prefix):
+            raise FrameRefused("subject_mismatch", "the subject's team and sender must be the issuer's")
+        if spec is not None:
+            address = spec.address.format(agent=frame.audience.id, pool=frame.audience.id, edge=frame.audience.id)
+            if frame.subject != prefix + address:
+                raise FrameRefused("subject_mismatch", "the address must match the kind and audience")
+    if arrived_on is not None and arrived_on != frame.subject:
+        raise FrameRefused("subject_mismatch", "the frame arrived on another subject")
+
+
+def _verify_time(frame: Frame, now: datetime, issued_at: datetime) -> None:
+    expires_at = parse_timestamp(frame.expires_at)
+    spec = _kind_spec(frame.kind)
+    if spec is not None:
+        # The receiver's registry caps the sender's expiry, including after the
+        # replay ledger has forgotten an old message. Subtract instead of adding
+        # so a timestamp near year 9999 cannot overflow datetime.
+        too_old = now - issued_at >= timedelta(seconds=spec.expiry_seconds)
+    else:
+        too_old = False
+    if now >= expires_at or too_old:
+        raise FrameRefused("expired")
+    if now < issued_at or (frame.not_before is not MISSING and now < parse_timestamp(frame.not_before)):
+        raise FrameRefused("not_yet_valid")
 
 
 def verify_frame(
@@ -172,16 +223,11 @@ def verify_frame(
             raise FrameRefused("wrong_team")
         if (frame.audience.target, frame.audience.id) != (receiver.target, receiver.id):
             raise FrameRefused("wrong_audience")
-    subject_tokens = frame.subject.split(".")
-    if subject_tokens[2] != frame.issuer.team or subject_tokens[3] != frame.issuer.runtime:
-        raise FrameRefused("subject_mismatch", "the subject's team and sender must be the issuer's")
-    if arrived_on is not None and arrived_on != frame.subject:
-        raise FrameRefused("subject_mismatch", "the frame arrived on another subject")
+        if receiver.runtime is not None and frame.audience.runtime not in (MISSING, receiver.runtime):
+            raise FrameRefused("wrong_audience")
+    _verify_subject(frame, arrived_on)
     if now is not None:
-        if now >= parse_timestamp(frame.expires_at):
-            raise FrameRefused("expired")
-        if frame.not_before is not None and now < parse_timestamp(frame.not_before):
-            raise FrameRefused("not_yet_valid")
+        _verify_time(frame, now, issued_at)
     if replay is not None:
         earlier = replay(frame.issuer.runtime, frame.issuer.membership_epoch, frame.message_id, frame.body_digest)
         if earlier is not None and earlier != frame.body_digest:

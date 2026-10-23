@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
+from pydantic import MISSING, AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
+
+from custom_messages.wire.values import validate_timestamp
 
 
 class WireModel(BaseModel):
@@ -40,7 +42,7 @@ IdempotencyKey = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-
 Kind = Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$', max_length=96)]
 
 
-Timestamp = Annotated[str, StringConstraints(pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$')]
+Timestamp = Annotated[Annotated[str, StringConstraints(pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$')], AfterValidator(validate_timestamp)]
 
 
 Epoch = Annotated[int, Field(ge=0, le=9007199254740991)]
@@ -73,7 +75,7 @@ class BlobRef(WireModel):
     sha256: Sha256Digest
     size: Count
     media_type: Annotated[str, StringConstraints(pattern='^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$')]
-    name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=255)]] = Field(default=None)
+    name: Union[Annotated[str, StringConstraints(min_length=1, max_length=255)], MISSING] = Field(default=MISSING)
 
 
 class Issuer(WireModel):
@@ -81,8 +83,8 @@ class Issuer(WireModel):
 
     team: TeamId
     runtime: RuntimeId
-    agent: Optional[AgentId] = Field(default=None)
-    session: Optional[TokenId] = Field(default=None)
+    agent: Union[AgentId, MISSING] = Field(default=MISSING)
+    session: Union[TokenId, MISSING] = Field(default=MISSING)
     membership_epoch: Epoch
     revocation_epoch: Epoch
     key_id: KeyId
@@ -94,7 +96,7 @@ class Audience(WireModel):
     team: TeamId
     target: Literal['agent', 'pool', 'team_services', 'edge', 'installation_service']
     id: TokenId
-    runtime: Optional[RuntimeId] = Field(default=None)
+    runtime: Union[RuntimeId, MISSING] = Field(default=MISSING)
 
 
 class AuthorityTokenIssuer(WireModel):
@@ -131,12 +133,12 @@ class Frame(WireModel):
     idempotency_key: IdempotencyKey
     issuer: Issuer
     audience: Audience
-    subject: Annotated[str, StringConstraints(pattern='^ua\\.v1\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+$', max_length=512)]
-    causation_id: Optional[MessageId] = Field(default=None)
+    subject: Annotated[str, StringConstraints(pattern='^(ua\\.v1\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+|_INBOX\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*)$', max_length=512)]
+    causation_id: Union[MessageId, MISSING] = Field(default=MISSING)
     issued_at: Timestamp
-    not_before: Optional[Timestamp] = Field(default=None)
+    not_before: Union[Timestamp, MISSING] = Field(default=MISSING)
     expires_at: Timestamp
-    authority: Optional[AuthorityToken] = Field(default=None)
+    authority: Union[AuthorityToken, MISSING] = Field(default=MISSING)
     algorithm: Literal['ed25519']
     body_digest: Sha256Digest
     body: dict[str, Any]
@@ -145,7 +147,7 @@ class Frame(WireModel):
 
 class AgentPauseBody(WireModel):
     request_id: RecordId
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class AgentPauseReplyOk(WireModel):
@@ -156,7 +158,7 @@ class AgentPauseReplyOk(WireModel):
 class AgentPauseReplyError(WireModel):
     outcome: Literal['error']
     code: Literal['agent_exiting']
-    message: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class SkillsChangedBodyInstall(WireModel):
@@ -178,7 +180,7 @@ class TaskStopBody(WireModel):
 
     task_id: RecordId
     stop_id: RecordId
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
     cascade_to_subtasks: bool
 
 

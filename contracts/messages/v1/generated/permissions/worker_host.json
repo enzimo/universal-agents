@@ -1,5 +1,8 @@
 {
   "publish": [
+    "$JS.ACK.UA1_WORK.agent_{team}_{agent}.>",
+    "$JS.API.CONSUMER.INFO.UA1_WORK.agent_{team}_{agent}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.agent_{team}_{agent}",
     "_INBOX.*.>"
   ],
   "role": "worker_host",

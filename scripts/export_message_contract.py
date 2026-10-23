@@ -56,7 +56,7 @@ REQUIRED_ENTRY_FIELDS = ENTRY_FIELDS - {"reply", "covered_change"}
 # The schema subset (contracts/messages/v1/README.md).
 ALLOWED_KEYWORDS = {
     "$schema", "$id", "$ref", "$defs", "title", "description", "type", "enum", "const", "properties",
-    "required", "additionalProperties", "items", "minItems", "maxItems", "uniqueItems", "minLength",
+    "required", "additionalProperties", "items", "minItems", "maxItems", "minLength",
     "maxLength", "pattern", "minimum", "maximum", "oneOf", "examples",
 }
 ALLOWED_TYPES = {"object", "string", "integer", "boolean", "array"}
@@ -210,6 +210,29 @@ def subject_pattern(address: str) -> str:
     return re.sub(r"\{[a-z_]+\}", "*", address)
 
 
+def consumer_permissions(entry: dict[str, Any], transport: dict[str, Any]) -> set[str]:
+    """Pull, inspect and acknowledge only the consumers for this delivery address.
+
+    The membership issuer expands agent/pool/edge bindings to the host's assigned
+    identities. These are placeholders, never NATS wildcards. Topology creation
+    stays with the trusted topology owner, not receiving workers.
+    """
+
+    expected_filter = transport["subject_prefix"].replace("{sender}", "*") + "." + entry["address"]
+    matches = [consumer for consumer in transport["consumers"].values() if consumer["filter"] == expected_filter]
+    if not matches:
+        raise ContractError(f"no pull consumer for {entry['address']}")
+    subjects = set()
+    for consumer in matches:
+        stream, name = consumer["stream"], consumer["name"]
+        subjects.update({
+            f"$JS.API.CONSUMER.INFO.{stream}.{name}",
+            f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{name}",
+            f"$JS.ACK.{stream}.{name}.>",
+        })
+    return subjects
+
+
 def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Per host role: subjects it may publish (only under its own id) and subscribe to."""
 
@@ -223,31 +246,57 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
                 publish.add(prefix + address)
             if role in entry["receivers"] and entry["class"] != "durable":
                 subscribe.add("ua.v1.{team}.*." + address)
+            if role in entry["receivers"] and entry["class"] == "durable":
+                publish.update(consumer_permissions(entry, transport))
             if role in entry["receivers"] and entry["class"] == "request_reply":
                 publish.add("_INBOX.*.>")
         result[role] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
     return result
 
 
+def channel(address: str, key: str) -> dict[str, Any]:
+    return {
+        "address": address,
+        "parameters": {name: {"description": f"The {name} subject token."}
+                       for name in re.findall(r"\{([a-z_]+)\}", address)},
+        "messages": {key: {"$ref": f"#/components/messages/{key}"}},
+    }
+
+
+def framed_payload(registry: dict[str, Any], kind: str, body: str) -> dict[str, Any]:
+    """A complete frame constrained to this kind, retaining the frame's closed fields."""
+
+    return {"allOf": [
+        {"$ref": f"../schemas/{registry['frame_schema']}"},
+        {"type": "object", "properties": {"kind": {"const": kind}, "body": {"$ref": f"../schemas/{body}"}}},
+    ]}
+
+
 def asyncapi(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, Any]:
     channels, operations, messages = {}, {}, {}
     for name, entry in sorted(registry["kinds"].items()):
         key = name.replace(".", "_")
-        channels[key] = {
-            "address": transport["subject_prefix"] + "." + entry["address"],
-            "messages": {key: {"$ref": f"#/components/messages/{key}"}},
-        }
+        channels[key] = channel(transport["subject_prefix"] + "." + entry["address"], key)
         messages[key] = {
             "name": name,
             "summary": entry["description"],
-            "payload": {"$ref": f"../schemas/{entry['body']}"},
+            "payload": framed_payload(registry, name, entry["body"]),
         }
         operations[f"send_{key}"] = {"action": "send", "channel": {"$ref": f"#/channels/{key}"}}
         operations[f"receive_{key}"] = {"action": "receive", "channel": {"$ref": f"#/channels/{key}"}}
         if "reply" in entry:
             reply_key = f"{key}_reply"
-            messages[reply_key] = {"name": f"{name}.reply", "payload": {"$ref": f"../schemas/{entry['reply']['body']}"}}
-            operations[f"send_{key}"]["reply"] = {"messages": [{"$ref": f"#/components/messages/{reply_key}"}]}
+            messages[reply_key] = {
+                "name": f"{name}.reply",
+                "payload": framed_payload(registry, f"{name}.reply", entry["reply"]["body"]),
+            }
+            channels[reply_key] = channel(transport["reply_inbox_prefix"] + ".{inbox}", reply_key)
+            reply = {
+                "channel": {"$ref": f"#/channels/{reply_key}"},
+                "messages": [{"$ref": f"#/channels/{reply_key}/messages/{reply_key}"}],
+            }
+            operations[f"send_{key}"]["reply"] = reply
+            operations[f"receive_{key}"]["reply"] = reply
     return {
         "asyncapi": "3.1.0",
         "info": {"title": "Universal Agents messages", "version": registry["protocol"]},
@@ -342,6 +391,8 @@ class ModelWriter:
         name = class_name(fragment.rsplit("/", 1)[-1]) if fragment else class_name(Path(file).name.removesuffix(".schema.json"))
         self.names[key] = name
         rendered = self.type_of(file, schema, name)
+        if file == "common.schema.json" and fragment == "/$defs/timestamp":
+            rendered = f"Annotated[{rendered}, AfterValidator(validate_timestamp)]"
         if rendered != name:
             self.blocks.append(f"{name} = {rendered}\n")
         return name
@@ -359,7 +410,7 @@ class ModelWriter:
             if prop in required:
                 lines.append(f"    {attribute}: {prop_type}" + (f" = Field({alias[2:]})" if alias else ""))
             else:
-                lines.append(f"    {attribute}: Optional[{prop_type}] = Field(default=None{alias})")
+                lines.append(f"    {attribute}: Union[{prop_type}, MISSING] = Field(default=MISSING{alias})")
         self.blocks.append("\n".join(lines) + "\n")
         return name
 
@@ -388,7 +439,7 @@ def shape(writer: ModelWriter, file: str, schema: dict[str, Any]) -> Any:
     return None
 
 
-def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> dict[Path, str]:
+def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], transport: dict[str, Any]) -> dict[Path, str]:
     writer = ModelWriter(schemas)
     for fragment in schemas["common.schema.json"]["$defs"]:
         writer.named("common.schema.json", f"/$defs/{fragment}")
@@ -403,8 +454,9 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) 
     header = '"""Generated by scripts/export_message_contract.py from contracts/messages/v1. Do not edit."""\n\n'
     models = header + (
         "from __future__ import annotations\n\n"
-        "from typing import Annotated, Any, Literal, Optional, Union\n\n"
-        "from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter\n\n\n"
+        "from typing import Annotated, Any, Literal, Union\n\n"
+        "from pydantic import MISSING, AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter\n\n"
+        "from custom_messages.wire.values import validate_timestamp\n\n\n"
         "class WireModel(BaseModel):\n"
         "    \"\"\"Strict, immutable and closed to unknown fields.\"\"\"\n\n"
         "    model_config = ConfigDict(extra=\"forbid\", frozen=True, strict=True, populate_by_name=True)\n\n\n"
@@ -456,6 +508,8 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) 
         f"PROTOCOL = {registry['protocol']!r}\n"
         f"SIGNING_DOMAIN = {registry['signing_domain']!r}\n"
         f"MAX_FRAME_BYTES = {registry['max_frame_bytes']!r}\n"
+        f"MAX_NESTING_DEPTH = {registry['max_nesting_depth']!r}\n"
+        f"REPLY_INBOX_PREFIX = {transport['reply_inbox_prefix']!r}\n"
         f"VERIFICATION_REFUSALS = {tuple(item['code'] for item in registry['verification_refusals'])!r}\n"
         f"CHANGE_REFUSALS = {tuple(item['code'] for item in registry['change_refusals'])!r}\n"
         f"HOST_ROLES = {tuple(registry['host_roles'])!r}\n"
@@ -480,7 +534,7 @@ def render() -> dict[Path, str]:
     }
     for role, document in permissions(registry, transport).items():
         files[GENERATED / "permissions" / f"{role}.json"] = json_text(document)
-    files.update(render_python(registry, schemas))
+    files.update(render_python(registry, schemas, transport))
     sources = sorted(path for path in CONTRACT.rglob("*") if path.is_file() and GENERATED not in path.parents)
     entries = {path.relative_to(REPO_ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}
     entries.update({path.relative_to(REPO_ROOT).as_posix(): hashlib.sha256(text.encode("utf-8")).hexdigest()

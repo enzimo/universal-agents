@@ -205,6 +205,11 @@ jobs:
         run: python -m pip install --require-hashes -r requirements-dev.lock.txt
       - name: Start NATS with JetStream
         run: python .github/runner/start_service.py nats
+      - name: Expose NATS server for isolated permission checks
+        run: |
+          docker cp "$NATS_DOCKER_CONTAINER:/nats-server" "$RUNNER_TEMP/nats-server"
+          chmod +x "$RUNNER_TEMP/nats-server"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - name: Wait for NATS
         run: |
           python - <<'PY'
