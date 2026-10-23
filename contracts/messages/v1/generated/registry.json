@@ -3852,6 +3852,7 @@
   },
   "max_frame_bytes": 262144,
   "protocol": "1.0-pre",
+  "renew_key_proof_domain": "universal-agents/host-renew-key-proof/v1",
   "signing_domain": "universal-agents/message-frame/v1",
   "state_records": {
     "agent": {
@@ -3951,7 +3952,7 @@
     },
     {
       "code": "epoch_too_old",
-      "meaning": "the issuer's membership or revocation epoch is below the receiver's minimum (request/reply and events only; queued work is checked against the certificate valid when it was issued) (request/reply and events only; queued work is checked against the certificate valid when it was issued) (request/reply and events only; queued work is checked against the certificate valid when it was issued)"
+      "meaning": "the issuer's membership or revocation epoch is below the receiver's minimum (certificate-authenticated request/reply and events only; queued work and proof-of-possession joins are exempt)"
     },
     {
       "code": "wrong_team",

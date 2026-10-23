@@ -17,41 +17,13 @@
       ]
     },
     "key": {
-      "type": "string",
-      "pattern": "^[A-Za-z0-9_-]{1,64}(\\.[A-Za-z0-9_-]{1,64}){0,3}$"
+      "$ref": "common.schema.json#/$defs/state_key"
     },
     "writer": {
-      "type": "object",
-      "properties": {
-        "runtime": {
-          "$ref": "common.schema.json#/$defs/runtime_id"
-        },
-        "team": {
-          "$ref": "common.schema.json#/$defs/scope_id"
-        },
-        "membership_epoch": {
-          "$ref": "common.schema.json#/$defs/epoch"
-        },
-        "revocation_epoch": {
-          "$ref": "common.schema.json#/$defs/epoch"
-        },
-        "key_id": {
-          "$ref": "common.schema.json#/$defs/key_id"
-        }
-      },
-      "required": [
-        "runtime",
-        "membership_epoch",
-        "revocation_epoch",
-        "key_id"
-      ],
-      "additionalProperties": false
+      "$ref": "common.schema.json#/$defs/state_writer"
     },
     "sequence": {
-      "description": "The writer's counter for this key; readers ignore a lower one.",
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 9007199254740991
+      "$ref": "common.schema.json#/$defs/state_sequence"
     },
     "issued_at": {
       "$ref": "common.schema.json#/$defs/timestamp"

@@ -21,13 +21,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from pydantic import ValidationError
 
 from custom_messages.wire.canonical import CanonicalJsonError, canonical_bytes, parse
-from custom_messages.wire.kinds import FRAME_SHAPE, KINDS, MAX_FRAME_BYTES, PROTOCOL, SIGNING_DOMAIN
+from custom_messages.wire.kinds import FRAME_SHAPE, KINDS, MAX_FRAME_BYTES, PROTOCOL, RENEW_KEY_PROOF_DOMAIN, SIGNING_DOMAIN
 from custom_messages.wire.models import Frame
 from custom_messages.wire.spec import prune
 
 _DOMAIN_PREFIX = SIGNING_DOMAIN.encode("ascii") + b"\n"
 # Installation-wide traffic (joining, renewing) names this scope instead of a team.
 INSTALLATION_SCOPE = "_install"
+_HOST_RENEW = "host.renew"
+_KEY_ROTATION = "application_key_rotation"
 
 
 class FrameRefused(ValueError):
@@ -77,6 +79,31 @@ def sign_frame(unsigned: Mapping[str, Any], private_key: Ed25519PrivateKey) -> d
     frame["body_digest"] = body_digest(frame["body"])
     frame["signature"] = b64url(private_key.sign(signing_bytes(frame)))
     return frame
+
+
+def renew_key_proof_bytes(frame: Mapping[str, Any]) -> bytes:
+    """Bind the new key to the complete renewal, excluding the dependent signatures.
+
+    The old key signs the finished frame, including this proof. Omitting the
+    body digest and both signatures here avoids a circular signing dependency.
+    """
+
+    if frame["kind"] != _HOST_RENEW:
+        raise ValueError("a renewal key proof belongs only to host.renew")
+    unsigned = {key: value for key, value in frame.items() if key not in {"signature", "body_digest"}}
+    unsigned["algorithm"] = "ed25519"
+    body = dict(frame["body"])
+    body[_KEY_ROTATION] = {key: value for key, value in body[_KEY_ROTATION].items() if key != "proof"}
+    unsigned["body"] = body
+    return RENEW_KEY_PROOF_DOMAIN.encode("ascii") + b"\n" + canonical_bytes(unsigned)
+
+
+def sign_renew_key_proof(frame: Mapping[str, Any], new_private_key: Ed25519PrivateKey) -> dict[str, Any]:
+    """Fill the new key's proof before calling ``sign_frame`` with the old key."""
+
+    body = dict(frame["body"])
+    body[_KEY_ROTATION] = dict(body[_KEY_ROTATION], proof=b64url(new_private_key.sign(renew_key_proof_bytes(frame))))
+    return dict(frame, body=body)
 
 
 @dataclass(frozen=True)
@@ -135,6 +162,42 @@ def body_model(kind: str) -> tuple[Any, Any]:
     raise FrameRefused("unknown_kind", kind)
 
 
+def _verification_key(raw: Mapping[str, Any], frame: Frame, trusted: Optional[TrustedKey],
+                      proof_of_possession: bool) -> Ed25519PublicKey:
+    if trusted is not None and (trusted.runtime != frame.issuer.runtime
+                               or frame.issuer.team not in {trusted.team, INSTALLATION_SCOPE}):
+        raise FrameRefused("unknown_key", frame.issuer.key_id)
+    if not proof_of_possession:
+        if trusted is None:
+            raise FrameRefused("unknown_key", frame.issuer.key_id)
+        return trusted.public_key
+    # Joining always proves possession of the presented key, including retries
+    # after the authority has learned this key id. A known id cannot change keys.
+    presented = raw["body"].get("application_key")
+    if not isinstance(presented, dict) or presented.get("key_id") != frame.issuer.key_id:
+        raise FrameRefused("unknown_key", frame.issuer.key_id)
+    try:
+        public_key = Ed25519PublicKey.from_public_bytes(b64url_decode(str(presented.get("public_key", ""))))
+    except ValueError as error:
+        raise FrameRefused("unknown_key", frame.issuer.key_id) from error
+    if trusted is not None and public_key.public_bytes_raw() != trusted.public_key.public_bytes_raw():
+        raise FrameRefused("unknown_key", "a known key id must present the same public key")
+    return public_key
+
+
+def _verify_renew_key_proof(raw: Mapping[str, Any]) -> None:
+    if raw["kind"] != _HOST_RENEW or _KEY_ROTATION not in raw["body"]:
+        return
+    rotation = raw["body"][_KEY_ROTATION]
+    if not isinstance(rotation, dict):
+        raise FrameRefused("invalid_body", "application_key_rotation must contain a key and proof")
+    try:
+        public_key = Ed25519PublicKey.from_public_bytes(b64url_decode(rotation["key"]["public_key"]))
+        public_key.verify(b64url_decode(rotation["proof"]), renew_key_proof_bytes(raw))
+    except (InvalidSignature, ValueError) as error:
+        raise FrameRefused("invalid_body", "the renewal's new-key proof does not verify") from error
+
+
 def verify_frame(
     data: bytes,
     *,
@@ -156,21 +219,8 @@ def verify_frame(
         raise FrameRefused("malformed", str(error).splitlines()[0]) from error
     spec = KINDS.get(frame.kind)
     trusted = keys.get(frame.issuer.key_id)
-    proven = trusted is None and spec is not None and spec.verification == "proof_of_possession"
-    if proven:
-        # A joining host has no certificate yet: it signs with the key its request presents.
-        presented = raw["body"].get("application_key") if isinstance(raw["body"], dict) else None
-        if not isinstance(presented, dict) or presented.get("key_id") != frame.issuer.key_id:
-            raise FrameRefused("unknown_key", frame.issuer.key_id)
-        try:
-            public_key = Ed25519PublicKey.from_public_bytes(b64url_decode(str(presented.get("public_key", ""))))
-        except ValueError as error:
-            raise FrameRefused("unknown_key", frame.issuer.key_id) from error
-    elif (trusted is None or trusted.runtime != frame.issuer.runtime
-          or frame.issuer.team not in {trusted.team, INSTALLATION_SCOPE}):
-        raise FrameRefused("unknown_key", frame.issuer.key_id)
-    else:
-        public_key = trusted.public_key
+    proof_of_possession = spec is not None and spec.verification == "proof_of_possession"
+    public_key = _verification_key(raw, frame, trusted, proof_of_possession)
     try:
         public_key.verify(b64url_decode(frame.signature), signing_bytes(raw))
     except (InvalidSignature, ValueError) as error:
@@ -182,7 +232,9 @@ def verify_frame(
     if trusted is not None and trusted.revoked_at is not None:
         raise FrameRefused("revoked")
     queued = spec is not None and spec.delivery_class in {"durable", "dead_letter"}
-    if trusted is not None and not queued and (
+    # A join has no certificate epochs, even when its key became known after
+    # an earlier attempt. The same signed retry must recover a lost reply.
+    if trusted is not None and not queued and not proof_of_possession and (
             frame.issuer.membership_epoch < trusted.min_membership_epoch
             or frame.issuer.revocation_epoch < trusted.min_revocation_epoch):
         raise FrameRefused("epoch_too_old")
@@ -210,4 +262,5 @@ def verify_frame(
         body = model.validate_python(prune(raw["body"], shape) if newer_minor else raw["body"])
     except ValidationError as error:
         raise FrameRefused("invalid_body", str(error).splitlines()[0]) from error
+    _verify_renew_key_proof(raw)
     return VerifiedFrame(frame=frame, body=body, raw=raw)

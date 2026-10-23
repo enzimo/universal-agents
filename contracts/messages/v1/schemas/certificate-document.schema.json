@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/certificate-document.schema.json",
+  "title": "Signed membership certificate of protocol 1",
+  "description": "The signed state document returned by host.join and host.renew. Its record is certificate and its body is a membership certificate. Receivers also verify its signature and writer using the trusted installation authority.",
+  "type": "object",
+  "properties": {
+    "record": {
+      "const": "certificate"
+    },
+    "key": {
+      "$ref": "common.schema.json#/$defs/state_key"
+    },
+    "writer": {
+      "$ref": "common.schema.json#/$defs/state_writer"
+    },
+    "sequence": {
+      "$ref": "common.schema.json#/$defs/state_sequence"
+    },
+    "issued_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "expires_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "algorithm": {
+      "const": "ed25519"
+    },
+    "body_digest": {
+      "$ref": "common.schema.json#/$defs/sha256_digest"
+    },
+    "body": {
+      "$ref": "state/certificate.schema.json"
+    },
+    "signature": {
+      "$ref": "common.schema.json#/$defs/ed25519_signature"
+    }
+  },
+  "required": [
+    "record",
+    "key",
+    "writer",
+    "sequence",
+    "issued_at",
+    "algorithm",
+    "body_digest",
+    "body",
+    "signature"
+  ],
+  "additionalProperties": false
+}

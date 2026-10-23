@@ -12,6 +12,7 @@
     "ua.v1.{team}.{self}.ctl.agent.*.tasks.purge",
     "ua.v1.{team}.{self}.ctl.agent.*.tasks.remove",
     "ua.v1.{team}.{self}.dlq.notice.*",
+    "ua.v1.{team}.{self}.dlq.raw.*",
     "ua.v1.{team}.{self}.svc.team.schedules.install",
     "ua.v1.{team}.{self}.svc.team.tasks.list",
     "ua.v1.{team}.{self}.svc.team.tasks.list_finished",

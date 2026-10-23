@@ -11,7 +11,7 @@
           "const": "ok"
         },
         "certificate": {
-          "$ref": "../state.schema.json"
+          "$ref": "../certificate-document.schema.json"
         },
         "connection": {
           "$ref": "../common.schema.json#/$defs/connection_credential"

@@ -210,7 +210,7 @@
       }
     },
     "host_join": {
-      "address": "ua.v1.{team}.{sender}._install.{sender}.svc.host.join",
+      "address": "ua.v1._install.{sender}.svc.host.join",
       "messages": {
         "host_join": {
           "$ref": "#/components/messages/host_join"
@@ -218,7 +218,7 @@
       }
     },
     "host_renew": {
-      "address": "ua.v1.{team}.{sender}._install.{sender}.svc.host.renew",
+      "address": "ua.v1._install.{sender}.svc.host.renew",
       "messages": {
         "host_renew": {
           "$ref": "#/components/messages/host_renew"

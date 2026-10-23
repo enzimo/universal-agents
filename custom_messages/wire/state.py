@@ -53,6 +53,27 @@ def _expected_key(record: str, body: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _check_writer(document: State, body: Mapping[str, Any], trusted: TrustedKey) -> None:
+    """Bind self-written presence and team records to the authenticated writer.
+
+    Certificate roles and agent placement still come from the caller's trusted
+    runtime context; these checks need only the signed document and its key.
+    """
+
+    if document.record == "host" and body["runtime"] != document.writer.runtime:
+        raise FrameRefused("invalid_body", "a host must write its own liveness record")
+    if document.record not in {"agent", "placement", "team_view"}:
+        return
+    team = document.writer.team
+    if team != trusted.team:
+        raise FrameRefused("wrong_team", "the writer's team must match its trusted key")
+    if document.record == "team_view":
+        if not document.key.startswith(f"{team}.{body['entry']}."):
+            raise FrameRefused("invalid_body", "a team view key must name its writer's team and entry")
+    elif body["team"] != team:
+        raise FrameRefused("wrong_team", "the record's team must match its writer")
+
+
 @dataclass(frozen=True)
 class VerifiedState:
     document: State
@@ -81,6 +102,7 @@ def verify_state(data: bytes, *, keys: Mapping[str, TrustedKey]) -> VerifiedStat
         body = spec.body_model.validate_python(raw["body"])
     except ValidationError as error:
         raise FrameRefused("invalid_body", str(error).splitlines()[0]) from error
+    _check_writer(document, raw["body"], trusted)
     expected = _expected_key(document.record, raw["body"])
     if expected is not None and expected != document.key:
         raise FrameRefused("invalid_body", f"a {document.record} record belongs under key {expected}")

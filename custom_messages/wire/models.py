@@ -380,6 +380,20 @@ class ConnectionCredential(WireModel):
     expires_at: Timestamp
 
 
+StateKey = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,64}(\\.[A-Za-z0-9_-]{1,64}){0,3}$')]
+
+
+class StateWriter(WireModel):
+    runtime: RuntimeId
+    team: Optional[ScopeId] = Field(default=None)
+    membership_epoch: Epoch
+    revocation_epoch: Epoch
+    key_id: KeyId
+
+
+StateSequence = Annotated[int, Field(ge=1, le=9007199254740991)]
+
+
 class Frame(WireModel):
     "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The body is checked against the schema its kind names in the registry."
 
@@ -401,21 +415,13 @@ class Frame(WireModel):
     signature: Ed25519Signature
 
 
-class StateWriter(WireModel):
-    runtime: RuntimeId
-    team: Optional[ScopeId] = Field(default=None)
-    membership_epoch: Epoch
-    revocation_epoch: Epoch
-    key_id: KeyId
-
-
 class State(WireModel):
     "Every key-value record is one state document, signed with Ed25519 over the domain prefix universal-agents/state-record/v1 and a newline, then the RFC 8785 canonical JSON of the document without its signature. The body is checked against the schema its record names in the registry."
 
     record: Literal['certificate', 'revocations', 'host', 'agent', 'placement', 'team_view']
-    key: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,64}(\\.[A-Za-z0-9_-]{1,64}){0,3}$')]
+    key: StateKey
     writer: StateWriter
-    sequence: Annotated[int, Field(ge=1, le=9007199254740991)]
+    sequence: StateSequence
     issued_at: Timestamp
     expires_at: Optional[Timestamp] = Field(default=None)
     algorithm: Literal['ed25519']
@@ -1510,9 +1516,24 @@ class HostJoinBody(WireModel):
     software: Optional[Software] = Field(default=None)
 
 
+class CertificateDocument(WireModel):
+    "The signed state document returned by host.join and host.renew. Its record is certificate and its body is a membership certificate. Receivers also verify its signature and writer using the trusted installation authority."
+
+    record: Literal['certificate']
+    key: StateKey
+    writer: StateWriter
+    sequence: StateSequence
+    issued_at: Timestamp
+    expires_at: Optional[Timestamp] = Field(default=None)
+    algorithm: Literal['ed25519']
+    body_digest: Sha256Digest
+    body: CertificateState
+    signature: Ed25519Signature
+
+
 class HostJoinReplyOk(WireModel):
     outcome: Literal['ok']
-    certificate: State
+    certificate: CertificateDocument
     connection: ConnectionCredential
 
 
@@ -1542,6 +1563,13 @@ class HostJoinReplyNotAllowed(WireModel):
     message: Optional[ShortText] = Field(default=None)
 
 
+class HostRenewBodyApplicationKeyRotation(WireModel):
+    "Both the new application key and its proof are required when rotating. The proof signs the renewal frame as specified in README.md, using the new private key."
+
+    key: ApplicationKey
+    proof: Ed25519Signature
+
+
 class HostRenewBody(WireModel):
     "A host renews its certificate and connection credential, or rotates its keys."
 
@@ -1550,14 +1578,13 @@ class HostRenewBody(WireModel):
     membership_epoch: Epoch
     profile_sha256: Sha256Digest
     software: Optional[Software] = Field(default=None)
-    new_application_key: Optional[ApplicationKey] = Field(default=None)
-    new_key_proof: Optional[Ed25519Signature] = Field(default=None)
     new_nats_public_key: Optional[NatsUserKey] = Field(default=None)
+    application_key_rotation: Optional[HostRenewBodyApplicationKeyRotation] = Field(default=None)
 
 
 class HostRenewReplyOk(WireModel):
     outcome: Literal['ok']
-    certificate: State
+    certificate: CertificateDocument
     connection: ConnectionCredential
 
 

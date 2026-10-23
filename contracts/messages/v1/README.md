@@ -68,14 +68,36 @@ never over a re-serialized object.
 A queued message can wait days, for example while a host is cut off.
 - **Certificate at issue time.** Receivers verify every frame and state record with the writer's certificate that was valid when it was issued, even if that certificate has expired since.
 - **Revocation.** A certificate on the installation's revocations record refuses all of its frames and records, whenever it was revoked.
-- **Epochs.** The receiver's minimum membership and revocation epochs apply to request/reply messages and events only. Queued work is never refused for an old epoch.
+- **Epochs.** The receiver's minimum membership and revocation epochs apply to certificate-authenticated request/reply messages and events only. Queued work is never refused for an old epoch. Joining proves key possession without a certificate, so a join's epoch zero is accepted on retries after the key becomes known; revocation still refuses the key.
 - **Expiry.** Each delivery class has an expiry in `transport.yaml`. Receivers keep their replay record at least as long as the longest expiry.
 
 ## Installation traffic
 
 Joining an installation and renewing a certificate use addresses under `ua.v1._install.<sender>`, and their frames name the scope `_install` instead of a team.
-- **Joining.** A new host has no certificate yet. It signs `host.join` with the key the request presents; the registry marks this as `verification: proof_of_possession`, and it applies to that one operation only.
-- **Afterwards.** The authority returns a certificate and a connection credential, and later requests are verified as usual.
+- **Joining.** A new host has no certificate yet. It signs `host.join` with the key the request presents; the registry marks this as `verification: proof_of_possession`, and it applies to that one operation only. The presented key is checked on every join, including retries after the authority knows its key id. A known id must still name the same public key and runtime.
+- **Afterwards.** The authority returns a signed membership certificate (`certificate-document.schema.json`) and a connection credential. Success replies require the certificate record type and its body schema; another state record is not a certificate. Receivers also verify the nested certificate's signature against their trusted installation authority. Later requests are verified as usual.
+
+### Application key rotation
+
+`host.renew` optionally carries `application_key_rotation`, an object with both `key`
+(an application key) and `proof` (an Ed25519 signature). Omitting the object keeps
+the application key.
+
+The new private key signs these bytes:
+
+1. Copy the complete renewal frame as received, keeping unknown optional fields.
+2. Remove the top-level `signature` and `body_digest`, and remove only `proof`
+   from `body.application_key_rotation`. Set `algorithm` to `ed25519`.
+3. Prefix its RFC 8785 canonical JSON with the registry's `renew_key_proof_domain`,
+   `universal-agents/host-renew-key-proof/v1`, followed by one newline.
+
+The old private key then signs the finished frame, including the new-key proof,
+using the normal frame procedure. This order avoids circular signatures and binds
+the proof to the issuer, audience, message id, expiry and entire renewal body.
+`sign_renew_key_proof` followed by `sign_frame` implements it. A structurally valid
+renewal with an invalid new-key proof is refused as `invalid_body`.
+`signing-vectors/key-rotation.json` and `examples/valid/host.renew/rotate.json`
+provide the exact bytes, proof and finished frame for other implementations.
 
 ## State records
 
@@ -88,10 +110,28 @@ Hosts, agents, placements and the team view are key-value records, not messages.
 The registry's `state_records` section names each record's bucket, key form, writer roles and body schema.
 - **Placement.** A placement record's key-value revision is its fencing token.
 - **Agent records.** A reader accepts an agent record only from the host its placement names.
+- **Writer identity.** A host record's body runtime must equal its signing writer's runtime. Agent, placement and team-view records require the writer's team to match the trusted key. Agent and placement bodies must name that same team. A team-view key starts with that team and its body's entry type; its remaining id names the view entry and need not equal a task id.
+
+`verify_state` checks these identity and key bindings. Its caller selects the
+certificate valid at issue time and checks the certificate's writer roles and
+the agent's placement. Those checks require runtime state and are not inferred
+from the record's own claims.
 
 ## Dead letters
 
 A receiver that sets a message aside keeps the exact bytes at `dlq.raw.<copy>` and sends a `dlq.notice`. The notice holds identifiers only: the stage, the reason (a verification refusal or a handler failure) and the set-aside message's unverified claims. It never holds the content.
+
+Raw copies have no frame kind: they preserve the refused bytes exactly. Generated
+permissions therefore include the dead-letter class addresses for each notice
+sender, bound to its own runtime id. They do not permit publishing copies under
+another runtime's id.
+
+Contract validation should combine schema and cryptographic tests with live NATS
+permission tests. The former cover writer binding, certificate types and key
+proofs; the latter prove that the generated subjects and permissions let a host
+join and retain raw dead letters while refusing another sender's identity. The
+live contract test starts an isolated authenticated NATS server, version 2.15.1
+or later. It does not use a team's live broker or credentials.
 
 ## Versions
 

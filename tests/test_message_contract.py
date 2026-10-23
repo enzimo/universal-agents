@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -30,6 +31,8 @@ from custom_messages.wire.frame import (
     b64url_decode,
     body_model,
     sign_frame,
+    sign_renew_key_proof,
+    renew_key_proof_bytes,
     signing_bytes,
     verify_frame,
 )
@@ -272,3 +275,217 @@ def test_invalid_state_records_are_refused_with_their_code(path: Path) -> None:
 def test_every_state_record_has_a_valid_example() -> None:
     examples = {path.parent.name for path in (STATE_EXAMPLES / "valid").rglob("*.json")}
     assert set(REGISTRY["state_records"]) <= examples
+
+
+def example(name: str) -> dict:
+    return json.loads((EXAMPLES / name).read_text(encoding="utf-8"))
+
+
+def private_key(key_id: str) -> Ed25519PrivateKey:
+    return Ed25519PrivateKey.from_private_bytes(b64url_decode(KEYS[key_id]["seed"]))
+
+
+def signed_state(document: dict) -> bytes:
+    from custom_messages.wire.state import sign_state
+
+    return json.dumps(sign_state(document, private_key(document["writer"]["key_id"]))).encode()
+
+
+@pytest.mark.parametrize("record", ["agent/lead-busy", "placement/lead", "team_view/roster"])
+@pytest.mark.parametrize("mismatch", ["writer", "record", "missing_team"])
+def test_state_records_cannot_claim_another_team(record: str, mismatch: str) -> None:
+    from custom_messages.wire.state import verify_state
+
+    document = example(f"state/valid/{record}.json")
+    if mismatch == "missing_team":
+        del document["writer"]["team"]
+    elif mismatch == "writer":
+        document["writer"]["team"] = "another_team"
+    elif document["record"] == "team_view":
+        document["key"] = document["key"].replace("team_example", "another_team")
+    else:
+        document["body"]["team"] = "another_team"
+        document["key"] = document["key"].replace("team_example", "another_team")
+    with pytest.raises(FrameRefused) as refused:
+        verify_state(signed_state(document), keys=trusted_keys())
+    expected = "invalid_body" if mismatch == "record" and document["record"] == "team_view" else "wrong_team"
+    assert refused.value.code == expected
+
+
+def test_a_host_cannot_write_another_hosts_liveness() -> None:
+    from custom_messages.wire.state import verify_state
+
+    document = example("state/valid/host/lead-host.json")
+    document["writer"].update(runtime="worker-host-1", key_id="test-worker-key-1")
+    with pytest.raises(FrameRefused) as refused:
+        verify_state(signed_state(document), keys=trusted_keys())
+    assert refused.value.code == "invalid_body"
+
+
+def test_host_liveness_does_not_require_a_team_scope() -> None:
+    from custom_messages.wire.state import verify_state
+
+    document = example("state/valid/host/lead-host.json")
+    del document["writer"]["team"]
+    assert verify_state(signed_state(document), keys=trusted_keys()).body.runtime == "lead-host-1"
+
+
+def test_team_view_key_must_name_its_body_entry() -> None:
+    from custom_messages.wire.state import verify_state
+
+    document = example("state/valid/team_view/roster.json")
+    document["key"] = "team_example.task.lead"
+    with pytest.raises(FrameRefused) as refused:
+        verify_state(signed_state(document), keys=trusted_keys())
+    assert refused.value.code == "invalid_body"
+
+
+@pytest.mark.parametrize("operation", ["join", "renew"])
+def test_asyncapi_installation_subjects_match_the_authority_subscription(operation: str) -> None:
+    document = json.loads((CONTRACT / "generated/asyncapi.json").read_text())
+    assert document["channels"][f"host_{operation}"]["address"] == f"ua.v1._install.{{sender}}.svc.host.{operation}"
+
+
+def test_dead_letter_senders_can_publish_raw_copies_under_their_own_id() -> None:
+    for role in REGISTRY["kinds"]["dlq.notice"]["senders"]:
+        document = json.loads((CONTRACT / f"generated/permissions/{role}.json").read_text())
+        assert "ua.v1.{team}.{self}.dlq.raw.*" in document["publish"]
+        assert not any("ua.v1.{team}.*.dlq.raw" in subject for subject in document["publish"])
+
+
+@pytest.mark.parametrize("known", [False, True])
+def test_join_proves_possession_even_when_the_key_is_known(known: bool) -> None:
+    document = example("valid/host.join/full.json")
+    document["issuer"].update(runtime="lead-host-1", key_id="test-lead-key-1")
+    document["subject"] = "ua.v1._install.lead-host-1.svc.host.join"
+    document["body"]["runtime"] = "lead-host-1"
+    document["body"]["application_key"] = {"key_id": "test-lead-key-1", "public_key": KEYS["test-lead-key-1"]["public_key"]}
+    signed = sign_frame(document, private_key("test-lead-key-1"))
+    assert verify_frame(json.dumps(signed).encode(), keys=trusted_keys() if known else {}).frame.kind == "host.join"
+    document["body"]["application_key"]["public_key"] = KEYS["test-worker-key-1"]["public_key"]
+    signed = sign_frame(document, private_key("test-lead-key-1"))
+    with pytest.raises(FrameRefused) as refused:
+        verify_frame(json.dumps(signed).encode(), keys=trusted_keys() if known else {})
+    assert refused.value.code == ("unknown_key" if known else "bad_signature")
+
+
+def test_known_join_key_id_cannot_be_reassigned_to_another_public_key() -> None:
+    document = example("valid/host.join/full.json")
+    document["issuer"].update(runtime="lead-host-1", key_id="test-lead-key-1")
+    document["subject"] = "ua.v1._install.lead-host-1.svc.host.join"
+    document["body"]["runtime"] = "lead-host-1"
+    document["body"]["application_key"] = {"key_id": "test-lead-key-1", "public_key": KEYS["test-worker-key-1"]["public_key"]}
+    signed = sign_frame(document, private_key("test-worker-key-1"))
+    with pytest.raises(FrameRefused) as refused:
+        verify_frame(json.dumps(signed).encode(), keys=trusted_keys())
+    assert refused.value.code == "unknown_key"
+
+
+def test_lost_join_reply_can_be_recovered_after_the_key_becomes_known() -> None:
+    from dataclasses import replace
+
+    document = example("valid/host.join/full.json")
+    document["issuer"].update(runtime="lead-host-1", key_id="test-lead-key-1")
+    document["subject"] = "ua.v1._install.lead-host-1.svc.host.join"
+    document["body"]["runtime"] = "lead-host-1"
+    document["body"]["application_key"] = {"key_id": "test-lead-key-1", "public_key": KEYS["test-lead-key-1"]["public_key"]}
+    data = json.dumps(sign_frame(document, private_key("test-lead-key-1"))).encode()
+    verify_frame(data, keys={})
+    known = {key_id: replace(key, min_membership_epoch=1, min_revocation_epoch=1) for key_id, key in trusted_keys().items()}
+    verify_frame(data, keys=known)
+    known["test-lead-key-1"] = replace(known["test-lead-key-1"], revoked_at=wire_frame.parse_timestamp("2026-10-22T04:30:00.000Z"))
+    with pytest.raises(FrameRefused) as refused:
+        verify_frame(data, keys=known)
+    assert refused.value.code == "revoked"
+
+
+def test_renewal_rotation_signing_vector() -> None:
+    vector = json.loads((CONTRACT / "signing-vectors/key-rotation.json").read_text())
+    document = example("valid/host.renew/rotate.json")
+    before = deepcopy(document)
+    assert renew_key_proof_bytes(document).hex() == vector["signing_bytes_hex"]
+    assert document["body"]["application_key_rotation"]["proof"] == vector["proof"]
+    signed = sign_renew_key_proof(document, private_key("test-worker-key-1"))
+    assert sign_frame(signed, private_key("test-lead-key-1")) == document
+    assert document == before, "signing must not mutate the caller's frame"
+
+
+@pytest.mark.parametrize(("location", "field", "value"), [
+    ("body", "renew_id", "changed"),
+    ("body", "certificate_id", "changed"),
+    ("body", "profile_sha256", "A" * 43),
+    ("issuer", "revocation_epoch", 2),
+    ("audience", "id", "another_authority"),
+    ("", "message_id", "01928f3a-7b2c-7709-8000-000000000709"),
+    ("", "expires_at", "2026-10-22T04:31:00.000Z"),
+    ("", "protocol", "1.1-pre"),
+])
+def test_new_key_proof_cannot_be_reused_for_a_different_renewal(location: str, field: str, value) -> None:
+    document = example("valid/host.renew/rotate.json")
+    target = document[location] if location else document
+    target[field] = value
+    signed = sign_frame(document, private_key("test-lead-key-1"))
+    with pytest.raises(FrameRefused) as refused:
+        verify_frame(json.dumps(signed).encode(), keys=trusted_keys())
+    assert refused.value.code == "invalid_body"
+
+
+def test_rotation_proof_covers_a_newer_minors_unknown_fields() -> None:
+    document = example("valid/host.renew/rotate.json")
+    document["protocol"] = "1.1-pre"
+    document["body"]["application_key_rotation"]["future_option"] = "original"
+    document = sign_frame(sign_renew_key_proof(document, private_key("test-worker-key-1")), private_key("test-lead-key-1"))
+    verify_frame(json.dumps(document).encode(), keys=trusted_keys())
+    document["body"]["application_key_rotation"]["future_option"] = "changed"
+    with pytest.raises(FrameRefused) as refused:
+        verify_frame(json.dumps(sign_frame(document, private_key("test-lead-key-1"))).encode(), keys=trusted_keys())
+    assert refused.value.code == "invalid_body"
+
+
+@pytest.mark.parametrize("missing", ["key", "proof"])
+def test_rotation_requires_both_key_and_proof_in_both_validators(missing: str) -> None:
+    document = example("valid/host.renew/rotate.json")
+    del document["body"]["application_key_rotation"][missing]
+    assert list(validator("bodies/host.renew.schema.json").iter_errors(document["body"]))
+    signed = sign_frame(document, private_key("test-lead-key-1"))
+    with pytest.raises(FrameRefused) as refused:
+        verify_frame(json.dumps(signed).encode(), keys=trusted_keys())
+    assert refused.value.code == "invalid_body"
+
+
+@pytest.mark.parametrize("bad", ["key", "proof"])
+def test_rotation_requires_a_valid_signature_by_the_new_key(bad: str) -> None:
+    document = example("valid/host.renew/rotate.json")
+    rotation = document["body"]["application_key_rotation"]
+    if bad == "key":
+        rotation["key"]["public_key"] = KEYS["test-gateway-key-1"]["public_key"]
+    else:
+        rotation["proof"] = b64url(bytes(64))
+    signed = sign_frame(document, private_key("test-lead-key-1"))
+    with pytest.raises(FrameRefused) as refused:
+        verify_frame(json.dumps(signed).encode(), keys=trusted_keys())
+    assert refused.value.code == "invalid_body"
+
+
+def test_rotation_cannot_be_null() -> None:
+    document = example("valid/host.renew/rotate.json")
+    document["body"]["application_key_rotation"] = None
+    assert list(validator("bodies/host.renew.schema.json").iter_errors(document["body"]))
+    with pytest.raises(FrameRefused) as refused:
+        verify_frame(json.dumps(sign_frame(document, private_key("test-lead-key-1"))).encode(), keys=trusted_keys())
+    assert refused.value.code == "invalid_body"
+
+
+@pytest.mark.parametrize("operation", ["join", "renew"])
+@pytest.mark.parametrize("bad", ["record", "body"])
+def test_successful_installation_replies_require_a_certificate(operation: str, bad: str) -> None:
+    document = example(f"valid/host.{operation}.reply/ok.json")
+    if bad == "record":
+        document["body"]["certificate"] = example("state/valid/team_view/roster.json")
+    else:
+        del document["body"]["certificate"]["body"]["application_key"]
+    assert list(validator(f"bodies/host.{operation}.reply.schema.json").iter_errors(document["body"]))
+    signed = sign_frame(document, private_key("test-services-key-1"))
+    with pytest.raises(FrameRefused) as refused:
+        verify_frame(json.dumps(signed).encode(), keys=trusted_keys())
+    assert refused.value.code == "invalid_body"

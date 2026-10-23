@@ -23,6 +23,7 @@
 
 protocol: 1.0-pre
 signing_domain: universal-agents/message-frame/v1
+renew_key_proof_domain: universal-agents/host-renew-key-proof/v1
 frame_schema: frame.schema.json
 max_frame_bytes: 262144
 
@@ -41,7 +42,7 @@ verification_refusals:
   - code: revoked
     meaning: the issuer's certificate is on the installation's revocations record, whenever it was revoked
   - code: epoch_too_old
-    meaning: the issuer's membership or revocation epoch is below the receiver's minimum (request/reply and events only; queued work is checked against the certificate valid when it was issued) (request/reply and events only; queued work is checked against the certificate valid when it was issued) (request/reply and events only; queued work is checked against the certificate valid when it was issued)
+    meaning: the issuer's membership or revocation epoch is below the receiver's minimum (certificate-authenticated request/reply and events only; queued work and proof-of-possession joins are exempt)
   - code: wrong_team
     meaning: the frame is for another team
   - code: wrong_audience

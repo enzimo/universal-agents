@@ -1,7 +1,8 @@
 {
   "publish": [
     "_INBOX.*.>",
-    "ua.v1.{team}.{self}.dlq.notice.*"
+    "ua.v1.{team}.{self}.dlq.notice.*",
+    "ua.v1.{team}.{self}.dlq.raw.*"
   ],
   "role": "installation_authority",
   "subscribe": [

@@ -20,14 +20,25 @@
     "software": {
       "$ref": "../common.schema.json#/$defs/software"
     },
-    "new_application_key": {
-      "$ref": "../common.schema.json#/$defs/application_key"
-    },
-    "new_key_proof": {
-      "$ref": "../common.schema.json#/$defs/ed25519_signature"
-    },
     "new_nats_public_key": {
       "$ref": "../common.schema.json#/$defs/nats_user_key"
+    },
+    "application_key_rotation": {
+      "description": "Both the new application key and its proof are required when rotating. The proof signs the renewal frame as specified in README.md, using the new private key.",
+      "type": "object",
+      "properties": {
+        "key": {
+          "$ref": "../common.schema.json#/$defs/application_key"
+        },
+        "proof": {
+          "$ref": "../common.schema.json#/$defs/ed25519_signature"
+        }
+      },
+      "required": [
+        "key",
+        "proof"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

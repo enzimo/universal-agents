@@ -272,6 +272,15 @@ def subject_pattern(address: str) -> str:
     return re.sub(r"\{(?!sender\})[a-z_]+\}", "*", address)
 
 
+def publication_addresses(entry: dict[str, Any], transport: dict[str, Any]) -> list[str]:
+    addresses = entry_addresses(entry)
+    if entry["class"] == "dead_letter":
+        # Exact raw copies have no frame kind, but the receiver must be able
+        # to store them beside its signed notices, under its own runtime id.
+        addresses += transport["classes"]["dead_letter"]["addresses"]
+    return addresses
+
+
 def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Per host role: subjects it may publish (only under its own id) and subscribe to."""
 
@@ -279,11 +288,11 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
     for role in registry["host_roles"]:
         publish, subscribe = set(), {f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"}
         for name, entry in registry["kinds"].items():
-            for address in map(subject_pattern, entry_addresses(entry)):
-                if role in entry["senders"]:
-                    publish.add(full_subject(address, "{self}"))
-                if role in entry["receivers"] and entry["class"] not in {"durable", "dead_letter"}:
-                    subscribe.add(full_subject(address, "*"))
+            if role in entry["senders"]:
+                publish.update(full_subject(subject_pattern(address), "{self}")
+                               for address in publication_addresses(entry, transport))
+            if role in entry["receivers"] and entry["class"] not in {"durable", "dead_letter"}:
+                subscribe.update(full_subject(subject_pattern(address), "*") for address in entry_addresses(entry))
             if role in entry["receivers"] and entry["class"] == "request_reply":
                 publish.add("_INBOX.*.>")
         result[role] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
@@ -297,7 +306,7 @@ def asyncapi(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, A
         for index, address in enumerate(entry_addresses(entry)):
             channel = key if index == 0 else f"{key}_{index}"
             channels[channel] = {
-                "address": transport["subject_prefix"] + "." + address,
+                "address": full_subject(address, "{sender}"),
                 "messages": {key: {"$ref": f"#/components/messages/{key}"}},
             }
         messages[key] = {
@@ -460,6 +469,8 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) 
     states = []
     for name, entry in sorted(registry["state_records"].items()):
         body = writer.type_of(entry["body"], schemas[entry["body"]], class_name(name) + "State")
+        # Nested certificate documents reuse the record's existing body model.
+        writer.names[(entry["body"], "")] = body
         states.append((name, entry, body))
     kinds = []
     for name, entry in sorted(registry["kinds"].items()):
@@ -526,6 +537,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) 
         "from custom_messages.wire.spec import KindSpec, StateSpec\n\n"
         f"PROTOCOL = {registry['protocol']!r}\n"
         f"SIGNING_DOMAIN = {registry['signing_domain']!r}\n"
+        f"RENEW_KEY_PROOF_DOMAIN = {registry['renew_key_proof_domain']!r}\n"
         f"MAX_FRAME_BYTES = {registry['max_frame_bytes']!r}\n"
         f"VERIFICATION_REFUSALS = {tuple(item['code'] for item in registry['verification_refusals'])!r}\n"
         f"CHANGE_REFUSALS = {tuple(item['code'] for item in registry['change_refusals'])!r}\n"
