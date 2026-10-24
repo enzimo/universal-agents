@@ -287,6 +287,7 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         check_entry_addresses(where, name, entry, transport)
         check_idempotency(where, name, entry, schemas, registry["frame_schema"])
         check_body_rules(where, entry, schemas)
+        check_wake_alternatives(where, entry, schemas)
     names: dict[str, str] = {}
     for name in registry["kinds"]:
         # Generated model and adapter names come from the kind name; two kinds
@@ -453,6 +454,37 @@ def check_idempotency(where: str, kind: str, entry: dict[str, Any], schemas: dic
             leaves = schema_leaves(resolver, frame_schema, schemas[frame_schema], steps)
         if not leaves or not all(scalar_schema(resolver, file, leaf) for file, leaf in leaves):
             raise ContractError(f"{where}: idempotency part {pointer} names no string or integer field of {kind}")
+
+
+def check_wake_alternatives(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """A per-alternative wake rule names a body oneOf's constant and gives every alternative, and only those, a value."""
+
+    wakes = entry["wakes_model"]
+    if isinstance(wakes, str):
+        return
+    *parent, key = str(wakes["by"]).split(".")
+    resolver = ModelWriter(schemas)
+    alternatives = None
+    for file, node in schema_parents(resolver, entry["body"], schemas[entry["body"]], parent):
+        if "oneOf" in node and discriminator(file, "", node) == key:
+            alternatives = {variant["properties"][key]["const"] for variant in node["oneOf"]}
+    if alternatives is None or alternatives != set(wakes["values"]):
+        raise ContractError(f"{where}: wakes_model by {wakes['by']} must name a body oneOf and give each of its "
+                            f"alternatives {sorted(alternatives or [])} a value")
+
+
+def schema_parents(resolver: "ModelWriter", file: str, node: dict[str, Any], steps: list[str]) -> list[tuple[str, dict[str, Any]]]:
+    """The schemas a path of property names reaches, references resolved but a final oneOf kept whole."""
+
+    while "$ref" in node:
+        file, fragment = resolver.resolve(file, node["$ref"])
+        node = resolver.node(file, fragment)
+    if not steps:
+        return [(file, node)]
+    if "oneOf" in node:
+        return [leaf for variant in node["oneOf"] for leaf in schema_parents(resolver, file, variant, steps)]
+    child = node.get("properties", {}).get(steps[0])
+    return [] if child is None else schema_parents(resolver, file, child, steps[1:])
 
 
 def check_body_rules(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
@@ -709,12 +741,18 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
     return result
 
 
-def channel(address: str, key: str) -> dict[str, Any]:
+def channel_name(address: str) -> str:
+    """An AsyncAPI channel id from an address: its fixed words joined by _ (work.agent.{agent} is work_agent)."""
+
+    return re.sub(r"[^a-z0-9]+", "_", re.sub(r"\{[a-z_]+\}", "", address)).strip("_")
+
+
+def channel(address: str) -> dict[str, Any]:
     return {
         "address": address,
         "parameters": {name: {"description": f"The {name} subject token."}
                        for name in re.findall(r"\{([a-z_]+)\}", address)},
-        "messages": {key: {"$ref": f"#/components/messages/{key}"}},
+        "messages": {},
     }
 
 
@@ -728,41 +766,62 @@ def framed_payload(registry: dict[str, Any], kind: str, body: str) -> dict[str, 
 
 
 def asyncapi(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, Any]:
-    channels, operations, messages = {}, {}, {}
+    """One channel per address, listing every kind sent there; per kind and destination a send and a receive operation.
+
+    Operations are named by the audience target they deliver to (``send_task_result_edge``);
+    a durable copy's are ``send_<kind>_copy_<target>`` and carry ``x-ua-copy``. Replies share
+    the requester's inbox channel.
+    """
+
+    channels: dict[str, Any] = {}
+    operations: dict[str, Any] = {}
+    messages: dict[str, Any] = {}
+    addresses: dict[str, str] = {}
+    inbox = "reply_inbox"
     for name, entry in sorted(registry["kinds"].items()):
         key = name.replace(".", "_")
-        messages[key] = {
-            "name": name,
-            "summary": entry["description"],
-            "payload": framed_payload(registry, name, entry["body"]),
-        }
+        messages[key] = {"name": name, "summary": entry["description"], "payload": framed_payload(registry, name, entry["body"])}
+        reply = None
         if "reply" in entry:
             reply_key = f"{key}_reply"
-            messages[reply_key] = {
-                "name": f"{name}.reply",
-                "payload": framed_payload(registry, f"{name}.reply", entry["reply"]["body"]),
-            }
-            channels[reply_key] = channel(transport["reply_inbox_prefix"] + ".{inbox}", reply_key)
-            reply = {
-                "channel": {"$ref": f"#/channels/{reply_key}"},
-                "messages": [{"$ref": f"#/channels/{reply_key}/messages/{reply_key}"}],
-            }
-        for index, address in enumerate(entry_addresses(entry)):
-            channel_key = key if index == 0 else f"{key}_{index}"
-            channels[channel_key] = channel(transport["subject_prefix"] + "." + address, key)
-            operations[f"send_{channel_key}"] = {"action": "send", "channel": {"$ref": f"#/channels/{channel_key}"}}
-            operations[f"receive_{channel_key}"] = {"action": "receive", "channel": {"$ref": f"#/channels/{channel_key}"}}
-            if "reply" in entry:
-                operations[f"send_{channel_key}"]["reply"] = reply
-                operations[f"receive_{channel_key}"]["reply"] = reply
+            messages[reply_key] = {"name": f"{name}.reply", "payload": framed_payload(registry, f"{name}.reply", entry["reply"]["body"])}
+            channels.setdefault(inbox, channel(transport["reply_inbox_prefix"] + ".{inbox}"))["messages"][reply_key] = \
+                {"$ref": f"#/components/messages/{reply_key}"}
+            reply = {"channel": {"$ref": f"#/channels/{inbox}"}, "messages": [{"$ref": f"#/channels/{inbox}/messages/{reply_key}"}]}
+        for address in entry_addresses(entry):
+            channel_id = channel_name(address)
+            if addresses.setdefault(channel_id, address) != address:
+                raise ContractError(f"addresses {addresses[channel_id]} and {address} make one AsyncAPI channel id")
+            channels.setdefault(channel_id, channel(transport["subject_prefix"] + "." + address))["messages"][key] = \
+                {"$ref": f"#/components/messages/{key}"}
+            operations.update(address_operations(key, entry, address, channel_id, reply))
     return {
         "asyncapi": "3.1.0",
         "info": {"title": "Universal Agents messages", "version": registry["protocol"]},
         "defaultContentType": "application/json",
-        "channels": channels,
+        "channels": dict(sorted(channels.items())),
         "operations": operations,
         "components": {"messages": messages},
     }
+
+
+def address_operations(key: str, entry: dict[str, Any], address: str, channel_id: str,
+                       reply: dict[str, Any] | None) -> dict[str, Any]:
+    """The send and receive operations of one kind at one of its addresses; a copy's are marked."""
+
+    is_copy = address in entry.get("copy_to", [])
+    suffix = f"{key}_{'copy_' if is_copy else ''}{audience_target(address)}"
+    operations = {}
+    for action in ("send", "receive"):
+        operation: dict[str, Any] = {"action": action, "channel": {"$ref": f"#/channels/{channel_id}"},
+                                     "messages": [{"$ref": f"#/channels/{channel_id}/messages/{key}"}]}
+        if is_copy:
+            operation["summary"] = "A durable copy for the team services (README, \"Durable copies\")."
+            operation["x-ua-copy"] = True
+        if reply is not None:
+            operation["reply"] = reply
+        operations[f"{action}_{suffix}"] = operation
+    return operations
 
 
 def compatibility(registry: dict[str, Any]) -> dict[str, Any]:

@@ -1,0 +1,41 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.result",
+  "message_id": "01928f3a-7b2c-7332-8000-000000000332",
+  "idempotency_key": "task.result:fBi0AaCKd8i9dW3symocXrORXFsbqtv5I11Lmzbgek4",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_sub_2",
+    "sequence": 2,
+    "outcome": {
+      "state": "failed",
+      "custody_token": 1,
+      "failure": {
+        "category": "worker_lost",
+        "attempts": 2,
+        "message": "The worker stopped answering twice."
+      }
+    }
+  },
+  "body_digest": "AEE0RGLW_N_0PLi_vo-bEt0OOIn_15y7qUFSp-nMw38",
+  "signature": "4ZwMZNk1Xij4biEV05G6mLxg6M5K6KuPZNoIbKe5_lfyv4eQ2pa1R73GqGYrwkU7l1nWxo2zFSydaJkDuLARAA"
+}

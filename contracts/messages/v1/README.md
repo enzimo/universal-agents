@@ -40,9 +40,11 @@ python scripts/export_message_contract.py
 `--check` regenerates in memory and fails on any difference, and on any file in a generated
 folder that the script did not write. `tests/test_message_contract.py` runs it.
 
-The AsyncAPI document defines send and receive operations for every permitted address,
-including pool destinations and durable copies. A client must be able to discover the
-same delivery choices in AsyncAPI as in the registry.
+The AsyncAPI document has one channel per address, listing every kind sent there, and for
+each kind a send and a receive operation per destination, named by its audience target
+(`send_task_result_edge`). A durable copy's operations are `send_<kind>_copy_<target>` and
+carry `x-ua-copy`. Replies share the requester's inbox channel. A client discovers the same
+delivery choices in AsyncAPI as in the registry.
 
 ## Task dispatch and retries
 
@@ -449,7 +451,8 @@ Each file in `examples/invalid/` describes one refusal:
 
 Every refusal code except `access_denied` has an example, and every two neighbouring
 checks have an example with both defects, so a receiver that checks in another order
-fails one.
+fails one. Every kind has a valid and an invalid example, and every alternative of a body
+(each constant that tells a `oneOf` apart) appears in a valid example; the tests check both.
 
 ## Verification
 

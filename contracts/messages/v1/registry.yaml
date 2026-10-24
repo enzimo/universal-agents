@@ -30,7 +30,8 @@
 #   topology_edge  the edges an agent may send it on: up | down | person | sideways | out, or none
 #                  for kinds only hosts send (team-topologies.yaml)
 #   ledger         the entry the receiver's work ledger records, or none
-#   wakes_model    never | always | next_turn
+#   wakes_model    never | always | next_turn, or {by: <body oneOf constant>, values: {<alternative>: ...}}
+#                  giving every alternative its own value
 #   rendering      how a model sees it: none | sender_line | summary | full
 #   covered_change the store record it changes and whether it needs the version the writer saw
 #

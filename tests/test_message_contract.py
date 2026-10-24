@@ -365,26 +365,27 @@ def test_a_receiver_role_gets_only_the_addresses_it_serves() -> None:
     assert consumers == {TRANSPORT["consumers"]["team_services"]["name"]}
 
 
-def test_asyncapi_describes_both_operations_for_every_address() -> None:
+def test_asyncapi_describes_both_operations_for_every_kind_and_destination() -> None:
+    """One channel per address; each kind it carries has a send and a receive operation there."""
+
     document = json.loads((CONTRACT / "generated" / "asyncapi.json").read_text(encoding="utf-8"))
     operations = document["operations"]
-    for channel, spec in document["channels"].items():
-        if channel.endswith("_reply"):
-            continue  # reply inboxes are referenced by the request's operations
-        actions = {
-            operation["action"]
-            for operation in operations.values()
-            if operation["channel"]["$ref"] == f"#/channels/{channel}"
-        }
-        assert actions == {"send", "receive"}, spec["address"]
     for name, entry in REGISTRY["kinds"].items():
-        if "reply" not in entry:
-            continue
-        message = name.replace(".", "_")
-        for operation in operations.values():
-            channel = document["channels"][operation["channel"]["$ref"].rsplit("/", 1)[1]]
-            if message in channel["messages"] and not channel["address"].startswith("_INBOX."):
-                assert operation["reply"]["messages"] == [{"$ref": f"#/channels/{message}_reply/messages/{message}_reply"}]
+        key = name.replace(".", "_")
+        for address in EXPORT.entry_addresses(entry):
+            is_copy = address in entry.get("copy_to", [])
+            channel_id = EXPORT.channel_name(address)
+            assert document["channels"][channel_id]["address"] == "ua.v1.{team}.{sender}." + address
+            assert key in document["channels"][channel_id]["messages"]
+            for action in ("send", "receive"):
+                operation = operations[f"{action}_{key}_{'copy_' if is_copy else ''}{EXPORT.audience_target(address)}"]
+                assert operation["channel"] == {"$ref": f"#/channels/{channel_id}"}
+                assert operation["messages"] == [{"$ref": f"#/channels/{channel_id}/messages/{key}"}]
+                assert operation.get("x-ua-copy", False) is is_copy
+                if "reply" in entry:
+                    assert operation["reply"]["messages"] == [{"$ref": f"#/channels/reply_inbox/messages/{key}_reply"}]
+                else:
+                    assert "reply" not in operation
 
 
 def test_reassignment_preserves_the_task_but_changes_the_dispatch_key() -> None:
@@ -419,6 +420,8 @@ def test_a_copy_and_its_original_carry_different_keys_and_the_copy_has_no_receiv
     ({"authority": "optional"}, "state authority_binding"),
     ({"senders_by_address": {"work.pool.{pool}": ["lead_host"]}}, "narrows the senders of one of its own addresses"),
     ({"topology_edge": ["up", "none"]}, "or none alone"),
+    ({"wakes_model": {"by": "outcome.stat", "values": {"completed": "next_turn"}}}, "must name a body oneOf"),
+    ({"wakes_model": {"by": "outcome.state", "values": {"completed": "next_turn", "failed": "always"}}}, "must name a body oneOf"),
 ])
 def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change: dict, problem: str) -> None:
     registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
@@ -441,6 +444,61 @@ def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change
 def test_edges_follow_the_kind_and_the_senders_role(kind: str, role: str, edge: str, given_by_person: bool,
                                                     allowed: bool) -> None:
     assert topology.edge_allowed(kind, "hub_and_spoke", role, edge, given_by_person=given_by_person) is allowed
+
+
+def test_every_kind_has_an_invalid_example() -> None:
+    """Plan 13A.8: every kind has a full example and invalid examples."""
+
+    refused = set()
+    for path in invalid_examples():
+        case = json.loads(path.read_text(encoding="utf-8"))
+        refused.add(json.loads((EXAMPLES / "valid" / case["base"]).read_text(encoding="utf-8"))["kind"])
+    assert set(REGISTRY["kinds"]) <= refused, sorted(set(REGISTRY["kinds"]) - refused)
+
+
+RESOLVER = EXPORT.ModelWriter(EXPORT.load_schemas())
+
+
+def variant_values(file: str, node: dict, path: str, found: dict, depth: int = 0) -> None:
+    """Each oneOf in a body schema: its JSON path and the constant that names each alternative."""
+
+    while "$ref" in node:
+        file, fragment = RESOLVER.resolve(file, node["$ref"])
+        node = RESOLVER.node(file, fragment)
+    if depth > 8:
+        return
+    if "oneOf" in node:
+        key = EXPORT.discriminator(file, "", node)
+        found.setdefault(f"{path}.{key}", set()).update(variant["properties"][key]["const"] for variant in node["oneOf"])
+        for variant in node["oneOf"]:
+            variant_values(file, variant, path, found, depth + 1)
+    if node.get("type") == "array":
+        variant_values(file, node["items"], path + "[]", found, depth + 1)
+    for name, child in node.get("properties", {}).items():
+        variant_values(file, child, f"{path}.{name}", found, depth + 1)
+
+
+def example_values(value, path: str, wanted: dict, seen: dict) -> None:
+    if isinstance(value, dict):
+        for name, item in value.items():
+            if f"{path}.{name}" in wanted:
+                seen.setdefault(f"{path}.{name}", set()).add(item)
+            example_values(item, f"{path}.{name}", wanted, seen)
+    elif isinstance(value, list):
+        for item in value:
+            example_values(item, path + "[]", wanted, seen)
+
+
+@pytest.mark.parametrize("kind", sorted(REGISTRY["kinds"]))
+def test_every_variant_of_a_body_has_a_valid_example(kind: str) -> None:
+    file = REGISTRY["kinds"][kind]["body"]
+    wanted: dict = {}
+    variant_values(file, json.loads((CONTRACT / "schemas" / file).read_text(encoding="utf-8")), "", wanted)
+    seen: dict = {}
+    for path in (EXAMPLES / "valid" / kind).glob("*.json"):
+        example_values(json.loads(path.read_text(encoding="utf-8"))["body"], "", wanted, seen)
+    missing = {place: sorted(values - seen.get(place, set())) for place, values in wanted.items() if values - seen.get(place, set())}
+    assert not missing, missing
 
 
 def test_every_kind_and_reply_has_a_valid_example() -> None:

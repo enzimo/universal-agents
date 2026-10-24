@@ -1,77 +1,7 @@
 {
   "asyncapi": "3.1.0",
   "channels": {
-    "access_decision": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
-        "access_decision": {
-          "$ref": "#/components/messages/access_decision"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "access_request": {
-      "address": "ua.v1.{team}.{sender}.work.team",
-      "messages": {
-        "access_request": {
-          "$ref": "#/components/messages/access_request"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "access_resolved": {
-      "address": "ua.v1.{team}.{sender}.work.team",
-      "messages": {
-        "access_resolved": {
-          "$ref": "#/components/messages/access_resolved"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "access_review": {
-      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
-      "messages": {
-        "access_review": {
-          "$ref": "#/components/messages/access_review"
-        }
-      },
-      "parameters": {
-        "edge": {
-          "description": "The edge subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "agent_pause": {
+    "ctl_agent_pause": {
       "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.pause",
       "messages": {
         "agent_pause": {
@@ -90,245 +20,7 @@
         }
       }
     },
-    "agent_pause_reply": {
-      "address": "_INBOX.{runtime}.{inbox}",
-      "messages": {
-        "agent_pause_reply": {
-          "$ref": "#/components/messages/agent_pause_reply"
-        }
-      },
-      "parameters": {
-        "inbox": {
-          "description": "The inbox subject token."
-        },
-        "runtime": {
-          "description": "The runtime subject token."
-        }
-      }
-    },
-    "credential_form_request": {
-      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
-      "messages": {
-        "credential_form_request": {
-          "$ref": "#/components/messages/credential_form_request"
-        }
-      },
-      "parameters": {
-        "edge": {
-          "description": "The edge subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "credential_form_result": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
-        "credential_form_result": {
-          "$ref": "#/components/messages/credential_form_result"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "custody_moved": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
-        "custody_moved": {
-          "$ref": "#/components/messages/custody_moved"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "custody_moved_1": {
-      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
-      "messages": {
-        "custody_moved": {
-          "$ref": "#/components/messages/custody_moved"
-        }
-      },
-      "parameters": {
-        "edge": {
-          "description": "The edge subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "delivery_receipt": {
-      "address": "ua.v1.{team}.{sender}.work.team",
-      "messages": {
-        "delivery_receipt": {
-          "$ref": "#/components/messages/delivery_receipt"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "delivery_refused": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
-        "delivery_refused": {
-          "$ref": "#/components/messages/delivery_refused"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "delivery_refused_1": {
-      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
-      "messages": {
-        "delivery_refused": {
-          "$ref": "#/components/messages/delivery_refused"
-        }
-      },
-      "parameters": {
-        "edge": {
-          "description": "The edge subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "delivery_refused_2": {
-      "address": "ua.v1.{team}.{sender}.work.team",
-      "messages": {
-        "delivery_refused": {
-          "$ref": "#/components/messages/delivery_refused"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "ledger_fact": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
-        "ledger_fact": {
-          "$ref": "#/components/messages/ledger_fact"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "person_notify": {
-      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
-      "messages": {
-        "person_notify": {
-          "$ref": "#/components/messages/person_notify"
-        }
-      },
-      "parameters": {
-        "edge": {
-          "description": "The edge subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "question_closed": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
-        "question_closed": {
-          "$ref": "#/components/messages/question_closed"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "question_closed_1": {
-      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
-      "messages": {
-        "question_closed": {
-          "$ref": "#/components/messages/question_closed"
-        }
-      },
-      "parameters": {
-        "edge": {
-          "description": "The edge subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "skills_changed": {
+    "evt_skills_changed": {
       "address": "ua.v1.{team}.{sender}.evt.skills_changed",
       "messages": {
         "skills_changed": {
@@ -344,246 +36,78 @@
         }
       }
     },
-    "task_account": {
+    "reply_inbox": {
+      "address": "_INBOX.{runtime}.{inbox}",
+      "messages": {
+        "agent_pause_reply": {
+          "$ref": "#/components/messages/agent_pause_reply"
+        }
+      },
+      "parameters": {
+        "inbox": {
+          "description": "The inbox subject token."
+        },
+        "runtime": {
+          "description": "The runtime subject token."
+        }
+      }
+    },
+    "work_agent": {
       "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
       "messages": {
+        "access_decision": {
+          "$ref": "#/components/messages/access_decision"
+        },
+        "credential_form_result": {
+          "$ref": "#/components/messages/credential_form_result"
+        },
+        "custody_moved": {
+          "$ref": "#/components/messages/custody_moved"
+        },
+        "delivery_refused": {
+          "$ref": "#/components/messages/delivery_refused"
+        },
+        "ledger_fact": {
+          "$ref": "#/components/messages/ledger_fact"
+        },
+        "question_closed": {
+          "$ref": "#/components/messages/question_closed"
+        },
         "task_account": {
           "$ref": "#/components/messages/task_account"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_account_1": {
-      "address": "ua.v1.{team}.{sender}.work.team",
-      "messages": {
-        "task_account": {
-          "$ref": "#/components/messages/task_account"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_answer": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
         "task_answer": {
           "$ref": "#/components/messages/task_answer"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_answer_1": {
-      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
-      "messages": {
-        "task_answer": {
-          "$ref": "#/components/messages/task_answer"
-        }
-      },
-      "parameters": {
-        "edge": {
-          "description": "The edge subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_claimed": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
         "task_claimed": {
           "$ref": "#/components/messages/task_claimed"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_claimed_1": {
-      "address": "ua.v1.{team}.{sender}.work.team",
-      "messages": {
-        "task_claimed": {
-          "$ref": "#/components/messages/task_claimed"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_handback": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
         "task_handback": {
           "$ref": "#/components/messages/task_handback"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_handback_1": {
-      "address": "ua.v1.{team}.{sender}.work.team",
-      "messages": {
-        "task_handback": {
-          "$ref": "#/components/messages/task_handback"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_progress": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
         "task_progress": {
           "$ref": "#/components/messages/task_progress"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_progress_1": {
-      "address": "ua.v1.{team}.{sender}.work.team",
-      "messages": {
-        "task_progress": {
-          "$ref": "#/components/messages/task_progress"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_question": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
         "task_question": {
           "$ref": "#/components/messages/task_question"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_question_1": {
-      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
-      "messages": {
-        "task_question": {
-          "$ref": "#/components/messages/task_question"
-        }
-      },
-      "parameters": {
-        "edge": {
-          "description": "The edge subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_report": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
         "task_report": {
           "$ref": "#/components/messages/task_report"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_request": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
         "task_request": {
           "$ref": "#/components/messages/task_request"
+        },
+        "task_result": {
+          "$ref": "#/components/messages/task_result"
+        },
+        "task_steer": {
+          "$ref": "#/components/messages/task_steer"
+        },
+        "task_stop": {
+          "$ref": "#/components/messages/task_stop"
+        },
+        "tool_setup_result": {
+          "$ref": "#/components/messages/tool_setup_result"
         }
       },
       "parameters": {
@@ -598,7 +122,62 @@
         }
       }
     },
-    "task_request_1": {
+    "work_edge": {
+      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
+      "messages": {
+        "access_review": {
+          "$ref": "#/components/messages/access_review"
+        },
+        "credential_form_request": {
+          "$ref": "#/components/messages/credential_form_request"
+        },
+        "custody_moved": {
+          "$ref": "#/components/messages/custody_moved"
+        },
+        "delivery_refused": {
+          "$ref": "#/components/messages/delivery_refused"
+        },
+        "person_notify": {
+          "$ref": "#/components/messages/person_notify"
+        },
+        "question_closed": {
+          "$ref": "#/components/messages/question_closed"
+        },
+        "task_answer": {
+          "$ref": "#/components/messages/task_answer"
+        },
+        "task_question": {
+          "$ref": "#/components/messages/task_question"
+        },
+        "task_request": {
+          "$ref": "#/components/messages/task_request"
+        },
+        "task_result": {
+          "$ref": "#/components/messages/task_result"
+        },
+        "task_steer": {
+          "$ref": "#/components/messages/task_steer"
+        },
+        "task_stop": {
+          "$ref": "#/components/messages/task_stop"
+        },
+        "tool_setup_request": {
+          "$ref": "#/components/messages/tool_setup_request"
+        }
+      },
+      "parameters": {
+        "edge": {
+          "description": "The edge subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "work_pool": {
       "address": "ua.v1.{team}.{sender}.work.pool.{pool}",
       "messages": {
         "task_request": {
@@ -617,201 +196,41 @@
         }
       }
     },
-    "task_request_2": {
-      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
-      "messages": {
-        "task_request": {
-          "$ref": "#/components/messages/task_request"
-        }
-      },
-      "parameters": {
-        "edge": {
-          "description": "The edge subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_request_3": {
+    "work_team": {
       "address": "ua.v1.{team}.{sender}.work.team",
       "messages": {
+        "access_request": {
+          "$ref": "#/components/messages/access_request"
+        },
+        "access_resolved": {
+          "$ref": "#/components/messages/access_resolved"
+        },
+        "delivery_receipt": {
+          "$ref": "#/components/messages/delivery_receipt"
+        },
+        "delivery_refused": {
+          "$ref": "#/components/messages/delivery_refused"
+        },
+        "task_account": {
+          "$ref": "#/components/messages/task_account"
+        },
+        "task_claimed": {
+          "$ref": "#/components/messages/task_claimed"
+        },
+        "task_handback": {
+          "$ref": "#/components/messages/task_handback"
+        },
+        "task_progress": {
+          "$ref": "#/components/messages/task_progress"
+        },
         "task_request": {
           "$ref": "#/components/messages/task_request"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_result": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
         "task_result": {
           "$ref": "#/components/messages/task_result"
         }
       },
       "parameters": {
-        "agent": {
-          "description": "The agent subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_result_1": {
-      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
-      "messages": {
-        "task_result": {
-          "$ref": "#/components/messages/task_result"
-        }
-      },
-      "parameters": {
-        "edge": {
-          "description": "The edge subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_result_2": {
-      "address": "ua.v1.{team}.{sender}.work.team",
-      "messages": {
-        "task_result": {
-          "$ref": "#/components/messages/task_result"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_steer": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
-        "task_steer": {
-          "$ref": "#/components/messages/task_steer"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_steer_1": {
-      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
-      "messages": {
-        "task_steer": {
-          "$ref": "#/components/messages/task_steer"
-        }
-      },
-      "parameters": {
-        "edge": {
-          "description": "The edge subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_stop": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
-        "task_stop": {
-          "$ref": "#/components/messages/task_stop"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "task_stop_1": {
-      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
-      "messages": {
-        "task_stop": {
-          "$ref": "#/components/messages/task_stop"
-        }
-      },
-      "parameters": {
-        "edge": {
-          "description": "The edge subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "tool_setup_request": {
-      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
-      "messages": {
-        "tool_setup_request": {
-          "$ref": "#/components/messages/tool_setup_request"
-        }
-      },
-      "parameters": {
-        "edge": {
-          "description": "The edge subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "tool_setup_result": {
-      "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
-      "messages": {
-        "tool_setup_result": {
-          "$ref": "#/components/messages/tool_setup_result"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
-        },
         "sender": {
           "description": "The sender subject token."
         },
@@ -1446,553 +865,1017 @@
     "version": "1.0-pre"
   },
   "operations": {
-    "receive_access_decision": {
+    "receive_access_decision_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/access_decision"
-      }
-    },
-    "receive_access_request": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/access_request"
-      }
-    },
-    "receive_access_resolved": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/access_resolved"
-      }
-    },
-    "receive_access_review": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/access_review"
-      }
-    },
-    "receive_agent_pause": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/agent_pause"
+        "$ref": "#/channels/work_agent"
       },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/access_decision"
+        }
+      ]
+    },
+    "receive_access_request_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/access_request"
+        }
+      ]
+    },
+    "receive_access_resolved_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/access_resolved"
+        }
+      ]
+    },
+    "receive_access_review_edge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/access_review"
+        }
+      ]
+    },
+    "receive_agent_pause_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/ctl_agent_pause"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/ctl_agent_pause/messages/agent_pause"
+        }
+      ],
       "reply": {
         "channel": {
-          "$ref": "#/channels/agent_pause_reply"
+          "$ref": "#/channels/reply_inbox"
         },
         "messages": [
           {
-            "$ref": "#/channels/agent_pause_reply/messages/agent_pause_reply"
+            "$ref": "#/channels/reply_inbox/messages/agent_pause_reply"
           }
         ]
       }
     },
-    "receive_credential_form_request": {
+    "receive_credential_form_request_edge": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/credential_form_request"
-      }
-    },
-    "receive_credential_form_result": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/credential_form_result"
-      }
-    },
-    "receive_custody_moved": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/custody_moved"
-      }
-    },
-    "receive_custody_moved_1": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/custody_moved_1"
-      }
-    },
-    "receive_delivery_receipt": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/delivery_receipt"
-      }
-    },
-    "receive_delivery_refused": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/delivery_refused"
-      }
-    },
-    "receive_delivery_refused_1": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/delivery_refused_1"
-      }
-    },
-    "receive_delivery_refused_2": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/delivery_refused_2"
-      }
-    },
-    "receive_ledger_fact": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/ledger_fact"
-      }
-    },
-    "receive_person_notify": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/person_notify"
-      }
-    },
-    "receive_question_closed": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/question_closed"
-      }
-    },
-    "receive_question_closed_1": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/question_closed_1"
-      }
-    },
-    "receive_skills_changed": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/skills_changed"
-      }
-    },
-    "receive_task_account": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_account"
-      }
-    },
-    "receive_task_account_1": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_account_1"
-      }
-    },
-    "receive_task_answer": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_answer"
-      }
-    },
-    "receive_task_answer_1": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_answer_1"
-      }
-    },
-    "receive_task_claimed": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_claimed"
-      }
-    },
-    "receive_task_claimed_1": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_claimed_1"
-      }
-    },
-    "receive_task_handback": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_handback"
-      }
-    },
-    "receive_task_handback_1": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_handback_1"
-      }
-    },
-    "receive_task_progress": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_progress"
-      }
-    },
-    "receive_task_progress_1": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_progress_1"
-      }
-    },
-    "receive_task_question": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_question"
-      }
-    },
-    "receive_task_question_1": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_question_1"
-      }
-    },
-    "receive_task_report": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_report"
-      }
-    },
-    "receive_task_request": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_request"
-      }
-    },
-    "receive_task_request_1": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_request_1"
-      }
-    },
-    "receive_task_request_2": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_request_2"
-      }
-    },
-    "receive_task_request_3": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_request_3"
-      }
-    },
-    "receive_task_result": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_result"
-      }
-    },
-    "receive_task_result_1": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_result_1"
-      }
-    },
-    "receive_task_result_2": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_result_2"
-      }
-    },
-    "receive_task_steer": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_steer"
-      }
-    },
-    "receive_task_steer_1": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_steer_1"
-      }
-    },
-    "receive_task_stop": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_stop"
-      }
-    },
-    "receive_task_stop_1": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/task_stop_1"
-      }
-    },
-    "receive_tool_setup_request": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/tool_setup_request"
-      }
-    },
-    "receive_tool_setup_result": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/tool_setup_result"
-      }
-    },
-    "send_access_decision": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/access_decision"
-      }
-    },
-    "send_access_request": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/access_request"
-      }
-    },
-    "send_access_resolved": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/access_resolved"
-      }
-    },
-    "send_access_review": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/access_review"
-      }
-    },
-    "send_agent_pause": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/agent_pause"
+        "$ref": "#/channels/work_edge"
       },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/credential_form_request"
+        }
+      ]
+    },
+    "receive_credential_form_result_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/credential_form_result"
+        }
+      ]
+    },
+    "receive_custody_moved_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/custody_moved"
+        }
+      ]
+    },
+    "receive_custody_moved_edge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/custody_moved"
+        }
+      ]
+    },
+    "receive_delivery_receipt_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/delivery_receipt"
+        }
+      ]
+    },
+    "receive_delivery_refused_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/delivery_refused"
+        }
+      ]
+    },
+    "receive_delivery_refused_edge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/delivery_refused"
+        }
+      ]
+    },
+    "receive_delivery_refused_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/delivery_refused"
+        }
+      ]
+    },
+    "receive_ledger_fact_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/ledger_fact"
+        }
+      ]
+    },
+    "receive_person_notify_edge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/person_notify"
+        }
+      ]
+    },
+    "receive_question_closed_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/question_closed"
+        }
+      ]
+    },
+    "receive_question_closed_edge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/question_closed"
+        }
+      ]
+    },
+    "receive_skills_changed_team": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/evt_skills_changed"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/evt_skills_changed/messages/skills_changed"
+        }
+      ]
+    },
+    "receive_task_account_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_account"
+        }
+      ]
+    },
+    "receive_task_account_copy_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/task_account"
+        }
+      ],
+      "summary": "A durable copy for the team services (README, \"Durable copies\").",
+      "x-ua-copy": true
+    },
+    "receive_task_answer_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_answer"
+        }
+      ]
+    },
+    "receive_task_answer_edge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/task_answer"
+        }
+      ]
+    },
+    "receive_task_claimed_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_claimed"
+        }
+      ]
+    },
+    "receive_task_claimed_copy_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/task_claimed"
+        }
+      ],
+      "summary": "A durable copy for the team services (README, \"Durable copies\").",
+      "x-ua-copy": true
+    },
+    "receive_task_handback_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_handback"
+        }
+      ]
+    },
+    "receive_task_handback_copy_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/task_handback"
+        }
+      ],
+      "summary": "A durable copy for the team services (README, \"Durable copies\").",
+      "x-ua-copy": true
+    },
+    "receive_task_progress_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_progress"
+        }
+      ]
+    },
+    "receive_task_progress_copy_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/task_progress"
+        }
+      ],
+      "summary": "A durable copy for the team services (README, \"Durable copies\").",
+      "x-ua-copy": true
+    },
+    "receive_task_question_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_question"
+        }
+      ]
+    },
+    "receive_task_question_edge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/task_question"
+        }
+      ]
+    },
+    "receive_task_report_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_report"
+        }
+      ]
+    },
+    "receive_task_request_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_request"
+        }
+      ]
+    },
+    "receive_task_request_copy_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/task_request"
+        }
+      ],
+      "summary": "A durable copy for the team services (README, \"Durable copies\").",
+      "x-ua-copy": true
+    },
+    "receive_task_request_edge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/task_request"
+        }
+      ]
+    },
+    "receive_task_request_pool": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_pool"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_pool/messages/task_request"
+        }
+      ]
+    },
+    "receive_task_result_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_result"
+        }
+      ]
+    },
+    "receive_task_result_copy_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/task_result"
+        }
+      ],
+      "summary": "A durable copy for the team services (README, \"Durable copies\").",
+      "x-ua-copy": true
+    },
+    "receive_task_result_edge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/task_result"
+        }
+      ]
+    },
+    "receive_task_steer_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_steer"
+        }
+      ]
+    },
+    "receive_task_steer_edge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/task_steer"
+        }
+      ]
+    },
+    "receive_task_stop_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_stop"
+        }
+      ]
+    },
+    "receive_task_stop_edge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/task_stop"
+        }
+      ]
+    },
+    "receive_tool_setup_request_edge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/tool_setup_request"
+        }
+      ]
+    },
+    "receive_tool_setup_result_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/tool_setup_result"
+        }
+      ]
+    },
+    "send_access_decision_agent": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/access_decision"
+        }
+      ]
+    },
+    "send_access_request_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/access_request"
+        }
+      ]
+    },
+    "send_access_resolved_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/access_resolved"
+        }
+      ]
+    },
+    "send_access_review_edge": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/access_review"
+        }
+      ]
+    },
+    "send_agent_pause_agent": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/ctl_agent_pause"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/ctl_agent_pause/messages/agent_pause"
+        }
+      ],
       "reply": {
         "channel": {
-          "$ref": "#/channels/agent_pause_reply"
+          "$ref": "#/channels/reply_inbox"
         },
         "messages": [
           {
-            "$ref": "#/channels/agent_pause_reply/messages/agent_pause_reply"
+            "$ref": "#/channels/reply_inbox/messages/agent_pause_reply"
           }
         ]
       }
     },
-    "send_credential_form_request": {
+    "send_credential_form_request_edge": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/credential_form_request"
-      }
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/credential_form_request"
+        }
+      ]
     },
-    "send_credential_form_result": {
+    "send_credential_form_result_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/credential_form_result"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/credential_form_result"
+        }
+      ]
     },
-    "send_custody_moved": {
+    "send_custody_moved_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/custody_moved"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/custody_moved"
+        }
+      ]
     },
-    "send_custody_moved_1": {
+    "send_custody_moved_edge": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/custody_moved_1"
-      }
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/custody_moved"
+        }
+      ]
     },
-    "send_delivery_receipt": {
+    "send_delivery_receipt_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/delivery_receipt"
-      }
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/delivery_receipt"
+        }
+      ]
     },
-    "send_delivery_refused": {
+    "send_delivery_refused_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/delivery_refused"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/delivery_refused"
+        }
+      ]
     },
-    "send_delivery_refused_1": {
+    "send_delivery_refused_edge": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/delivery_refused_1"
-      }
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/delivery_refused"
+        }
+      ]
     },
-    "send_delivery_refused_2": {
+    "send_delivery_refused_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/delivery_refused_2"
-      }
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/delivery_refused"
+        }
+      ]
     },
-    "send_ledger_fact": {
+    "send_ledger_fact_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/ledger_fact"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/ledger_fact"
+        }
+      ]
     },
-    "send_person_notify": {
+    "send_person_notify_edge": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/person_notify"
-      }
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/person_notify"
+        }
+      ]
     },
-    "send_question_closed": {
+    "send_question_closed_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/question_closed"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/question_closed"
+        }
+      ]
     },
-    "send_question_closed_1": {
+    "send_question_closed_edge": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/question_closed_1"
-      }
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/question_closed"
+        }
+      ]
     },
-    "send_skills_changed": {
+    "send_skills_changed_team": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/skills_changed"
-      }
+        "$ref": "#/channels/evt_skills_changed"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/evt_skills_changed/messages/skills_changed"
+        }
+      ]
     },
-    "send_task_account": {
+    "send_task_account_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_account"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_account"
+        }
+      ]
     },
-    "send_task_account_1": {
+    "send_task_account_copy_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_account_1"
-      }
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/task_account"
+        }
+      ],
+      "summary": "A durable copy for the team services (README, \"Durable copies\").",
+      "x-ua-copy": true
     },
-    "send_task_answer": {
+    "send_task_answer_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_answer"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_answer"
+        }
+      ]
     },
-    "send_task_answer_1": {
+    "send_task_answer_edge": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_answer_1"
-      }
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/task_answer"
+        }
+      ]
     },
-    "send_task_claimed": {
+    "send_task_claimed_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_claimed"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_claimed"
+        }
+      ]
     },
-    "send_task_claimed_1": {
+    "send_task_claimed_copy_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_claimed_1"
-      }
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/task_claimed"
+        }
+      ],
+      "summary": "A durable copy for the team services (README, \"Durable copies\").",
+      "x-ua-copy": true
     },
-    "send_task_handback": {
+    "send_task_handback_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_handback"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_handback"
+        }
+      ]
     },
-    "send_task_handback_1": {
+    "send_task_handback_copy_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_handback_1"
-      }
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/task_handback"
+        }
+      ],
+      "summary": "A durable copy for the team services (README, \"Durable copies\").",
+      "x-ua-copy": true
     },
-    "send_task_progress": {
+    "send_task_progress_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_progress"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_progress"
+        }
+      ]
     },
-    "send_task_progress_1": {
+    "send_task_progress_copy_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_progress_1"
-      }
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/task_progress"
+        }
+      ],
+      "summary": "A durable copy for the team services (README, \"Durable copies\").",
+      "x-ua-copy": true
     },
-    "send_task_question": {
+    "send_task_question_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_question"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_question"
+        }
+      ]
     },
-    "send_task_question_1": {
+    "send_task_question_edge": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_question_1"
-      }
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/task_question"
+        }
+      ]
     },
-    "send_task_report": {
+    "send_task_report_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_report"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_report"
+        }
+      ]
     },
-    "send_task_request": {
+    "send_task_request_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_request"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_request"
+        }
+      ]
     },
-    "send_task_request_1": {
+    "send_task_request_copy_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_request_1"
-      }
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/task_request"
+        }
+      ],
+      "summary": "A durable copy for the team services (README, \"Durable copies\").",
+      "x-ua-copy": true
     },
-    "send_task_request_2": {
+    "send_task_request_edge": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_request_2"
-      }
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/task_request"
+        }
+      ]
     },
-    "send_task_request_3": {
+    "send_task_request_pool": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_request_3"
-      }
+        "$ref": "#/channels/work_pool"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_pool/messages/task_request"
+        }
+      ]
     },
-    "send_task_result": {
+    "send_task_result_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_result"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_result"
+        }
+      ]
     },
-    "send_task_result_1": {
+    "send_task_result_copy_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_result_1"
-      }
+        "$ref": "#/channels/work_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_team/messages/task_result"
+        }
+      ],
+      "summary": "A durable copy for the team services (README, \"Durable copies\").",
+      "x-ua-copy": true
     },
-    "send_task_result_2": {
+    "send_task_result_edge": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_result_2"
-      }
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/task_result"
+        }
+      ]
     },
-    "send_task_steer": {
+    "send_task_steer_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_steer"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_steer"
+        }
+      ]
     },
-    "send_task_steer_1": {
+    "send_task_steer_edge": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_steer_1"
-      }
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/task_steer"
+        }
+      ]
     },
-    "send_task_stop": {
+    "send_task_stop_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_stop"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/task_stop"
+        }
+      ]
     },
-    "send_task_stop_1": {
+    "send_task_stop_edge": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/task_stop_1"
-      }
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/task_stop"
+        }
+      ]
     },
-    "send_tool_setup_request": {
+    "send_tool_setup_request_edge": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/tool_setup_request"
-      }
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/tool_setup_request"
+        }
+      ]
     },
-    "send_tool_setup_result": {
+    "send_tool_setup_result_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/tool_setup_result"
-      }
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/tool_setup_result"
+        }
+      ]
     }
   }
 }
