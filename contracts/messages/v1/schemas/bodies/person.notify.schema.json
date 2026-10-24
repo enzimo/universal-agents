@@ -9,37 +9,7 @@
       "$ref": "../common.schema.json#/$defs/record_id"
     },
     "recipient": {
-      "description": "Whom the notice is for: the person behind a delivery reference, or the team's administrators.",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "const": "person"
-            },
-            "delivery_ref": {
-              "$ref": "../common.schema.json#/$defs/delivery_ref"
-            }
-          },
-          "required": [
-            "type",
-            "delivery_ref"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "const": "administrators"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "additionalProperties": false
-        }
-      ]
+      "$ref": "../common.schema.json#/$defs/recipient"
     },
     "task_id": {
       "$ref": "../common.schema.json#/$defs/record_id"

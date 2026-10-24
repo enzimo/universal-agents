@@ -52,6 +52,8 @@ class KindSpec:
     # What a token on this kind is bound to: (type, JSON pointer to the body field
     # holding the id), or (type, None) when the handler checks the task it holds.
     authority_binding: Optional[tuple[str, Optional[str]]]
+    # What the schema cannot say, checked after it (README, "What bodies carry").
+    body_rules: tuple[dict[str, Any], ...]
     execution_slot: bool
     accepted_while_paused: bool
     priority: str

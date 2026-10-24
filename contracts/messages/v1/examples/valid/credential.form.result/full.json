@@ -29,7 +29,7 @@
     "credential_key": "example_analytics.api_key",
     "service_name": "Example Analytics",
     "display_name": "Example Analytics key",
-    "broker_session_id": "bs_1",
+    "broker_session_id": "-Xk2rQ9vT1mZpL0aB7cD4eF",
     "flow": "collect",
     "message": "Stored.",
     "error": "none",
@@ -39,13 +39,19 @@
           "name": "api_key",
           "kind": "api_key",
           "visibility": "secret",
-          "value_source": "user_input",
-          "secret": true
+          "value_source": "user_input"
+        },
+        {
+          "name": "account_name",
+          "kind": "account_id",
+          "visibility": "metadata_visible",
+          "value_source": "agent_supplied_metadata",
+          "value": "analytics-team"
         }
       ],
       "purpose": "Read last quarter's usage figures."
     }
   },
-  "body_digest": "LRSJZqMpSST2jZ1JXqvpIHfIpuj0lvcaNElqzK10M-0",
-  "signature": "3Cy1nWVqP-RaVy7C3V0ad9_u1fx-cTxHC6frhI6e_ESyi3JQqn-C7ocaABa1yaCla481-qoD_DuJhT710EULCg"
+  "body_digest": "OSOrMmnfarzUV09IHuJ2k4F02ngJ-WPh5tmTL2wWOa0",
+  "signature": "C_TikwkbIwkIM53rm5N-98sd6FCBX1yXwZcJhOPsRQ8QqsllmLxETW5MaJZdE_tPxvn2xcaHIvNxF-uXmmbLBQ"
 }

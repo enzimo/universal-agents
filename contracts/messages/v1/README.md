@@ -98,6 +98,59 @@ topology does not allow is refused with `delivery.refused`. Work a person gave a
 directly reports to the person whatever the agent's role. Messages that hosts send without
 an agent (gateway, scheduler, team services) are not topology checks.
 
+## What bodies carry
+
+**Body rules.** A schema cannot say that a list holds no value twice, that one field is
+required when others have given values, or that a body needs at least one of several
+fields. A kind's `body_rules` say it, and receivers check them right after the schema,
+refusing as `invalid_body` at the rule's field:
+- `{unique: <list>, by: <member>}`: no two items (or their members) are equal;
+- `{requires: <field>, when: [{at: <field>, is: <value>}, ...]}`: the field is present
+  whenever every condition holds;
+- `{any_of: [<field>, ...]}`: at least one is present.
+
+**Long text.** `long_text` holds at most 32,768 characters. A result's answer and a
+person's answer may instead go as a text file in the object store (`form: file`,
+`text_file`); larger text must. The person's own request travels by reference
+(`work.root_request`), so instructions written by the lead stay within the limit.
+
+**Passing a result on.** When the lead, or the team services applying the lead's decision
+made ahead, passes a subtask's result on "as it is", code copies the subtask's answer and
+files into the new result and names the subtask in `forwarded_from_task_id`. The receiver,
+often a gateway, never has to look the subtask up.
+
+**Delivery references** are `dr_` and at least 16 random characters, made by the gateway,
+so a phone number, chat id or handle can never pass as one. A task's `delivery_mode`
+tells the gateway how to deliver: an interactive reply, a scheduled (`cron`) or deferred
+message, a heartbeat, or a system schedule's mode.
+
+**Credentials.** A credential field is either visible (`metadata_visible`, of a kind that
+is never secret, and may carry its value) or secret (any kind, never a value): the person
+or the store fills secret fields in the broker's own form. A template candidate the
+broker saves after approval travels as a JSON file in the object store. The broker's
+session id is its own random token.
+
+**Access reviews and decisions.** Access requests go to the team services, which hand
+access down or ask whoever may decide. They send the gateway an `access.review` to open a
+review in its Inbox; a staged change's review card, written by code, goes by reference.
+The person's decision returns as `access.resolved`, with the card's choice, note, kept
+items, "keep for later tasks" and "may hand it on" boxes. A decision the team services
+cannot record (not the person's to decide, request closed) comes back as an
+`access.review` in state `refused`, which the Inbox shows; `decided` and `closed` close
+the card. The waiting task learns the outcome from `access.decision`, which only the team
+services send. It carries what was granted because a worker on another host cannot read
+the team's store; it grants nothing the access service has not recorded. Until the
+runtime moves onto this contract (plan, phase 3), today's notice still carries ids only,
+as `AGENTS.md` says.
+
+**Change-conflict decisions.** A person's decision on a change conflict is recorded by
+the team services and returned in a `decision_token`, bound to a digest of the values the
+person was shown. A team-services certificate of the frame's installation and team signs
+the RFC 8785 canonical JSON of the token without its signature, after the domain prefix
+`universal-agents/decision-token/v1` and a newline (`frame.sign_decision_token`).
+Receivers check it like an authority token, as `bad_authority` at the token's field, and
+the team services apply the decision once, refusing it when the values changed.
+
 ## Schema subset
 
 Schemas use only what every implementation reads the same way. `tests/test_message_contract.py`

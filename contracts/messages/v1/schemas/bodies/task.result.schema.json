@@ -47,43 +47,7 @@
               "$ref": "../common.schema.json#/$defs/custody_token"
             },
             "answer": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "properties": {
-                    "form": {
-                      "const": "text"
-                    },
-                    "text": {
-                      "$ref": "../common.schema.json#/$defs/long_text"
-                    }
-                  },
-                  "required": [
-                    "form",
-                    "text"
-                  ],
-                  "additionalProperties": false
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "form": {
-                      "const": "from_subtask"
-                    },
-                    "from_task_id": {
-                      "$ref": "../common.schema.json#/$defs/record_id"
-                    },
-                    "note": {
-                      "$ref": "../common.schema.json#/$defs/note_text"
-                    }
-                  },
-                  "required": [
-                    "form",
-                    "from_task_id"
-                  ],
-                  "additionalProperties": false
-                }
-              ]
+              "$ref": "../common.schema.json#/$defs/answer"
             },
             "artifacts": {
               "type": "array",
@@ -110,43 +74,7 @@
               "$ref": "../common.schema.json#/$defs/custody_token"
             },
             "answer": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "properties": {
-                    "form": {
-                      "const": "text"
-                    },
-                    "text": {
-                      "$ref": "../common.schema.json#/$defs/long_text"
-                    }
-                  },
-                  "required": [
-                    "form",
-                    "text"
-                  ],
-                  "additionalProperties": false
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "form": {
-                      "const": "from_subtask"
-                    },
-                    "from_task_id": {
-                      "$ref": "../common.schema.json#/$defs/record_id"
-                    },
-                    "note": {
-                      "$ref": "../common.schema.json#/$defs/note_text"
-                    }
-                  },
-                  "required": [
-                    "form",
-                    "from_task_id"
-                  ],
-                  "additionalProperties": false
-                }
-              ]
+              "$ref": "../common.schema.json#/$defs/answer"
             },
             "missing": {
               "$ref": "../common.schema.json#/$defs/note_text"

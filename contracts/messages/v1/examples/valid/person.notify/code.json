@@ -25,7 +25,7 @@
     "notice_id": "notice_2",
     "recipient": {
       "type": "person",
-      "delivery_ref": "dref_1"
+      "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0"
     },
     "text": "Your scheduled run waited too long and stopped.",
     "urgency": "urgent",
@@ -34,6 +34,6 @@
       "code": "task_wait_limit_reached"
     }
   },
-  "body_digest": "REfWoRfoqjUDR7iWw-MtNrOShi9bNW20uSi0aWYLaLs",
-  "signature": "ASyU3HIvI9UdmNZOAQFwRZgieRTDsF1hLOTlHm1iPjFMh7rt-J8g9jiVWkiOtyceQ0AXOfvUTLbz0-xSiTumCg"
+  "body_digest": "xjLfuTUO8HyAa-xAWG6brLKSiiRMhLL73SN4K2b2Pgw",
+  "signature": "Mgl3zP6dprBU0wg4WjPNFJVXbmwxFywVMwPaQc6fvExlvnI_h5hovX-xBNVXGsIKj_ZhUAzQcpxg42CWC-PZAQ"
 }

@@ -55,11 +55,12 @@
       "root_task_id": "run_sched_1_0430",
       "conversation_id": "conv_7",
       "time_zone": "Europe/Berlin",
-      "delivery_ref": "dref_7",
+      "delivery_ref": "dr_U2NoZWR1bGVkTW9ybmluZw",
+      "delivery_mode": "cron",
       "topology": "hub_and_spoke"
     },
     "instructions": "Send me this morning's three most important unread emails."
   },
-  "body_digest": "5yowkuHaiEryKBwmkR_BuF3YPULEmlq4iAKWvZMAk2M",
-  "signature": "Ym1dApCjxpSvVnapo10kDDGUEXSP7RJvrJQ6NTjlxlMtl1NGMP5EPtgDe0wWT5bRvjDkmfu66RXpXOyJ7zUQAw"
+  "body_digest": "QIUVxiqlbDrw5oFlbopvGoJUnrJCnS4-LT02MsLHMU8",
+  "signature": "DryLKUTqV1HHamaXGvVb-AR1FGjO_pFD-HAS-JWQwVts08WAzPw3-4V9WIjQTpttkIKeuYsYYLigMMLMYP4NDA"
 }

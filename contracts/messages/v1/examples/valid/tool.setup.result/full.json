@@ -38,8 +38,8 @@
     "reason_code": "linked",
     "message": "Connected.",
     "link_id": "link_1",
-    "broker_session_id": "bs_2"
+    "broker_session_id": "Tq3nW8yHs2LkP5vR0cXe7A"
   },
-  "body_digest": "0c5Gn03nBNW65IlTxojv63eivnYY0zumQYD9c5yGmb0",
-  "signature": "UfBxrfA_uly5jh1UviIww_2f7Lsdn8jMpOjbD69_nqDh4AgmD5_kVqf7qRid2EspCmVgmqLDpXyLGcPy09rWCQ"
+  "body_digest": "k8WFX1mVgR0ICJlxfvXnP8bgs1ZcTBeakpE-LhgAI7c",
+  "signature": "6xLWwwtO-HlileIOyohYzTVDBXlqUkG1zmNEC8p4YRn6mvFCvp_SISwv7esoNd-uvPb4xxNLumSFRt8GXdgHAw"
 }

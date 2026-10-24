@@ -37,7 +37,7 @@
       "follows_task_id": "task_prev_1",
       "objective_id": "obj_1",
       "time_zone": "Europe/Berlin",
-      "delivery_ref": "dref_1",
+      "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
       "started_on_purpose": true,
       "topology": "hub_and_spoke",
       "intent": {
@@ -103,6 +103,6 @@
       }
     }
   },
-  "body_digest": "kzGipeWbWYNZZIKNh_qNiILl6iSrEXoYPc0NkaMUuwQ",
-  "signature": "LM34N0tie8kuMVKzLuFuSv5IYY3cedtvjCdLP1DA5wnrpqPHrI_Jz_XyteNK63s8D4yvCT1oPAqSKC_9khs8Cw"
+  "body_digest": "ChtAn5XBnCEWOL16jsfC5MAHe2o2J1ZuXeQ5wTRMhZw",
+  "signature": "U1lKGyCUra3kqPiSZFsI-PeeeSGQJ6rbRqUcVkoanqd1B97cLz0ORHYl1WDZNZ79LdHkRJ7gvXlsxGse4WDWDQ"
 }

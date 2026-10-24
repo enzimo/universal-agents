@@ -5,10 +5,12 @@
     "minors": "any; a newer minor's unknown optional fields are ignored"
   },
   "authority_token_domain": "universal-agents/authority-token/v1",
+  "decision_token_domain": "universal-agents/decision-token/v1",
   "kinds": [
     "access.decision",
     "access.request",
     "access.resolved",
+    "access.review",
     "agent.pause",
     "credential.form.request",
     "credential.form.result",

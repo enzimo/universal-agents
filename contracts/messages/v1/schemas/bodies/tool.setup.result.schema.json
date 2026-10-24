@@ -135,7 +135,7 @@
       "$ref": "../common.schema.json#/$defs/record_id"
     },
     "broker_session_id": {
-      "$ref": "../common.schema.json#/$defs/record_id"
+      "$ref": "../common.schema.json#/$defs/broker_session_id"
     }
   },
   "required": [

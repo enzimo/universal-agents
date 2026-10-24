@@ -49,9 +49,14 @@
     "form_id": "form_1",
     "task_id": "task_root_1",
     "root_task_id": "task_root_7f",
-    "delivery_ref": "dref_1",
+    "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
     "continue_task": true,
     "user_approved": true,
+    "template_reference": {
+      "template_id": "generic_api_token",
+      "template_source": "builtin",
+      "template_version": 1
+    },
     "flow": {
       "type": "collect",
       "service_name": "Example Analytics",
@@ -81,6 +86,6 @@
       ]
     }
   },
-  "body_digest": "KsXIbv3EPe8rG1ksU5FZRrdgzAFMjND9esh8Fg0wShs",
-  "signature": "JGvgg7K6gtO0pOuxK1kTLUgkUpZIBYPzAHLUMA-5ZTUIsaMXItSmNp8VO0bWeEGilSUP_cY5TI7Tawgrr00bBg"
+  "body_digest": "nu1mOjzCTEOuxK_EeuE0IO6oecVb1x4SzrKNIm_99kY",
+  "signature": "1cLJapb-obmhWqZsSDNLYaBiCEU8xKTElit07W44xo2qpYa6LrzwoIslOgh5FbleiBskY3kkLk63ENcmP0KzBg"
 }

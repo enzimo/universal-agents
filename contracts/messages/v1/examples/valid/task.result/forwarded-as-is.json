@@ -25,20 +25,21 @@
   "algorithm": "ed25519",
   "body": {
     "task_id": "task_root_1",
-    "delivery_ref": "dref_1",
+    "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
     "conversation_id": "conv_1",
     "sequence": 9,
     "outcome": {
       "state": "partial",
       "custody_token": 1,
       "answer": {
-        "form": "from_subtask",
-        "from_task_id": "task_sub_1",
+        "form": "text",
+        "text": "Travel 40%, software 30%, other 30%.",
+        "forwarded_from_task_id": "task_sub_1",
         "note": "As the researcher wrote it."
       },
       "missing": "The September invoices are not booked yet."
     }
   },
-  "body_digest": "WeCHPlajIAdBfHoRc4eOBOYo2XUNpcMrnBOm-rURi3c",
-  "signature": "IPuHFcWIH9QV0RFJ31ygN6wiRKeSYM7mripM4Et6dH1u0UcyqjYVvUNkd0GaQVDFA5duLue4i9N-QgLGulGEDg"
+  "body_digest": "QOA06Gjh6NKXhEjFldj9PTisfFI1nV4OKkmJZ5zevDg",
+  "signature": "fyzOybMkkZ88DtgCDdrLVZLyCvbmQ_IPqogrX4p2Uvs2A9La8nF19jdI1TLfsapkOoYPWxC4Sd-VlGC0BIIIBg"
 }

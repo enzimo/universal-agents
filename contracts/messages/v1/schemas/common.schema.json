@@ -93,9 +93,9 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
     },
     "delivery_ref": {
-      "description": "An opaque reference to where a person is reached. Only the gateway can resolve it.",
+      "description": "An opaque reference to where a person is reached, which only the gateway can resolve: dr_ and at least 16 random characters, so a phone number, chat id or handle can never pass as one.",
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+      "pattern": "^dr_[A-Za-z0-9_-]{16,124}$"
     },
     "blob_ref": {
       "description": "A file or long text in the object store, named by its digest.",
@@ -796,7 +796,7 @@
     },
     "decision_token": {
       "type": "object",
-      "description": "A person's decision on a change conflict, bound to a digest of the values they were shown.",
+      "description": "A person's decision on a change conflict, recorded by the team services and bound to a digest of the values the person was shown. A team-services certificate signs the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/decision-token/v1 and a newline (README, \"What bodies carry\").",
       "properties": {
         "token_id": {
           "$ref": "#/$defs/message_id"
@@ -819,19 +819,27 @@
         "issuer": {
           "type": "object",
           "properties": {
+            "installation": {
+              "$ref": "#/$defs/installation_id"
+            },
             "team": {
               "$ref": "#/$defs/team_id"
             },
             "runtime": {
               "$ref": "#/$defs/runtime_id"
             },
+            "membership_epoch": {
+              "$ref": "#/$defs/epoch"
+            },
             "key_id": {
               "$ref": "#/$defs/key_id"
             }
           },
           "required": [
+            "installation",
             "team",
             "runtime",
+            "membership_epoch",
             "key_id"
           ],
           "additionalProperties": false
@@ -884,6 +892,203 @@
         "id"
       ],
       "additionalProperties": false
+    },
+    "credential_field_kind": {
+      "description": "What a credential field holds. The broker treats password, token, api_key, secret, totp and credential_file as secret whatever the field's visibility.",
+      "type": "string",
+      "enum": [
+        "username",
+        "email",
+        "login",
+        "account_id",
+        "service_label",
+        "custom",
+        "password",
+        "token",
+        "api_key",
+        "secret",
+        "totp",
+        "credential_file"
+      ]
+    },
+    "credential_visible_kind": {
+      "description": "The field kinds whose value may be shown to agents: never a secret.",
+      "type": "string",
+      "enum": [
+        "username",
+        "email",
+        "login",
+        "account_id",
+        "service_label",
+        "custom"
+      ]
+    },
+    "broker_session_id": {
+      "description": "The secure broker's form session: its unpadded base64url random id.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{16,128}$"
+    },
+    "answer": {
+      "description": "A task's answer: text, or a text file in the object store when it is longer than long_text allows. A result passed on as it is carries the subtask's answer itself, copied by code, and names the subtask.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "form": {
+              "const": "text"
+            },
+            "text": {
+              "$ref": "#/$defs/long_text"
+            },
+            "forwarded_from_task_id": {
+              "$ref": "#/$defs/record_id"
+            },
+            "note": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "form",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "form": {
+              "const": "file"
+            },
+            "text_file": {
+              "$ref": "#/$defs/blob_ref"
+            },
+            "forwarded_from_task_id": {
+              "$ref": "#/$defs/record_id"
+            },
+            "note": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "form",
+            "text_file"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "access_ask": {
+      "description": "What an access request asks for: access to one target, or approval of a staged change.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "access"
+            },
+            "target": {
+              "$ref": "#/$defs/access_target"
+            },
+            "level": {
+              "type": "string",
+              "enum": [
+                "read",
+                "write",
+                "full"
+              ]
+            },
+            "lifetime": {
+              "type": "string",
+              "enum": [
+                "one_time",
+                "task",
+                "until",
+                "until_revoked"
+              ]
+            },
+            "hours": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2160
+            },
+            "hand_on": {
+              "type": "boolean"
+            },
+            "action_digest": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,128}$"
+            }
+          },
+          "required": [
+            "type",
+            "target",
+            "level",
+            "lifetime",
+            "hand_on"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "change"
+            },
+            "change_kind": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "change_id": {
+              "$ref": "#/$defs/record_id"
+            },
+            "plan_digest": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,128}$"
+            }
+          },
+          "required": [
+            "type",
+            "change_kind",
+            "change_id",
+            "plan_digest"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "recipient": {
+      "description": "Whom a notice or review is for: the person behind a delivery reference, or the team's administrators.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "person"
+            },
+            "delivery_ref": {
+              "$ref": "#/$defs/delivery_ref"
+            }
+          },
+          "required": [
+            "type",
+            "delivery_ref"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "administrators"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        }
+      ]
     },
     "reply_target": {
       "description": "Where a task's results, questions, progress, claims and reports go: its requester. A delegation names the delegating agent; a task the gateway starts for a person, or a run of a person's own schedule, names the gateway route that reaches the person (README, \"Replies\").",
@@ -960,6 +1165,19 @@
         },
         "delivery_ref": {
           "$ref": "#/$defs/delivery_ref"
+        },
+        "delivery_mode": {
+          "description": "How the gateway delivers to the person: an interactive reply, a scheduled (cron) or deferred message, a heartbeat, or one of the system schedules' modes.",
+          "type": "string",
+          "enum": [
+            "interactive",
+            "cron",
+            "deferred",
+            "heartbeat",
+            "memory_review",
+            "internal_improvement",
+            "knowledge_curation"
+          ]
         },
         "started_on_purpose": {
           "type": "boolean"

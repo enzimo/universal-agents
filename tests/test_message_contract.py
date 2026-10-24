@@ -413,6 +413,12 @@ def test_a_copy_and_its_original_carry_different_keys_and_the_copy_has_no_receiv
     ({"copy_to": ["work.agent.{agent}"]}, "two of its addresses deliver to one audience target"),
     ({"copy_to": ["work.pool.{pool}"]}, "copies go only to"),
     ({"receivers": ["lead_host", "gateway", "edge_adapter", "scheduler"]}, "serve none of its addresses"),
+    ({"body_rules": [{"unique": "/body/summary"}]}, "is not a unique, requires or any_of rule"),
+    ({"body_rules": [{"requires": "/body/no_such_field", "when": [{"at": "/body/sequence", "is": 1}]}]}, "is not a unique"),
+    ({"body_rules": [{"any_of": ["/body/summary"]}]}, "is not a unique"),
+    ({"authority": "optional"}, "state authority_binding"),
+    ({"senders_by_address": {"work.pool.{pool}": ["lead_host"]}}, "narrows the senders of one of its own addresses"),
+    ({"topology_edge": ["up", "none"]}, "or none alone"),
 ])
 def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change: dict, problem: str) -> None:
     registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
@@ -574,10 +580,20 @@ def test_neighbouring_checks_each_have_a_two_defect_example() -> None:
     assert {(first, second) for first, second in zip(order, order[1:])} <= covered
 
 
-# A schema cannot recompute a key from other fields, so key refusals (at /idempotency_key)
-# are the receiver's alone (README, "Idempotency keys").
+def receiver_only(case: dict) -> bool:
+    """A schema cannot recompute a key from other fields or apply a body rule: those refusals are the receiver's alone.
+
+    README, "Idempotency keys" and "What bodies carry".
+    """
+
+    kind = json.loads(case["frame_text"])["kind"]
+    rules = REGISTRY["kinds"].get(kind, {}).get("body_rules", [])
+    places = {rule.get("unique") or rule.get("requires") or rule["any_of"][0].rsplit("/", 1)[0] for rule in rules}
+    return case["at"] == "/idempotency_key" or case["at"] in places
+
+
 @pytest.mark.parametrize("path", [p for p in invalid_examples() if json.loads(p.read_text())["refusal"] == "invalid_body"
-                                  and json.loads(p.read_text())["at"] != "/idempotency_key"], ids=lambda path: path.stem)
+                                  and not receiver_only(json.loads(p.read_text()))], ids=lambda path: path.stem)
 def test_invalid_bodies_fail_their_schema_where_named(path: Path) -> None:
     case = json.loads(path.read_text(encoding="utf-8"))
     document = json.loads(case["frame_text"])

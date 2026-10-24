@@ -61,7 +61,8 @@
               "items": {
                 "$ref": "../common.schema.json#/$defs/question_choice"
               },
-              "maxItems": 20
+              "maxItems": 20,
+              "minItems": 1
             },
             "allow_free_text": {
               "type": "boolean"
@@ -295,7 +296,8 @@
               "items": {
                 "$ref": "../common.schema.json#/$defs/question_choice"
               },
-              "maxItems": 20
+              "maxItems": 20,
+              "minItems": 1
             }
           },
           "required": [

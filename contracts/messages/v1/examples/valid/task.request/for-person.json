@@ -54,11 +54,12 @@
       "root_task_id": "task_root_9c",
       "conversation_id": "conv_9",
       "time_zone": "Europe/Berlin",
-      "delivery_ref": "dref_9",
+      "delivery_ref": "dr_VGVhbUx1bmNoRnJpZGF5",
+      "delivery_mode": "interactive",
       "topology": "hub_and_spoke"
     },
     "instructions": "Plan a team lunch for Friday."
   },
-  "body_digest": "GKaybmt6v-9uzyTnXPdnURqqtfEFcqExHGKghnXskkY",
-  "signature": "C0o0ly3CCjMtDVbmwnmMVLiv7axosRVDMfOUkRiP39Vfu-lQrvE5jO7iXmuWkumi7zuJwNJoHy96dI5TJYpJBQ"
+  "body_digest": "QhNzhbMxX4PsqY0RcvNkp1fqIdNgESmOP1_yiJ3nDBw",
+  "signature": "XwEnsmNWWIGYUVyK_tqKtyhxr9OI2gR6LbobHHvk9fYQkVEtKkUSTjiWBA0H6ZdZyGWINQqBp7Tye90l1PVIDA"
 }

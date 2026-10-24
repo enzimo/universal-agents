@@ -56,11 +56,11 @@
       "root_task_id": "task_root_9c",
       "parent_task_id": "task_root_9c",
       "conversation_id": "conv_9",
-      "delivery_ref": "dref_9",
+      "delivery_ref": "dr_VGVhbUx1bmNoRnJpZGF5",
       "topology": "hub_and_spoke"
     },
     "instructions": "Find three places near the office that take a group of eight on Friday."
   },
-  "body_digest": "ORm_CbamheJ101gllwlhbyMzfeRQeh8-rRubMGwS7bw",
-  "signature": "muYW-rN6Z0sx8meWStHSVv-cl3g8Rxdr96VktcKqzNxUeMqrMGN6OPwHogZ6QmXupeF9-UsWGx1TM7XBIILdAA"
+  "body_digest": "twEbNJUXAmeDuaB_39MYqGsNf2330TadG1H1g1is27E",
+  "signature": "W3bDJfzQhgKjD-4zh1K9RK5dwoS_L8xucAho_grwCHaDyzunA9q9FKUoDGBpNZR8TfHm2f6_dLFC5MUbq9j3BQ"
 }

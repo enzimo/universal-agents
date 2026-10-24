@@ -25,7 +25,7 @@
   "algorithm": "ed25519",
   "body": {
     "task_id": "run_sched_1_0430",
-    "delivery_ref": "dref_7",
+    "delivery_ref": "dr_U2NoZWR1bGVkTW9ybmluZw",
     "conversation_id": "conv_7",
     "sequence": 2,
     "summary": "Three emails need an answer today.",
@@ -38,6 +38,6 @@
       }
     }
   },
-  "body_digest": "GVH2QGNfozjguk9ryPODFDHTAlK92y_h4HrtDaQVTfM",
-  "signature": "g2xd40M4aReB5OgDORNyd7JjXf9UiHbMXFHrVDcf4OCYGB21am4ef-HQz3lW8FaxOTmm6tnvkw_BFlaZG99eBQ"
+  "body_digest": "-HFjDR5AKsquiVC8pWP7-K3XvPVtzLah97wAA4pjPso",
+  "signature": "zedncyVnAou-BZ8hYzkzu0NGEUyjI1RlNy6h_WYQvyrd4AkOg2fr7JCjYDMXXJtVTtPZRFgFyW_6534ugU8oBg"
 }

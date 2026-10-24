@@ -52,6 +52,25 @@
         }
       }
     },
+    "access_review": {
+      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
+      "messages": {
+        "access_review": {
+          "$ref": "#/components/messages/access_review"
+        }
+      },
+      "parameters": {
+        "edge": {
+          "description": "The edge subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
     "agent_pause": {
       "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.pause",
       "messages": {
@@ -870,6 +889,28 @@
         },
         "summary": "A person's decision on an access request, from the gateway to the team services."
       },
+      "access_review": {
+        "name": "access.review",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/access.review.schema.json"
+                },
+                "kind": {
+                  "const": "access.review"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "An access review for the gateway's Inbox, from the team services; a refused decision returns this way too."
+      },
       "agent_pause": {
         "name": "agent.pause",
         "payload": {
@@ -1423,6 +1464,12 @@
         "$ref": "#/channels/access_resolved"
       }
     },
+    "receive_access_review": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/access_review"
+      }
+    },
     "receive_agent_pause": {
       "action": "receive",
       "channel": {
@@ -1689,6 +1736,12 @@
       "action": "send",
       "channel": {
         "$ref": "#/channels/access_resolved"
+      }
+    },
+    "send_access_review": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/access_review"
       }
     },
     "send_agent_pause": {

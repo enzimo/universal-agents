@@ -49,7 +49,7 @@
     "setup_request_id": "setup_1",
     "task_id": "task_root_1",
     "root_task_id": "task_root_7f",
-    "delivery_ref": "dref_1",
+    "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
     "tool_id": "mcp:example.calendar",
     "reason": "Read your calendar to plan the meeting.",
     "setup": {
@@ -58,6 +58,6 @@
       "step_id": "connect_calendar"
     }
   },
-  "body_digest": "X3R5T4Wg2PnMYMK-9nehV77YKOuzphSgPRUfJru2R8c",
-  "signature": "vaKn38PEsXjq7irNmnmreZPbBF1Z5zsxz1l48pX9sD-Q-wx1Ab-HC4OdsKFX9AJPyLib7ENd9vyseH2Tm_UnBg"
+  "body_digest": "EgUks9Mn-m_1O15Lt5zapkvOK2D_449gDunfcEU_Z2c",
+  "signature": "tIet5aHh2Fi2oqJXzF3VOLqvKhQIQT7fsW7vEPPFp2yUu64qcq4S7x3T3hlmVFlftY8lbi3-yWN8guAf9UmvBA"
 }

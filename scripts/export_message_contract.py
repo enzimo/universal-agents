@@ -57,9 +57,10 @@ PRIORITIES = {"low", "normal", "high"}
 ENTRY_FIELDS = {
     "description", "class", "address", "body", "reply", "senders", "receivers", "expiry_seconds",
     "authority", "idempotency", "admission", "routing", "topology_edge", "ledger", "wakes_model",
-    "rendering", "covered_change", "copy_to", "senders_by_address", "authority_binding",
+    "rendering", "covered_change", "copy_to", "senders_by_address", "authority_binding", "body_rules",
 }
-REQUIRED_ENTRY_FIELDS = ENTRY_FIELDS - {"reply", "covered_change", "copy_to", "senders_by_address", "authority_binding"}
+REQUIRED_ENTRY_FIELDS = ENTRY_FIELDS - {"reply", "covered_change", "copy_to", "senders_by_address", "authority_binding",
+                                        "body_rules"}
 
 # The schema subset (contracts/messages/v1/README.md).
 ALLOWED_KEYWORDS = {
@@ -285,6 +286,7 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         check_entry_fields(where, name, entry, registry, transport, schemas)
         check_entry_addresses(where, name, entry, transport)
         check_idempotency(where, name, entry, schemas, registry["frame_schema"])
+        check_body_rules(where, entry, schemas)
     names: dict[str, str] = {}
     for name in registry["kinds"]:
         # Generated model and adapter names come from the kind name; two kinds
@@ -451,6 +453,35 @@ def check_idempotency(where: str, kind: str, entry: dict[str, Any], schemas: dic
             leaves = schema_leaves(resolver, frame_schema, schemas[frame_schema], steps)
         if not leaves or not all(scalar_schema(resolver, file, leaf) for file, leaf in leaves):
             raise ContractError(f"{where}: idempotency part {pointer} names no string or integer field of {kind}")
+
+
+def check_body_rules(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """Each rule is one of the three README shapes and names fields its body defines."""
+
+    resolver = ModelWriter(schemas)
+
+    def defined(pointer: Any, kind: str | None = None) -> bool:
+        if not isinstance(pointer, str) or not pointer.startswith("/body/"):
+            return False
+        leaves = schema_leaves(resolver, entry["body"], schemas[entry["body"]], pointer.split("/")[2:])
+        return bool(leaves) and (kind is None or all(resolved_type(resolver, file, leaf) == kind for file, leaf in leaves))
+
+    for rule in entry.get("body_rules", []):
+        if set(rule) <= {"unique", "by"} and defined(rule.get("unique"), "array"):
+            continue
+        if set(rule) == {"requires", "when"} and defined(rule["requires"]) and rule["when"] \
+                and all(set(c) == {"at", "is"} and defined(c["at"]) for c in rule["when"]):
+            continue
+        if set(rule) == {"any_of"} and len(rule["any_of"]) > 1 and all(defined(p) for p in rule["any_of"]):
+            continue
+        raise ContractError(f"{where}: body rule {rule} is not a unique, requires or any_of rule over its body's fields")
+
+
+def resolved_type(resolver: "ModelWriter", file: str, node: dict[str, Any]) -> Any:
+    while "$ref" in node:
+        file, fragment = resolver.resolve(file, node["$ref"])
+        node = resolver.node(file, fragment)
+    return node.get("type")
 
 
 def schema_leaves(resolver: "ModelWriter", file: str, node: dict[str, Any], steps: list[str]) -> list[tuple[str, dict[str, Any]]]:
@@ -744,6 +775,7 @@ def compatibility(registry: dict[str, Any]) -> dict[str, Any]:
         "signing_domain": registry["signing_domain"],
         "state_signing_domain": registry["state_signing_domain"],
         "authority_token_domain": registry["authority_token_domain"],
+        "decision_token_domain": registry["decision_token_domain"],
         "kinds": sorted(registry["kinds"]),
         "state_records": sorted(registry["state_records"]),
     }
@@ -946,6 +978,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
             f"        expiry_seconds={entry['expiry_seconds']!r},\n"
             f"        authority={entry['authority']!r},\n"
             f"        authority_binding={binding_spec(entry)!r},\n"
+            f"        body_rules={tuple(entry.get('body_rules', ()))!r},\n"
             f"        execution_slot={entry['admission']['execution_slot']!r},\n"
             f"        accepted_while_paused={entry['admission']['accepted_while_paused']!r},\n"
             f"        priority={entry['admission']['priority']!r},\n"
@@ -973,6 +1006,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"SIGNING_DOMAIN = {registry['signing_domain']!r}\n"
         f"STATE_SIGNING_DOMAIN = {registry['state_signing_domain']!r}\n"
         f"AUTHORITY_TOKEN_DOMAIN = {registry['authority_token_domain']!r}\n"
+        f"DECISION_TOKEN_DOMAIN = {registry['decision_token_domain']!r}\n"
         f"AUTHORITY_TOKEN_MAX_SECONDS = {registry['authority_token_max_seconds']!r}\n"
         f"MAX_FRAME_BYTES = {registry['max_frame_bytes']!r}\n"
         f"MAX_NESTING_DEPTH = {registry['max_nesting_depth']!r}\n"

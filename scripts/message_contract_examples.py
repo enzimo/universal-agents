@@ -110,6 +110,7 @@ class Signer:
         self.frame_domain = registry["signing_domain"]
         self.state_domain = registry["state_signing_domain"]
         self.token_domain = registry["authority_token_domain"]
+        self.decision_domain = registry["decision_token_domain"]
 
     def private_key(self, key_id: str) -> Ed25519PrivateKey:
         if key_id not in self.keys:
@@ -162,6 +163,11 @@ class Signer:
         frame = dict(frame)
         if "authority" in frame and sign_token:
             frame["authority"] = self.token(frame["authority"])
+        body = frame.get("body")
+        if isinstance(body, dict) and isinstance(body.get("decision_token"), dict) and sign_token:
+            decision = dict(body["decision_token"], algorithm="ed25519")
+            decision["signature"] = self.sign(self.decision_domain, decision, decision["issuer"]["key_id"])
+            frame["body"] = dict(body, decision_token=decision)
         frame["algorithm"] = "ed25519"
         frame["body_digest"] = digest or self.digest(frame["body"])
         frame["signature"] = self.sign(self.frame_domain, frame, key_id or frame["issuer"]["key_id"])

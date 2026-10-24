@@ -27,7 +27,7 @@
     "notice_id": "notice_1",
     "recipient": {
       "type": "person",
-      "delivery_ref": "dref_1"
+      "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0"
     },
     "task_id": "task_root_1",
     "conversation_id": "conv_1",
@@ -50,6 +50,6 @@
       }
     ]
   },
-  "body_digest": "Tg9-TawApiHKm-FrATJwhbXJYal0VMzedNB11edIyQg",
-  "signature": "J9F_S3T-j2BJ8gq3s7qEXu274DT8T_y2v5h945hG9MRZh88fjQYjX0Du3MXaiLukE63NMVG5JfqpcAtqQOj0Cw"
+  "body_digest": "SedE0IEC4y1QNV0HIDmayPYZ1SI-1o1z8dbum6jc5nw",
+  "signature": "RVyAmZau5zhXTYKTy5Mn3kqnTdD7qMiWMISZuCOgDgyE8PByjtuS4c6zJqB24VUIy40EUdwEb0oKrmhvi0idBA"
 }

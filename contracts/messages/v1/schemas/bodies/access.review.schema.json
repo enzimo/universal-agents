@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/access.review.schema.json",
+  "title": "access.review",
+  "description": "The team services tell the gateway about one access review: open it for whoever may decide, say a person's decision was refused, or close it. The gateway's Inbox shows it; the team services keep the request.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "state": {
+      "oneOf": [
+        {
+          "type": "object",
+          "description": "A person or the administrators must decide.",
+          "properties": {
+            "type": {
+              "const": "open"
+            },
+            "task_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            },
+            "decider": {
+              "$ref": "../common.schema.json#/$defs/recipient"
+            },
+            "requester_agent": {
+              "$ref": "../common.schema.json#/$defs/agent_id"
+            },
+            "what": {
+              "$ref": "../common.schema.json#/$defs/access_ask"
+            },
+            "reason": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            },
+            "brief": {
+              "description": "The review card's text for a staged change, written by code.",
+              "$ref": "../common.schema.json#/$defs/blob_ref"
+            },
+            "choices": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "approve",
+                  "approve_read",
+                  "approve_task",
+                  "approve_all",
+                  "deny"
+                ]
+              },
+              "minItems": 1,
+              "maxItems": 5
+            },
+            "expires_at": {
+              "$ref": "../common.schema.json#/$defs/timestamp"
+            }
+          },
+          "required": [
+            "type",
+            "task_id",
+            "decider",
+            "requester_agent",
+            "what",
+            "reason",
+            "choices",
+            "expires_at"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "A person's decision (access.resolved) was not recorded; the Inbox shows why.",
+          "properties": {
+            "type": {
+              "const": "refused"
+            },
+            "refused_message_id": {
+              "$ref": "../common.schema.json#/$defs/message_id"
+            },
+            "code": {
+              "type": "string",
+              "enum": [
+                "not_the_decider",
+                "request_closed",
+                "needs_person_decision",
+                "choice_not_offered",
+                "hours_out_of_range"
+              ]
+            },
+            "message": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            }
+          },
+          "required": [
+            "type",
+            "refused_message_id",
+            "code",
+            "message"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "The decision was recorded; the card closes.",
+          "properties": {
+            "type": {
+              "const": "decided"
+            },
+            "choice": {
+              "type": "string",
+              "enum": [
+                "approve",
+                "approve_read",
+                "approve_task",
+                "approve_all",
+                "deny"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "choice"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "The request ended without a decision.",
+          "properties": {
+            "type": {
+              "const": "closed"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "withdrawn",
+                "expired",
+                "task_ended"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "request_id",
+    "state"
+  ],
+  "additionalProperties": false
+}

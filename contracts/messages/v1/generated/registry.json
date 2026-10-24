@@ -23,6 +23,7 @@
       "meaning": "another request is writing the file or sign-in; carries when to try again"
     }
   ],
+  "decision_token_domain": "universal-agents/decision-token/v1",
   "frame_schema": "frame.schema.json",
   "host_roles": {
     "edge_adapter": "connects outside agents (A2A)",
@@ -43,6 +44,21 @@
       },
       "authority": "none",
       "body": "bodies/access.decision.schema.json",
+      "body_rules": [
+        {
+          "requires": "/body/status/expires_at",
+          "when": [
+            {
+              "at": "/body/status/state",
+              "is": "granted"
+            },
+            {
+              "at": "/body/status/lifetime",
+              "is": "until"
+            }
+          ]
+        }
+      ],
       "class": "durable",
       "description": "What became of an access request, sent to the waiting task.",
       "expiry_seconds": 604800,
@@ -86,6 +102,17 @@
         "type": "root_task"
       },
       "body": "bodies/access.request.schema.json",
+      "body_rules": [
+        {
+          "requires": "/body/what/hours",
+          "when": [
+            {
+              "at": "/body/what/lifetime",
+              "is": "until"
+            }
+          ]
+        }
+      ],
       "class": "durable",
       "description": "A task asks the team services for access; no model decides it.",
       "expiry_seconds": 604800,
@@ -132,6 +159,35 @@
       "routing": "team",
       "senders": [
         "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "access.review": {
+      "address": "work.edge.{edge}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/access.review.schema.json",
+      "class": "durable",
+      "description": "An access review for the gateway's Inbox, from the team services; a refused decision returns this way too.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/request_id",
+        "/body/state/type",
+        "/body/state/refused_message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "gateway"
+      ],
+      "rendering": "none",
+      "routing": "person",
+      "senders": [
+        "team_services"
       ],
       "topology_edge": "none",
       "wakes_model": "never"
@@ -508,6 +564,20 @@
         "type": "root_task"
       },
       "body": "bodies/task.answer.schema.json",
+      "body_rules": [
+        {
+          "unique": "/body/selected_choice_ids"
+        },
+        {
+          "any_of": [
+            "/body/text",
+            "/body/text_file",
+            "/body/selected_choice_ids",
+            "/body/decision",
+            "/body/decision_token"
+          ]
+        }
+      ],
       "class": "durable",
       "description": "The answer to one question.",
       "expiry_seconds": 604800,
@@ -651,6 +721,24 @@
       },
       "authority": "none",
       "body": "bodies/task.question.schema.json",
+      "body_rules": [
+        {
+          "by": "choice_id",
+          "unique": "/body/purpose/choices"
+        },
+        {
+          "unique": "/body/purpose/allowed_decisions"
+        },
+        {
+          "requires": "/body/purpose/choices",
+          "when": [
+            {
+              "at": "/body/purpose/allow_free_text",
+              "is": false
+            }
+          ]
+        }
+      ],
       "class": "durable",
       "description": "A question from a task's holder to the one who can answer it.",
       "expiry_seconds": 604800,
@@ -1095,11 +1183,11 @@
     },
     {
       "code": "invalid_body",
-      "meaning": "the body breaks the kind's schema, or the idempotency key is not the one the kind's key parts give"
+      "meaning": "the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give"
     },
     {
       "code": "bad_authority",
-      "meaning": "the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names another team than the issuer's, was not valid when the frame was issued, lasts longer than authority_token_max_seconds, or is bound to another root task or command than the one the receiver holds"
+      "meaning": "the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, lasts longer than authority_token_max_seconds, or is bound to another record than its kind's binding names or the receiver holds; or a change-conflict decision token in the body is not signed by a team-services certificate of the frame's installation and team, or was not valid when the frame was issued"
     },
     {
       "code": "access_denied",

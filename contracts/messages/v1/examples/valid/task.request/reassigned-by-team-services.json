@@ -38,9 +38,60 @@
       "prior_holder": "researcher-1",
       "prior_disposition": "interrupted",
       "interruption_count": 1,
-      "actions": []
+      "actions": [],
+      "ledger": {
+        "plan": {
+          "sha256": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+          "size": 7168,
+          "media_type": "application/json"
+        },
+        "checkpoint": {
+          "sha256": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg",
+          "size": 8192,
+          "media_type": "application/json"
+        },
+        "history_summary": "Grouped two of five categories.",
+        "delegations": [
+          {
+            "task_id": "task_sub_1_sub_1",
+            "number": 1,
+            "holder": "researcher-3",
+            "state": "standin"
+          }
+        ],
+        "questions": [
+          {
+            "question_id": "q_1",
+            "number": 1,
+            "purpose": "input"
+          }
+        ],
+        "assumptions": [
+          {
+            "assumption_id": "asm_1",
+            "text": "The report covers the last quarter only.",
+            "affects": [
+              "S2"
+            ]
+          }
+        ],
+        "held_actions": [
+          {
+            "action_id": "act_1",
+            "action_type": "send_email",
+            "summary": "Send the summary to the finance list.",
+            "state": "held"
+          }
+        ],
+        "counters": {
+          "subtask": 1,
+          "question": 1,
+          "attachment": 0,
+          "report": 0
+        }
+      }
     }
   },
-  "body_digest": "FZDbla_21wNzI3gFUmG991uyZkR6VjrML_4y3PUPJvQ",
-  "signature": "SVij3QcK6J491FizO6SFxz4dihu0YaKbBWnsoMS36S-N6yDkaH3iHqhPtg0GkkMB96_m57MZabwFLFnKRidBAQ"
+  "body_digest": "q3Wi2dPUEwSFvVbPVm-EpZ8q7rj7c2Dl7i4t6UVi5VU",
+  "signature": "1W2mTN9b1MG3ztKbRoqvrixFuX1C9uN1RR4RGOJ6GuoHOK-ateMWXmmbbKvFu7jNmPOld1Zu188Jj0VHGu0BBA"
 }

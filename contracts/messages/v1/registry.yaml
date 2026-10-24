@@ -9,6 +9,9 @@
 #   copy_to        durable only: addresses that also get a copy of each frame (README, "Durable
 #                  copies"); the roles serving the copy's target receive it
 #   body           the body schema, under schemas/
+#   body_rules     optional: what a schema cannot say, checked after it (README, "What bodies carry"):
+#                  unique values in a list, a field required when others have given values,
+#                  or at least one of several fields
 #   reply          request/reply only: the reply body schema and the error codes it may carry
 #   senders        host roles that may publish it; receivers check them against the issuer's certificate
 #   senders_by_address  optional: fewer senders for some of its own addresses (the edge adapter
@@ -37,6 +40,7 @@ protocol: 1.0-pre
 signing_domain: universal-agents/message-frame/v1
 state_signing_domain: universal-agents/state-record/v1
 authority_token_domain: universal-agents/authority-token/v1
+decision_token_domain: universal-agents/decision-token/v1
 frame_schema: frame.schema.json
 state_schema: state.schema.json
 max_frame_bytes: 262144
@@ -80,9 +84,9 @@ verification_refusals:
   - code: unknown_kind
     meaning: the kind is not in this registry
   - code: invalid_body
-    meaning: the body breaks the kind's schema, or the idempotency key is not the one the kind's key parts give
+    meaning: the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give
   - code: bad_authority
-    meaning: the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names another team than the issuer's, was not valid when the frame was issued, lasts longer than authority_token_max_seconds, or is bound to another root task or command than the one the receiver holds
+    meaning: the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, lasts longer than authority_token_max_seconds, or is bound to another record than its kind's binding names or the receiver holds; or a change-conflict decision token in the body is not signed by a team-services certificate of the frame's installation and team, or was not valid when the frame was issued
   - code: access_denied
     meaning: the receiver's access decision refused the sender
 # Refusals of a change to a covered store record (shared by every covered operation).
@@ -260,6 +264,10 @@ kinds:
     class: durable
     address: ["work.agent.{agent}", "work.edge.{edge}"]
     body: bodies/task.question.schema.json
+    body_rules:
+      - {unique: /body/purpose/choices, by: choice_id}
+      - {unique: /body/purpose/allowed_decisions}
+      - {requires: /body/purpose/choices, when: [{at: /body/purpose/allow_free_text, is: false}]}
     senders: [worker_host, lead_host, edge_adapter]
     receivers: [lead_host, gateway, edge_adapter]
     expiry_seconds: 604800
@@ -277,6 +285,9 @@ kinds:
     class: durable
     address: ["work.agent.{agent}", "work.edge.{edge}"]
     body: bodies/task.answer.schema.json
+    body_rules:
+      - {unique: /body/selected_choice_ids}
+      - {any_of: [/body/text, /body/text_file, /body/selected_choice_ids, /body/decision, /body/decision_token]}
     senders: [gateway, lead_host, team_services, worker_host, edge_adapter]
     receivers: [lead_host, worker_host, edge_adapter]
     expiry_seconds: 604800
@@ -421,6 +432,8 @@ kinds:
     class: durable
     address: work.team
     body: bodies/access.request.schema.json
+    body_rules:
+      - {requires: /body/what/hours, when: [{at: /body/what/lifetime, is: until}]}
     senders: [worker_host, lead_host]
     receivers: [team_services]
     expiry_seconds: 604800
@@ -439,6 +452,8 @@ kinds:
     class: durable
     address: work.agent.{agent}
     body: bodies/access.decision.schema.json
+    body_rules:
+      - {requires: /body/status/expires_at, when: [{at: /body/status/state, is: granted}, {at: /body/status/lifetime, is: until}]}
     senders: [team_services]
     receivers: [worker_host, lead_host]
     expiry_seconds: 604800
@@ -473,6 +488,23 @@ kinds:
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  access.review:
+    description: An access review for the gateway's Inbox, from the team services; a refused decision returns this way too.
+    class: durable
+    address: work.edge.{edge}
+    body: bodies/access.review.schema.json
+    senders: [team_services]
+    receivers: [gateway]
+    expiry_seconds: 604800
+    authority: none
+    idempotency: [/body/request_id, /body/state/type, /body/state/refused_message_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: person
     topology_edge: none
     ledger: none
     wakes_model: never
