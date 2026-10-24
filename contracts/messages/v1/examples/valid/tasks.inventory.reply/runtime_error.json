@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "tasks.inventory.reply",
   "message_id": "01928f3a-7b2c-7403-8000-000000000403",
-  "idempotency_key": "tasks.inventory:01928f3a-7b2c-7401-8000-000000000401:reply",
+  "idempotency_key": "tasks.inventory.reply:arWXh8WhCI6HwuQ0_q8l60h9gcCV_zNBjmpuEJmZ9wE",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -28,5 +28,5 @@
   },
   "causation_id": "01928f3a-7b2c-7401-8000-000000000401",
   "body_digest": "66VTNQ95LGRxIdtdQjL5dDY_PX3Olu982NAoKNPPDdE",
-  "signature": "W2Gy_csk7SYNT1jxeHfKXX1XMgl0V3Z5oY5WM6g04UwN3vhNqkDWHqtRc0c103fIVU9r6YvN53U1mQKXQtbWDQ"
+  "signature": "Uh01oFjcp6ms4KvbY4AdWXnNcYqRx3u41A-lpw5Mp1Lovsd6wTpIacZBzGrSv1nntJglU4olaH_jxRLlQP4TAg"
 }

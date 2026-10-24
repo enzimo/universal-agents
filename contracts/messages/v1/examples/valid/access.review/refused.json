@@ -1,0 +1,35 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "access.review",
+  "message_id": "01928f3a-7b2c-7223-8000-000000000223",
+  "idempotency_key": "access.review:6PG2Yc46PjwST-oPGzgsYa518a43sokm23qEpiRJyCk",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.work.edge.web",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "areq_1",
+    "state": {
+      "type": "refused",
+      "refused_message_id": "01928f3a-7b2c-7117-8000-000000000117",
+      "code": "not_the_decider",
+      "message": "Only the person this work is for decides this request."
+    }
+  },
+  "body_digest": "vj_ONkMFlIpaK2uT9GsZrkfyHS-vKpvzd_-C8iehuMU",
+  "signature": "2RinkkZu-HWMy-zSaTgRx7Pc3PqsBw5DfTJnSZVF7iX5-QsiACd1XS3-VbTnNuaQ1jy2CPMuIO8Isx51E0xVBw"
+}

@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.list",
   "message_id": "01928f3a-7b2c-7464-8000-000000000464",
-  "idempotency_key": "knowledge.list:01928f3a-7b2c-7464-8000-000000000464",
+  "idempotency_key": "knowledge.list:pJfGRGE1Pjc3KsS9XjtRTh7MJORJ681wDac7o1aJzjg",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -51,5 +51,5 @@
     "limit": 3
   },
   "body_digest": "PcauUJFTr0ZVCKolcEOftd_9R_Vxp60JXPxWw_aRhw4",
-  "signature": "hs2C3weG0MkfEo2H4FdaoswtyNLiTmqwt0moRWGJWnoOuueDgMleppauCkqYrIdeYrfpJXvpNBMfIN3SZ2hkAg"
+  "signature": "KsGJnbZsVfAk3qMzHYN5qcK9dwPzTMefNd1oxmwZoitlcTZetJum-V6cZT4DZtVhgmjpZzpkkvFWeiODH-PBBg"
 }

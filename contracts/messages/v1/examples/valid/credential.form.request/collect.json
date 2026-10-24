@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "credential.form.request",
   "message_id": "01928f3a-7b2c-711c-8000-00000000011c",
-  "idempotency_key": "credential_form:form_1",
+  "idempotency_key": "credential.form.request:Mz4Ldx3wlgFm_ySqDkrOk_ZaJb7_7iJE91y0siAoIbY",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -48,9 +48,15 @@
   "body": {
     "form_id": "form_1",
     "task_id": "task_root_1",
-    "delivery_ref": "dref_1",
+    "root_task_id": "task_root_7f",
+    "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
     "continue_task": true,
     "user_approved": true,
+    "template_reference": {
+      "template_id": "generic_api_token",
+      "template_source": "builtin",
+      "template_version": 1
+    },
     "flow": {
       "type": "collect",
       "service_name": "Example Analytics",
@@ -80,6 +86,6 @@
       ]
     }
   },
-  "body_digest": "WmhCbXkKb-9DSjBfgQ5yLPPmrIGAmApW-uieckuJSLs",
-  "signature": "IF_IXfU8reC2IuFOmiPyiRIEDxq0kwWBLFuV47XNDPkW9t_En45qjCpRVzSV_3oueUAgg5RVE7Kj2mhU8mojDA"
+  "body_digest": "nu1mOjzCTEOuxK_EeuE0IO6oecVb1x4SzrKNIm_99kY",
+  "signature": "1cLJapb-obmhWqZsSDNLYaBiCEU8xKTElit07W44xo2qpYa6LrzwoIslOgh5FbleiBskY3kkLk63ENcmP0KzBg"
 }

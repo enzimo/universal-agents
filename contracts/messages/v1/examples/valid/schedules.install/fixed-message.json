@@ -1,0 +1,93 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.install",
+  "message_id": "01928f3a-7b2c-7a0a-8000-000000000a0a",
+  "idempotency_key": "schedules.install:BRosM-M4eBWl0P6TsPhLRPfnWUNX9iXwlADfRp0HHew",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.schedules.install",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7170-9000-000000000170",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "command",
+      "id": "cmd_000170"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "r4lZm7KIEX2tQKdjQg5SoqZ15o3U8cpCIKNpV1R-tXCTPnSHo44z0xMGdtL2_JY6KYkbBlTm3PNAjUjO73mTAQ"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_4",
+    "schedule_id": "schedule_id_1",
+    "mode": "create",
+    "seen_version": "v3",
+    "name": "Example name",
+    "management_class": "user",
+    "system_schedule_kind": "unclassified",
+    "objective_id": "objective_id_1",
+    "worker": {
+      "agent_type": "token_id_1",
+      "agent_id": "token_id_1"
+    },
+    "timing": {
+      "kind": "interval",
+      "interval_ms": 1000
+    },
+    "repeat_count": 3,
+    "expires_at": "2026-10-22T04:30:00.000Z",
+    "paused_until": "2026-10-22T04:30:00.000Z",
+    "enabled": true,
+    "action": {
+      "type": "fixed_message",
+      "text": "Stand-up in ten minutes."
+    },
+    "run_notes": {
+      "schedule_kind": "schedule_kind_1",
+      "policy": {
+        "notify": true,
+        "notify_on_failure": true,
+        "evidence_required": true
+      }
+    },
+    "decisions_ahead": [
+      {
+        "decision_id": "decision_id_1",
+        "kind": "forward_result_to_person"
+      }
+    ],
+    "deliver_to": {
+      "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
+      "conversation_id": "conversation_id_1",
+      "time_zone": "Europe/Berlin"
+    }
+  },
+  "body_digest": "38RrtUw_U_SuCRqT-v8NopN4kLTUxdKepn0WjSdkYVM",
+  "signature": "KwK1XYr3EX_f6tP6i_RZgNbVXQZrMniasACFxRD1AncZnW2FwM1GFR4kWUJ2CUIpy9qAtNrECre40TUk0rpzAw"
+}

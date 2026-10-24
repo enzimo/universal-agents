@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "access.withdraw",
   "message_id": "01928f3a-7b2c-74b7-8000-0000000004b7",
-  "idempotency_key": "access.withdraw:request_id_1",
+  "idempotency_key": "access.withdraw:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -51,5 +51,5 @@
     "reason": "Example reason"
   },
   "body_digest": "5JtxIgUikYkbZALvSDdzPpsN7tK7s2JQsS6mDw4gLGQ",
-  "signature": "uzZrrhFUn0C7cDanrJybfLdrd_OoN2vqJg-h3zitQtVdXrtnKulTLw3jbO33j_aszdvgSsKDtDg-DRC7w6ZrDA"
+  "signature": "DIA7MAeGAeGQKeZ7shu4LrMzVLz8Qb0KXweZpfRvpLwn8Av7ukzarBIyoshl26sAlR-MfZuE3OsDyGmzjbglCQ"
 }

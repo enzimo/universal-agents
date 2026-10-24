@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.request",
   "message_id": "01928f3a-7b2c-7101-8000-000000000101",
-  "idempotency_key": "task_request:task_sub_1:01928f3a-7b2c-7101-8000-000000000101",
+  "idempotency_key": "task.request:LQqO0I_NeB-f6ZvAeA5r1-Ht4bUqxiWrZc8PcigtEKc",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -27,14 +27,17 @@
     "task_id": "task_sub_1",
     "work": {
       "origin": "delegation",
+      "reply_to": {
+        "target": "agent",
+        "id": "lead"
+      },
       "root_task_id": "task_root_1",
       "parent_task_id": "task_root_1",
       "conversation_id": "conv_1",
       "follows_task_id": "task_prev_1",
       "objective_id": "obj_1",
-      "schedule_id": "sched_1",
       "time_zone": "Europe/Berlin",
-      "delivery_ref": "dref_1",
+      "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
       "started_on_purpose": true,
       "topology": "hub_and_spoke",
       "intent": {
@@ -100,6 +103,6 @@
       }
     }
   },
-  "body_digest": "RRDImmmLj5sHupKm6Tvul12p31dcPRsPTSL8DveyGUw",
-  "signature": "dMLpaC0Y0419dyNIPloHct_u4bJtE_r8sQARKHwDXV5n1dGcorkIg8A9Smuz_WPK8vc4NNiMrNhvzedVXGiWAg"
+  "body_digest": "ChtAn5XBnCEWOL16jsfC5MAHe2o2J1ZuXeQ5wTRMhZw",
+  "signature": "U1lKGyCUra3kqPiSZFsI-PeeeSGQJ6rbRqUcVkoanqd1B97cLz0ORHYl1WDZNZ79LdHkRJ7gvXlsxGse4WDWDQ"
 }

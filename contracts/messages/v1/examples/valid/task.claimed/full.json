@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.claimed",
   "message_id": "01928f3a-7b2c-710f-8000-00000000010f",
-  "idempotency_key": "task_claimed:claim_5c1f2a",
+  "idempotency_key": "task.claimed:_abfeeo3ETx6X4iio9zFUrk8f_SZgbYv8bi7A0Mbhks",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -30,5 +30,5 @@
     "recovered": false
   },
   "body_digest": "HXY9-9yshRtLGR6ifpV_N3EXiCdSjoRWa8KXxYiHg74",
-  "signature": "HS6vrQ7ADcGYhJ06-yquR6PU3VOjt7lNbJrScxMt41QfICZCu-kKRAFPjf87SKVetddjXWOghHj4dWhn9u6UAg"
+  "signature": "ug-PhCPbqpezyg-4BfB2ClueIhQ7CDMZeBxJYZfOXCcGDIq7fw5c86NvCAFWpDN8XH6XrkLMe6AKFMczjr2FCg"
 }

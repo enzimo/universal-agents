@@ -1,0 +1,65 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.result",
+  "message_id": "01928f3a-7b2c-7200-8000-000000000200",
+  "idempotency_key": "task.result:csSo8HIvrUHeTAax2GNSpNk6wpATDWJN0qrUYT32v18",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.work.team",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_sub_1",
+    "sequence": 4,
+    "intent_version": 2,
+    "steering_seen": "steer_1",
+    "assumptions": [
+      {
+        "assumption_id": "asm_1",
+        "text": "The report covers the last quarter only.",
+        "affects": [
+          "S2"
+        ]
+      }
+    ],
+    "summary": "Costs grouped into five categories.",
+    "outcome": {
+      "state": "completed",
+      "custody_token": 3,
+      "answer": {
+        "form": "text",
+        "text": "Travel 40%, software 30%, other 30%."
+      },
+      "artifacts": [
+        {
+          "attachment_id": "att_1",
+          "blob": {
+            "sha256": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+            "size": 2048,
+            "media_type": "application/pdf",
+            "name": "costs.pdf"
+          },
+          "kind": "document",
+          "caption": "Last quarter's invoices"
+        }
+      ]
+    }
+  },
+  "body_digest": "QDBLHPcFveL3EEkYUm78C79bF67VkdsDFBQ9mB3wjIY",
+  "signature": "Xiso5u9JXlyqxUDhpGGUF_ZoRA7FS6ix4KdOFtF0tlDO9-b81XGaTATE6M5ypXkzoev7tGBdvow-aLXRJ4e-Bw"
+}

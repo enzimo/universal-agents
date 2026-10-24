@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.update",
   "message_id": "01928f3a-7b2c-7440-8000-000000000440",
-  "idempotency_key": "schedules.update:request_id_1",
+  "idempotency_key": "schedules.update:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -57,5 +57,5 @@
     "repeat_count": 3
   },
   "body_digest": "il9joaKwTsWFx7YiwAV8bgKKnGMZPXY6kvjmpnq6ZY4",
-  "signature": "DgHX0WJRaSFsgCxXVhhcBKlaw7ThbsVZNaaNz7UGXRk-vbAocq3w7q4GtWoEW18_F-HxfqaYR2xE94dDCGGdCQ"
+  "signature": "k0p7wOWGSE_hI6VyMuLbffraYYA_Ng61Ir08n_TFs3W5M47Lz07o2T14ln74JgN4jm2VzZpwB_xAKzER-DkADw"
 }

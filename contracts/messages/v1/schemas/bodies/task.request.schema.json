@@ -55,6 +55,10 @@
         },
         "checkpoint": {
           "$ref": "../common.schema.json#/$defs/blob_ref"
+        },
+        "ledger": {
+          "description": "The handed-back task's open work and labels, so its new holder continues with the same labels.",
+          "$ref": "../common.schema.json#/$defs/ledger_snapshot"
         }
       },
       "required": [

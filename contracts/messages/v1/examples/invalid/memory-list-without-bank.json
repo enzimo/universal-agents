@@ -1,0 +1,13 @@
+{
+  "description": "A memory.list request without its bank.",
+  "refusal": "invalid_body",
+  "at": "/body/bank",
+  "base": "memory.list/full.json",
+  "changes": [
+    {
+      "remove": "/body/bank"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"memory.list\", \"message_id\": \"01928f3a-7b2c-7449-8000-000000000449\", \"idempotency_key\": \"memory.list:sowGbcFEmUKl0tHyPFK0DGHGDFlCU0GlIftYb45YeFw\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"revocation_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.gateway-1.svc.team.memory.list\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7149-9000-000000000149\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"command\", \"id\": \"cmd_000149\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-23T04:29:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"TLeJ2HYWBOTsCCxcbkfpsCqru5R-SM3H_GdBUODm4MmdQig2yozxxjMuoKSqbzOP2-KViZ12ZjaeAZWX2VIqCA\"}, \"algorithm\": \"ed25519\", \"body\": {\"sort\": \"newest\", \"offset\": 3, \"limit\": 3}, \"body_digest\": \"ZxQdWxOuCMda3laiF3x_3u_leiFvA6A3wwmRB1JucUs\", \"signature\": \"H3pLa3I83yezQtFuqv-smqeccaDltCqfEliyZQgrQSgxeAl4dAAnOMNUYqpnqCiS_o2yx8BFFxUkuO-FSrfVDg\"}"
+}

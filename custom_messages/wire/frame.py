@@ -33,6 +33,7 @@ from custom_messages.wire.encoding import b64url, b64url_decode, body_digest, fo
 from custom_messages.wire.kinds import (
     AUTHORITY_TOKEN_DOMAIN,
     AUTHORITY_TOKEN_MAX_SECONDS,
+    DECISION_TOKEN_DOMAIN,
     BETWEEN_INSTALLATIONS,
     FRAME_SHAPE,
     KINDS,
@@ -52,14 +53,23 @@ from custom_messages.wire.values import parse_timestamp
 
 __all__ = [
     "FrameRefused", "Receiver", "ReplayKey", "ReplayLookup", "VerifiedAuthority", "VerifiedFrame",
-    "b64url", "b64url_decode", "body_digest", "body_model", "format_timestamp", "frame_digest",
-    "idempotency_key", "renew_key_proof_bytes", "sign_authority_token", "sign_frame", "sign_renew_key_proof",
-    "signing_bytes", "verify_frame",
+    "b64url", "b64url_decode", "body_digest", "body_model", "expected_idempotency_key", "format_timestamp",
+    "frame_digest", "idempotency_key", "renew_key_proof_bytes", "sign_authority_token", "sign_decision_token",
+    "sign_frame", "sign_renew_key_proof", "signing_bytes", "verify_frame",
 ]
 
 REPLY_SUFFIX = ".reply"
 # Hosts whose certificates may sign authority tokens (README, "On behalf of a person").
 AUTHORITY_ISSUER_ROLES = frozenset({"gateway", "scheduler"})
+# The only role whose certificate may sign a token naming a schedule.
+SCHEDULE_ISSUER_ROLE = "scheduler"
+# The role whose certificate signs change-conflict decision tokens (README, "What bodies carry").
+DECISION_ISSUER_ROLE = "team_services"
+DECISION_TOKEN_AT = "/body/decision_token"
+# The host role that speaks for outside agents (A2A); its frames reach only the lead.
+OUTSIDE_ROLE = "edge_adapter"
+# Who may reach an outside agent: the lead agent, or the team services without an agent.
+OUTSIDE_CONTACT_ROLE, OUTSIDE_CONTACT_HOST = "lead", "team_services"
 # Audience targets an address delivers to as a whole team (audience id is the team id).
 TEAM_WIDE_TARGETS = frozenset({"team", "team_services"})
 # NATS headers that copy frame fields (README, "NATS headers").
@@ -80,15 +90,48 @@ _KEY_ROTATION = "application_key_rotation"
 _TOKEN = "[A-Za-z0-9_-]+"
 
 
-def idempotency_key(kind: str, *parts: str) -> str:
-    """A bounded key for a tuple of ids; JSON preserves their boundaries and order.
+def idempotency_key(kind: str, *parts: str | int | None) -> str:
+    """A bounded key for a tuple of values; JSON preserves their boundaries and order.
 
-    ``kind`` is a registry kind, and each part is a schema-validated record id.
-    Even a maximum-length kind and tuple produce at most 140 characters.
+    ``kind`` is a registry kind (at most 84 characters), and each part is a value
+    the registry's ``idempotency`` list names, ``None`` where an optional field is
+    absent. The key is at most 128 characters, whatever the ids' lengths
+    (README, "Idempotency keys").
     """
 
     digest = hashlib.sha256(canonical_bytes(list(parts))).digest()
     return f"{kind}:{b64url(digest)}"
+
+
+def _pointed(document: Mapping[str, Any], pointer: str) -> Any:
+    """The value a JSON pointer names, or None when a step is absent."""
+
+    value: Any = document
+    for step in pointer[1:].split("/"):
+        if not isinstance(value, Mapping) or step not in value:
+            return None
+        value = value[step]
+    return value
+
+
+def expected_idempotency_key(raw: Mapping[str, Any], spec: KindSpec, is_reply: bool,
+                             answering: Optional[Frame]) -> str:
+    """The key a frame of this kind must carry (README, "Idempotency keys").
+
+    A request/reply operation's reply derives its key from the request's key. A
+    durable copy (registry ``copy_to``) adds its audience target as a last part, so
+    the broker, which drops repeats of one key across the whole stream, keeps both
+    the original and the copy.
+    """
+
+    if is_reply:
+        assert answering is not None  # _verify_issuer refused replies without their request
+        return idempotency_key(f"{spec.name}{REPLY_SUFFIX}", answering.idempotency_key)
+    parts = [_pointed(raw, pointer) for pointer in spec.idempotency]
+    target = raw["audience"]["target"]
+    if target in spec.copies:
+        parts.append(target)
+    return idempotency_key(spec.name, *parts)
 
 
 def signing_bytes(frame: Mapping[str, Any]) -> bytes:
@@ -105,6 +148,19 @@ def frame_digest(frame: Mapping[str, Any]) -> str:
 
 def authority_signing_bytes(token: Mapping[str, Any]) -> bytes:
     return signed_bytes(AUTHORITY_TOKEN_DOMAIN, token)
+
+
+def decision_signing_bytes(token: Mapping[str, Any]) -> bytes:
+    return signed_bytes(DECISION_TOKEN_DOMAIN, token)
+
+
+def sign_decision_token(unsigned: Mapping[str, Any], private_key: Ed25519PrivateKey) -> dict[str, Any]:
+    """Return ``unsigned`` with its algorithm and signature filled in; the team services sign it."""
+
+    token = {key: value for key, value in unsigned.items() if key != "signature"}
+    token["algorithm"] = "ed25519"
+    token["signature"] = b64url(private_key.sign(decision_signing_bytes(token)))
+    return token
 
 
 def sign_authority_token(unsigned: Mapping[str, Any], private_key: Ed25519PrivateKey) -> dict[str, Any]:
@@ -154,13 +210,22 @@ def sign_frame(unsigned: Mapping[str, Any], private_key: Ed25519PrivateKey) -> d
 
 @dataclass(frozen=True)
 class Receiver:
-    """Who is receiving: the audience a frame must name, and the host it runs on."""
+    """Who is receiving: the audience a frame must name, and the host it runs on.
+
+    ``agent_role`` is the receiving agent's place in its team (``lead`` or
+    ``worker``) when the receiver is an agent; only the lead receives frames from
+    outside agents. ``outside`` is true for an edge adapter receiving for an outside
+    agent, which accepts frames only from the lead and the team services
+    (team-topologies.yaml fixed rules).
+    """
 
     installation: str
     team: str
     target: str
     id: str
     runtime: str
+    agent_role: Optional[str] = None
+    outside: bool = False
 
 
 @dataclass(frozen=True)
@@ -186,7 +251,7 @@ class VerifiedAuthority:
         """The handler's last authority check: the token is bound to the root task or command it holds."""
 
         if (self.token.bound_to.type, self.token.bound_to.id) != (bound_type, record_id):
-            raise FrameRefused("bad_authority", "the token is bound to another root task or command",
+            raise FrameRefused("bad_authority", f"the token is not bound to the {bound_type} {record_id}",
                                at="/authority/bound_to")
 
 
@@ -369,13 +434,16 @@ def _verify_issuer(frame: Frame, certificate: HostCertificate, session: Optional
         raise FrameRefused("wrong_issuer", "the reply comes from another agent than the one asked", at="/issuer/agent")
 
 
-def _verify_sender(frame: Frame, certificate: HostCertificate, spec: Optional[KindSpec], is_reply: bool,
-                   trust: TrustStore, issued_at: datetime) -> None:
+def _verify_sender(frame: Frame, certificate: HostCertificate, session: Optional[AgentSession], spec: Optional[KindSpec],
+                   is_reply: bool, trust: TrustStore, issued_at: datetime, receiver: Receiver) -> None:
     if spec is None:
         return  # an unknown kind is refused later, as unknown_kind
-    allowed = spec.receivers if is_reply else spec.senders
-    if not certificate.roles & set(allowed):
-        raise FrameRefused("wrong_sender", f"{frame.kind} comes only from {', '.join(allowed)} hosts", at="/kind")
+    target = frame.audience.target
+    allowed = spec.receivers if is_reply else spec.senders_by_target.get(target, spec.senders)
+    roles = certificate.roles & set(allowed)
+    if not roles:
+        raise FrameRefused("wrong_sender", f"{frame.kind} to a {target} comes only from {', '.join(allowed)} hosts", at="/kind")
+    _verify_outside_boundary(frame, roles, session, receiver)
     if frame.issuer.installation == trust.installation:
         return
     agreement = trust.agreement(frame.issuer.installation)
@@ -386,6 +454,24 @@ def _verify_sender(frame: Frame, certificate: HostCertificate, spec: Optional[Ki
         raise FrameRefused("wrong_sender", f"the agreement with {agreement.peer} does not allow this team", at="/audience/team")
     if not agreement.covers(issued_at):
         raise FrameRefused("wrong_sender", "the agreement did not cover the frame's issue time", at="/issued_at")
+
+
+def _verify_outside_boundary(frame: Frame, roles: frozenset[str] | set[str], session: Optional[AgentSession], receiver: Receiver) -> None:
+    """Contact with outside agents goes through the lead (team-topologies.yaml fixed rules).
+
+    An outside agent's adapter reaches only the lead's inbox (or the team services),
+    and an adapter receiving for an outside agent accepts frames only from a lead
+    agent or the team services.
+    """
+
+    if roles == {OUTSIDE_ROLE} and not (frame.audience.target == "team_services"
+                                       or (frame.audience.target == "agent" and receiver.agent_role == OUTSIDE_CONTACT_ROLE)):
+        raise FrameRefused("wrong_sender", "an outside agent reaches only the team's lead", at="/audience/id")
+    if receiver.outside:
+        lead = session is not None and session.agent_role == OUTSIDE_CONTACT_ROLE
+        services = session is None and OUTSIDE_CONTACT_HOST in roles
+        if not (lead or services):
+            raise FrameRefused("wrong_sender", "only the lead or the team services contact an outside agent", at="/issuer")
 
 
 def _verify_audience(frame: Frame, receiver: Receiver) -> None:
@@ -498,23 +584,113 @@ def _verify_authority(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, is_r
                            at="/authority/issuer/installation")
     if audience.team != frame.issuer.team:
         raise FrameRefused("bad_authority", "only the team the person asked presents the token", at="/authority/audience/team")
-    certificate = trust.host_certificate(issuer.installation, issuer.runtime, issuer.membership_epoch)
-    token_issued, token_expires = parse_timestamp(token.issued_at), parse_timestamp(token.expires_at)
-    if (certificate is None or certificate.key_id != issuer.key_id or not certificate.valid_at(token_issued)
+    # Over the token as received: a newer minor's unknown fields are signed too.
+    signed = _SignedToken("/authority", raw["authority"], authority_signing_bytes(raw["authority"]))
+    certificate = _token_certificate(signed, trust, AUTHORITY_ISSUER_ROLES, audience.team, "a gateway or scheduler")
+    if token.schedule_id is not MISSING and SCHEDULE_ISSUER_ROLE not in certificate.roles:
+        raise FrameRefused("bad_authority", "only a scheduler names the schedule a run belongs to", at="/authority/schedule_id")
+    _verify_token_signature_and_time(signed, certificate, frame)
+    return _verify_binding(raw, spec, VerifiedAuthority(token=token, certificate=certificate))
+
+
+@dataclass(frozen=True)
+class _SignedToken:
+    """An authority or decision token as received: where it sits, its fields, and what its signature covers."""
+
+    at: str
+    fields: Mapping[str, Any]
+    signing_bytes: bytes
+
+    @property
+    def issued_at(self) -> datetime:
+        return parse_timestamp(self.fields["issued_at"])
+
+    @property
+    def expires_at(self) -> datetime:
+        return parse_timestamp(self.fields["expires_at"])
+
+
+def _token_certificate(token: _SignedToken, trust: TrustStore, roles: frozenset[str], team: str,
+                       signers: str) -> HostCertificate:
+    """The unrevoked certificate, valid when the token was issued, of a host in one of ``roles`` serving ``team``."""
+
+    issuer = token.fields["issuer"]
+    certificate = trust.host_certificate(issuer["installation"], issuer["runtime"], issuer["membership_epoch"])
+    if (certificate is None or certificate.key_id != issuer["key_id"] or not certificate.valid_at(token.issued_at)
             or trust.revoked(certificate.installation, certificate.certificate_id)):
-        raise FrameRefused("bad_authority", "no unrevoked certificate for the token's issuer", at="/authority/issuer")
-    if not certificate.roles & AUTHORITY_ISSUER_ROLES or audience.team not in certificate.teams:
-        raise FrameRefused("bad_authority", "only a gateway or scheduler of the team issues its tokens", at="/authority/issuer")
+        raise FrameRefused("bad_authority", "no unrevoked certificate for the token's issuer", at=token.at + "/issuer")
+    if not certificate.roles & roles or team not in certificate.teams:
+        raise FrameRefused("bad_authority", f"only {signers} of the team signs this token", at=token.at + "/issuer")
+    return certificate
+
+
+def _verify_token_signature_and_time(token: _SignedToken, certificate: HostCertificate, frame: Frame) -> None:
     try:
-        # Over the token as received: a newer minor's unknown fields are signed too.
-        certificate.public_key.verify(b64url_decode(token.signature), authority_signing_bytes(raw["authority"]))
+        certificate.public_key.verify(b64url_decode(token.fields["signature"]), token.signing_bytes)
     except (InvalidSignature, ValueError) as error:
-        raise FrameRefused("bad_authority", "the token's signature does not verify", at="/authority/signature") from error
-    if token_expires - token_issued > timedelta(seconds=AUTHORITY_TOKEN_MAX_SECONDS):
-        raise FrameRefused("bad_authority", "the token lasts too long", at="/authority/expires_at")
-    if not within(token_issued, token_expires, parse_timestamp(frame.issued_at)):
-        raise FrameRefused("bad_authority", "the token was not valid when the frame was issued", at="/authority/expires_at")
-    return VerifiedAuthority(token=token, certificate=certificate)
+        raise FrameRefused("bad_authority", "the token's signature does not verify", at=token.at + "/signature") from error
+    if token.expires_at - token.issued_at > timedelta(seconds=AUTHORITY_TOKEN_MAX_SECONDS):
+        raise FrameRefused("bad_authority", "the token lasts too long", at=token.at + "/expires_at")
+    if not within(token.issued_at, token.expires_at, parse_timestamp(frame.issued_at)):
+        raise FrameRefused("bad_authority", "the token was not valid when the frame was issued", at=token.at + "/expires_at")
+
+
+def _verify_binding(raw: Mapping[str, Any], spec: KindSpec, verified: VerifiedAuthority) -> VerifiedAuthority:
+    """Where the body names the record the token is bound to (registry authority_binding ``at``), they agree.
+
+    The handler still checks that it holds that record.
+    """
+
+    bound_type, at = spec.authority_binding or ("", None)
+    if at is not None:
+        verified.require_bound_to(bound_type, str(_pointed(raw, at)))
+    return verified
+
+
+def _repeats(raw: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
+    items = _pointed(raw, rule["unique"])
+    if not isinstance(items, list):
+        return False
+    by = rule.get("by")
+    values = [canonical_bytes(item[by] if by is not None and isinstance(item, Mapping) else item) for item in items]
+    return len(set(values)) != len(values)
+
+
+def _lacks_required(raw: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
+    applies = all(_pointed(raw, condition["at"]) == condition["is"] for condition in rule["when"])
+    return applies and _pointed(raw, rule["requires"]) is None
+
+
+def _says_nothing(raw: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
+    return all(_pointed(raw, pointer) is None for pointer in rule["any_of"])
+
+
+def _check_body_rules(raw: Mapping[str, Any], spec: KindSpec) -> None:
+    """What the schema cannot say (registry body_rules; README, "What bodies carry")."""
+
+    for rule in spec.body_rules:
+        if "unique" in rule and _repeats(raw, rule):
+            raise FrameRefused("invalid_body", "a list holds the same value twice", at=rule["unique"])
+        if "requires" in rule and _lacks_required(raw, rule):
+            raise FrameRefused("invalid_body", "a field its other fields need is missing", at=rule["requires"])
+        if "any_of" in rule and _says_nothing(raw, rule):
+            raise FrameRefused("invalid_body", "the body needs one of " + ", ".join(rule["any_of"]),
+                               at=rule["any_of"][0].rsplit("/", 1)[0])
+
+
+def _verify_decision_token(raw: Mapping[str, Any], frame: Frame, trust: TrustStore) -> None:
+    """A change-conflict decision token in the body is the team services' signed record of a person's choice."""
+
+    token = _pointed(raw, DECISION_TOKEN_AT)
+    if token is None:
+        return
+    issuer = token["issuer"]
+    if (issuer["installation"], issuer["team"]) != (frame.issuer.installation, frame.audience.team):
+        raise FrameRefused("bad_authority", "the decision token belongs to another installation or team",
+                           at=DECISION_TOKEN_AT + "/issuer")
+    signed = _SignedToken(DECISION_TOKEN_AT, token, decision_signing_bytes(token))
+    certificate = _token_certificate(signed, trust, frozenset({DECISION_ISSUER_ROLE}), issuer["team"], "a team-services host")
+    _verify_token_signature_and_time(signed, certificate, frame)
 
 
 def verify_frame(
@@ -565,7 +741,7 @@ def verify_frame(
         _verify_revocation(certificate, session, trust)
         _verify_epochs(certificate, spec, trust)
         _verify_issuer(frame, certificate, session, issued_at, is_reply, answering)
-        _verify_sender(frame, certificate, spec, is_reply, trust, issued_at)
+        _verify_sender(frame, certificate, session, spec, is_reply, trust, issued_at, receiver)
     _verify_audience(frame, receiver)
     _verify_subject(frame, spec, is_reply, arrived_on, headers)
     _verify_time(frame, spec, now, issued_at)
@@ -582,7 +758,14 @@ def verify_frame(
     except ValidationError as error:
         raise FrameRefused("invalid_body", str(error).splitlines()[0],
                            at=pointer(error.errors()[0], shape, prefix="/body")) from error
+    if not is_reply:
+        _check_body_rules(raw, spec)
+    if frame.idempotency_key != expected_idempotency_key(raw, spec, is_reply, answering):
+        raise FrameRefused("invalid_body", "the idempotency key is not the one the kind's key parts give",
+                           at="/idempotency_key")
     authority = _verify_authority(raw, frame, spec, is_reply, trust)
     _verify_renew_key_proof(raw)
+    if not is_reply:
+        _verify_decision_token(raw, frame, trust)
     return VerifiedFrame(frame=frame, body=body, certificate=certificate, session=session, authority=authority,
                          replay_key=replay_key, frame_digest=digest, raw=raw)

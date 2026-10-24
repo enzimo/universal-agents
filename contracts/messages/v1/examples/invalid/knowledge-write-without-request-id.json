@@ -1,0 +1,13 @@
+{
+  "description": "A knowledge.write request without its request id.",
+  "refusal": "invalid_body",
+  "at": "/body/request_id",
+  "base": "knowledge.write/full.json",
+  "changes": [
+    {
+      "remove": "/body/request_id"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"knowledge.write\", \"message_id\": \"01928f3a-7b2c-746d-8000-00000000046d\", \"idempotency_key\": \"knowledge.write:HY_GzrH5TGMm1tVIPSWPyy4XnphpMlskXRBcIhm_af0\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"revocation_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.gateway-1.svc.team.knowledge.write\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7143-9000-000000000143\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"command\", \"id\": \"cmd_000143\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-23T04:29:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"wqIQrvXGwOzpKXdfih-xCG1kDt7SAtiFZZIq_j5dIk0eGUf7ds1Rsbmicv5Sb7tejqWefvXkLvsEJykUOF7AAQ\"}, \"algorithm\": \"ed25519\", \"body\": {\"space\": \"team\", \"page\": \"Example page\", \"seen_version\": \"v3\", \"title\": \"Example title\", \"summary\": \"Example summary\", \"body\": \"Example body\", \"body_ref\": {\"sha256\": \"BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU\", \"size\": 3, \"media_type\": \"application/pdf\", \"name\": \"Example name\"}, \"tags\": [\"Example tags\"], \"page_type\": \"page_type_1\", \"change_summary\": \"Example change summary\", \"confirm_review\": true}, \"body_digest\": \"LlB0vXdz6XDLIyzUb4qLBenkSxYwyVArYjWIeMax7Yo\", \"signature\": \"wzfr0H8bhBz0jtOWpTB07SqxLsvEcEXxyuil3BjqKptLPYTJhCklNIvk8ROHvTuRm3JolIuWhFxOOW5poALpAg\"}"
+}

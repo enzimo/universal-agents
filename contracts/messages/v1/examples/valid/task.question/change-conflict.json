@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.question",
   "message_id": "01928f3a-7b2c-7108-8000-000000000108",
-  "idempotency_key": "task_question:q_2",
+  "idempotency_key": "task.question:p9ImreC3pIzCBkIwDmPm-qjSHwkKAZU_GEq5foF1XE0",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -26,6 +26,8 @@
   "body": {
     "question_id": "q_2",
     "task_id": "task_root_1",
+    "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
+    "conversation_id": "conv_1",
     "sequence": 7,
     "text": "Another request changed this schedule after you asked for your change. Which should stay?",
     "can_answer": "person",
@@ -45,6 +47,6 @@
       ]
     }
   },
-  "body_digest": "VxY2Uk6r9mCwLk4kSFdicqYOarTUVGL1TEsXpmiqJ58",
-  "signature": "fMJPlyJGZbpLEO5ERJTjB3bUVYpIM62PhI08Yg1xaO5XhjeyK5RNgj4Hh9LmJ26TWxYo3XXoL_r-PqkNDuSiBw"
+  "body_digest": "92upJ4sjRUdRG3BaJ0Ci9g6VNjZ0BJ-9kzzqWB0KmKA",
+  "signature": "2KqiD61Uob77vUSWGqFuhj7XkvqHjP_7DuSVgPD8xnv4t73sDX9_QPmb2kevXa9AYNcdt_ff8NgbaCWqwhJOAQ"
 }

@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "objectives.list",
   "message_id": "01928f3a-7b2c-7413-8000-000000000413",
-  "idempotency_key": "objectives.list:01928f3a-7b2c-7413-8000-000000000413",
+  "idempotency_key": "objectives.list:OW7iMbIvzSUs4GelLnbrpxhW1b1TNoJd3BTTLz_hz9U",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -45,5 +45,5 @@
   "algorithm": "ed25519",
   "body": {},
   "body_digest": "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o",
-  "signature": "7mjs4H5PqRWvPoV0KrCt4KsP0Wn9VavEK3UXWcq0RYASNn9F3h2soTqgY3YVHMi7ZiHutVaUBPQOOpcqiYnHDw"
+  "signature": "4L5TGeTd0CQA1WMT3n_SsrH0cAEan0w5ElHgdOBDoAIKWlTxBVDSL5rQWNp6ec1XZ-tlyY_ncVCwE1c_JAzdBA"
 }

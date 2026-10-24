@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "objectives.create",
   "message_id": "01928f3a-7b2c-7425-8000-000000000425",
-  "idempotency_key": "objectives.create:request_id_1",
+  "idempotency_key": "objectives.create:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -56,5 +56,5 @@
     ]
   },
   "body_digest": "WlvtuabJv02VF8A9zTasH0lwCbj5TZKkW_Y3nQ7p8cw",
-  "signature": "kiBX4kDI5gQUDsCFtxbihPi55xfredn1to6m5jId6k7qa8T3pxiYCBJFsJfyaMe5UcQMhZL63cb9URUxOjxpDg"
+  "signature": "qtrrCNDsTQr1atF5RRgYft6HKSNukRsJrEODBvrEGrEDUixMOp8pvixdhiOtVDleYj7mO2OGB-e27tnarUr0Aw"
 }

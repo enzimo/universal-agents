@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "host.renew",
   "message_id": "01928f3a-7b2c-7704-8000-000000000704",
-  "idempotency_key": "host.renew:renew_1",
+  "idempotency_key": "host.renew:Jooah9qNAKl_JESy2cUJX0CujN-e8zigeNUwqyS7-VQ",
   "issuer": {
     "installation": "install_example",
     "team": "_install",
@@ -32,5 +32,5 @@
     }
   },
   "body_digest": "PAECrdGqQ1Ms_rIO2ok3D_OxMx1wNAnbhDtq-Hr-rXQ",
-  "signature": "IAjSmXn4lvTYgud8CgUWrfu_nbtNwB2MOUr_U26ukrXkjMPqjcElM6SUFhqDx7CfWWI9Pe2RJPzePuS1yfcBAQ"
+  "signature": "3cOUE0mwnyR_IzOaDBJKejBVNB7D-vKO-SsmFT8KbjYQ-VswqtSvZ7UyF1rKrA_CI37cGr27SVh6GoVubMtJCA"
 }

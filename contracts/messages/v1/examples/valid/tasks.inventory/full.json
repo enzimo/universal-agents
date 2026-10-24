@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "tasks.inventory",
   "message_id": "01928f3a-7b2c-7401-8000-000000000401",
-  "idempotency_key": "tasks.inventory:01928f3a-7b2c-7401-8000-000000000401",
+  "idempotency_key": "tasks.inventory:u6FmnZPqQtPazFOL7dm0QJQ0DKZwsXZ6lqxDQT6RIKQ",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -45,5 +45,5 @@
   "algorithm": "ed25519",
   "body": {},
   "body_digest": "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o",
-  "signature": "mRbbkUc5xxXB7Ngn8TiuHNzwMpPNihSXZGUkAXGS35kuf0wcnARda7G2hr2hGa4s58FFnVO-91vabzjfjaIABg"
+  "signature": "vj-kim-srfNSf0azrfD_MM5WsU_AY5SdgLDzmJ4q_ffpIbzZ45ASqoUDJ1dqG3YMSUzbF6o2kKDJ80uXbcXMDQ"
 }

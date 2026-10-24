@@ -1,0 +1,13 @@
+{
+  "description": "A claim names the task it takes.",
+  "refusal": "invalid_body",
+  "at": "/body/task_id",
+  "base": "task.claimed/full.json",
+  "changes": [
+    {
+      "remove": "/body/task_id"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.claimed\", \"message_id\": \"01928f3a-7b2c-710f-8000-00000000010f\", \"idempotency_key\": \"task.claimed:_abfeeo3ETx6X4iio9zFUrk8f_SZgbYv8bi7A0Mbhks\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"agent\": \"researcher-2\", \"session\": \"s-researcher-2-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"lead\"}, \"subject\": \"ua.v1.team_example.worker-host-1.work.agent.lead\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"claim_id\": \"claim_5c1f2a\", \"parent_task_id\": \"task_root_1\", \"recovered\": false}, \"body_digest\": \"Amk-IRIydkj0T1TwZ4GIHLvMHU3QWgJA_kItDMZR694\", \"signature\": \"Bw9g7OenwJDSk1ptAspBjoa7aRKJB8HZUUnHHbp2rut2Qjw9Vi_GVG6FeUBlwn276puSv08DE0pv3idmBsxkDw\"}"
+}

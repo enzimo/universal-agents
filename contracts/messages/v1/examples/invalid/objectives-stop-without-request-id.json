@@ -1,0 +1,13 @@
+{
+  "description": "A objectives.stop request without its request id.",
+  "refusal": "invalid_body",
+  "at": "/body/request_id",
+  "base": "objectives.stop/full.json",
+  "changes": [
+    {
+      "remove": "/body/request_id"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"objectives.stop\", \"message_id\": \"01928f3a-7b2c-741c-8000-00000000041c\", \"idempotency_key\": \"objectives.stop:HY_GzrH5TGMm1tVIPSWPyy4XnphpMlskXRBcIhm_af0\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"revocation_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.gateway-1.svc.team.objectives.stop\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7159-9000-000000000159\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"command\", \"id\": \"cmd_000159\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-23T04:29:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"UAxFSiPVZrsfMsi-0wknJcc7Bv_cjwF9btiuLKxhxAA8ykFKabRa_h_ootKm1uXFRaVTPJ3e1l9N4S0IoajIBw\"}, \"algorithm\": \"ed25519\", \"body\": {\"objective_id\": \"objective_id_1\", \"seen_version\": \"v3\", \"reason\": \"Example reason\"}, \"body_digest\": \"q2EOHOfJcpw8IFEpVSmdrGyJnIcP3ygajhdsgyPWs1E\", \"signature\": \"m0RwIC92SZ5BHLVyNfE-ihCb9yZkjHybN_jxRsEYnUtuKCDlnPDK8CZXoRWMkGaDHBivaUQqiPOAlsIto2aZBQ\"}"
+}

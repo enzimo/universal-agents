@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.request",
   "message_id": "01928f3a-7b2c-7130-8000-000000000130",
-  "idempotency_key": "task_request:task_sub_2:01928f3a-7b2c-7130-8000-000000000130",
+  "idempotency_key": "task.request:joAc3RjLjM91HJoIEtw6PZQ3RfmEi5by-eGOyP6c3vU",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -27,6 +27,10 @@
     "task_id": "task_sub_2",
     "work": {
       "origin": "delegation",
+      "reply_to": {
+        "target": "agent",
+        "id": "lead"
+      },
       "root_task_id": "task_root_1",
       "topology": "hub_and_spoke"
     },
@@ -36,10 +40,61 @@
       "prior_holder": "researcher-1",
       "prior_disposition": "interrupted",
       "interruption_count": 1,
-      "actions": []
+      "actions": [],
+      "ledger": {
+        "plan": {
+          "sha256": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+          "size": 7168,
+          "media_type": "application/json"
+        },
+        "checkpoint": {
+          "sha256": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg",
+          "size": 8192,
+          "media_type": "application/json"
+        },
+        "history_summary": "Grouped two of five categories.",
+        "delegations": [
+          {
+            "task_id": "task_sub_1_sub_1",
+            "number": 1,
+            "holder": "researcher-3",
+            "state": "standin"
+          }
+        ],
+        "questions": [
+          {
+            "question_id": "q_1",
+            "number": 1,
+            "purpose": "input"
+          }
+        ],
+        "assumptions": [
+          {
+            "assumption_id": "asm_1",
+            "text": "The report covers the last quarter only.",
+            "affects": [
+              "S2"
+            ]
+          }
+        ],
+        "held_actions": [
+          {
+            "action_id": "act_1",
+            "action_type": "send_email",
+            "summary": "Send the summary to the finance list.",
+            "state": "held"
+          }
+        ],
+        "counters": {
+          "subtask": 1,
+          "question": 1,
+          "attachment": 0,
+          "report": 0
+        }
+      }
     }
   },
   "causation_id": "01928f3a-7b2c-710f-8000-00000000010f",
-  "body_digest": "OYRgx9sGmckR1AlxPLlrXJBuOoU7L-F7mX_l5cdzWxs",
-  "signature": "446R6faYtR1rk7klUlaqL9R-6Q3ou5_xslK2mwYLWh3ElRSbDuqyqVEWi3AYqrOCkiFhGeEIA3f50NZcEsRdBQ"
+  "body_digest": "q3Wi2dPUEwSFvVbPVm-EpZ8q7rj7c2Dl7i4t6UVi5VU",
+  "signature": "6iS_sGk09STz_9SkfwXb2qBmTjmvXKEDh8CRNzicrMCItvcadwaL_a8xJCjbPF52sTUEV34uHyU_gtEIWEmfBg"
 }

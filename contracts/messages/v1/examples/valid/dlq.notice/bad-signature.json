@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "dlq.notice",
   "message_id": "01928f3a-7b2c-7707-8000-000000000707",
-  "idempotency_key": "dlq.notice:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "idempotency_key": "dlq.notice:bXeWDLlDIfDQIqJa4-qHRKn9OilGJtRZEBoRT9eCMgA",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -48,5 +48,5 @@
     "release": "0.9.8"
   },
   "body_digest": "GeR8XjITcqE2mTe_GyM9aHgMfmmJmc8-5lEPFrO1mus",
-  "signature": "KJ3PEGHLTjzMewwyEosURYqkhF1acqbc1cJS_MurHSJe2rHZsk7q8dcRgqC7KtfvJocKG_lHZse-EgXgqktgCw"
+  "signature": "OxfFy7Y3VsD2cWRbc7luWDpao_MT9UKfGAKhX3Db1PN0Oqg470XlOLQOOVk5ZIn74iEqNqmFdamaZUAgWP1lCw"
 }

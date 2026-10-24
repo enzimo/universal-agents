@@ -1,0 +1,68 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.merge",
+  "message_id": "01928f3a-7b2c-7a05-8000-000000000a05",
+  "idempotency_key": "knowledge.merge:vfLJL2c14BQ9xhQMQL-zK6-NnQo3qAmc9cnvaHwbnrY",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.knowledge.merge",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7134-9000-000000000134",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "CuAJltcGcmAK3C3pZItpg-tvYJltiUZwtYukbga1LruGj3qEJsSmGAx8WxlWTkForOJBTAeYIqJtfhL-gbBABw"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_2",
+    "space": "team",
+    "page": "Example page",
+    "seen_version": "v3",
+    "into": "Example into",
+    "target_seen_version": "2",
+    "content": {
+      "type": "blob",
+      "ref": {
+        "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+        "size": 40000,
+        "media_type": "text/plain",
+        "name": "merged.txt"
+      }
+    },
+    "confirm_review": false
+  },
+  "body_digest": "Azor9lTo50NnC_7sbt62Y_Mjhvxc29kUes66h-_zULY",
+  "signature": "yhsawxe8IFf1mjQOVMp2vpKxn32ou8RsI93bji9I7RUnjAjjt-EF6xzNTXNA0mHQXqz85dxyBXSGqDQa4vbRDw"
+}

@@ -132,6 +132,13 @@
                 "normal",
                 "urgent"
               ]
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/attachment"
+              },
+              "maxItems": 20
             }
           },
           "required": [

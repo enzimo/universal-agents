@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "host.join",
   "message_id": "01928f3a-7b2c-7701-8000-000000000701",
-  "idempotency_key": "host.join:join_1",
+  "idempotency_key": "host.join:9jZ1_8_B-Q6djDGXFmRxSrRjp_UcPXTRg04QX3SGX00",
   "issuer": {
     "installation": "install_example",
     "team": "_install",
@@ -49,5 +49,5 @@
     }
   },
   "body_digest": "FtFcJ8QhVZbqURHybgyFspNrOpxpcRUjhlbr-Aeyr2U",
-  "signature": "bkSXXuF2GZwi9xlO6967e59yeBLmkb4O1dqyTdgpe8l76M2j8AVk9Kp0wpHBBd1QQW2l1xpKmfnA5fnO3DTpCg"
+  "signature": "8Hg7F68nXDAPtjKsYXiyQe0eeSvZclKkHnbx7AbqKnrcgKu8G57EJKtcefT5Rkp_5vpKh_MYS_NkaS8HeCDVAw"
 }

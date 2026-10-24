@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "tasks.purge.reply",
   "message_id": "01928f3a-7b2c-7412-8000-000000000412",
-  "idempotency_key": "tasks.purge:request_id_1:reply",
+  "idempotency_key": "tasks.purge.reply:qxZQ01Z5A6MdgFSQzF0hIQ5WvhcqymHMh5aK6pIZokQ",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -29,5 +29,5 @@
   },
   "causation_id": "01928f3a-7b2c-7410-8000-000000000410",
   "body_digest": "csyNRhUeGQK2oRFE8YRiW_winxMNmB5DdpYyhu2vGww",
-  "signature": "h07yecyyGaj9Tj-K5p20BdoOE-hRGh0ShRYNHRuJFU3Wmyg-2MDreO8uqfjtRV6ML9em1dCP1pSLVC-t2UK7BA"
+  "signature": "c7vYeeWytNTi5Hz7A-TF0AEGc_HFPtRlb7o9JE8HbGLfEiGSmNjx7A4m3AO3kcOyinTF3zsTGlGFneEnjCr9Dw"
 }

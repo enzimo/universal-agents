@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.list",
   "message_id": "01928f3a-7b2c-742e-8000-00000000042e",
-  "idempotency_key": "schedules.list:01928f3a-7b2c-742e-8000-00000000042e",
+  "idempotency_key": "schedules.list:T9kDcNxZvFnAYPvm9ecdyRn-YkvAOPOHvbbWR6NkOVg",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -46,8 +46,8 @@
   "body": {
     "offset": 3,
     "limit": 3,
-    "delivery_ref": "dref_1"
+    "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0"
   },
-  "body_digest": "86Aqgu_PADN1ARY8s2Pp8RYUnYMsV4mXVHNGoVOK2-8",
-  "signature": "E8nuu7kJK0HkoZGcv75uyviUDvCZisRZjBXcRc8j7OYCzzivvPxbOkKWRBW-nbBNMa7T3e6zSWFG6FjkbJbeAg"
+  "body_digest": "l1zvRkUqZnVrgoW0NVzjW8ItNcLICq5Ykoy55k3l9ds",
+  "signature": "0S3Rpur_DPxBN2y70FinJBjwNsHiHDqPYT4-TtY9CVmHmuqyqH_BcsAI73fzx36cYPhbAaBCd_1Ii0IvPgdvAA"
 }

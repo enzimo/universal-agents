@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "objectives.update_status",
   "message_id": "01928f3a-7b2c-742b-8000-00000000042b",
-  "idempotency_key": "objectives.update_status:request_id_1",
+  "idempotency_key": "objectives.update_status:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -54,5 +54,5 @@
     "confirmed": true
   },
   "body_digest": "pRw0NmZFYFTF_P8uF-3p8DpMO_Tl35_NRh_Cz5DUaHQ",
-  "signature": "x0F713Sa0mSBETaZqj3hV_MAwggOD-A7F9dRbRMVaNJFLqEscNwLs0Ng5pJ9mqBsfeDWzgAMTExsxBGTTbuADw"
+  "signature": "eDwaLqk3fhiVlo9m42LjXyBcDtuYz7sSJoY5GBnC4VuSj-OXvRKbeHFkZdHRFsTK73IENvgMg5xfA_fse398Dw"
 }

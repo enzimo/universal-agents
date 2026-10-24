@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.unfreeze",
   "message_id": "01928f3a-7b2c-7491-8000-000000000491",
-  "idempotency_key": "knowledge.unfreeze:request_id_1",
+  "idempotency_key": "knowledge.unfreeze:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -52,5 +52,5 @@
     "seen_version": "v3"
   },
   "body_digest": "UH6s6pN5KCymyrbcleMxmd1Ui1owFGUli2zgHppi_Ew",
-  "signature": "ffunQu-4l7V_Xnj9ZlR2L8PkX_UlQSQPgKa_MhvnQF8GrFkZv0_K6R4WaioHeCgJkVHXB6VP1BG9cvUZnVDABg"
+  "signature": "NoVmBndArKssCF6VLA55A4zM40ofCMHlm39rznRyzFHEB_1SwuldSvGTcPN4fZhd41C1NOtfH92pgCNkmGHCBA"
 }

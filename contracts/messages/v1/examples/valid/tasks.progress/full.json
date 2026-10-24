@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "tasks.progress",
   "message_id": "01928f3a-7b2c-749a-8000-00000000049a",
-  "idempotency_key": "tasks.progress:01928f3a-7b2c-749a-8000-00000000049a",
+  "idempotency_key": "tasks.progress:dD-qu5eVM_VFysWV1IorIBTvoNkkWsEylmlJf8YvBcI",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -45,8 +45,8 @@
   "algorithm": "ed25519",
   "body": {
     "conversation_id": "conversation_id_1",
-    "delivery_ref": "dref_1"
+    "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0"
   },
-  "body_digest": "2R6H663G3PsGhG_gylu8NtlYKjCxIaP6EN0y_ODH3A4",
-  "signature": "xlql_DhgSWDTjJaFaB7hsSaSkivHbSFfmVGJZSO9IKOgYryQ_dzQxY6rbQXuGS-hpNEVrQprr4qimjpJVlm7Cg"
+  "body_digest": "BFlADVDFi4X2x9iaaEoRA3v2fmc07H1yfZO1YfgF91E",
+  "signature": "FkGPhslGyM1I5v9106c2PXafqKiRDC9lYKjV_EZ1llSM1kgl4vfsHaIsZpzXQSDH-4gdjdHoY8zBjsA0PJtHDw"
 }

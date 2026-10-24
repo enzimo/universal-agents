@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "topics.tag_thread",
   "message_id": "01928f3a-7b2c-7461-8000-000000000461",
-  "idempotency_key": "topics.tag_thread:request_id_1",
+  "idempotency_key": "topics.tag_thread:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -52,5 +52,5 @@
     "private": true
   },
   "body_digest": "__EFIO8xZGGMZ9xjszQ04QzXm10i4N5sJL1GiHKQqmg",
-  "signature": "jUVF-dQeCAossRAkJ21sy3bFp_SOkVZkL2xhniIBRzvtMbU86CxuQ721PVhueFcWy8zgQD6ZShW_oWwhtDxNDw"
+  "signature": "O85aBH1qejCamLsUbEpPUF0rKgFeI-wXfEha6g-mHwn9voOE1RKs_x1LBOpMY22k54rIStDkPQIrfc_KM0aJCw"
 }

@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "host.renew",
   "message_id": "01928f3a-7b2c-7708-8000-000000000708",
-  "idempotency_key": "host.renew:renew_rotate_1",
+  "idempotency_key": "host.renew:fvXBGDDzeRjGfY5DcZNDXkG288FNs4mgvkGvQK_FyEA",
   "issuer": {
     "installation": "install_example",
     "team": "_install",
@@ -35,9 +35,9 @@
         "key_id": "test-lead-key-2",
         "public_key": "bI0UsEdZPXEX3ERZV9i91ncsMD0GQpf9yOMpkn03C9o"
       },
-      "proof": "wNCghWW7TZ7IMEU8FNV9P15dcaNoxoTJgBezTtgEAPHeBB__Wkb8o3bSGyAVhXLKINiHTCR99ULE2ACadrh5Dg"
+      "proof": "-LIcqA4MpOgD0VSOkjfYI6dYJSa8N4wBTagNIG87vJLpvMSpKAkwls_e2nA61Zao-T9RMFWjL37wAJz-VVodDw"
     }
   },
-  "body_digest": "JdWys9It0FEI3mxWfH5nPnRs_QuLVCjGNHuFMhEctYs",
-  "signature": "PPfWqtXUlwzoBgmTlyVf3FfBTGmmCjCbCZzP5Cyyp2f-2L_1WukIL3ORMHsU6NwrOZPsQPqd97z5-vDFncKFAA"
+  "body_digest": "-INxFrDMJ73oSke_EYjh_5JH5vspScHroi_xZgqppVI",
+  "signature": "B5z-yy6iBCtsHOAXD4iC2nrqsRrLz34_Mo6Dr0jmAFvcRfEoH6fEnzmvchyyWtfLoUAOkSJ89mHIvVZn74LaDA"
 }
