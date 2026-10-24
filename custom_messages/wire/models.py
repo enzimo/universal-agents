@@ -124,7 +124,7 @@ class AuthorityTokenAudience(WireModel):
 
 
 class AuthorityTokenBoundTo(WireModel):
-    type: Literal['root_task', 'command']
+    type: Literal['root_task', 'command', 'access_request']
     id: RecordId
 
 
@@ -136,6 +136,7 @@ class AuthorityToken(WireModel):
     audience: AuthorityTokenAudience
     person: PersonRef
     bound_to: AuthorityTokenBoundTo
+    schedule_id: Union[RecordId, MISSING] = Field(default=MISSING)
     issued_at: Timestamp
     expires_at: Timestamp
     algorithm: Literal['ed25519']
@@ -332,6 +333,19 @@ class AccessTarget(WireModel):
     id: Annotated[str, StringConstraints(min_length=1, max_length=400)]
 
 
+class ReplyTargetAgent(WireModel):
+    target: Literal['agent']
+    id: AgentId
+
+
+class ReplyTargetEdge(WireModel):
+    target: Literal['edge']
+    id: TokenId
+
+
+ReplyTarget = Annotated[Union[ReplyTargetAgent, ReplyTargetEdge], Field(discriminator='target')]
+
+
 class WorkContextIntent(WireModel):
     version: Count
     text: NoteText
@@ -346,12 +360,12 @@ class WorkContext(WireModel):
     "Where a task sits in its request and how it should run."
 
     origin: Literal['person_request', 'delegation', 'schedule_run', 'system_work', 'other_team', 'outside_agent']
+    reply_to: ReplyTarget
     root_task_id: RecordId
     parent_task_id: Union[RecordId, MISSING] = Field(default=MISSING)
     conversation_id: Union[RecordId, MISSING] = Field(default=MISSING)
     follows_task_id: Union[RecordId, MISSING] = Field(default=MISSING)
     objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
-    schedule_id: Union[RecordId, MISSING] = Field(default=MISSING)
     time_zone: Union[TimeZone, MISSING] = Field(default=MISSING)
     delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
     started_on_purpose: Union[bool, MISSING] = Field(default=MISSING)
@@ -676,6 +690,7 @@ class CredentialFormRequestBody(WireModel):
 
     form_id: RecordId
     task_id: RecordId
+    root_task_id: RecordId
     delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
     continue_task: bool
     user_approved: bool
@@ -816,6 +831,15 @@ class LedgerFactBody(WireModel):
     fact: Annotated[Union[LedgerFactBodyFactCustodyConfirmed, LedgerFactBodyFactAccessRequested, LedgerFactBodyFactAccessDecided, LedgerFactBodyFactDecisionAheadUsed, LedgerFactBodyFactColleagueExchange, LedgerFactBodyFactSteeringSeen, LedgerFactBodyFactWait, LedgerFactBodyFactHoldTimedOut, LedgerFactBodyFactLateWork, LedgerFactBodyFactIntentChanged], Field(discriminator='type')]
 
 
+class PersonNotifyBodyRecipientPerson(WireModel):
+    type: Literal['person']
+    delivery_ref: DeliveryRef
+
+
+class PersonNotifyBodyRecipientAdministrators(WireModel):
+    type: Literal['administrators']
+
+
 class PersonNotifyBodyReasonAgent(WireModel):
     source: Literal['agent']
     note: ShortText
@@ -836,7 +860,7 @@ class PersonNotifyBody(WireModel):
     "A notice for a person, delivered by the gateway."
 
     notice_id: RecordId
-    delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
+    recipient: Annotated[Union[PersonNotifyBodyRecipientPerson, PersonNotifyBodyRecipientAdministrators], Field(discriminator='type')]
     task_id: Union[RecordId, MISSING] = Field(default=MISSING)
     conversation_id: Union[RecordId, MISSING] = Field(default=MISSING)
     text: LongText
@@ -922,6 +946,7 @@ class TaskHandbackBody(WireModel):
 
     handback_id: RecordId
     task_id: RecordId
+    custody_token: CustodyToken
     disposition: Literal['not_started', 'interrupted']
     launch_id: RecordId
     interrupted_at: Union[Timestamp, MISSING] = Field(default=MISSING)
@@ -1014,6 +1039,8 @@ class TaskQuestionBody(WireModel):
 
     question_id: RecordId
     task_id: RecordId
+    delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
+    conversation_id: Union[RecordId, MISSING] = Field(default=MISSING)
     sequence: Count
     text: LongText
     can_answer: Literal['lead', 'person']
@@ -1095,6 +1122,7 @@ class TaskResultBodyOutcomeCompletedAnswerFromSubtask(WireModel):
 
 class TaskResultBodyOutcomeCompleted(WireModel):
     state: Literal['completed']
+    custody_token: CustodyToken
     answer: Annotated[Union[TaskResultBodyOutcomeCompletedAnswerText, TaskResultBodyOutcomeCompletedAnswerFromSubtask], Field(discriminator='form')]
     artifacts: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
@@ -1112,6 +1140,7 @@ class TaskResultBodyOutcomePartialAnswerFromSubtask(WireModel):
 
 class TaskResultBodyOutcomePartial(WireModel):
     state: Literal['partial']
+    custody_token: CustodyToken
     answer: Annotated[Union[TaskResultBodyOutcomePartialAnswerText, TaskResultBodyOutcomePartialAnswerFromSubtask], Field(discriminator='form')]
     missing: NoteText
     artifacts: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
@@ -1119,27 +1148,32 @@ class TaskResultBodyOutcomePartial(WireModel):
 
 class TaskResultBodyOutcomeFailed(WireModel):
     state: Literal['failed']
+    custody_token: CustodyToken
     failure: Failure
 
 
 class TaskResultBodyOutcomeCancelled(WireModel):
     state: Literal['cancelled']
+    custody_token: CustodyToken
     reason: Literal['stopped', 'parent_ended', 'request_closed', 'conflict_not_decided', 'custody_moved']
 
 
 class TaskResultBodyOutcomePaused(WireModel):
     state: Literal['paused']
+    custody_token: CustodyToken
     trigger: Literal['tool_call_budget_exceeded', 'context_budget_exceeded', 'delegated_subtask_timeout', 'specialist_runtime_budget_pause', 'provider_overloaded']
     detail: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class TaskResultBodyOutcomeYielded(WireModel):
     state: Literal['yielded']
+    custody_token: CustodyToken
     reason: ShortText
 
 
 class TaskResultBodyOutcomeRejected(WireModel):
     state: Literal['rejected']
+    custody_token: Union[CustodyToken, MISSING] = Field(default=MISSING)
     reason: Literal['queue_full', 'not_allowed']
     detail: Union[NoteText, MISSING] = Field(default=MISSING)
 
@@ -1148,8 +1182,9 @@ class TaskResultBody(WireModel):
     "The final answer of a task, sent by its holder."
 
     task_id: RecordId
+    delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
+    conversation_id: Union[RecordId, MISSING] = Field(default=MISSING)
     sequence: Count
-    custody_token: CustodyToken
     intent_version: Union[Count, MISSING] = Field(default=MISSING)
     steering_seen: Union[RecordId, MISSING] = Field(default=MISSING)
     assumptions: Union[Annotated[list[Assumption], Field(max_length=20)], MISSING] = Field(default=MISSING)
@@ -1217,6 +1252,7 @@ class ToolSetupRequestBody(WireModel):
 
     setup_request_id: RecordId
     task_id: RecordId
+    root_task_id: RecordId
     delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
     tool_id: ToolId
     reason: NoteText

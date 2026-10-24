@@ -26,6 +26,7 @@
   "body": {
     "handback_id": "handback_0123abcd",
     "task_id": "task_sub_1",
+    "custody_token": 3,
     "disposition": "interrupted",
     "launch_id": "launch_7",
     "interrupted_at": "2026-10-22T04:10:00.000Z",
@@ -93,6 +94,6 @@
       }
     }
   },
-  "body_digest": "796sdRwOEqQysTrV2-AFuedY7SI07LEmRn-WzmYXKhw",
-  "signature": "KZvc04Fktj7Zi8tWd2qWEpb2iQnoh23owlwedT2kG4X1ZIbq10ZonIUBIgDEM64KBmuQ-nsEQzs9iUP4llz0AA"
+  "body_digest": "VBXEzbPzB36G2aH8oNnGo-jSnigcUsCE9EiTZA8IoDU",
+  "signature": "YZcuHVjW6-pqAB9XylovlICnv2syvETeeh0kdz7bkRVUm4sL9G6W6ziAHolowgwJgLmJG8du5p6B2XVDOVGfAg"
 }

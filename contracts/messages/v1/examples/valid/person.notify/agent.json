@@ -25,7 +25,10 @@
   "algorithm": "ed25519",
   "body": {
     "notice_id": "notice_1",
-    "delivery_ref": "dref_1",
+    "recipient": {
+      "type": "person",
+      "delivery_ref": "dref_1"
+    },
     "task_id": "task_root_1",
     "conversation_id": "conv_1",
     "text": "The cost report is ready.",
@@ -47,6 +50,6 @@
       }
     ]
   },
-  "body_digest": "nWRZd0JSziRuO0C-cRzw08avVueFCLCg8b2V4Ne-5-4",
-  "signature": "ze6WWO2BoWHWg7I_Tu37hIs2yjOLuEd8XbICltCAEmGXTwkzWaSjKhS5tu3RTkAIvpXVRgocFKyjw-hXOSTNDA"
+  "body_digest": "Tg9-TawApiHKm-FrATJwhbXJYal0VMzedNB11edIyQg",
+  "signature": "J9F_S3T-j2BJ8gq3s7qEXu274DT8T_y2v5h945hG9MRZh88fjQYjX0Du3MXaiLukE63NMVG5JfqpcAtqQOj0Cw"
 }

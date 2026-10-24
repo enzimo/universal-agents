@@ -43,14 +43,21 @@ class KindSpec:
     reply_model: Optional[TypeAdapter[Any]]
     reply_errors: tuple[str, ...]
     senders: tuple[str, ...]
+    # Audience target -> the fewer roles that may publish to that address (registry
+    # senders_by_address); other targets take ``senders``.
+    senders_by_target: dict[str, tuple[str, ...]]
     receivers: tuple[str, ...]
     expiry_seconds: int
     authority: str
+    # What a token on this kind is bound to: (type, JSON pointer to the body field
+    # holding the id), or (type, None) when the handler checks the task it holds.
+    authority_binding: Optional[tuple[str, Optional[str]]]
     execution_slot: bool
     accepted_while_paused: bool
     priority: str
     routing: str
-    topology_edge: str
+    # The edges an agent may send it on (team-topologies.yaml), or ("none",).
+    topology_edges: tuple[str, ...]
     ledger: str
     wakes_model: Any
     rendering: str

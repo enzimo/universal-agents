@@ -27,6 +27,10 @@
     "task_id": "task_sub_2",
     "work": {
       "origin": "delegation",
+      "reply_to": {
+        "target": "agent",
+        "id": "lead"
+      },
       "root_task_id": "task_root_1",
       "topology": "hub_and_spoke"
     },
@@ -40,6 +44,6 @@
     }
   },
   "causation_id": "01928f3a-7b2c-710f-8000-00000000010f",
-  "body_digest": "OYRgx9sGmckR1AlxPLlrXJBuOoU7L-F7mX_l5cdzWxs",
-  "signature": "bgLyoiIHF_YgvX5ny_9GgzXBvA1oqOGa3Lj_iMciC_l0J-y9Au13ShNGRMFwm9lApFdr-4l2IZilqYCj6JJTCQ"
+  "body_digest": "FZDbla_21wNzI3gFUmG991uyZkR6VjrML_4y3PUPJvQ",
+  "signature": "Jr8e6LdQ5MfvRl0wTHuC4ekRI1bX3dhNbtc4dP6YEfTXNFUqg528ruDNMsxuOdQB3BhDIZbct-OH8T1Uylx8BQ"
 }

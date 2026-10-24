@@ -258,7 +258,8 @@
               "type": "string",
               "enum": [
                 "root_task",
-                "command"
+                "command",
+                "access_request"
               ]
             },
             "id": {
@@ -270,6 +271,10 @@
             "id"
           ],
           "additionalProperties": false
+        },
+        "schedule_id": {
+          "description": "The schedule a scheduled job's run belongs to. Only a scheduler certificate signs it, and a run's schedule comes only from here (README, \"On behalf of a person\").",
+          "$ref": "#/$defs/record_id"
         },
         "issued_at": {
           "$ref": "#/$defs/timestamp"
@@ -880,6 +885,43 @@
       ],
       "additionalProperties": false
     },
+    "reply_target": {
+      "description": "Where a task's results, questions, progress, claims and reports go: its requester. A delegation names the delegating agent; a task the gateway starts for a person, or a run of a person's own schedule, names the gateway route that reaches the person (README, \"Replies\").",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "const": "agent"
+            },
+            "id": {
+              "$ref": "#/$defs/agent_id"
+            }
+          },
+          "required": [
+            "target",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "const": "edge"
+            },
+            "id": {
+              "$ref": "#/$defs/token_id"
+            }
+          },
+          "required": [
+            "target",
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
     "work_context": {
       "type": "object",
       "description": "Where a task sits in its request and how it should run.",
@@ -895,6 +937,9 @@
             "outside_agent"
           ]
         },
+        "reply_to": {
+          "$ref": "#/$defs/reply_target"
+        },
         "root_task_id": {
           "$ref": "#/$defs/record_id"
         },
@@ -908,9 +953,6 @@
           "$ref": "#/$defs/record_id"
         },
         "objective_id": {
-          "$ref": "#/$defs/record_id"
-        },
-        "schedule_id": {
           "$ref": "#/$defs/record_id"
         },
         "time_zone": {
@@ -984,6 +1026,7 @@
       },
       "required": [
         "origin",
+        "reply_to",
         "root_task_id",
         "topology"
       ],

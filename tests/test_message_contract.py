@@ -28,7 +28,7 @@ from referencing import Registry
 from referencing.jsonschema import DRAFT202012
 
 from custom_messages.enums import ChangeRefusal
-from custom_messages.wire import canonical, frame as wire_frame, kinds, models
+from custom_messages.wire import canonical, frame as wire_frame, kinds, models, topology
 from custom_messages.wire.canonical import CanonicalJsonError
 from custom_messages.wire.frame import (
     FrameRefused,
@@ -315,6 +315,10 @@ def test_every_kind_has_a_model_and_every_model_a_kind() -> None:
         assert (spec.delivery_class, spec.addresses, spec.expiry_seconds) == (entry["class"], addresses, entry["expiry_seconds"])
         copies = tuple(EXPORT.audience_target(address) for address in entry.get("copy_to", []))
         assert (spec.copies, spec.idempotency) == (copies, tuple(entry["idempotency"]))
+        assert spec.topology_edges == tuple(EXPORT.topology_edges(entry))
+        assert spec.authority_binding == EXPORT.binding_spec(entry)
+        for address in EXPORT.own_addresses(entry):
+            assert spec.senders_by_target.get(EXPORT.audience_target(address), spec.senders) == tuple(EXPORT.address_senders(entry, address))
     assert kinds.VERIFICATION_REFUSALS == tuple(item["code"] for item in REGISTRY["verification_refusals"])
 
 
@@ -336,7 +340,7 @@ def test_permissions_name_exact_identities_and_publish_only_under_the_senders_ow
         receives_requests = False
         for entry in REGISTRY["kinds"].values():
             for address in EXPORT.entry_addresses(entry):
-                if role in entry["senders"]:
+                if role in EXPORT.address_senders(entry, address):
                     assert "ua.v1.{team}.{self}." + EXPORT.send_pattern(address) in document["publish"]
                 receives = role in EXPORT.receiving_roles(entry, address, TRANSPORT)
                 if entry["class"] != "durable":
@@ -344,6 +348,12 @@ def test_permissions_name_exact_identities_and_publish_only_under_the_senders_ow
                 receives_requests |= receives and entry["class"] == "request_reply"
         expires = f"{TRANSPORT['classes']['request_reply']['max_expiry_seconds'] + TRANSPORT['clock_skew_seconds']}s"
         assert document.get("allow_responses") == ({"max": 1, "expires": expires} if receives_requests else None)
+
+
+def test_outside_agents_cannot_publish_into_worker_pools() -> None:
+    edge = json.loads((CONTRACT / "generated" / "permissions" / "edge_adapter.json").read_text(encoding="utf-8"))
+    assert "ua.v1.{team}.{self}.work.pool.*" not in edge["publish"]
+    assert "ua.v1.{team}.{self}.work.agent.*" in edge["publish"]
 
 
 def test_a_receiver_role_gets_only_the_addresses_it_serves() -> None:
@@ -409,6 +419,22 @@ def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change
     registry["kinds"]["task.result"].update(change)
     with pytest.raises(EXPORT.ContractError, match=problem):
         EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+@pytest.mark.parametrize(("kind", "role", "edge", "given_by_person", "allowed"), [
+    ("task.result", "lead", "person", False, True),     # the lead answers the person (forwarded-as-is)
+    ("task.question", "lead", "person", False, True),   # the lead asks the person (change-conflict)
+    ("task.result", "worker", "up", False, True),       # a worker answers its lead
+    ("task.answer", "lead", "down", False, True),       # the lead answers its worker
+    ("task.request", "lead", "out", False, True),       # the lead delegates to an outside agent
+    ("task.question", "worker", "sideways", False, False),  # hub and spoke: workers do not ask each other
+    ("task.result", "worker", "person", False, False),  # delegated work reports through the lead
+    ("task.result", "worker", "person", True, True),    # a run of the person's own schedule reports to them
+    ("task.progress", "lead", "person", True, False),   # progress has no person edge
+])
+def test_edges_follow_the_kind_and_the_senders_role(kind: str, role: str, edge: str, given_by_person: bool,
+                                                    allowed: bool) -> None:
+    assert topology.edge_allowed(kind, "hub_and_spoke", role, edge, given_by_person=given_by_person) is allowed
 
 
 def test_every_kind_and_reply_has_a_valid_example() -> None:

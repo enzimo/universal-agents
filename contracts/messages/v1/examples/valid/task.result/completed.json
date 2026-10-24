@@ -26,7 +26,6 @@
   "body": {
     "task_id": "task_sub_1",
     "sequence": 4,
-    "custody_token": 3,
     "intent_version": 2,
     "steering_seen": "steer_1",
     "assumptions": [
@@ -41,6 +40,7 @@
     "summary": "Costs grouped into five categories.",
     "outcome": {
       "state": "completed",
+      "custody_token": 3,
       "answer": {
         "form": "text",
         "text": "Travel 40%, software 30%, other 30%."
@@ -60,6 +60,6 @@
       ]
     }
   },
-  "body_digest": "jHtFjOWBjPJ6q75_MrcRAOwa-_r6jNuu6jztb913qhY",
-  "signature": "NM8mNsBjVm_kOGPt2Egzx2EdkhBwpvUltvo92ywjPqNDPeHQigVlstaAQiN8_aPxWR6j7VjnLWQXpP55gfq7AQ"
+  "body_digest": "QDBLHPcFveL3EEkYUm78C79bF67VkdsDFBQ9mB3wjIY",
+  "signature": "Qo1o-B9A46KO2ux_mHk8Cqs6sdi2NEP24GOT-aK8DYqR_dq70YDojMHeSwti23GkId5EFPBI3PdiJM0bXdXlDw"
 }

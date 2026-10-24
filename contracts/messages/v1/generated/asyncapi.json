@@ -144,6 +144,25 @@
         }
       }
     },
+    "custody_moved_1": {
+      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
+      "messages": {
+        "custody_moved": {
+          "$ref": "#/components/messages/custody_moved"
+        }
+      },
+      "parameters": {
+        "edge": {
+          "description": "The edge subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
     "delivery_receipt": {
       "address": "ua.v1.{team}.{sender}.work.team",
       "messages": {
@@ -271,6 +290,25 @@
         }
       }
     },
+    "question_closed_1": {
+      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
+      "messages": {
+        "question_closed": {
+          "$ref": "#/components/messages/question_closed"
+        }
+      },
+      "parameters": {
+        "edge": {
+          "description": "The edge subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
     "skills_changed": {
       "address": "ua.v1.{team}.{sender}.evt.skills_changed",
       "messages": {
@@ -332,6 +370,25 @@
       "parameters": {
         "agent": {
           "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "task_answer_1": {
+      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
+      "messages": {
+        "task_answer": {
+          "$ref": "#/components/messages/task_answer"
+        }
+      },
+      "parameters": {
+        "edge": {
+          "description": "The edge subject token."
         },
         "sender": {
           "description": "The sender subject token."
@@ -542,6 +599,25 @@
       }
     },
     "task_request_2": {
+      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
+      "messages": {
+        "task_request": {
+          "$ref": "#/components/messages/task_request"
+        }
+      },
+      "parameters": {
+        "edge": {
+          "description": "The edge subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "task_request_3": {
       "address": "ua.v1.{team}.{sender}.work.team",
       "messages": {
         "task_request": {
@@ -630,6 +706,25 @@
         }
       }
     },
+    "task_steer_1": {
+      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
+      "messages": {
+        "task_steer": {
+          "$ref": "#/components/messages/task_steer"
+        }
+      },
+      "parameters": {
+        "edge": {
+          "description": "The edge subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
     "task_stop": {
       "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
       "messages": {
@@ -640,6 +735,25 @@
       "parameters": {
         "agent": {
           "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "task_stop_1": {
+      "address": "ua.v1.{team}.{sender}.work.edge.{edge}",
+      "messages": {
+        "task_stop": {
+          "$ref": "#/components/messages/task_stop"
+        }
+      },
+      "parameters": {
+        "edge": {
+          "description": "The edge subject token."
         },
         "sender": {
           "description": "The sender subject token."
@@ -1343,6 +1457,12 @@
         "$ref": "#/channels/custody_moved"
       }
     },
+    "receive_custody_moved_1": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/custody_moved_1"
+      }
+    },
     "receive_delivery_receipt": {
       "action": "receive",
       "channel": {
@@ -1385,6 +1505,12 @@
         "$ref": "#/channels/question_closed"
       }
     },
+    "receive_question_closed_1": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/question_closed_1"
+      }
+    },
     "receive_skills_changed": {
       "action": "receive",
       "channel": {
@@ -1407,6 +1533,12 @@
       "action": "receive",
       "channel": {
         "$ref": "#/channels/task_answer"
+      }
+    },
+    "receive_task_answer_1": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_answer_1"
       }
     },
     "receive_task_claimed": {
@@ -1481,6 +1613,12 @@
         "$ref": "#/channels/task_request_2"
       }
     },
+    "receive_task_request_3": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_request_3"
+      }
+    },
     "receive_task_result": {
       "action": "receive",
       "channel": {
@@ -1505,10 +1643,22 @@
         "$ref": "#/channels/task_steer"
       }
     },
+    "receive_task_steer_1": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_steer_1"
+      }
+    },
     "receive_task_stop": {
       "action": "receive",
       "channel": {
         "$ref": "#/channels/task_stop"
+      }
+    },
+    "receive_task_stop_1": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_stop_1"
       }
     },
     "receive_tool_setup_request": {
@@ -1575,6 +1725,12 @@
         "$ref": "#/channels/custody_moved"
       }
     },
+    "send_custody_moved_1": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/custody_moved_1"
+      }
+    },
     "send_delivery_receipt": {
       "action": "send",
       "channel": {
@@ -1617,6 +1773,12 @@
         "$ref": "#/channels/question_closed"
       }
     },
+    "send_question_closed_1": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/question_closed_1"
+      }
+    },
     "send_skills_changed": {
       "action": "send",
       "channel": {
@@ -1639,6 +1801,12 @@
       "action": "send",
       "channel": {
         "$ref": "#/channels/task_answer"
+      }
+    },
+    "send_task_answer_1": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_answer_1"
       }
     },
     "send_task_claimed": {
@@ -1713,6 +1881,12 @@
         "$ref": "#/channels/task_request_2"
       }
     },
+    "send_task_request_3": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_request_3"
+      }
+    },
     "send_task_result": {
       "action": "send",
       "channel": {
@@ -1737,10 +1911,22 @@
         "$ref": "#/channels/task_steer"
       }
     },
+    "send_task_steer_1": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_steer_1"
+      }
+    },
     "send_task_stop": {
       "action": "send",
       "channel": {
         "$ref": "#/channels/task_stop"
+      }
+    },
+    "send_task_stop_1": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_stop_1"
       }
     },
     "send_tool_setup_request": {

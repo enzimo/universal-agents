@@ -25,10 +25,12 @@
   "algorithm": "ed25519",
   "body": {
     "task_id": "task_root_1",
+    "delivery_ref": "dref_1",
+    "conversation_id": "conv_1",
     "sequence": 9,
-    "custody_token": 1,
     "outcome": {
       "state": "partial",
+      "custody_token": 1,
       "answer": {
         "form": "from_subtask",
         "from_task_id": "task_sub_1",
@@ -37,6 +39,6 @@
       "missing": "The September invoices are not booked yet."
     }
   },
-  "body_digest": "kXEyt8z5eB9JDu3K8a7SR9d0rDBnOqa4blko_WRd1kI",
-  "signature": "EVU_1xg9fjX6Du4IbVdE_6Nt0GhKPuRB7NFGCtqH9kZgoPqUm0JdbnbHqfNVksLCso-HlJ9mgFWIdW_w2kbyDw"
+  "body_digest": "WeCHPlajIAdBfHoRc4eOBOYo2XUNpcMrnBOm-rURi3c",
+  "signature": "IPuHFcWIH9QV0RFJ31ygN6wiRKeSYM7mripM4Et6dH1u0UcyqjYVvUNkd0GaQVDFA5duLue4i9N-QgLGulGEDg"
 }

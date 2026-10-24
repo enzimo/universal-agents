@@ -27,11 +27,15 @@
     "task_id": "task_sub_2",
     "work": {
       "origin": "delegation",
+      "reply_to": {
+        "target": "agent",
+        "id": "lead"
+      },
       "root_task_id": "task_root_1",
       "topology": "hub_and_spoke"
     },
     "instructions": "Find the three largest invoices."
   },
-  "body_digest": "ygtS-U5oy6ENBUSZU7avbXfb74FFcz6lrIiGKUjXlcE",
-  "signature": "ql8IIrSCGuNFlSOJL--yAIdAgSoNfH63wg9WRnYXSrkCWNKVUKGZpn5oTe4BXzKDsitfBu6GX9PUIN7fCg8kDg"
+  "body_digest": "3ieO4db41llCCHkCYwNaQ3wXURS-G-XiJjtBt95yFMY",
+  "signature": "1JQtcMFFW8GWM1Kk45YEZEcNVIqc6ERX5IWxQHe9rEzSqpwIaS-gTFVtbSlRELt20-WK_FNAfdI9dMIHkguEDg"
 }

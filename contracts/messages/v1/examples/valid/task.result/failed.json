@@ -26,9 +26,9 @@
   "body": {
     "task_id": "task_sub_2",
     "sequence": 2,
-    "custody_token": 1,
     "outcome": {
       "state": "failed",
+      "custody_token": 1,
       "failure": {
         "category": "provider_limited",
         "provider": "example-provider",
@@ -39,6 +39,6 @@
       }
     }
   },
-  "body_digest": "PI8nLmFmC4U9etvamq9Y_g8dVq-atfTM_FsSmrjDdDo",
-  "signature": "fOdi0lmsJyuo4CzSyNQe76Zv_91i2MOWouF4-5Sm8XcYOOmL08PlPNYODd9WxovuQssCxA8w2Ig4R9v4OkvsDw"
+  "body_digest": "l2g1dMUYY0w9v2GyhPai94oF8DsnngvnRbu_5jpOnxU",
+  "signature": "Gc-41-pI3AmuuAXVaIKPw4SJKN-hCheBw6eZ6DbokzwuPHsEGpOi4-SlnTWkn10fryTpBG_P4cRBx-GW37XVDQ"
 }

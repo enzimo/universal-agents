@@ -57,9 +57,9 @@ PRIORITIES = {"low", "normal", "high"}
 ENTRY_FIELDS = {
     "description", "class", "address", "body", "reply", "senders", "receivers", "expiry_seconds",
     "authority", "idempotency", "admission", "routing", "topology_edge", "ledger", "wakes_model",
-    "rendering", "covered_change", "copy_to",
+    "rendering", "covered_change", "copy_to", "senders_by_address", "authority_binding",
 }
-REQUIRED_ENTRY_FIELDS = ENTRY_FIELDS - {"reply", "covered_change", "copy_to"}
+REQUIRED_ENTRY_FIELDS = ENTRY_FIELDS - {"reply", "covered_change", "copy_to", "senders_by_address", "authority_binding"}
 
 # The schema subset (contracts/messages/v1/README.md).
 ALLOWED_KEYWORDS = {
@@ -274,6 +274,8 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
     check_state_records(registry, transport, schemas)
     check_shared_lists(registry, transport, topologies, schemas)
     edges = set(EDGES) - {"none"}
+    if set(topologies["edges"]) != edges:
+        raise ContractError(f"team-topologies.yaml: edges describes exactly {sorted(edges)}")
     for topology, spec in topologies["topologies"].items():
         for role, allowed in spec["allowed_edges"].items():
             if role not in topologies["agent_roles"] or not set(allowed) <= edges:
@@ -306,16 +308,13 @@ def check_entry_fields(where: str, name: str, entry: dict[str, Any], registry: d
         raise ContractError(f"{where}: missing {sorted(missing)}, unknown {sorted(unknown)}")
     checks = {
         "class": (entry["class"], CLASSES), "authority": (entry["authority"], AUTHORITY),
-        "routing": (entry["routing"], ROUTING), "topology_edge": (entry["topology_edge"], EDGES),
-        "rendering": (entry["rendering"], RENDERING),
+        "routing": (entry["routing"], ROUTING), "rendering": (entry["rendering"], RENDERING),
         "admission.priority": (entry["admission"].get("priority"), PRIORITIES),
     }
     for field_name, (value, allowed) in checks.items():
         if value not in allowed:
             raise ContractError(f"{where}: {field_name} {value!r} is not one of {sorted(allowed)}")
-    check_wakes(where, entry["wakes_model"])
-    if set(entry["admission"]) != {"execution_slot", "accepted_while_paused", "priority"}:
-        raise ContractError(f"{where}: admission states execution_slot, accepted_while_paused and priority")
+    check_routing_rules(where, entry)
     roles = set(registry["host_roles"])
     if not set(entry["senders"]) <= roles or not set(entry["receivers"]) <= roles:
         raise ContractError(f"{where}: senders and receivers must be host roles")
@@ -327,6 +326,48 @@ def check_entry_fields(where: str, name: str, entry: dict[str, Any], registry: d
         raise ContractError(f"{where}: request/reply kinds, and only they, have a reply")
     if "reply" in entry and entry["reply"]["body"] not in schemas:
         raise ContractError(f"{where}: reply schema {entry['reply']['body']} is missing")
+    check_authority_binding(where, entry, schemas)
+
+
+def check_routing_rules(where: str, entry: dict[str, Any]) -> None:
+    """Edges, wake rule and admission: how receivers route and admit the kind."""
+
+    edges = topology_edges(entry)
+    if not edges or not set(edges) <= EDGES or ("none" in edges and len(edges) > 1):
+        raise ContractError(f"{where}: topology_edge is an edge, a list of edges, or none alone")
+    check_wakes(where, entry["wakes_model"])
+    if set(entry["admission"]) != {"execution_slot", "accepted_while_paused", "priority"}:
+        raise ContractError(f"{where}: admission states execution_slot, accepted_while_paused and priority")
+
+
+def check_authority_binding(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """A kind that takes a token says what the token is bound to; with ``at``, the body field holding that id."""
+
+    binding = entry.get("authority_binding")
+    if (binding is None) != (entry["authority"] == "none"):
+        raise ContractError(f"{where}: kinds that take an authority token, and only they, state authority_binding")
+    if binding is None:
+        return
+    types = schemas["common.schema.json"]["$defs"]["authority_token"]["properties"]["bound_to"]["properties"]["type"]["enum"]
+    if not isinstance(binding, dict) or set(binding) - {"type", "at"} or binding.get("type") not in types:
+        raise ContractError(f"{where}: authority_binding is {{type, at}} with type one of {types}")
+    if "at" in binding:
+        steps = binding["at"].split("/")
+        leaves = schema_leaves(ModelWriter(schemas), entry["body"], schemas[entry["body"]], steps[2:]) \
+            if binding["at"].startswith("/body/") else []
+        if not leaves or not all(scalar_schema(ModelWriter(schemas), file, leaf) for file, leaf in leaves):
+            raise ContractError(f"{where}: authority_binding at {binding['at']} names no field of its body")
+
+
+def topology_edges(entry: dict[str, Any]) -> list[str]:
+    edge = entry["topology_edge"]
+    return list(edge) if isinstance(edge, list) else [edge]
+
+
+def address_senders(entry: dict[str, Any], address: str) -> list[str]:
+    """The roles that may publish the kind to one of its addresses; a copy has its kind's senders."""
+
+    return list(entry.get("senders_by_address", {}).get(address, entry["senders"]))
 
 
 def check_entry_addresses(where: str, name: str, entry: dict[str, Any], transport: dict[str, Any]) -> None:
@@ -359,6 +400,9 @@ def check_entry_receivers(where: str, entry: dict[str, Any], transport: dict[str
         raise ContractError(f"{where}: only durable kinds are copied to other inboxes")
     if any(audience_target(address) not in COPY_TARGETS for address in entry.get("copy_to", [])):
         raise ContractError(f"{where}: copies go only to {sorted(COPY_TARGETS)} inboxes")
+    for address, senders in entry.get("senders_by_address", {}).items():
+        if address not in own_addresses(entry) or not senders or not set(senders) <= set(entry["senders"]):
+            raise ContractError(f"{where}: senders_by_address narrows the senders of one of its own addresses")
 
 
 def own_addresses(entry: dict[str, Any]) -> list[str]:
@@ -617,8 +661,8 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
         subscribe = {f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"}
         answers_requests = False
         for entry in registry["kinds"].values():
-            if role in entry["senders"]:
-                publish.update(sender_prefix + send_pattern(address) for address in entry_addresses(entry))
+            publish.update(sender_prefix + send_pattern(address) for address in entry_addresses(entry)
+                           if role in address_senders(entry, address))
             for address in entry_addresses(entry):
                 if role not in receiving_roles(entry, address, transport):
                     continue
@@ -837,7 +881,13 @@ def shape(writer: ModelWriter, file: str, schema: dict[str, Any]) -> Any:
     return None
 
 
-def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], transport: dict[str, Any]) -> dict[Path, str]:
+def binding_spec(entry: dict[str, Any]) -> tuple[str, str | None] | None:
+    binding = entry.get("authority_binding")
+    return None if binding is None else (binding["type"], binding.get("at"))
+
+
+def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], transport: dict[str, Any],
+                  topologies: dict[str, Any]) -> dict[Path, str]:
     writer = ModelWriter(schemas)
     for fragment in schemas["common.schema.json"]["$defs"]:
         writer.named("common.schema.json", f"/$defs/{fragment}")
@@ -891,14 +941,16 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
             f"        reply_model={reply_text},\n"
             f"        reply_errors={tuple(entry.get('reply', {}).get('errors', ()))!r},\n"
             f"        senders={tuple(entry['senders'])!r},\n"
+            f"        senders_by_target={ {audience_target(a): tuple(s) for a, s in entry.get('senders_by_address', {}).items()}!r},\n"
             f"        receivers={tuple(entry['receivers'])!r},\n"
             f"        expiry_seconds={entry['expiry_seconds']!r},\n"
             f"        authority={entry['authority']!r},\n"
+            f"        authority_binding={binding_spec(entry)!r},\n"
             f"        execution_slot={entry['admission']['execution_slot']!r},\n"
             f"        accepted_while_paused={entry['admission']['accepted_while_paused']!r},\n"
             f"        priority={entry['admission']['priority']!r},\n"
             f"        routing={entry['routing']!r},\n"
-            f"        topology_edge={entry['topology_edge']!r},\n"
+            f"        topology_edges={tuple(topology_edges(entry))!r},\n"
             f"        ledger={entry['ledger']!r},\n"
             f"        wakes_model={entry['wakes_model']!r},\n"
             f"        rendering={entry['rendering']!r},\n"
@@ -932,6 +984,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"VERIFICATION_REFUSALS = {tuple(item['code'] for item in registry['verification_refusals'])!r}\n"
         f"CHANGE_REFUSALS = {tuple(item['code'] for item in registry['change_refusals'])!r}\n"
         f"HOST_ROLES = {tuple(registry['host_roles'])!r}\n"
+        f"TOPOLOGIES = { {name: {role: tuple(edges) for role, edges in spec['allowed_edges'].items()} for name, spec in topologies['topologies'].items()}!r}\n"
         f"FRAME_SHAPE = {shape(writer, 'frame.schema.json', schemas['frame.schema.json'])!r}\n\n"
         "KINDS: dict[str, KindSpec] = {\n" + "\n".join(specs) + "\n}\n\n"
         "STATE_RECORDS: dict[str, StateSpec] = {\n" + "\n".join(state_specs) + "\n}\n"
@@ -956,7 +1009,7 @@ def render() -> dict[Path, str]:
     }
     for role, document in permissions(registry, transport).items():
         files[GENERATED / "permissions" / f"{role}.json"] = json_text(document)
-    files.update(render_python(registry, schemas, transport))
+    files.update(render_python(registry, schemas, transport, topologies))
     # Examples are sources whose digests and signatures this run fills in; the
     # manifest records them as rendered.
     files.update(render_examples(registry))

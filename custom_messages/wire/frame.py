@@ -57,6 +57,11 @@ __all__ = [
 REPLY_SUFFIX = ".reply"
 # Hosts whose certificates may sign authority tokens (README, "On behalf of a person").
 AUTHORITY_ISSUER_ROLES = frozenset({"gateway", "scheduler"})
+# The only role whose certificate may sign a token naming a schedule.
+SCHEDULE_ISSUER_ROLE = "scheduler"
+# The host role that speaks for outside agents (A2A); its frames reach only the lead.
+OUTSIDE_ROLE = "edge_adapter"
+AGENT_TARGETS = frozenset({"agent", "pool"})
 # Audience targets an address delivers to as a whole team (audience id is the team id).
 TEAM_WIDE_TARGETS = frozenset({"team", "team_services"})
 # NATS headers that copy frame fields (README, "NATS headers").
@@ -145,13 +150,19 @@ def sign_frame(unsigned: Mapping[str, Any], private_key: Ed25519PrivateKey) -> d
 
 @dataclass(frozen=True)
 class Receiver:
-    """Who is receiving: the audience a frame must name, and the host it runs on."""
+    """Who is receiving: the audience a frame must name, and the host it runs on.
+
+    ``agent_role`` is the receiving agent's place in its team (``lead`` or
+    ``worker``) when the receiver is an agent; only the lead receives frames from
+    outside agents (team-topologies.yaml fixed rules).
+    """
 
     installation: str
     team: str
     target: str
     id: str
     runtime: str
+    agent_role: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -324,12 +335,16 @@ def _verify_issuer(frame: Frame, certificate: HostCertificate, session: Optional
 
 
 def _verify_sender(frame: Frame, certificate: HostCertificate, spec: Optional[KindSpec], is_reply: bool,
-                   trust: TrustStore, issued_at: datetime) -> None:
+                   trust: TrustStore, issued_at: datetime, receiver: Receiver) -> None:
     if spec is None:
         return  # an unknown kind is refused later, as unknown_kind
-    allowed = spec.receivers if is_reply else spec.senders
-    if not certificate.roles & set(allowed):
-        raise FrameRefused("wrong_sender", f"{frame.kind} comes only from {', '.join(allowed)} hosts", at="/kind")
+    target = frame.audience.target
+    allowed = spec.receivers if is_reply else spec.senders_by_target.get(target, spec.senders)
+    roles = certificate.roles & set(allowed)
+    if not roles:
+        raise FrameRefused("wrong_sender", f"{frame.kind} to a {target} comes only from {', '.join(allowed)} hosts", at="/kind")
+    if roles == {OUTSIDE_ROLE} and target in AGENT_TARGETS and receiver.agent_role != "lead":
+        raise FrameRefused("wrong_sender", "an outside agent reaches only the team's lead", at="/audience/id")
     if frame.issuer.installation == trust.installation:
         return
     agreement = trust.agreement(frame.issuer.installation)
@@ -436,6 +451,8 @@ def _verify_authority(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, is_r
         raise FrameRefused("bad_authority", "no unrevoked certificate for the token's issuer", at="/authority/issuer")
     if not certificate.roles & AUTHORITY_ISSUER_ROLES or audience.team not in certificate.teams:
         raise FrameRefused("bad_authority", "only a gateway or scheduler of the team issues its tokens", at="/authority/issuer")
+    if token.schedule_id is not MISSING and SCHEDULE_ISSUER_ROLE not in certificate.roles:
+        raise FrameRefused("bad_authority", "only a scheduler names the schedule a run belongs to", at="/authority/schedule_id")
     try:
         # Over the token as received: a newer minor's unknown fields are signed too.
         certificate.public_key.verify(b64url_decode(token.signature), authority_signing_bytes(raw["authority"]))
@@ -445,7 +462,19 @@ def _verify_authority(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, is_r
         raise FrameRefused("bad_authority", "the token lasts too long", at="/authority/expires_at")
     if not within(token_issued, token_expires, parse_timestamp(frame.issued_at)):
         raise FrameRefused("bad_authority", "the token was not valid when the frame was issued", at="/authority/expires_at")
-    return VerifiedAuthority(token=token, certificate=certificate)
+    return _verify_binding(raw, spec, VerifiedAuthority(token=token, certificate=certificate))
+
+
+def _verify_binding(raw: Mapping[str, Any], spec: KindSpec, verified: VerifiedAuthority) -> VerifiedAuthority:
+    """Where the body names the record the token is bound to (registry authority_binding ``at``), they agree.
+
+    The handler still checks that it holds that record.
+    """
+
+    bound_type, at = spec.authority_binding or ("", None)
+    if at is not None:
+        verified.require_bound_to(bound_type, str(_pointed(raw, at)))
+    return verified
 
 
 def verify_frame(
@@ -487,7 +516,7 @@ def verify_frame(
     _verify_revocation(certificate, session, trust)
     _verify_epochs(certificate, trust)
     _verify_issuer(frame, certificate, session, issued_at, is_reply, answering)
-    _verify_sender(frame, certificate, spec, is_reply, trust, issued_at)
+    _verify_sender(frame, certificate, spec, is_reply, trust, issued_at, receiver)
     _verify_audience(frame, receiver)
     _verify_subject(frame, spec, is_reply, arrived_on, headers)
     _verify_time(frame, spec, now, issued_at)

@@ -59,6 +59,45 @@ The live contract test (`tests/test_live_message_contract.py`) checks that an ac
 task can be dispatched again and that retrying its replacement does not create another
 queued task.
 
+## Replies
+
+A task's work context names its `reply_to`: the requester that its results, questions,
+progress, claims and reports go to (registry routing `requester`).
+- A delegation names the delegating agent; a team-services dispatch names the agent the
+  work is for.
+- A task the gateway starts for a person names the gateway route (`edge`) that reaches
+  them, and so does a run of a person's own schedule: the scheduler takes the route from
+  the schedule, and the worker reports to the person directly (team-topologies.yaml fixed
+  rules).
+- A result or question sent to a gateway route carries the task's `delivery_ref` and
+  `conversation_id` from its work context. The gateway resolves the reference from its
+  own records; a result for a task it did not start, such as a scheduled run, has
+  nothing else to match.
+- A kind routed to the requester that has no address for its target goes only to its
+  copies: a scheduled run's claims, progress and handbacks reach the team services, and
+  its worker tells the person things with `person.notify`.
+- `delivery.refused` goes back to the refused frame's sender (routing `sender`): to the
+  agent that sent it, or to an outside agent's adapter on the route its task's reply
+  target names. A frame another host sent without an agent (gateway, scheduler, team
+  services) names no inbox to answer, so its refusal goes to the team services' inbox; they
+  record it and tell the person (`person.notify`) when the refused frame was theirs.
+
+The reply target is part of the signed frame, so no reply needs a lookup, a broadcast or
+a fallback (plan, section 11A.1).
+
+## Who may talk to whom
+
+`team-topologies.yaml` names the edges a message can travel and, per topology, which edges
+each agent role may use. A kind's `topology_edge` lists the edges an agent may send it on.
+A receiver works out the edge from its place relative to the sender for the task the
+message is about (its thread record): up to the requester, down to the holder or the agent
+given the task, sideways to another agent of the team, person to a gateway route, out to an
+outside agent or another team. `custom_messages.wire.topology.edge_allowed` checks the edge
+against the kind and the sender's role (from its agent session); a message on an edge the
+topology does not allow is refused with `delivery.refused`. Work a person gave an agent
+directly reports to the person whatever the agent's role. Messages that hosts send without
+an agent (gateway, scheduler, team services) are not topology checks.
+
 ## Schema subset
 
 Schemas use only what every implementation reads the same way. `tests/test_message_contract.py`
@@ -174,9 +213,12 @@ frame it checks, in the registry's order:
    place that agent, of a type the certificate allows, on the signing runtime when the
    frame was issued. A reply must answer the request the receiver sent, from the team
    and agent that request was for.
-6. **Sender (`wrong_sender`):** one of the certificate's roles may send the kind (for a
-   reply, receive its request), and another installation's frame stays within its
-   agreement.
+6. **Sender (`wrong_sender`):** one of the certificate's roles may send the kind to its
+   audience's address (for a reply, receive its request; a kind's `senders_by_address`
+   narrows some addresses), and another installation's frame stays within its agreement.
+   Only the lead receives a frame whose sole sending role is `edge_adapter`, which speaks
+   for outside agents: the receiving host states its agent's role (`Receiver.agent_role`),
+   and a worker or pool refuses such a frame.
 
 The accepted residual risks:
 - A compromised host can speak as the agents placed on it, including agents that moved
@@ -197,14 +239,24 @@ An authority token (`authority` in the frame) proves that work acts for a person
 - It names its audience: the installation and team the person asked. Only that team
   presents it, copied unchanged down a delegation tree, and only inside frames of the
   token's own installation.
-- It is bound to one root task or one command, and lasts at most
-  `authority_token_max_seconds`.
+- It is bound to one root task, one command, or one access request (a person's decision
+  on it), and lasts at most `authority_token_max_seconds`.
+- A scheduled job's run carries a token the scheduler signed with the run's
+  `schedule_id`. A run's schedule comes only from there: the work context names no
+  schedule, so a host that passes the task on cannot change it, and a run handed back
+  and dispatched again keeps it.
 
 A receiver refuses with `bad_authority` a token on a kind whose `authority` is `none`, a
 missing token where it is `required`, and a token that is not signed by an unrevoked
-gateway or scheduler certificate serving its audience team, names another team than the
-frame's issuer, or was not valid when the frame was issued. The handler then checks that
-the token is bound to the root task or command it holds
+gateway or scheduler certificate serving its audience team, names a schedule without a
+scheduler's signature, names another team than the frame's issuer, or was not valid when
+the frame was issued.
+
+Each kind that takes a token states its `authority_binding`: what the token is bound to,
+and with `at` the body field naming that record. The receiver checks such a field
+(`task.request`: `/body/work/root_task_id`; `access.resolved`: `/body/request_id`; the
+credential and tool setup forms: `/body/root_task_id`). In every case the handler then
+checks that the token is bound to the root task, command or request it holds
 (`VerifiedAuthority.require_bound_to`), still as `bad_authority`, before its access
 decision. Replies carry no token.
 
@@ -320,7 +372,8 @@ not rendered: the team services record the fact in the custody record. A copy of
 A receiver of the examples is installation `install_example`. It starts from
 `examples/trust/anchors.json` and loads every record under `examples/trust/` except
 `extra/`. Unless an example says otherwise, the receiver is the frame's audience, running
-on the audience's runtime (or any host when the audience names none); the time is
+on the audience's runtime (or any host when the audience names none), with the agent role
+its session names when it is an agent; the time is
 `2026-10-22T04:30:01.000Z`; the frame arrived on its own subject without NATS headers; the
 replay record is empty; and a reply answers the valid example whose message id it names.
 
@@ -359,7 +412,9 @@ file. It uses public fixture signing keys and no operator credentials.
 - **Settings:** the broker, stream and consumers are created from `transport.yaml`, and
   the test checks that the server reports the same values back.
 - **What it proves:** real publish, pull, acknowledgement and signed inbox replies; a
-  result and its team-services copy both stored and pulled by their own readers;
+  result and its team-services copy both stored and pulled by their own readers; a
+  scheduled run delivered to a worker pool and its result to the person's gateway route;
+  an outside agent's adapter refused when it publishes into a worker pool;
   separate consumers for ids that an `_` separator would have merged; and refusals of
   other consumers' fetches and acknowledgements, consumer creation and deletion, stream
   reads, publishing under another runtime's id, subscribing to another runtime's inbox,

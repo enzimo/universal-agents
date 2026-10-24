@@ -1,0 +1,18 @@
+{
+  "description": "Only the lead receives messages from outside agents.",
+  "refusal": "wrong_sender",
+  "at": "/audience/id",
+  "base": "task.answer/from-outside-agent.json",
+  "changes": [
+    {
+      "set": "/audience/id",
+      "to": "researcher-2"
+    },
+    {
+      "set": "/subject",
+      "to": "ua.v1.team_example.edge-adapter-1.work.agent.researcher-2"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.answer\", \"message_id\": \"01928f3a-7b2c-7207-8000-000000000207\", \"idempotency_key\": \"task.answer:s-8yK6MnPz11eFxc03_-eWUqG9MfBXIfPIiiO4BZOq8\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"edge-adapter-1\", \"membership_epoch\": 1, \"revocation_epoch\": 1, \"key_id\": \"test-edge-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.edge-adapter-1.work.agent.researcher-2\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"question_id\": \"q_out_1\", \"task_id\": \"task_in_1\", \"text\": \"Use the blue logo.\"}, \"body_digest\": \"Wt12iPLwvvrV_4aGNfmJzVg0OFmUBXGJhO7OsK0UaF0\", \"signature\": \"DRYTGw8P933bl00s1xSFpinJ92lWtBs5LoJt2jK-kFAPW5TTBUdJWibVYPpcpZLvEK5LEeavgJKk7oyi3Sh_Bw\"}"
+}

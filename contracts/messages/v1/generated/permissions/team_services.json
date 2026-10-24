@@ -6,6 +6,7 @@
     "ua.v1.{team}.{self}.ctl.agent.*.pause",
     "ua.v1.{team}.{self}.work.agent.*",
     "ua.v1.{team}.{self}.work.edge.*",
+    "ua.v1.{team}.{self}.work.pool.*",
     "ua.v1.{team}.{self}.work.team"
   ],
   "role": "team_services",

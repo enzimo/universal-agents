@@ -26,6 +26,8 @@
   "body": {
     "question_id": "q_2",
     "task_id": "task_root_1",
+    "delivery_ref": "dref_1",
+    "conversation_id": "conv_1",
     "sequence": 7,
     "text": "Another request changed this schedule after you asked for your change. Which should stay?",
     "can_answer": "person",
@@ -45,6 +47,6 @@
       ]
     }
   },
-  "body_digest": "VxY2Uk6r9mCwLk4kSFdicqYOarTUVGL1TEsXpmiqJ58",
-  "signature": "fDVtLf9tDbA3JAAIgq9qmXAxU4PUM5WhbtNX0KKwSy2vLUe1qDg1AotSPrrGG1W0Pxav8KBDPWE11YAD6xkyAQ"
+  "body_digest": "hcq7C8LPjfBiBPUK2Oim9gxFVyABuhn21eVWB5bYPJg",
+  "signature": "oZLFvF2Q7TgsIm_o0XJCCfF4ZRI2tQ9WnORtrhTqwCz6MwPpix8iisKZQ3K3I06jpPK0p23kn3i91_EamJNPAg"
 }

@@ -82,6 +82,9 @@
         "priority": "normal"
       },
       "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/access.request.schema.json",
       "class": "durable",
       "description": "A task asks the team services for access; no model decides it.",
@@ -110,6 +113,10 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "access_request"
+      },
       "body": "bodies/access.resolved.schema.json",
       "class": "durable",
       "description": "A person's decision on an access request, from the gateway to the team services.",
@@ -173,6 +180,10 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "at": "/body/root_task_id",
+        "type": "root_task"
+      },
       "body": "bodies/credential.form.request.schema.json",
       "class": "durable",
       "description": "Ask the gateway to collect, set up or delete a credential through a secure form.",
@@ -189,7 +200,9 @@
       "senders": [
         "lead_host"
       ],
-      "topology_edge": "person",
+      "topology_edge": [
+        "person"
+      ],
       "wakes_model": "never"
     },
     "credential.form.result": {
@@ -220,7 +233,10 @@
       "wakes_model": "next_turn"
     },
     "custody.moved": {
-      "address": "work.agent.{agent}",
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -238,7 +254,8 @@
       "ledger": "custody_lost",
       "receivers": [
         "worker_host",
-        "lead_host"
+        "lead_host",
+        "edge_adapter"
       ],
       "rendering": "none",
       "routing": "named",
@@ -350,6 +367,9 @@
         "priority": "normal"
       },
       "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/person.notify.schema.json",
       "class": "durable",
       "description": "A notice for a person, delivered by the gateway.",
@@ -368,11 +388,16 @@
         "worker_host",
         "team_services"
       ],
-      "topology_edge": "person",
+      "topology_edge": [
+        "person"
+      ],
       "wakes_model": "never"
     },
     "question.closed": {
-      "address": "work.agent.{agent}",
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
       "admission": {
         "accepted_while_paused": false,
         "execution_slot": true,
@@ -389,7 +414,8 @@
       "ledger": "question_closed",
       "receivers": [
         "lead_host",
-        "worker_host"
+        "worker_host",
+        "edge_adapter"
       ],
       "rendering": "summary",
       "routing": "named",
@@ -398,7 +424,10 @@
         "team_services",
         "lead_host"
       ],
-      "topology_edge": "down",
+      "topology_edge": [
+        "down",
+        "out"
+      ],
       "wakes_model": "always"
     },
     "skills.changed": {
@@ -459,17 +488,25 @@
         "worker_host",
         "lead_host"
       ],
-      "topology_edge": "up",
+      "topology_edge": [
+        "up"
+      ],
       "wakes_model": "never"
     },
     "task.answer": {
-      "address": "work.agent.{agent}",
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
       "admission": {
         "accepted_while_paused": false,
         "execution_slot": true,
         "priority": "high"
       },
       "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/task.answer.schema.json",
       "class": "durable",
       "description": "The answer to one question.",
@@ -480,7 +517,8 @@
       "ledger": "question_answered",
       "receivers": [
         "lead_host",
-        "worker_host"
+        "worker_host",
+        "edge_adapter"
       ],
       "rendering": "full",
       "routing": "named",
@@ -488,9 +526,14 @@
         "gateway",
         "lead_host",
         "team_services",
-        "worker_host"
+        "worker_host",
+        "edge_adapter"
       ],
-      "topology_edge": "down",
+      "topology_edge": [
+        "down",
+        "sideways",
+        "out"
+      ],
       "wakes_model": "always"
     },
     "task.claimed": {
@@ -522,7 +565,9 @@
         "lead_host",
         "edge_adapter"
       ],
-      "topology_edge": "up",
+      "topology_edge": [
+        "up"
+      ],
       "wakes_model": "never"
     },
     "task.handback": {
@@ -553,7 +598,9 @@
         "worker_host",
         "lead_host"
       ],
-      "topology_edge": "up",
+      "topology_edge": [
+        "up"
+      ],
       "wakes_model": "never"
     },
     "task.progress": {
@@ -587,7 +634,9 @@
         "lead_host",
         "edge_adapter"
       ],
-      "topology_edge": "up",
+      "topology_edge": [
+        "up"
+      ],
       "wakes_model": "never"
     },
     "task.question": {
@@ -621,7 +670,12 @@
         "lead_host",
         "edge_adapter"
       ],
-      "topology_edge": "up",
+      "topology_edge": [
+        "up",
+        "person",
+        "sideways",
+        "out"
+      ],
       "wakes_model": "next_turn"
     },
     "task.report": {
@@ -649,13 +703,16 @@
         "worker_host",
         "lead_host"
       ],
-      "topology_edge": "up",
+      "topology_edge": [
+        "up"
+      ],
       "wakes_model": "next_turn"
     },
     "task.request": {
       "address": [
         "work.agent.{agent}",
-        "work.pool.{pool}"
+        "work.pool.{pool}",
+        "work.edge.{edge}"
       ],
       "admission": {
         "accepted_while_paused": false,
@@ -663,6 +720,10 @@
         "priority": "normal"
       },
       "authority": "optional",
+      "authority_binding": {
+        "at": "/body/work/root_task_id",
+        "type": "root_task"
+      },
       "body": "bodies/task.request.schema.json",
       "class": "durable",
       "copy_to": [
@@ -677,7 +738,8 @@
       "ledger": "task_held",
       "receivers": [
         "lead_host",
-        "worker_host"
+        "worker_host",
+        "edge_adapter"
       ],
       "rendering": "full",
       "routing": "named",
@@ -685,9 +747,24 @@
         "gateway",
         "lead_host",
         "scheduler",
-        "edge_adapter"
+        "edge_adapter",
+        "team_services"
       ],
-      "topology_edge": "down",
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host"
+        ],
+        "work.pool.{pool}": [
+          "gateway",
+          "lead_host",
+          "scheduler",
+          "team_services"
+        ]
+      },
+      "topology_edge": [
+        "down",
+        "out"
+      ],
       "wakes_model": "always"
     },
     "task.result": {
@@ -710,7 +787,7 @@
       "expiry_seconds": 604800,
       "idempotency": [
         "/body/task_id",
-        "/body/custody_token",
+        "/body/outcome/custody_token",
         "/body/sequence"
       ],
       "ledger": "delegated_resolved",
@@ -724,9 +801,14 @@
       "senders": [
         "worker_host",
         "lead_host",
-        "edge_adapter"
+        "edge_adapter",
+        "team_services"
       ],
-      "topology_edge": "up",
+      "topology_edge": [
+        "up",
+        "person",
+        "out"
+      ],
       "wakes_model": {
         "by": "outcome.state",
         "values": {
@@ -741,13 +823,19 @@
       }
     },
     "task.steer": {
-      "address": "work.agent.{agent}",
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
         "priority": "high"
       },
       "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/task.steer.schema.json",
       "class": "durable",
       "description": "Steering for the holder of one named task.",
@@ -759,7 +847,8 @@
       "ledger": "steering_received",
       "receivers": [
         "worker_host",
-        "lead_host"
+        "lead_host",
+        "edge_adapter"
       ],
       "rendering": "full",
       "routing": "holder",
@@ -767,7 +856,10 @@
         "lead_host",
         "team_services"
       ],
-      "topology_edge": "down",
+      "topology_edge": [
+        "down",
+        "out"
+      ],
       "wakes_model": {
         "by": "action.type",
         "values": {
@@ -778,13 +870,19 @@
       }
     },
     "task.stop": {
-      "address": "work.agent.{agent}",
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
         "priority": "high"
       },
       "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/task.stop.schema.json",
       "class": "durable",
       "description": "Stop one task. Sent only to the task's current holder.",
@@ -796,7 +894,8 @@
       "ledger": "task_stopped",
       "receivers": [
         "lead_host",
-        "worker_host"
+        "worker_host",
+        "edge_adapter"
       ],
       "rendering": "none",
       "routing": "holder",
@@ -804,7 +903,10 @@
         "lead_host",
         "team_services"
       ],
-      "topology_edge": "down",
+      "topology_edge": [
+        "down",
+        "out"
+      ],
       "wakes_model": "never"
     },
     "tool.setup.request": {
@@ -815,6 +917,10 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "at": "/body/root_task_id",
+        "type": "root_task"
+      },
       "body": "bodies/tool.setup.request.schema.json",
       "class": "durable",
       "description": "Ask the gateway to have a person or administrator set a tool up.",
@@ -831,7 +937,9 @@
       "senders": [
         "lead_host"
       ],
-      "topology_edge": "person",
+      "topology_edge": [
+        "person"
+      ],
       "wakes_model": "never"
     },
     "tool.setup.result": {

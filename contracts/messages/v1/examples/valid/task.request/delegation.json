@@ -27,12 +27,15 @@
     "task_id": "task_sub_1",
     "work": {
       "origin": "delegation",
+      "reply_to": {
+        "target": "agent",
+        "id": "lead"
+      },
       "root_task_id": "task_root_1",
       "parent_task_id": "task_root_1",
       "conversation_id": "conv_1",
       "follows_task_id": "task_prev_1",
       "objective_id": "obj_1",
-      "schedule_id": "sched_1",
       "time_zone": "Europe/Berlin",
       "delivery_ref": "dref_1",
       "started_on_purpose": true,
@@ -100,6 +103,6 @@
       }
     }
   },
-  "body_digest": "RRDImmmLj5sHupKm6Tvul12p31dcPRsPTSL8DveyGUw",
-  "signature": "vpcXFHN_Noz0N3w8IPIOWxof7ApRQ61OmssOunBZwCYOeW3NuksyXwqFPkSNMiH1BGfYjsmTUVbB5kOVPQ-rAw"
+  "body_digest": "kzGipeWbWYNZZIKNh_qNiILl6iSrEXoYPc0NkaMUuwQ",
+  "signature": "LM34N0tie8kuMVKzLuFuSv5IYY3cedtvjCdLP1DA5wnrpqPHrI_Jz_XyteNK63s8D4yvCT1oPAqSKC_9khs8Cw"
 }

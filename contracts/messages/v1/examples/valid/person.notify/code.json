@@ -23,7 +23,10 @@
   "algorithm": "ed25519",
   "body": {
     "notice_id": "notice_2",
-    "delivery_ref": "dref_1",
+    "recipient": {
+      "type": "person",
+      "delivery_ref": "dref_1"
+    },
     "text": "Your scheduled run waited too long and stopped.",
     "urgency": "urgent",
     "reason": {
@@ -31,6 +34,6 @@
       "code": "task_wait_limit_reached"
     }
   },
-  "body_digest": "nycKvD3xMnUYplhsu0XYLHCwI29vODSD5Lt7hmaZQ2Q",
-  "signature": "Sadb9QvrE1o-fK8TFMkAfGaQWUq4CPPvKiBmLb_jiSrE2hSq3KXlhkI2msow_yYjdh7Tx77nVDe7ewMrFyPnCg"
+  "body_digest": "REfWoRfoqjUDR7iWw-MtNrOShi9bNW20uSi0aWYLaLs",
+  "signature": "ASyU3HIvI9UdmNZOAQFwRZgieRTDsF1hLOTlHm1iPjFMh7rt-J8g9jiVWkiOtyceQ0AXOfvUTLbz0-xSiTumCg"
 }

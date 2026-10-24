@@ -8,8 +8,38 @@
     "notice_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
     },
-    "delivery_ref": {
-      "$ref": "../common.schema.json#/$defs/delivery_ref"
+    "recipient": {
+      "description": "Whom the notice is for: the person behind a delivery reference, or the team's administrators.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "person"
+            },
+            "delivery_ref": {
+              "$ref": "../common.schema.json#/$defs/delivery_ref"
+            }
+          },
+          "required": [
+            "type",
+            "delivery_ref"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "administrators"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        }
+      ]
     },
     "task_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
@@ -115,6 +145,7 @@
   },
   "required": [
     "notice_id",
+    "recipient",
     "text",
     "urgency",
     "reason"

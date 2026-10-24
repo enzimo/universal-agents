@@ -48,6 +48,7 @@
   "body": {
     "form_id": "form_1",
     "task_id": "task_root_1",
+    "root_task_id": "task_root_7f",
     "delivery_ref": "dref_1",
     "continue_task": true,
     "user_approved": true,
@@ -80,6 +81,6 @@
       ]
     }
   },
-  "body_digest": "WmhCbXkKb-9DSjBfgQ5yLPPmrIGAmApW-uieckuJSLs",
-  "signature": "SLYJIvY9fNUZJUCqgect-ftdTKrv7UqJMYglwV_pqBnpm1U_gx3snTUaLAGedAzPqTwdq31QBbLPWi8iTThyCw"
+  "body_digest": "KsXIbv3EPe8rG1ksU5FZRrdgzAFMjND9esh8Fg0wShs",
+  "signature": "JGvgg7K6gtO0pOuxK1kTLUgkUpZIBYPzAHLUMA-5ZTUIsaMXItSmNp8VO0bWeEGilSUP_cY5TI7Tawgrr00bBg"
 }

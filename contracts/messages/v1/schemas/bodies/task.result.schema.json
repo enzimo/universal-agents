@@ -8,11 +8,16 @@
     "task_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
     },
+    "delivery_ref": {
+      "description": "Copied from the task's work context when the message goes to a gateway route, so the gateway knows whom it is for.",
+      "$ref": "../common.schema.json#/$defs/delivery_ref"
+    },
+    "conversation_id": {
+      "description": "Copied from the task's work context when the message goes to a gateway route.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
     "sequence": {
       "$ref": "../common.schema.json#/$defs/count"
-    },
-    "custody_token": {
-      "$ref": "../common.schema.json#/$defs/custody_token"
     },
     "intent_version": {
       "$ref": "../common.schema.json#/$defs/count"
@@ -37,6 +42,9 @@
           "properties": {
             "state": {
               "const": "completed"
+            },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
             },
             "answer": {
               "oneOf": [
@@ -87,6 +95,7 @@
           },
           "required": [
             "state",
+            "custody_token",
             "answer"
           ],
           "additionalProperties": false
@@ -96,6 +105,9 @@
           "properties": {
             "state": {
               "const": "partial"
+            },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
             },
             "answer": {
               "oneOf": [
@@ -149,6 +161,7 @@
           },
           "required": [
             "state",
+            "custody_token",
             "answer",
             "missing"
           ],
@@ -160,12 +173,16 @@
             "state": {
               "const": "failed"
             },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
+            },
             "failure": {
               "$ref": "../common.schema.json#/$defs/failure"
             }
           },
           "required": [
             "state",
+            "custody_token",
             "failure"
           ],
           "additionalProperties": false
@@ -175,6 +192,9 @@
           "properties": {
             "state": {
               "const": "cancelled"
+            },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
             },
             "reason": {
               "type": "string",
@@ -189,6 +209,7 @@
           },
           "required": [
             "state",
+            "custody_token",
             "reason"
           ],
           "additionalProperties": false
@@ -198,6 +219,9 @@
           "properties": {
             "state": {
               "const": "paused"
+            },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
             },
             "trigger": {
               "type": "string",
@@ -215,6 +239,7 @@
           },
           "required": [
             "state",
+            "custody_token",
             "trigger"
           ],
           "additionalProperties": false
@@ -225,12 +250,16 @@
             "state": {
               "const": "yielded"
             },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
+            },
             "reason": {
               "$ref": "../common.schema.json#/$defs/short_text"
             }
           },
           "required": [
             "state",
+            "custody_token",
             "reason"
           ],
           "additionalProperties": false
@@ -240,6 +269,9 @@
           "properties": {
             "state": {
               "const": "rejected"
+            },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
             },
             "reason": {
               "type": "string",
@@ -264,7 +296,6 @@
   "required": [
     "task_id",
     "sequence",
-    "custody_token",
     "outcome"
   ],
   "additionalProperties": false

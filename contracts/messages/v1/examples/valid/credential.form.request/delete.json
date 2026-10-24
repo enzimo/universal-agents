@@ -48,6 +48,7 @@
   "body": {
     "form_id": "form_2",
     "task_id": "task_root_1",
+    "root_task_id": "task_root_7f",
     "continue_task": false,
     "user_approved": true,
     "flow": {
@@ -59,6 +60,6 @@
       "source_item_name": "Example Analytics key"
     }
   },
-  "body_digest": "Dh45ATPCDTuoc0hxiEuWXrUes-QF7vRwu7lW8HUsIM0",
-  "signature": "K7IHqvlq-lNyqjT-m9FHxjJxN19c2yC7V7j90UGa4RsBDxoTpPcY0r9w8zyTq-4jBt9WYM90nzB8d9dVVQooBA"
+  "body_digest": "u02La8C0Im90S5lS9DEn-CX4my1J78g5JnjBZI2z7BQ",
+  "signature": "G2WxnhVsz9Bjhv2XUASxLdAMlUSmFBJH40EqhK35iSuTwlfwi8JTpwx5FwTX3566q1EjPkLg-Btj_wBtxH-2BA"
 }

@@ -48,6 +48,7 @@
   "body": {
     "setup_request_id": "setup_1",
     "task_id": "task_root_1",
+    "root_task_id": "task_root_7f",
     "delivery_ref": "dref_1",
     "tool_id": "mcp:example.calendar",
     "reason": "Read your calendar to plan the meeting.",
@@ -57,6 +58,6 @@
       "step_id": "connect_calendar"
     }
   },
-  "body_digest": "Qw62S18gGF_0lSbGc1sAsL64EkefsvEky8JP6N_yDS0",
-  "signature": "WoG0Y_rUXSiRxoKUkXXakUrS6YUUrN3q_65C4ED34py-CLAvjGBVxm-Qp8zE2uO9xmfPEOQ9w6ovVboVXqlZAQ"
+  "body_digest": "X3R5T4Wg2PnMYMK-9nehV77YKOuzphSgPRUfJru2R8c",
+  "signature": "vaKn38PEsXjq7irNmnmreZPbBF1Z5zsxz1l48pX9sD-Q-wx1Ab-HC4OdsKFX9AJPyLib7ENd9vyseH2Tm_UnBg"
 }
