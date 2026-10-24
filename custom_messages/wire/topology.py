@@ -5,8 +5,9 @@ the task the message is about, read from the task's thread record: ``up`` to the
 task's requester, ``down`` to its holder (or the agent given it), ``sideways`` to
 another agent of the team, ``person`` to a gateway route, ``out`` to an outside
 agent or another team. It then checks the edge with ``edge_allowed`` and refuses a
-message on an edge it does not allow with ``delivery.refused``. Messages that hosts
-send without an agent (gateway, scheduler, team services) are not topology checks.
+message on an edge it does not allow with ``delivery.refused``. Kinds whose
+``topology_edge`` is ``none`` (sent to the team services, or only by hosts) and
+messages that hosts send without an agent are not topology checks.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ from __future__ import annotations
 from custom_messages.wire.kinds import KINDS, TOPOLOGIES
 
 PERSON = "person"
+# A kind that is not a topology check: sent to the team services, or only by hosts.
+NOT_CHECKED = "none"
 
 
 def edge_allowed(kind: str, topology: str, sender_role: str, edge: str, *, given_by_person: bool = False) -> bool:
@@ -26,7 +29,10 @@ def edge_allowed(kind: str, topology: str, sender_role: str, edge: str, *, given
     (team-topologies.yaml fixed rules).
     """
 
-    if edge not in KINDS[kind].topology_edges:
+    edges = KINDS[kind].topology_edges
+    if edges == (NOT_CHECKED,):
+        return True
+    if edge not in edges:
         return False
     if edge == PERSON and given_by_person:
         return True

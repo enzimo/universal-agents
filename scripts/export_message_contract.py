@@ -90,6 +90,8 @@ ID_CHARACTER = re.compile(r"[A-Za-z0-9_-]")
 # its team; a receiver reads only its own, so subscriptions and consumer grants keep
 # them as placeholders for membership code to fill per assigned id.
 RECEIVER_PLACEHOLDERS = ("agent", "pool", "edge")
+# Hosts that send frames for agents; a kind no agent sends is not a topology check.
+AGENT_HOSTS = {"lead_host", "worker_host"}
 # Audience targets that get durable copies: the team services record custody facts.
 COPY_TARGETS = {"team_services"}
 # A kind (with ".reply") within 84 characters keeps its idempotency key, the kind,
@@ -338,6 +340,8 @@ def check_routing_rules(where: str, entry: dict[str, Any]) -> None:
     edges = topology_edges(entry)
     if not edges or not set(edges) <= EDGES or ("none" in edges and len(edges) > 1):
         raise ContractError(f"{where}: topology_edge is an edge, a list of edges, or none alone")
+    if not set(entry["senders"]) & AGENT_HOSTS and edges != ["none"]:
+        raise ContractError(f"{where}: only hosts send it, so it is not a topology check: topology_edge none")
     check_wakes(where, entry["wakes_model"])
     if set(entry["admission"]) != {"execution_slot", "accepted_while_paused", "priority"}:
         raise ContractError(f"{where}: admission states execution_slot, accepted_while_paused and priority")
@@ -358,8 +362,9 @@ def check_authority_binding(where: str, entry: dict[str, Any], schemas: dict[str
         steps = binding["at"].split("/")
         leaves = schema_leaves(ModelWriter(schemas), entry["body"], schemas[entry["body"]], steps[2:]) \
             if binding["at"].startswith("/body/") else []
-        if not leaves or not all(scalar_schema(ModelWriter(schemas), file, leaf) for file, leaf in leaves):
-            raise ContractError(f"{where}: authority_binding at {binding['at']} names no field of its body")
+        if not leaves or not all(scalar_schema(ModelWriter(schemas), file, leaf) for file, leaf in leaves) \
+                or not always_supplied(entry, schemas, "frame.schema.json", steps[1:]):
+            raise ContractError(f"{where}: authority_binding at {binding['at']} names no field every body carries")
 
 
 def topology_edges(entry: dict[str, Any]) -> list[str]:
@@ -454,6 +459,8 @@ def check_idempotency(where: str, kind: str, entry: dict[str, Any], schemas: dic
             leaves = schema_leaves(resolver, frame_schema, schemas[frame_schema], steps)
         if not leaves or not all(scalar_schema(resolver, file, leaf) for file, leaf in leaves):
             raise ContractError(f"{where}: idempotency part {pointer} names no string or integer field of {kind}")
+    if not any(always_supplied(entry, schemas, frame_schema, pointer[1:].split("/")) for pointer in pointers):
+        raise ContractError(f"{where}: idempotency names no part every frame carries, so frames without them share a key")
 
 
 def check_wake_alternatives(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
@@ -465,7 +472,7 @@ def check_wake_alternatives(where: str, entry: dict[str, Any], schemas: dict[str
     *parent, key = str(wakes["by"]).split(".")
     resolver = ModelWriter(schemas)
     alternatives = None
-    for file, node in schema_parents(resolver, entry["body"], schemas[entry["body"]], parent):
+    for file, node in schema_leaves(resolver, entry["body"], schemas[entry["body"]], parent, keep_one_of=True):
         if "oneOf" in node and discriminator(file, "", node) == key:
             alternatives = {variant["properties"][key]["const"] for variant in node["oneOf"]}
     if alternatives is None or alternatives != set(wakes["values"]):
@@ -473,40 +480,69 @@ def check_wake_alternatives(where: str, entry: dict[str, Any], schemas: dict[str
                             f"alternatives {sorted(alternatives or [])} a value")
 
 
-def schema_parents(resolver: "ModelWriter", file: str, node: dict[str, Any], steps: list[str]) -> list[tuple[str, dict[str, Any]]]:
-    """The schemas a path of property names reaches, references resolved but a final oneOf kept whole."""
+class BodyFields:
+    """Looks up a kind's body fields by JSON pointer, for checking its body rules."""
+
+    def __init__(self, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+        self.resolver = ModelWriter(schemas)
+        self.file, self.root = entry["body"], schemas[entry["body"]]
+
+    def leaves(self, pointer: Any) -> list[tuple[str, dict[str, Any]]]:
+        if not isinstance(pointer, str) or not pointer.startswith("/body/"):
+            return []
+        return schema_leaves(self.resolver, self.file, self.root, pointer.split("/")[2:])
+
+    def defined(self, pointer: Any, kind: str | None = None) -> bool:
+        leaves = self.leaves(pointer)
+        return bool(leaves) and (kind is None or all(resolved_type(self.resolver, f, leaf) == kind for f, leaf in leaves))
+
+    def items_have(self, pointer: str, member: str) -> bool:
+        """``by`` names a member every object item carries; plain values (strings, integers) compare whole."""
+
+        items = [item for file, node in self.leaves(pointer) for item in schema_leaves(self.resolver, file, node["items"], [])]
+        return all(member in node.get("required", []) if node.get("type") == "object"
+                   else node.get("type") in {"string", "integer"} or "enum" in node or "const" in node
+                   for _file, node in items)
+
+    def fits(self, pointer: str, value: Any) -> bool:
+        return any(value_fits(self.resolver, file, node, value) for file, node in self.leaves(pointer))
+
+
+def unique_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
+    return set(rule) <= {"unique", "by"} and fields.defined(rule.get("unique"), "array") \
+        and ("by" not in rule or fields.items_have(rule["unique"], rule["by"]))
+
+
+def requires_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
+    return set(rule) == {"requires", "when"} and fields.defined(rule["requires"]) and bool(rule["when"]) \
+        and all(set(c) == {"at", "is"} and fields.defined(c["at"]) and fields.fits(c["at"], c["is"]) for c in rule["when"])
+
+
+def any_of_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
+    return set(rule) == {"any_of"} and len(rule["any_of"]) > 1 and all(fields.defined(p) for p in rule["any_of"])
+
+
+def check_body_rules(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """Each rule is one of the three README shapes and names fields its body defines, with values they can hold."""
+
+    fields = BodyFields(entry, schemas)
+    for rule in entry.get("body_rules", []):
+        if not (unique_rule_valid(rule, fields) or requires_rule_valid(rule, fields) or any_of_rule_valid(rule, fields)):
+            raise ContractError(f"{where}: body rule {rule} is not a unique, requires or any_of rule over its body's fields")
+
+
+def value_fits(resolver: "ModelWriter", file: str, node: dict[str, Any], value: Any) -> bool:
+    """Whether a field could hold ``value``: its const, one of its enum values, or a value of its type."""
 
     while "$ref" in node:
         file, fragment = resolver.resolve(file, node["$ref"])
         node = resolver.node(file, fragment)
-    if not steps:
-        return [(file, node)]
-    if "oneOf" in node:
-        return [leaf for variant in node["oneOf"] for leaf in schema_parents(resolver, file, variant, steps)]
-    child = node.get("properties", {}).get(steps[0])
-    return [] if child is None else schema_parents(resolver, file, child, steps[1:])
-
-
-def check_body_rules(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
-    """Each rule is one of the three README shapes and names fields its body defines."""
-
-    resolver = ModelWriter(schemas)
-
-    def defined(pointer: Any, kind: str | None = None) -> bool:
-        if not isinstance(pointer, str) or not pointer.startswith("/body/"):
-            return False
-        leaves = schema_leaves(resolver, entry["body"], schemas[entry["body"]], pointer.split("/")[2:])
-        return bool(leaves) and (kind is None or all(resolved_type(resolver, file, leaf) == kind for file, leaf in leaves))
-
-    for rule in entry.get("body_rules", []):
-        if set(rule) <= {"unique", "by"} and defined(rule.get("unique"), "array"):
-            continue
-        if set(rule) == {"requires", "when"} and defined(rule["requires"]) and rule["when"] \
-                and all(set(c) == {"at", "is"} and defined(c["at"]) for c in rule["when"]):
-            continue
-        if set(rule) == {"any_of"} and len(rule["any_of"]) > 1 and all(defined(p) for p in rule["any_of"]):
-            continue
-        raise ContractError(f"{where}: body rule {rule} is not a unique, requires or any_of rule over its body's fields")
+    if "const" in node:
+        return bool(node["const"] == value)
+    if "enum" in node:
+        return value in node["enum"]
+    kind = node.get("type")
+    return isinstance(value, bool) if kind == "boolean" else _of_type(value, kind) if kind in {"string", "integer"} else False
 
 
 def resolved_type(resolver: "ModelWriter", file: str, node: dict[str, Any]) -> Any:
@@ -516,18 +552,40 @@ def resolved_type(resolver: "ModelWriter", file: str, node: dict[str, Any]) -> A
     return node.get("type")
 
 
-def schema_leaves(resolver: "ModelWriter", file: str, node: dict[str, Any], steps: list[str]) -> list[tuple[str, dict[str, Any]]]:
-    """The schemas a path of property names reaches, through references and every oneOf alternative."""
+def always_supplied(entry: dict[str, Any], schemas: dict[str, dict[str, Any]], frame_schema: str, steps: list[str]) -> bool:
+    """Whether every frame of the kind carries the field: required at each step, or the audience id its address names."""
+
+    if steps == ["audience", "id"]:
+        return any("{" in address for address in own_addresses(entry))
+    resolver = ModelWriter(schemas)
+    file, node = (entry["body"], schemas[entry["body"]]) if steps[0] == "body" else (frame_schema, schemas[frame_schema])
+    for step in steps[1:] if steps[0] == "body" else steps:
+        while "$ref" in node:
+            file, fragment = resolver.resolve(file, node["$ref"])
+            node = resolver.node(file, fragment)
+        variants = node.get("oneOf", [node])
+        if not all(step in variant.get("required", []) for variant in variants):
+            return False
+        node = variants[0]["properties"][step]
+    return True
+
+
+def schema_leaves(resolver: "ModelWriter", file: str, node: dict[str, Any], steps: list[str],
+                  keep_one_of: bool = False) -> list[tuple[str, dict[str, Any]]]:
+    """The schemas a path of property names reaches, through references and every oneOf alternative.
+
+    With ``keep_one_of``, a oneOf the path ends at is returned whole, not split into its alternatives.
+    """
 
     while "$ref" in node:
         file, fragment = resolver.resolve(file, node["$ref"])
         node = resolver.node(file, fragment)
-    if "oneOf" in node:
-        return [leaf for variant in node["oneOf"] for leaf in schema_leaves(resolver, file, variant, steps)]
-    if not steps:
+    if not steps and (keep_one_of or "oneOf" not in node):
         return [(file, node)]
+    if "oneOf" in node:
+        return [leaf for variant in node["oneOf"] for leaf in schema_leaves(resolver, file, variant, steps, keep_one_of)]
     child = node.get("properties", {}).get(steps[0])
-    return [] if child is None else schema_leaves(resolver, file, child, steps[1:])
+    return [] if child is None else schema_leaves(resolver, file, child, steps[1:], keep_one_of)
 
 
 def scalar_schema(resolver: "ModelWriter", file: str, node: dict[str, Any]) -> bool:

@@ -66,7 +66,8 @@ DECISION_ISSUER_ROLE = "team_services"
 DECISION_TOKEN_AT = "/body/decision_token"
 # The host role that speaks for outside agents (A2A); its frames reach only the lead.
 OUTSIDE_ROLE = "edge_adapter"
-AGENT_TARGETS = frozenset({"agent", "pool"})
+# Who may reach an outside agent: the lead agent, or the team services without an agent.
+OUTSIDE_CONTACT_ROLE, OUTSIDE_CONTACT_HOST = "lead", "team_services"
 # Audience targets an address delivers to as a whole team (audience id is the team id).
 TEAM_WIDE_TARGETS = frozenset({"team", "team_services"})
 # NATS headers that copy frame fields (README, "NATS headers").
@@ -172,7 +173,9 @@ class Receiver:
 
     ``agent_role`` is the receiving agent's place in its team (``lead`` or
     ``worker``) when the receiver is an agent; only the lead receives frames from
-    outside agents (team-topologies.yaml fixed rules).
+    outside agents. ``outside`` is true for an edge adapter receiving for an outside
+    agent, which accepts frames only from the lead and the team services
+    (team-topologies.yaml fixed rules).
     """
 
     installation: str
@@ -181,6 +184,7 @@ class Receiver:
     id: str
     runtime: str
     agent_role: Optional[str] = None
+    outside: bool = False
 
 
 @dataclass(frozen=True)
@@ -206,7 +210,7 @@ class VerifiedAuthority:
         """The handler's last authority check: the token is bound to the root task or command it holds."""
 
         if (self.token.bound_to.type, self.token.bound_to.id) != (bound_type, record_id):
-            raise FrameRefused("bad_authority", "the token is bound to another root task or command",
+            raise FrameRefused("bad_authority", f"the token is not bound to the {bound_type} {record_id}",
                                at="/authority/bound_to")
 
 
@@ -352,8 +356,8 @@ def _verify_issuer(frame: Frame, certificate: HostCertificate, session: Optional
         raise FrameRefused("wrong_issuer", "the reply comes from another agent than the one asked", at="/issuer/agent")
 
 
-def _verify_sender(frame: Frame, certificate: HostCertificate, spec: Optional[KindSpec], is_reply: bool,
-                   trust: TrustStore, issued_at: datetime, receiver: Receiver) -> None:
+def _verify_sender(frame: Frame, certificate: HostCertificate, session: Optional[AgentSession], spec: Optional[KindSpec],
+                   is_reply: bool, trust: TrustStore, issued_at: datetime, receiver: Receiver) -> None:
     if spec is None:
         return  # an unknown kind is refused later, as unknown_kind
     target = frame.audience.target
@@ -361,8 +365,7 @@ def _verify_sender(frame: Frame, certificate: HostCertificate, spec: Optional[Ki
     roles = certificate.roles & set(allowed)
     if not roles:
         raise FrameRefused("wrong_sender", f"{frame.kind} to a {target} comes only from {', '.join(allowed)} hosts", at="/kind")
-    if roles == {OUTSIDE_ROLE} and target in AGENT_TARGETS and receiver.agent_role != "lead":
-        raise FrameRefused("wrong_sender", "an outside agent reaches only the team's lead", at="/audience/id")
+    _verify_outside_boundary(frame, roles, session, receiver)
     if frame.issuer.installation == trust.installation:
         return
     agreement = trust.agreement(frame.issuer.installation)
@@ -373,6 +376,24 @@ def _verify_sender(frame: Frame, certificate: HostCertificate, spec: Optional[Ki
         raise FrameRefused("wrong_sender", f"the agreement with {agreement.peer} does not allow this team", at="/audience/team")
     if not agreement.covers(issued_at):
         raise FrameRefused("wrong_sender", "the agreement did not cover the frame's issue time", at="/issued_at")
+
+
+def _verify_outside_boundary(frame: Frame, roles: frozenset[str] | set[str], session: Optional[AgentSession], receiver: Receiver) -> None:
+    """Contact with outside agents goes through the lead (team-topologies.yaml fixed rules).
+
+    An outside agent's adapter reaches only the lead's inbox (or the team services),
+    and an adapter receiving for an outside agent accepts frames only from a lead
+    agent or the team services.
+    """
+
+    if roles == {OUTSIDE_ROLE} and not (frame.audience.target == "team_services"
+                                       or (frame.audience.target == "agent" and receiver.agent_role == OUTSIDE_CONTACT_ROLE)):
+        raise FrameRefused("wrong_sender", "an outside agent reaches only the team's lead", at="/audience/id")
+    if receiver.outside:
+        lead = session is not None and session.agent_role == OUTSIDE_CONTACT_ROLE
+        services = session is None and OUTSIDE_CONTACT_HOST in roles
+        if not (lead or services):
+            raise FrameRefused("wrong_sender", "only the lead or the team services contact an outside agent", at="/issuer")
 
 
 def _verify_audience(frame: Frame, receiver: Receiver) -> None:
@@ -462,25 +483,55 @@ def _verify_authority(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, is_r
                            at="/authority/issuer/installation")
     if audience.team != frame.issuer.team:
         raise FrameRefused("bad_authority", "only the team the person asked presents the token", at="/authority/audience/team")
-    certificate = trust.host_certificate(issuer.installation, issuer.runtime, issuer.membership_epoch)
-    token_issued, token_expires = parse_timestamp(token.issued_at), parse_timestamp(token.expires_at)
-    if (certificate is None or certificate.key_id != issuer.key_id or not certificate.valid_at(token_issued)
-            or trust.revoked(certificate.installation, certificate.certificate_id)):
-        raise FrameRefused("bad_authority", "no unrevoked certificate for the token's issuer", at="/authority/issuer")
-    if not certificate.roles & AUTHORITY_ISSUER_ROLES or audience.team not in certificate.teams:
-        raise FrameRefused("bad_authority", "only a gateway or scheduler of the team issues its tokens", at="/authority/issuer")
+    # Over the token as received: a newer minor's unknown fields are signed too.
+    signed = _SignedToken("/authority", raw["authority"], authority_signing_bytes(raw["authority"]))
+    certificate = _token_certificate(signed, trust, AUTHORITY_ISSUER_ROLES, audience.team, "a gateway or scheduler")
     if token.schedule_id is not MISSING and SCHEDULE_ISSUER_ROLE not in certificate.roles:
         raise FrameRefused("bad_authority", "only a scheduler names the schedule a run belongs to", at="/authority/schedule_id")
-    try:
-        # Over the token as received: a newer minor's unknown fields are signed too.
-        certificate.public_key.verify(b64url_decode(token.signature), authority_signing_bytes(raw["authority"]))
-    except (InvalidSignature, ValueError) as error:
-        raise FrameRefused("bad_authority", "the token's signature does not verify", at="/authority/signature") from error
-    if token_expires - token_issued > timedelta(seconds=AUTHORITY_TOKEN_MAX_SECONDS):
-        raise FrameRefused("bad_authority", "the token lasts too long", at="/authority/expires_at")
-    if not within(token_issued, token_expires, parse_timestamp(frame.issued_at)):
-        raise FrameRefused("bad_authority", "the token was not valid when the frame was issued", at="/authority/expires_at")
+    _verify_token_signature_and_time(signed, certificate, frame)
     return _verify_binding(raw, spec, VerifiedAuthority(token=token, certificate=certificate))
+
+
+@dataclass(frozen=True)
+class _SignedToken:
+    """An authority or decision token as received: where it sits, its fields, and what its signature covers."""
+
+    at: str
+    fields: Mapping[str, Any]
+    signing_bytes: bytes
+
+    @property
+    def issued_at(self) -> datetime:
+        return parse_timestamp(self.fields["issued_at"])
+
+    @property
+    def expires_at(self) -> datetime:
+        return parse_timestamp(self.fields["expires_at"])
+
+
+def _token_certificate(token: _SignedToken, trust: TrustStore, roles: frozenset[str], team: str,
+                       signers: str) -> HostCertificate:
+    """The unrevoked certificate, valid when the token was issued, of a host in one of ``roles`` serving ``team``."""
+
+    issuer = token.fields["issuer"]
+    certificate = trust.host_certificate(issuer["installation"], issuer["runtime"], issuer["membership_epoch"])
+    if (certificate is None or certificate.key_id != issuer["key_id"] or not certificate.valid_at(token.issued_at)
+            or trust.revoked(certificate.installation, certificate.certificate_id)):
+        raise FrameRefused("bad_authority", "no unrevoked certificate for the token's issuer", at=token.at + "/issuer")
+    if not certificate.roles & roles or team not in certificate.teams:
+        raise FrameRefused("bad_authority", f"only {signers} of the team signs this token", at=token.at + "/issuer")
+    return certificate
+
+
+def _verify_token_signature_and_time(token: _SignedToken, certificate: HostCertificate, frame: Frame) -> None:
+    try:
+        certificate.public_key.verify(b64url_decode(token.fields["signature"]), token.signing_bytes)
+    except (InvalidSignature, ValueError) as error:
+        raise FrameRefused("bad_authority", "the token's signature does not verify", at=token.at + "/signature") from error
+    if token.expires_at - token.issued_at > timedelta(seconds=AUTHORITY_TOKEN_MAX_SECONDS):
+        raise FrameRefused("bad_authority", "the token lasts too long", at=token.at + "/expires_at")
+    if not within(token.issued_at, token.expires_at, parse_timestamp(frame.issued_at)):
+        raise FrameRefused("bad_authority", "the token was not valid when the frame was issued", at=token.at + "/expires_at")
 
 
 def _verify_binding(raw: Mapping[str, Any], spec: KindSpec, verified: VerifiedAuthority) -> VerifiedAuthority:
@@ -536,22 +587,9 @@ def _verify_decision_token(raw: Mapping[str, Any], frame: Frame, trust: TrustSto
     if (issuer["installation"], issuer["team"]) != (frame.issuer.installation, frame.audience.team):
         raise FrameRefused("bad_authority", "the decision token belongs to another installation or team",
                            at=DECISION_TOKEN_AT + "/issuer")
-    certificate = trust.host_certificate(issuer["installation"], issuer["runtime"], issuer["membership_epoch"])
-    token_issued, token_expires = parse_timestamp(token["issued_at"]), parse_timestamp(token["expires_at"])
-    if (certificate is None or certificate.key_id != issuer["key_id"] or not certificate.valid_at(token_issued)
-            or trust.revoked(certificate.installation, certificate.certificate_id)
-            or DECISION_ISSUER_ROLE not in certificate.roles or issuer["team"] not in certificate.teams):
-        raise FrameRefused("bad_authority", "only an unrevoked team-services certificate of the team signs decision tokens",
-                           at=DECISION_TOKEN_AT + "/issuer")
-    try:
-        certificate.public_key.verify(b64url_decode(token["signature"]), decision_signing_bytes(token))
-    except (InvalidSignature, ValueError) as error:
-        raise FrameRefused("bad_authority", "the decision token's signature does not verify",
-                           at=DECISION_TOKEN_AT + "/signature") from error
-    if token_expires - token_issued > timedelta(seconds=AUTHORITY_TOKEN_MAX_SECONDS) \
-            or not within(token_issued, token_expires, parse_timestamp(frame.issued_at)):
-        raise FrameRefused("bad_authority", "the decision token was not valid when the frame was issued",
-                           at=DECISION_TOKEN_AT + "/expires_at")
+    signed = _SignedToken(DECISION_TOKEN_AT, token, decision_signing_bytes(token))
+    certificate = _token_certificate(signed, trust, frozenset({DECISION_ISSUER_ROLE}), issuer["team"], "a team-services host")
+    _verify_token_signature_and_time(signed, certificate, frame)
 
 
 def verify_frame(
@@ -593,7 +631,7 @@ def verify_frame(
     _verify_revocation(certificate, session, trust)
     _verify_epochs(certificate, trust)
     _verify_issuer(frame, certificate, session, issued_at, is_reply, answering)
-    _verify_sender(frame, certificate, spec, is_reply, trust, issued_at, receiver)
+    _verify_sender(frame, certificate, session, spec, is_reply, trust, issued_at, receiver)
     _verify_audience(frame, receiver)
     _verify_subject(frame, spec, is_reply, arrived_on, headers)
     _verify_time(frame, spec, now, issued_at)
@@ -610,11 +648,13 @@ def verify_frame(
     except ValidationError as error:
         raise FrameRefused("invalid_body", str(error).splitlines()[0],
                            at=pointer(error.errors()[0], shape, prefix="/body")) from error
-    _check_body_rules(raw, spec)
+    if not is_reply:
+        _check_body_rules(raw, spec)
     if frame.idempotency_key != expected_idempotency_key(raw, spec, is_reply, answering):
         raise FrameRefused("invalid_body", "the idempotency key is not the one the kind's key parts give",
                            at="/idempotency_key")
     authority = _verify_authority(raw, frame, spec, is_reply, trust)
-    _verify_decision_token(raw, frame, trust)
+    if not is_reply:
+        _verify_decision_token(raw, frame, trust)
     return VerifiedFrame(frame=frame, body=body, certificate=certificate, session=session, authority=authority,
                          replay_key=replay_key, frame_digest=digest, raw=raw)

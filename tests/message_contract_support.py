@@ -32,6 +32,8 @@ NOW = datetime(2026, 10, 22, 4, 30, 1, tzinfo=timezone.utc)
 RECORD_ORDER = ("agreement", "certificate", "revocations", "agent_session")
 # The receiving host when a frame's audience names none.
 RECEIVING_HOST = "receiving-host"
+# Edge routes the examples' edge adapter serves for outside agents (others are gateway routes).
+OUTSIDE_EDGES = {"a2a_partner"}
 _UNSET: Any = object()
 
 
@@ -80,8 +82,9 @@ def agent_roles() -> dict[tuple[str, str], str]:
 def default_receiver(frame: Mapping[str, Any]) -> Receiver:
     audience = frame["audience"]
     role = agent_roles().get((audience["team"], audience["id"])) if audience["target"] == "agent" else None
+    outside = audience["target"] == "edge" and audience["id"] in OUTSIDE_EDGES
     return Receiver(audience["installation"], audience["team"], audience["target"], audience["id"],
-                    audience.get("runtime", RECEIVING_HOST), role)
+                    audience.get("runtime", RECEIVING_HOST), role, outside)
 
 
 def replay_holding(digest: Optional[str] = None) -> ReplayLookup:

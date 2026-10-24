@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "delivery.refused",
   "message_id": "01928f3a-7b2c-711b-8000-00000000011b",
-  "idempotency_key": "delivery.refused:BceKbcSbwVpdUUuuRoduIcy43e0Cqq-4clASwkgLTIM",
+  "idempotency_key": "delivery.refused:x2DA0a4bu1vpyR_BWedoouFVMmJmhPu8i39RWXKIVfI",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -31,5 +31,5 @@
     "current_custody_token": 4
   },
   "body_digest": "6Ztf-Ttm-VTiYgOmCX5qQzubxV-DPiFg6XbRhxz3NqU",
-  "signature": "02NMtUMavyQcFoTXTNUilR8TqWeVx2Yz82HQHQw6YcMNWYasB8Qzw5R_4XSf7oXRXvzdj53T0-nPwRL4M5UWCg"
+  "signature": "RDapAkD7uj5d6ajchwG1kx4HApwlmstTU0egopf60LeTlsP94twH1qXDP4h1cU9EXbXkupbv4qGCv3shhJhGAQ"
 }
