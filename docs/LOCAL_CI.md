@@ -347,7 +347,7 @@ workflow. Its `--kind` option prints `stable`, `beta`, `rc` or `nightly`.
 | Tag | Made by | GitHub release | Image tags | Docs site |
 |-----|---------|----------------|------------|-----------|
 | `vX.Y.Z` | a person, per the release process | release, may become Latest | `X.Y.Z`, `X.Y`, `X`, `latest` | built |
-| `vX.Y.Z-beta.N`, `vX.Y.Z-rc.N` | a person (signed tag on `main`) | pre-release, never Latest | `X.Y.Z-beta.N` only | not built |
+| `vX.Y.Z-beta.N`, `vX.Y.Z-rc.N` | a person (signed tag on `main`, or on the development branch `release/X.Y` while one is open) | pre-release, never Latest | `X.Y.Z-beta.N` only | not built |
 | `vX.Y.Z-nightly.YYYYMMDDHHMM` | `nightly.yml` | pre-release, never Latest | `X.Y.Z-nightly.…` only | not built |
 
 `N` starts at 1 and has no leading zeros. Generated release notes always start
@@ -359,6 +359,8 @@ but no setup-guide attachment: the tracked guide installs the last stable
 version. Existing pre-releases are marked as pre-releases and removed from
 Latest on a rerun, which also removes any stale setup-guide attachments.
 
+While a development branch is open, `main` stays at the last release, so nightlies stop until
+it is merged; a testing candidate of the branch is a beta or release-candidate tag on it.
 `nightly.yml` runs daily at 03:17 UTC and can be started by hand from `main`.
 When `main` has changed since the newest nightly, it creates the pre-release
 `v{next patch}-nightly.{UTC minute}` on that commit (notes: "Nightly build of main
