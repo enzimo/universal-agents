@@ -1,0 +1,20 @@
+{
+  "allow_responses": {
+    "expires": "38s",
+    "max": 1
+  },
+  "publish": [
+    "$JS.ACK.UA1_WORK.agent~{team}~{agent}.>",
+    "$JS.API.CONSUMER.INFO.UA1_WORK.agent~{team}~{agent}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.agent~{team}~{agent}",
+    "ua.v1.{team}.{self}.ctl.agent.*.pause",
+    "ua.v1.{team}.{self}.evt.skills_changed",
+    "ua.v1.{team}.{self}.work.agent.*"
+  ],
+  "role": "lead_host",
+  "subscribe": [
+    "_INBOX.{self}.>",
+    "ua.v1.{team}.*.ctl.agent.{agent}.pause",
+    "ua.v1.{team}.*.evt.skills_changed"
+  ]
+}

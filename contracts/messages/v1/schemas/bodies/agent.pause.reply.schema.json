@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/agent.pause.reply.schema.json",
+  "title": "agent.pause reply body",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "paused",
+            "already_paused"
+          ]
+        }
+      },
+      "required": [
+        "outcome",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "error"
+        },
+        "code": {
+          "type": "string",
+          "enum": [
+            "agent_exiting"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      },
+      "required": [
+        "outcome",
+        "code"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

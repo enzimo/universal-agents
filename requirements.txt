@@ -15,7 +15,7 @@ websockets>=15.0.1
 nats-py>=2.16.0
 
 # Models and configuration
-pydantic>=2.12.5
+pydantic>=2.14.1
 typing-extensions>=4.15.0
 PyYAML>=6.0.2
 python-dotenv>=1.2.2
@@ -60,3 +60,6 @@ twilio>=9.5.2
 
 # Schema validation
 jsonschema>=4.26.0
+
+# Canonical JSON (RFC 8785) for signed messages
+rfc8785>=0.1.4

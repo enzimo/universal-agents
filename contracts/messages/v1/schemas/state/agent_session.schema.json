@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/state/agent_session.schema.json",
+  "title": "Agent session certificate",
+  "description": "Issued by the team services when they start or move an agent: this agent, of this type and team role, runs on this host from started_at until ends_at. The team services renew a running session before ends_at and rewrite it with the actual end when the agent stops or moves. A frame that names an agent must fall inside one of its sessions on the signing host.",
+  "type": "object",
+  "properties": {
+    "session": {
+      "$ref": "../common.schema.json#/$defs/session_id"
+    },
+    "installation": {
+      "$ref": "../common.schema.json#/$defs/installation_id"
+    },
+    "team": {
+      "$ref": "../common.schema.json#/$defs/team_id"
+    },
+    "agent": {
+      "$ref": "../common.schema.json#/$defs/agent_id"
+    },
+    "agent_type": {
+      "$ref": "../common.schema.json#/$defs/agent_type"
+    },
+    "agent_role": {
+      "$ref": "../common.schema.json#/$defs/agent_role"
+    },
+    "runtime": {
+      "$ref": "../common.schema.json#/$defs/runtime_id"
+    },
+    "placement_revision": {
+      "description": "The placement record's revision when the session started; a newer session of the same agent has a higher one.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "started_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "ends_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    }
+  },
+  "required": [
+    "session",
+    "installation",
+    "team",
+    "agent",
+    "agent_type",
+    "agent_role",
+    "runtime",
+    "placement_revision",
+    "started_at",
+    "ends_at"
+  ],
+  "additionalProperties": false
+}

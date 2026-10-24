@@ -1,0 +1,194 @@
+# Protocol 1 registry: one entry per message kind and operation.
+#
+# Each entry states, for one kind:
+#   class          durable | request_reply | event   (transport.yaml describes each class)
+#   address        the subject after ua.v1.<audience team>.<sender slot>. ; {agent}, {pool} and
+#                  {edge} are the audience id, and the address decides the audience target:
+#                  agent, pool, edge, team_services (work.team, svc.team.*) or team (evt.*)
+#   body           the body schema, under schemas/
+#   reply          request/reply only: the reply body schema and the error codes it may carry
+#   senders        host roles that may publish it; receivers check them against the issuer's certificate
+#   receivers      host roles that may receive it (and so send its reply)
+#   expiry_seconds how long after issue a receiver still accepts it (at most its class's max_expiry_seconds)
+#   authority      none | optional | required: whether the frame carries an authority token
+#   idempotency    how the sender derives the idempotency key
+#   admission      execution_slot (needs a free slot), accepted_while_paused, priority
+#   routing        requester | holder | team | person | named | broadcast
+#   topology_edge  up | down | person | sideways | out | none  (team-topologies.yaml)
+#   ledger         the entry the receiver's work ledger records, or none
+#   wakes_model    never | always | next_turn
+#   rendering      how a model sees it: none | sender_line | summary | full
+#   covered_change the store record it changes and whether it needs the version the writer saw
+#
+# Edit by hand, then run scripts/export_message_contract.py.
+
+protocol: 1.0-pre
+signing_domain: universal-agents/message-frame/v1
+state_signing_domain: universal-agents/state-record/v1
+authority_token_domain: universal-agents/authority-token/v1
+frame_schema: frame.schema.json
+state_schema: state.schema.json
+max_frame_bytes: 262144
+max_nesting_depth: 64
+authority_token_max_seconds: 604800   # today's signed person context lasts at most 7 days
+
+# Refusals a receiver gives before any handler runs, in the order it checks them.
+# "The issuer's certificate" is the host certificate the receiver's trust store holds
+# for the issuer's installation, runtime and membership epoch (README, "Who sent it").
+verification_refusals:
+  - code: too_large
+    meaning: the serialized frame is larger than max_frame_bytes
+  - code: malformed
+    meaning: the frame is not one JSON object, repeats a key, holds a number with a fraction or exponent part, or breaks the frame schema
+  - code: unknown_key
+    meaning: the trust store holds no certificate for the issuer's installation, runtime and membership epoch that names the issuer's key id and was valid when the frame was issued, or the installation is neither the receiver's nor one it has an agreement with
+  - code: bad_signature
+    meaning: the signature is not the one unpadded base64url spelling of a signature that verifies over the canonical frame with the certificate's key
+  - code: bad_digest
+    meaning: the body digest does not match the body
+  - code: revoked
+    meaning: the issuer's certificate, or the certificate that signed the issuer's agent session, is listed in its installation's revocations, whenever it was revoked and whenever the frame says it was issued
+  - code: epoch_too_old
+    meaning: the issuer's certificate has a membership or revocation epoch below the receiver's minimum for that runtime or installation
+  - code: wrong_issuer
+    meaning: the issuer's revocation epoch or team disagrees with its certificate; or it names an agent without a session, or a session that does not place that agent, of a type the certificate allows, on the signing runtime when the frame was issued; or a reply does not come from the agent and team the request was for
+  - code: wrong_sender
+    meaning: none of the certificate's roles may send the kind (for a reply, receive its request); or the frame comes from another installation with a kind, class or destination team its agreement does not allow
+  - code: wrong_team
+    meaning: the frame is for another installation or team
+  - code: wrong_audience
+    meaning: the frame names another receiver
+  - code: subject_mismatch
+    meaning: the subject is not ua.v1.<audience team>.<sender slot>.<address> for the kind and audience target, the frame arrived on another subject, or a NATS header copy disagrees with the frame; replies use the audience runtime's inbox and name their request
+  - code: expired
+    meaning: the receiver's clock, less the clock tolerance, is at or after the frame's expiry or its kind's lifetime
+  - code: not_yet_valid
+    meaning: the frame's issue or not-before time is more than the clock tolerance ahead of the receiver's clock
+  - code: replayed
+    meaning: a frame with the same issuer installation, runtime, membership epoch and message id was admitted with other content
+  - code: unknown_kind
+    meaning: the kind is not in this registry
+  - code: invalid_body
+    meaning: the body breaks the kind's schema
+  - code: bad_authority
+    meaning: the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names another team than the issuer's, was not valid when the frame was issued, lasts longer than authority_token_max_seconds, or is bound to another root task or command than the one the receiver holds
+  - code: access_denied
+    meaning: the receiver's access decision refused the sender
+# Refusals of a change to a covered store record (shared by every covered operation).
+change_refusals:
+  - code: changed_since_read
+    meaning: the record changed after the writer read it; carries the current version
+  - code: change_conflict
+    meaning: another request changed the record; carries the case id and the brief reference
+  - code: request_closed
+    meaning: the request was stopped or ended
+  - code: needs_person_decision
+    meaning: the person must decide before the change is saved
+  - code: record_busy
+    meaning: another request is writing the file or sign-in; carries when to try again
+# Roles that hold NATS permissions. Agent roles for topology are in team-topologies.yaml.
+host_roles:
+  gateway: talks to people through channels and the web
+  lead_host: runs a team's lead agent
+  worker_host: runs worker agents
+  team_services: the team's operations, steering, access and custody services
+  edge_adapter: connects outside agents (A2A)
+  installation_authority: issues and revokes certificates and authority keys
+  scheduler: fires schedules
+
+# Signed records that vouch for keys and agents (state.schema.json). Readers verify each
+# one: authority records with the installation's authority keys (their own, or a peer's
+# from an agreement), host records with the writer's certificate that was valid when the
+# record was written, unless that certificate is revoked. Where a record is stored adds
+# no trust. Fields: bucket and key form; signer (authority | host); writers, the host
+# roles that may store it (the edge adapter stores unchanged copies of a peer's records
+# under the peer's installation id); body; write_rule.
+state_records:
+  certificate:
+    description: A host's membership certificate.
+    bucket: UA1_CERTS
+    key: "host.<installation>.<runtime>.<membership_epoch>"
+    signer: authority
+    writers: [installation_authority, edge_adapter]
+    body: state/certificate.schema.json
+    write_rule: written once; kept until its expiry plus the longest kind lifetime, so queued frames can still be checked
+  revocations:
+    description: An installation's revoked certificates.
+    bucket: UA1_CERTS
+    key: "revocations.<installation>"
+    signer: authority
+    writers: [installation_authority, edge_adapter]
+    body: state/revocations.schema.json
+    write_rule: rewritten with a higher sequence on each revocation; the revocation epoch only grows and entries are never removed while a revoked certificate could still be named
+  agent_session:
+    description: An agent session certificate, issued by the team services that place the agent.
+    bucket: UA1_CERTS
+    key: "session.<installation>.<team>.<session>"
+    signer: host
+    signer_roles: [team_services]
+    writers: [team_services, edge_adapter]
+    body: state/agent_session.schema.json
+    write_rule: rewritten with a higher sequence to renew it or to record its actual end; kept until its end plus the longest kind lifetime
+  agreement:
+    description: A federation agreement with another installation.
+    bucket: UA1_CERTS
+    key: "agreement.<peer>"
+    signer: authority
+    writers: [installation_authority]
+    body: state/agreement.schema.json
+    write_rule: rewritten with a higher sequence to change or end it; only the receiver's own authority signs it
+
+kinds:
+  task.stop:
+    description: Stop one task. Sent only to the task's current holder.
+    class: durable
+    address: work.agent.{agent}
+    body: bodies/task.stop.schema.json
+    senders: [lead_host, team_services]
+    receivers: [lead_host, worker_host]
+    expiry_seconds: 86400
+    authority: optional
+    idempotency: "task.stop:<base64url(sha256(RFC8785([task_id, stop_id])))>"
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: holder
+    topology_edge: down
+    ledger: task_stopped
+    wakes_model: never
+    rendering: none
+
+  agent.pause:
+    description: Pause one agent at its next safe point; it keeps its queued work.
+    class: request_reply
+    address: ctl.agent.{agent}.pause
+    body: bodies/agent.pause.schema.json
+    reply:
+      body: bodies/agent.pause.reply.schema.json
+      errors: [agent_exiting]
+    senders: [lead_host, team_services]
+    receivers: [lead_host, worker_host]
+    expiry_seconds: 30
+    authority: none
+    idempotency: "agent_pause:<agent>:<request_id>"
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: named
+    topology_edge: down
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  skills.changed:
+    description: Hint that a managed skill was installed or removed. Receivers verify the stored receipt before they refresh.
+    class: event
+    address: evt.skills_changed
+    body: bodies/skills.changed.schema.json
+    senders: [lead_host]
+    receivers: [lead_host, worker_host]
+    expiry_seconds: 300
+    authority: none
+    idempotency: "skills_changed:<change_id>"
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: broadcast
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none

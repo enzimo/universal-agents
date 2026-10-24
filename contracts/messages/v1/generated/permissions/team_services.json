@@ -1,0 +1,10 @@
+{
+  "publish": [
+    "ua.v1.{team}.{self}.ctl.agent.*.pause",
+    "ua.v1.{team}.{self}.work.agent.*"
+  ],
+  "role": "team_services",
+  "subscribe": [
+    "_INBOX.{self}.>"
+  ]
+}

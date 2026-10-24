@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/frame.schema.json",
+  "title": "Signed frame of protocol 1",
+  "description": "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The issuer's host certificate and agent session are looked up in the receiver's trust store. The body is checked against the schema its kind names in the registry.",
+  "type": "object",
+  "properties": {
+    "protocol": {
+      "description": "The protocol label and minor version.",
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]{0,3})-pre$"
+    },
+    "kind": {
+      "$ref": "common.schema.json#/$defs/kind"
+    },
+    "message_id": {
+      "$ref": "common.schema.json#/$defs/message_id"
+    },
+    "idempotency_key": {
+      "$ref": "common.schema.json#/$defs/idempotency_key"
+    },
+    "issuer": {
+      "$ref": "common.schema.json#/$defs/issuer"
+    },
+    "audience": {
+      "$ref": "common.schema.json#/$defs/audience"
+    },
+    "subject": {
+      "description": "The exact NATS delivery subject. Work, requests and events use ua.v1.<audience team>.<sender slot>.<address>, where the sender slot is the issuer's runtime, or x-<issuer installation> for a frame from another installation. Operation replies use _INBOX.<audience.runtime>.<inbox token(s)> and name their request in causation_id.",
+      "type": "string",
+      "pattern": "^(ua\\.v1\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+|_INBOX\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*)$",
+      "maxLength": 512
+    },
+    "causation_id": {
+      "description": "The message that caused this one.",
+      "$ref": "common.schema.json#/$defs/message_id"
+    },
+    "issued_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "not_before": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "expires_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "authority": {
+      "$ref": "common.schema.json#/$defs/authority_token"
+    },
+    "algorithm": {
+      "const": "ed25519"
+    },
+    "body_digest": {
+      "description": "SHA-256 of the RFC 8785 canonical JSON of the body.",
+      "$ref": "common.schema.json#/$defs/sha256_digest"
+    },
+    "body": {
+      "type": "object"
+    },
+    "signature": {
+      "$ref": "common.schema.json#/$defs/ed25519_signature"
+    }
+  },
+  "required": [
+    "protocol",
+    "kind",
+    "message_id",
+    "idempotency_key",
+    "issuer",
+    "audience",
+    "subject",
+    "issued_at",
+    "expires_at",
+    "algorithm",
+    "body_digest",
+    "body",
+    "signature"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,33 @@
+{
+  "record": "agreement",
+  "key": "agreement.install_peer",
+  "writer": {
+    "type": "authority",
+    "installation": "install_example",
+    "key_id": "test-authority-key-1"
+  },
+  "sequence": 2,
+  "issued_at": "2026-10-15T00:00:00.000Z",
+  "body": {
+    "agreement_id": "agr_install_peer_1",
+    "installation": "install_example",
+    "peer": "install_peer",
+    "authority_keys": [
+      {
+        "key_id": "test-peer-authority-key-1",
+        "public_key": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+      }
+    ],
+    "teams": [
+      "team_example"
+    ],
+    "kinds": [
+      "task.request"
+    ],
+    "issued_at": "2026-10-01T00:00:00.000Z",
+    "expires_at": "2027-10-01T00:00:00.000Z"
+  },
+  "algorithm": "ed25519",
+  "body_digest": "txkLE7Sw3E2sv099vQx6wLC_stB-6NdCAtXXyigbUe0",
+  "signature": "EGVLgOoQOB_SxMOxod-tP7BLJCoA4klQtuF51v2im77IOGEgkUgLlzwwjhK5YtAg54c4xi_wQ16IqhP3KmqEBw"
+}

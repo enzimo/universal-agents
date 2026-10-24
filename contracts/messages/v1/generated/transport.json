@@ -1,0 +1,147 @@
+{
+  "classes": {
+    "dead_letter": {
+      "addresses": [
+        "dlq.raw.{copy}",
+        "dlq.notice.{copy}"
+      ],
+      "between_installations": false,
+      "description": "set-aside copies and notices, under the receiving runtime's id",
+      "max_expiry_seconds": 2592000,
+      "stream": "UA1_DLQ"
+    },
+    "durable": {
+      "addresses": [
+        "work.agent.{agent}",
+        "work.pool.{pool}",
+        "work.edge.{edge}",
+        "work.team"
+      ],
+      "between_installations": true,
+      "description": "at least once; the sender records before publishing, the receiver admits durably before acknowledging",
+      "max_expiry_seconds": 604800,
+      "stream": "UA1_WORK"
+    },
+    "event": {
+      "addresses": [
+        "evt.{event}"
+      ],
+      "between_installations": false,
+      "description": "at most once; never the only way something important happens",
+      "max_expiry_seconds": 300
+    },
+    "request_reply": {
+      "addresses": [
+        "svc.team.{operation}",
+        "ctl.agent.{agent}.{operation}"
+      ],
+      "between_installations": false,
+      "description": "answered at once or \"no responders\"; mutations carry an idempotency key and the receiver stores the outcome before replying",
+      "installation_addresses": [
+        "_install.{sender}.svc.{operation}"
+      ],
+      "max_expiry_seconds": 30
+    }
+  },
+  "clock_skew_seconds": 8,
+  "consumers": {
+    "agent_inbox": {
+      "ack": "explicit",
+      "ack_wait_seconds": 60,
+      "filter": "ua.v1.{team}.*.work.agent.{agent}",
+      "max_deliveries": 20,
+      "mode": "pull",
+      "name": "agent~{team}~{agent}",
+      "stream": "UA1_WORK"
+    },
+    "edge": {
+      "ack": "explicit",
+      "ack_wait_seconds": 60,
+      "filter": "ua.v1.{team}.*.work.edge.{edge}",
+      "max_deliveries": 20,
+      "mode": "pull",
+      "name": "edge~{team}~{edge}",
+      "stream": "UA1_WORK"
+    },
+    "pool": {
+      "ack": "explicit",
+      "ack_wait_seconds": 60,
+      "filter": "ua.v1.{team}.*.work.pool.{pool}",
+      "max_deliveries": 20,
+      "mode": "pull",
+      "name": "pool~{team}~{pool}",
+      "stream": "UA1_WORK"
+    },
+    "team_services": {
+      "ack": "explicit",
+      "ack_wait_seconds": 60,
+      "filter": "ua.v1.{team}.*.work.team",
+      "max_deliveries": 20,
+      "mode": "pull",
+      "name": "team~{team}",
+      "stream": "UA1_WORK"
+    }
+  },
+  "key_value": {
+    "UA1_AGENTS": {
+      "description": "one record per agent (availability, busy, idle, paused, exiting), written only on change",
+      "per_key_ttl_seconds": 0
+    },
+    "UA1_CERTS": {
+      "description": "host certificates, revocations, agent sessions and agreements (registry state_records); each record is signed, so readers trust the signature, not the bucket",
+      "per_key_ttl_seconds": 0
+    },
+    "UA1_HOSTS": {
+      "description": "one record per runtime host; written every 20 s, expires after 60 s",
+      "per_key_ttl_seconds": 60
+    },
+    "UA1_PLACEMENT": {
+      "description": "which host runs an agent and that host's epoch; its revision is the fencing token",
+      "per_key_ttl_seconds": 0
+    },
+    "UA1_TEAM_VIEW": {
+      "description": "the team's shared view of open work",
+      "per_key_ttl_seconds": 0
+    }
+  },
+  "limits": {
+    "max_frame_bytes": 262144,
+    "nats_max_payload_bytes": 1048576
+  },
+  "object_store": {
+    "UA1_BLOBS": {
+      "description": "files and long text, named by SHA-256; the owner deletes them"
+    }
+  },
+  "peer_sender_slot": "x-{installation}",
+  "replay_ledger_retention_seconds": 2592060,
+  "reply_inbox_prefix": "_INBOX.{runtime}",
+  "server": {
+    "jetstream": {
+      "sync_interval": "always"
+    },
+    "minimum_version": "2.15.1"
+  },
+  "streams": {
+    "UA1_DLQ": {
+      "max_age_seconds": 2592060,
+      "retention": "limits",
+      "storage": "file",
+      "subjects": [
+        "ua.v1.*.*.dlq.>"
+      ]
+    },
+    "UA1_WORK": {
+      "duplicate_window_seconds": 120,
+      "max_age_seconds": 604860,
+      "max_consumers": 4096,
+      "max_message_bytes": 262144,
+      "retention": "workqueue",
+      "storage": "file",
+      "subjects": [
+        "ua.v1.*.*.work.>"
+      ]
+    }
+  },
+  "subject_prefix": "ua.v1.{team}.{sender}"
+}

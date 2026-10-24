@@ -1,0 +1,16 @@
+{
+  "description": "researcher-2 answers a pause request that was for researcher-3.",
+  "refusal": "wrong_issuer",
+  "at": "/issuer/agent",
+  "base": "agent.pause.reply/paused.json",
+  "changes": [
+    {
+      "set": "/causation_id",
+      "to": "01928f3a-7b2c-7007-8000-000000000007"
+    }
+  ],
+  "context": {
+    "answering": "agent.pause/to-researcher-3.json"
+  },
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"agent.pause.reply\", \"message_id\": \"01928f3a-7b2c-7003-8000-000000000003\", \"idempotency_key\": \"agent_pause:researcher-2:pause_1:reply\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"agent\": \"researcher-2\", \"session\": \"s-researcher-2-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"lead\", \"runtime\": \"lead-host-1\"}, \"subject\": \"_INBOX.lead-host-1.pause_1\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"outcome\": \"ok\", \"state\": \"paused\"}, \"causation_id\": \"01928f3a-7b2c-7007-8000-000000000007\", \"body_digest\": \"cDA0KmsbnQZWBb290esk-O08S0ZXDJsIwSCUFoB7djE\", \"signature\": \"M2R_sgBcjBitdyK5MwqJoywYgENV8l_f3R_bLESyuestHx7ZDMtld2KJ51rYNBVkLb-wc2tV4kZ_SWzruUmiAA\"}"
+}

@@ -1,0 +1,19 @@
+{
+  "description": "Only gateway and scheduler hosts issue authority tokens.",
+  "refusal": "bad_authority",
+  "at": "/authority/issuer",
+  "base": "task.stop/for-person.json",
+  "changes": [
+    {
+      "set": "/authority/issuer",
+      "to": {
+        "installation": "install_example",
+        "runtime": "lead-host-1",
+        "membership_epoch": 3,
+        "key_id": "test-lead-key-1"
+      }
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.stop\", \"message_id\": \"01928f3a-7b2c-7004-8000-000000000004\", \"idempotency_key\": \"task.stop:_HWvLKp0FruRbmcSpynfGaVTLXXA5i-hmwUXf15LzHY\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.lead-host-1.work.agent.researcher-2\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7010-8000-000000000010\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"lead-host-1\", \"membership_epoch\": 3, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"root_task\", \"id\": \"task_root_7f\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-23T04:29:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"4AglJh-BVVGZnaWXPGLjNPx2giZ6ji4JTL-TV-aJ1ZEy2YoQXa9XONFmZgFDjFL0UlrGfLlJbNKTLEC5dwP-DA\"}, \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_7f3a\", \"stop_id\": \"stop_2\", \"reason\": \"The person asked to stop this task.\", \"cascade_to_subtasks\": true}, \"body_digest\": \"wnqyQzN29TdExEaICPbIxLgQBUJwJjBof2Ejelckevw\", \"signature\": \"o_3W1ksy6era1NhxKJlUkYGX2BhxtsmFN5nJl2jeycGgpfoRwY4g5BoMUdXGF0vZyQFMDPnaroFC74ZY4VCTCA\"}"
+}

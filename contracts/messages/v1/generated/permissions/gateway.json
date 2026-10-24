@@ -1,0 +1,7 @@
+{
+  "publish": [],
+  "role": "gateway",
+  "subscribe": [
+    "_INBOX.{self}.>"
+  ]
+}
