@@ -3,21 +3,30 @@
 from __future__ import annotations
 
 from custom_messages.wire import models
-from custom_messages.wire.spec import KindSpec
+from custom_messages.wire.spec import KindSpec, StateSpec
 
 PROTOCOL = '1.0-pre'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
+STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
+AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'
+AUTHORITY_TOKEN_MAX_SECONDS = 604800
 MAX_FRAME_BYTES = 262144
-VERIFICATION_REFUSALS = ('too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'access_denied')
+MAX_NESTING_DEPTH = 64
+CLOCK_SKEW_SECONDS = 8
+SUBJECT_PREFIX = 'ua.v1.{team}.{sender}'
+PEER_SENDER_SLOT = 'x-{installation}'
+REPLY_INBOX_PREFIX = '_INBOX.{runtime}'
+BETWEEN_INSTALLATIONS = frozenset(['durable'])
+VERIFICATION_REFUSALS = ('too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_issuer', 'wrong_sender', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'bad_authority', 'access_denied')
 CHANGE_REFUSALS = ('changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy')
 HOST_ROLES = ('gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler')
-FRAME_SHAPE = {'properties': {'protocol': None, 'kind': None, 'message_id': None, 'idempotency_key': None, 'issuer': {'properties': {'team': None, 'runtime': None, 'agent': None, 'session': None, 'membership_epoch': None, 'revocation_epoch': None, 'key_id': None}}, 'audience': {'properties': {'team': None, 'target': None, 'id': None, 'runtime': None}}, 'subject': None, 'causation_id': None, 'issued_at': None, 'not_before': None, 'expires_at': None, 'authority': {'properties': {'token_id': None, 'issuer': {'properties': {'team': None, 'runtime': None, 'key_id': None}}, 'person': None, 'team': None, 'bound_to': {'properties': {'type': None, 'id': None}}, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'signature': None}}, 'algorithm': None, 'body_digest': None, 'body': None, 'signature': None}}
+FRAME_SHAPE = {'properties': {'protocol': None, 'kind': None, 'message_id': None, 'idempotency_key': None, 'issuer': {'properties': {'installation': None, 'team': None, 'runtime': None, 'agent': None, 'session': None, 'membership_epoch': None, 'revocation_epoch': None, 'key_id': None}}, 'audience': {'properties': {'installation': None, 'team': None, 'target': None, 'id': None, 'runtime': None}}, 'subject': None, 'causation_id': None, 'issued_at': None, 'not_before': None, 'expires_at': None, 'authority': {'properties': {'token_id': None, 'issuer': {'properties': {'installation': None, 'runtime': None, 'membership_epoch': None, 'key_id': None}}, 'audience': {'properties': {'installation': None, 'team': None}}, 'person': None, 'bound_to': {'properties': {'type': None, 'id': None}}, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'signature': None}}, 'algorithm': None, 'body_digest': None, 'body': None, 'signature': None}}
 
 KINDS: dict[str, KindSpec] = {
     'access.decision': KindSpec(
         name='access.decision',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.AccessDecisionBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -39,7 +48,7 @@ KINDS: dict[str, KindSpec] = {
     'access.request': KindSpec(
         name='access.request',
         delivery_class='durable',
-        addresses=('work.team',),
+        addresses={'team_services': 'work.team'},
         body_model=models.AccessRequestBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -61,7 +70,7 @@ KINDS: dict[str, KindSpec] = {
     'access.resolved': KindSpec(
         name='access.resolved',
         delivery_class='durable',
-        addresses=('work.team',),
+        addresses={'team_services': 'work.team'},
         body_model=models.AccessResolvedBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -83,7 +92,7 @@ KINDS: dict[str, KindSpec] = {
     'access.withdraw': KindSpec(
         name='access.withdraw',
         delivery_class='request_reply',
-        addresses=('svc.team.access.withdraw',),
+        addresses={'team_services': 'svc.team.access.withdraw'},
         body_model=models.AccessWithdrawBodyAdapter,
         reply_model=models.AccessWithdrawReplyAdapter,
         reply_errors=('not_found', 'not_own_request'),
@@ -105,7 +114,7 @@ KINDS: dict[str, KindSpec] = {
     'agent.exit': KindSpec(
         name='agent.exit',
         delivery_class='request_reply',
-        addresses=('ctl.agent.{agent}.exit',),
+        addresses={'agent': 'ctl.agent.{agent}.exit'},
         body_model=models.AgentExitBodyAdapter,
         reply_model=models.AgentExitReplyAdapter,
         reply_errors=(),
@@ -127,7 +136,7 @@ KINDS: dict[str, KindSpec] = {
     'agent.pause': KindSpec(
         name='agent.pause',
         delivery_class='request_reply',
-        addresses=('ctl.agent.{agent}.pause',),
+        addresses={'agent': 'ctl.agent.{agent}.pause'},
         body_model=models.AgentPauseBodyAdapter,
         reply_model=models.AgentPauseReplyAdapter,
         reply_errors=('agent_exiting',),
@@ -149,7 +158,7 @@ KINDS: dict[str, KindSpec] = {
     'agent.resume': KindSpec(
         name='agent.resume',
         delivery_class='request_reply',
-        addresses=('ctl.agent.{agent}.resume',),
+        addresses={'agent': 'ctl.agent.{agent}.resume'},
         body_model=models.AgentResumeBodyAdapter,
         reply_model=models.AgentResumeReplyAdapter,
         reply_errors=('agent_exiting',),
@@ -171,7 +180,7 @@ KINDS: dict[str, KindSpec] = {
     'agent.status': KindSpec(
         name='agent.status',
         delivery_class='request_reply',
-        addresses=('ctl.agent.{agent}.status',),
+        addresses={'agent': 'ctl.agent.{agent}.status'},
         body_model=models.AgentStatusBodyAdapter,
         reply_model=models.AgentStatusReplyAdapter,
         reply_errors=('not_allowed',),
@@ -193,7 +202,7 @@ KINDS: dict[str, KindSpec] = {
     'conflicts.cancel': KindSpec(
         name='conflicts.cancel',
         delivery_class='request_reply',
-        addresses=('svc.team.conflicts.cancel',),
+        addresses={'team_services': 'svc.team.conflicts.cancel'},
         body_model=models.ConflictsCancelBodyAdapter,
         reply_model=models.ConflictsCancelReplyAdapter,
         reply_errors=('not_found', 'administrator_required'),
@@ -215,7 +224,7 @@ KINDS: dict[str, KindSpec] = {
     'conflicts.decide': KindSpec(
         name='conflicts.decide',
         delivery_class='request_reply',
-        addresses=('svc.team.conflicts.decide',),
+        addresses={'team_services': 'svc.team.conflicts.decide'},
         body_model=models.ConflictsDecideBodyAdapter,
         reply_model=models.ConflictsDecideReplyAdapter,
         reply_errors=('not_found', 'case_closed', 'values_changed', 'not_allowed'),
@@ -237,7 +246,7 @@ KINDS: dict[str, KindSpec] = {
     'conflicts.list': KindSpec(
         name='conflicts.list',
         delivery_class='request_reply',
-        addresses=('svc.team.conflicts.list',),
+        addresses={'team_services': 'svc.team.conflicts.list'},
         body_model=models.ConflictsListBodyAdapter,
         reply_model=models.ConflictsListReplyAdapter,
         reply_errors=('administrator_required',),
@@ -259,7 +268,7 @@ KINDS: dict[str, KindSpec] = {
     'credential.form.request': KindSpec(
         name='credential.form.request',
         delivery_class='durable',
-        addresses=('work.edge.{edge}',),
+        addresses={'edge': 'work.edge.{edge}'},
         body_model=models.CredentialFormRequestBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -281,7 +290,7 @@ KINDS: dict[str, KindSpec] = {
     'credential.form.result': KindSpec(
         name='credential.form.result',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.CredentialFormResultBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -303,7 +312,7 @@ KINDS: dict[str, KindSpec] = {
     'custody.decide': KindSpec(
         name='custody.decide',
         delivery_class='request_reply',
-        addresses=('svc.team.custody.decide',),
+        addresses={'team_services': 'svc.team.custody.decide'},
         body_model=models.CustodyDecideBodyAdapter,
         reply_model=models.CustodyDecideReplyAdapter,
         reply_errors=('not_found', 'stale_custody', 'late_work_not_found', 'request_closed', 'not_own_request'),
@@ -325,7 +334,7 @@ KINDS: dict[str, KindSpec] = {
     'custody.moved': KindSpec(
         name='custody.moved',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.CustodyMovedBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -347,7 +356,7 @@ KINDS: dict[str, KindSpec] = {
     'debug.dump': KindSpec(
         name='debug.dump',
         delivery_class='request_reply',
-        addresses=('svc.team.debug.dump',),
+        addresses={'team_services': 'svc.team.debug.dump'},
         body_model=models.DebugDumpBodyAdapter,
         reply_model=models.DebugDumpReplyAdapter,
         reply_errors=('not_allowed',),
@@ -369,7 +378,7 @@ KINDS: dict[str, KindSpec] = {
     'delivery.receipt': KindSpec(
         name='delivery.receipt',
         delivery_class='durable',
-        addresses=('work.team',),
+        addresses={'team_services': 'work.team'},
         body_model=models.DeliveryReceiptBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -391,7 +400,7 @@ KINDS: dict[str, KindSpec] = {
     'delivery.refused': KindSpec(
         name='delivery.refused',
         delivery_class='durable',
-        addresses=('work.agent.{agent}', 'work.edge.{edge}', 'work.team'),
+        addresses={'agent': 'work.agent.{agent}', 'edge': 'work.edge.{edge}', 'team_services': 'work.team'},
         body_model=models.DeliveryRefusedBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -413,7 +422,7 @@ KINDS: dict[str, KindSpec] = {
     'heartbeat_items.add': KindSpec(
         name='heartbeat_items.add',
         delivery_class='request_reply',
-        addresses=('svc.team.heartbeat_items.add',),
+        addresses={'team_services': 'svc.team.heartbeat_items.add'},
         body_model=models.HeartbeatItemsAddBodyAdapter,
         reply_model=models.HeartbeatItemsAddReplyAdapter,
         reply_errors=('not_found', 'objective_link_refused', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -435,7 +444,7 @@ KINDS: dict[str, KindSpec] = {
     'heartbeat_items.disable': KindSpec(
         name='heartbeat_items.disable',
         delivery_class='request_reply',
-        addresses=('svc.team.heartbeat_items.disable',),
+        addresses={'team_services': 'svc.team.heartbeat_items.disable'},
         body_model=models.HeartbeatItemsDisableBodyAdapter,
         reply_model=models.HeartbeatItemsDisableReplyAdapter,
         reply_errors=('not_found', 'objective_link_refused', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -457,7 +466,7 @@ KINDS: dict[str, KindSpec] = {
     'heartbeat_items.enable': KindSpec(
         name='heartbeat_items.enable',
         delivery_class='request_reply',
-        addresses=('svc.team.heartbeat_items.enable',),
+        addresses={'team_services': 'svc.team.heartbeat_items.enable'},
         body_model=models.HeartbeatItemsEnableBodyAdapter,
         reply_model=models.HeartbeatItemsEnableReplyAdapter,
         reply_errors=('not_found', 'objective_link_refused', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -479,7 +488,7 @@ KINDS: dict[str, KindSpec] = {
     'heartbeat_items.remove': KindSpec(
         name='heartbeat_items.remove',
         delivery_class='request_reply',
-        addresses=('svc.team.heartbeat_items.remove',),
+        addresses={'team_services': 'svc.team.heartbeat_items.remove'},
         body_model=models.HeartbeatItemsRemoveBodyAdapter,
         reply_model=models.HeartbeatItemsRemoveReplyAdapter,
         reply_errors=('not_found', 'objective_link_refused', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -501,7 +510,7 @@ KINDS: dict[str, KindSpec] = {
     'heartbeat_items.update': KindSpec(
         name='heartbeat_items.update',
         delivery_class='request_reply',
-        addresses=('svc.team.heartbeat_items.update',),
+        addresses={'team_services': 'svc.team.heartbeat_items.update'},
         body_model=models.HeartbeatItemsUpdateBodyAdapter,
         reply_model=models.HeartbeatItemsUpdateReplyAdapter,
         reply_errors=('not_found', 'objective_link_refused', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -523,7 +532,7 @@ KINDS: dict[str, KindSpec] = {
     'intent.set': KindSpec(
         name='intent.set',
         delivery_class='request_reply',
-        addresses=('svc.team.intent.set',),
+        addresses={'team_services': 'svc.team.intent.set'},
         body_model=models.IntentSetBodyAdapter,
         reply_model=models.IntentSetReplyAdapter,
         reply_errors=('changed_since_read', 'not_found', 'request_closed', 'not_own_request'),
@@ -545,7 +554,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.add_note': KindSpec(
         name='knowledge.add_note',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.add_note',),
+        addresses={'team_services': 'svc.team.knowledge.add_note'},
         body_model=models.KnowledgeAddNoteBodyAdapter,
         reply_model=models.KnowledgeAddNoteReplyAdapter,
         reply_errors=('pending_review', 'not_found', 'not_allowed', 'feature_off', 'page_exists', 'merged', 'review_required', 'sensitive_content', 'limit_reached', 'page_frozen', 'repeats_recent_revision', 'personal_space_unavailable', 'saved_write_mismatch', 'contribution_not_pending', 'invalid_request', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -567,7 +576,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.archive': KindSpec(
         name='knowledge.archive',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.archive',),
+        addresses={'team_services': 'svc.team.knowledge.archive'},
         body_model=models.KnowledgeArchiveBodyAdapter,
         reply_model=models.KnowledgeArchiveReplyAdapter,
         reply_errors=('pending_review', 'not_found', 'not_allowed', 'feature_off', 'page_exists', 'merged', 'review_required', 'sensitive_content', 'limit_reached', 'page_frozen', 'repeats_recent_revision', 'personal_space_unavailable', 'saved_write_mismatch', 'contribution_not_pending', 'invalid_request', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -589,7 +598,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.count_contributions': KindSpec(
         name='knowledge.count_contributions',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.count_contributions',),
+        addresses={'team_services': 'svc.team.knowledge.count_contributions'},
         body_model=models.KnowledgeCountContributionsBodyAdapter,
         reply_model=models.KnowledgeCountContributionsReplyAdapter,
         reply_errors=('not_allowed', 'feature_off', 'runtime_error'),
@@ -611,7 +620,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.freeze': KindSpec(
         name='knowledge.freeze',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.freeze',),
+        addresses={'team_services': 'svc.team.knowledge.freeze'},
         body_model=models.KnowledgeFreezeBodyAdapter,
         reply_model=models.KnowledgeFreezeReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'feature_off', 'page_exists', 'merged', 'review_required', 'sensitive_content', 'limit_reached', 'page_frozen', 'repeats_recent_revision', 'personal_space_unavailable', 'saved_write_mismatch', 'contribution_not_pending', 'invalid_request', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -633,7 +642,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.history': KindSpec(
         name='knowledge.history',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.history',),
+        addresses={'team_services': 'svc.team.knowledge.history'},
         body_model=models.KnowledgeHistoryBodyAdapter,
         reply_model=models.KnowledgeHistoryReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'feature_off', 'runtime_error'),
@@ -655,7 +664,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.list': KindSpec(
         name='knowledge.list',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.list',),
+        addresses={'team_services': 'svc.team.knowledge.list'},
         body_model=models.KnowledgeListBodyAdapter,
         reply_model=models.KnowledgeListReplyAdapter,
         reply_errors=('not_allowed', 'feature_off', 'runtime_error'),
@@ -677,7 +686,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.list_contributions': KindSpec(
         name='knowledge.list_contributions',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.list_contributions',),
+        addresses={'team_services': 'svc.team.knowledge.list_contributions'},
         body_model=models.KnowledgeListContributionsBodyAdapter,
         reply_model=models.KnowledgeListContributionsReplyAdapter,
         reply_errors=('not_allowed', 'feature_off', 'runtime_error'),
@@ -699,7 +708,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.merge': KindSpec(
         name='knowledge.merge',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.merge',),
+        addresses={'team_services': 'svc.team.knowledge.merge'},
         body_model=models.KnowledgeMergeBodyAdapter,
         reply_model=models.KnowledgeMergeReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'feature_off', 'page_exists', 'merged', 'review_required', 'sensitive_content', 'limit_reached', 'page_frozen', 'repeats_recent_revision', 'personal_space_unavailable', 'saved_write_mismatch', 'contribution_not_pending', 'invalid_request', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -721,7 +730,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.publish_contribution': KindSpec(
         name='knowledge.publish_contribution',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.publish_contribution',),
+        addresses={'team_services': 'svc.team.knowledge.publish_contribution'},
         body_model=models.KnowledgePublishContributionBodyAdapter,
         reply_model=models.KnowledgePublishContributionReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'feature_off', 'page_exists', 'merged', 'review_required', 'sensitive_content', 'limit_reached', 'page_frozen', 'repeats_recent_revision', 'personal_space_unavailable', 'saved_write_mismatch', 'contribution_not_pending', 'invalid_request', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -743,7 +752,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.read': KindSpec(
         name='knowledge.read',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.read',),
+        addresses={'team_services': 'svc.team.knowledge.read'},
         body_model=models.KnowledgeReadBodyAdapter,
         reply_model=models.KnowledgeReadReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'feature_off', 'runtime_error'),
@@ -765,7 +774,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.read_contribution': KindSpec(
         name='knowledge.read_contribution',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.read_contribution',),
+        addresses={'team_services': 'svc.team.knowledge.read_contribution'},
         body_model=models.KnowledgeReadContributionBodyAdapter,
         reply_model=models.KnowledgeReadContributionReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'feature_off', 'runtime_error'),
@@ -787,7 +796,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.reject_contribution': KindSpec(
         name='knowledge.reject_contribution',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.reject_contribution',),
+        addresses={'team_services': 'svc.team.knowledge.reject_contribution'},
         body_model=models.KnowledgeRejectContributionBodyAdapter,
         reply_model=models.KnowledgeRejectContributionReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'feature_off', 'page_exists', 'merged', 'review_required', 'sensitive_content', 'limit_reached', 'page_frozen', 'repeats_recent_revision', 'personal_space_unavailable', 'saved_write_mismatch', 'contribution_not_pending', 'invalid_request', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -809,7 +818,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.resolve_note': KindSpec(
         name='knowledge.resolve_note',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.resolve_note',),
+        addresses={'team_services': 'svc.team.knowledge.resolve_note'},
         body_model=models.KnowledgeResolveNoteBodyAdapter,
         reply_model=models.KnowledgeResolveNoteReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'feature_off', 'page_exists', 'merged', 'review_required', 'sensitive_content', 'limit_reached', 'page_frozen', 'repeats_recent_revision', 'personal_space_unavailable', 'saved_write_mismatch', 'contribution_not_pending', 'invalid_request', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -831,7 +840,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.revert': KindSpec(
         name='knowledge.revert',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.revert',),
+        addresses={'team_services': 'svc.team.knowledge.revert'},
         body_model=models.KnowledgeRevertBodyAdapter,
         reply_model=models.KnowledgeRevertReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'feature_off', 'page_exists', 'merged', 'review_required', 'sensitive_content', 'limit_reached', 'page_frozen', 'repeats_recent_revision', 'personal_space_unavailable', 'saved_write_mismatch', 'contribution_not_pending', 'invalid_request', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -853,7 +862,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.unfreeze': KindSpec(
         name='knowledge.unfreeze',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.unfreeze',),
+        addresses={'team_services': 'svc.team.knowledge.unfreeze'},
         body_model=models.KnowledgeUnfreezeBodyAdapter,
         reply_model=models.KnowledgeUnfreezeReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'feature_off', 'page_exists', 'merged', 'review_required', 'sensitive_content', 'limit_reached', 'page_frozen', 'repeats_recent_revision', 'personal_space_unavailable', 'saved_write_mismatch', 'contribution_not_pending', 'invalid_request', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -875,7 +884,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.withdraw_contribution': KindSpec(
         name='knowledge.withdraw_contribution',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.withdraw_contribution',),
+        addresses={'team_services': 'svc.team.knowledge.withdraw_contribution'},
         body_model=models.KnowledgeWithdrawContributionBodyAdapter,
         reply_model=models.KnowledgeWithdrawContributionReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'contribution_not_pending', 'runtime_error'),
@@ -897,7 +906,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.write': KindSpec(
         name='knowledge.write',
         delivery_class='request_reply',
-        addresses=('svc.team.knowledge.write',),
+        addresses={'team_services': 'svc.team.knowledge.write'},
         body_model=models.KnowledgeWriteBodyAdapter,
         reply_model=models.KnowledgeWriteReplyAdapter,
         reply_errors=('pending_review', 'not_found', 'not_allowed', 'feature_off', 'page_exists', 'merged', 'review_required', 'sensitive_content', 'limit_reached', 'page_frozen', 'repeats_recent_revision', 'personal_space_unavailable', 'saved_write_mismatch', 'contribution_not_pending', 'invalid_request', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -919,7 +928,7 @@ KINDS: dict[str, KindSpec] = {
     'ledger.fact': KindSpec(
         name='ledger.fact',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.LedgerFactBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -941,7 +950,7 @@ KINDS: dict[str, KindSpec] = {
     'memory.create': KindSpec(
         name='memory.create',
         delivery_class='request_reply',
-        addresses=('svc.team.memory.create',),
+        addresses={'team_services': 'svc.team.memory.create'},
         body_model=models.MemoryCreateBodyAdapter,
         reply_model=models.MemoryCreateReplyAdapter,
         reply_errors=('not_allowed', 'not_found', 'capacity_reached', 'invalid_request', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -963,7 +972,7 @@ KINDS: dict[str, KindSpec] = {
     'memory.delete': KindSpec(
         name='memory.delete',
         delivery_class='request_reply',
-        addresses=('svc.team.memory.delete',),
+        addresses={'team_services': 'svc.team.memory.delete'},
         body_model=models.MemoryDeleteBodyAdapter,
         reply_model=models.MemoryDeleteReplyAdapter,
         reply_errors=('not_allowed', 'not_found', 'capacity_reached', 'invalid_request', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -985,7 +994,7 @@ KINDS: dict[str, KindSpec] = {
     'memory.list': KindSpec(
         name='memory.list',
         delivery_class='request_reply',
-        addresses=('svc.team.memory.list',),
+        addresses={'team_services': 'svc.team.memory.list'},
         body_model=models.MemoryListBodyAdapter,
         reply_model=models.MemoryListReplyAdapter,
         reply_errors=('not_allowed', 'runtime_error'),
@@ -1007,7 +1016,7 @@ KINDS: dict[str, KindSpec] = {
     'memory.replace': KindSpec(
         name='memory.replace',
         delivery_class='request_reply',
-        addresses=('svc.team.memory.replace',),
+        addresses={'team_services': 'svc.team.memory.replace'},
         body_model=models.MemoryReplaceBodyAdapter,
         reply_model=models.MemoryReplaceReplyAdapter,
         reply_errors=('not_allowed', 'not_found', 'capacity_reached', 'invalid_request', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -1029,7 +1038,7 @@ KINDS: dict[str, KindSpec] = {
     'memory.show': KindSpec(
         name='memory.show',
         delivery_class='request_reply',
-        addresses=('svc.team.memory.show',),
+        addresses={'team_services': 'svc.team.memory.show'},
         body_model=models.MemoryShowBodyAdapter,
         reply_model=models.MemoryShowReplyAdapter,
         reply_errors=('not_allowed', 'not_found', 'runtime_error'),
@@ -1051,7 +1060,7 @@ KINDS: dict[str, KindSpec] = {
     'memory.undo': KindSpec(
         name='memory.undo',
         delivery_class='request_reply',
-        addresses=('svc.team.memory.undo',),
+        addresses={'team_services': 'svc.team.memory.undo'},
         body_model=models.MemoryUndoBodyAdapter,
         reply_model=models.MemoryUndoReplyAdapter,
         reply_errors=('not_allowed', 'not_found', 'capacity_reached', 'invalid_request', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -1073,7 +1082,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.abandon': KindSpec(
         name='objectives.abandon',
         delivery_class='request_reply',
-        addresses=('svc.team.objectives.abandon',),
+        addresses={'team_services': 'svc.team.objectives.abandon'},
         body_model=models.ObjectivesAbandonBodyAdapter,
         reply_model=models.ObjectivesAbandonReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'changed_since_read', 'action_unavailable', 'runtime_error'),
@@ -1095,7 +1104,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.create': KindSpec(
         name='objectives.create',
         delivery_class='request_reply',
-        addresses=('svc.team.objectives.create',),
+        addresses={'team_services': 'svc.team.objectives.create'},
         body_model=models.ObjectivesCreateBodyAdapter,
         reply_model=models.ObjectivesCreateReplyAdapter,
         reply_errors=('not_found', 'feature_off', 'status_not_settable', 'confirmation_required', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -1117,7 +1126,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.delete': KindSpec(
         name='objectives.delete',
         delivery_class='request_reply',
-        addresses=('svc.team.objectives.delete',),
+        addresses={'team_services': 'svc.team.objectives.delete'},
         body_model=models.ObjectivesDeleteBodyAdapter,
         reply_model=models.ObjectivesDeleteReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'changed_since_read', 'action_unavailable', 'runtime_error'),
@@ -1139,7 +1148,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.list': KindSpec(
         name='objectives.list',
         delivery_class='request_reply',
-        addresses=('svc.team.objectives.list',),
+        addresses={'team_services': 'svc.team.objectives.list'},
         body_model=models.ObjectivesListBodyAdapter,
         reply_model=models.ObjectivesListReplyAdapter,
         reply_errors=('runtime_error',),
@@ -1161,7 +1170,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.pause': KindSpec(
         name='objectives.pause',
         delivery_class='request_reply',
-        addresses=('svc.team.objectives.pause',),
+        addresses={'team_services': 'svc.team.objectives.pause'},
         body_model=models.ObjectivesPauseBodyAdapter,
         reply_model=models.ObjectivesPauseReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'changed_since_read', 'action_unavailable', 'runtime_error'),
@@ -1183,7 +1192,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.resume': KindSpec(
         name='objectives.resume',
         delivery_class='request_reply',
-        addresses=('svc.team.objectives.resume',),
+        addresses={'team_services': 'svc.team.objectives.resume'},
         body_model=models.ObjectivesResumeBodyAdapter,
         reply_model=models.ObjectivesResumeReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'changed_since_read', 'action_unavailable', 'runtime_error'),
@@ -1205,7 +1214,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.stop': KindSpec(
         name='objectives.stop',
         delivery_class='request_reply',
-        addresses=('svc.team.objectives.stop',),
+        addresses={'team_services': 'svc.team.objectives.stop'},
         body_model=models.ObjectivesStopBodyAdapter,
         reply_model=models.ObjectivesStopReplyAdapter,
         reply_errors=('not_found', 'not_allowed', 'changed_since_read', 'action_unavailable', 'runtime_error'),
@@ -1227,7 +1236,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.update_progress': KindSpec(
         name='objectives.update_progress',
         delivery_class='request_reply',
-        addresses=('svc.team.objectives.update_progress',),
+        addresses={'team_services': 'svc.team.objectives.update_progress'},
         body_model=models.ObjectivesUpdateProgressBodyAdapter,
         reply_model=models.ObjectivesUpdateProgressReplyAdapter,
         reply_errors=('not_found', 'feature_off', 'status_not_settable', 'confirmation_required', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -1249,7 +1258,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.update_status': KindSpec(
         name='objectives.update_status',
         delivery_class='request_reply',
-        addresses=('svc.team.objectives.update_status',),
+        addresses={'team_services': 'svc.team.objectives.update_status'},
         body_model=models.ObjectivesUpdateStatusBodyAdapter,
         reply_model=models.ObjectivesUpdateStatusReplyAdapter,
         reply_errors=('not_found', 'feature_off', 'status_not_settable', 'confirmation_required', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -1271,7 +1280,7 @@ KINDS: dict[str, KindSpec] = {
     'people.set_standing': KindSpec(
         name='people.set_standing',
         delivery_class='request_reply',
-        addresses=('svc.team.people.set_standing',),
+        addresses={'team_services': 'svc.team.people.set_standing'},
         body_model=models.PeopleSetStandingBodyAdapter,
         reply_model=models.PeopleSetStandingReplyAdapter,
         reply_errors=('administrator_required', 'runtime_error'),
@@ -1293,7 +1302,7 @@ KINDS: dict[str, KindSpec] = {
     'person.notify': KindSpec(
         name='person.notify',
         delivery_class='durable',
-        addresses=('work.edge.{edge}',),
+        addresses={'edge': 'work.edge.{edge}'},
         body_model=models.PersonNotifyBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -1315,7 +1324,7 @@ KINDS: dict[str, KindSpec] = {
     'question.closed': KindSpec(
         name='question.closed',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.QuestionClosedBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -1337,7 +1346,7 @@ KINDS: dict[str, KindSpec] = {
     'requests.pause': KindSpec(
         name='requests.pause',
         delivery_class='request_reply',
-        addresses=('svc.team.requests.pause',),
+        addresses={'team_services': 'svc.team.requests.pause'},
         body_model=models.RequestsPauseBodyAdapter,
         reply_model=models.RequestsPauseReplyAdapter,
         reply_errors=('not_found', 'request_closed', 'not_own_request'),
@@ -1359,7 +1368,7 @@ KINDS: dict[str, KindSpec] = {
     'requests.resume': KindSpec(
         name='requests.resume',
         delivery_class='request_reply',
-        addresses=('svc.team.requests.resume',),
+        addresses={'team_services': 'svc.team.requests.resume'},
         body_model=models.RequestsResumeBodyAdapter,
         reply_model=models.RequestsResumeReplyAdapter,
         reply_errors=('not_found', 'request_closed', 'not_own_request'),
@@ -1381,7 +1390,7 @@ KINDS: dict[str, KindSpec] = {
     'run_context.sign': KindSpec(
         name='run_context.sign',
         delivery_class='request_reply',
-        addresses=('svc.team.run_context.sign',),
+        addresses={'team_services': 'svc.team.run_context.sign'},
         body_model=models.RunContextSignBodyAdapter,
         reply_model=models.RunContextSignReplyAdapter,
         reply_errors=('signer_missing', 'not_found', 'claim_not_held', 'schedule_stopped', 'scheduled_job_mismatch', 'heartbeat_item_not_found', 'owner_inactive', 'check_failed'),
@@ -1398,12 +1407,12 @@ KINDS: dict[str, KindSpec] = {
         wakes_model='never',
         rendering='none',
         body_shape={'properties': {'request_id': None, 'schedule_id': None, 'claim_token': None, 'scheduled_job_id': None, 'conversation_id': None, 'heartbeat_item_id': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'system_work': None, 'authority': {'properties': {'token_id': None, 'issuer': {'properties': {'team': None, 'runtime': None, 'key_id': None}}, 'person': None, 'team': None, 'bound_to': {'properties': {'type': None, 'id': None}}, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'signature': None}}}}, 'signer_missing': {'properties': {'outcome': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'claim_not_held': {'properties': {'outcome': None, 'message': None}}, 'schedule_stopped': {'properties': {'outcome': None, 'message': None}}, 'scheduled_job_mismatch': {'properties': {'outcome': None, 'message': None}}, 'heartbeat_item_not_found': {'properties': {'outcome': None, 'message': None}}, 'owner_inactive': {'properties': {'outcome': None, 'message': None}}, 'check_failed': {'properties': {'outcome': None, 'message': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'system_work': None, 'authority': {'properties': {'token_id': None, 'issuer': {'properties': {'installation': None, 'runtime': None, 'membership_epoch': None, 'key_id': None}}, 'audience': {'properties': {'installation': None, 'team': None}}, 'person': None, 'bound_to': {'properties': {'type': None, 'id': None}}, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'signature': None}}}}, 'signer_missing': {'properties': {'outcome': None, 'message': None}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'claim_not_held': {'properties': {'outcome': None, 'message': None}}, 'schedule_stopped': {'properties': {'outcome': None, 'message': None}}, 'scheduled_job_mismatch': {'properties': {'outcome': None, 'message': None}}, 'heartbeat_item_not_found': {'properties': {'outcome': None, 'message': None}}, 'owner_inactive': {'properties': {'outcome': None, 'message': None}}, 'check_failed': {'properties': {'outcome': None, 'message': None}}}},
     ),
     'schedules.disable': KindSpec(
         name='schedules.disable',
         delivery_class='request_reply',
-        addresses=('svc.team.schedules.disable',),
+        addresses={'team_services': 'svc.team.schedules.disable'},
         body_model=models.SchedulesDisableBodyAdapter,
         reply_model=models.SchedulesDisableReplyAdapter,
         reply_errors=('approval_required', 'not_found', 'not_allowed', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -1425,7 +1434,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.install': KindSpec(
         name='schedules.install',
         delivery_class='request_reply',
-        addresses=('svc.team.schedules.install',),
+        addresses={'team_services': 'svc.team.schedules.install'},
         body_model=models.SchedulesInstallBodyAdapter,
         reply_model=models.SchedulesInstallReplyAdapter,
         reply_errors=('invalid_request', 'id_in_use', 'not_allowed', 'not_found', 'not_system_managed', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy'),
@@ -1447,7 +1456,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.list': KindSpec(
         name='schedules.list',
         delivery_class='request_reply',
-        addresses=('svc.team.schedules.list',),
+        addresses={'team_services': 'svc.team.schedules.list'},
         body_model=models.SchedulesListBodyAdapter,
         reply_model=models.SchedulesListReplyAdapter,
         reply_errors=('not_allowed', 'runtime_error'),
@@ -1469,7 +1478,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.pause': KindSpec(
         name='schedules.pause',
         delivery_class='request_reply',
-        addresses=('svc.team.schedules.pause',),
+        addresses={'team_services': 'svc.team.schedules.pause'},
         body_model=models.SchedulesPauseBodyAdapter,
         reply_model=models.SchedulesPauseReplyAdapter,
         reply_errors=('approval_required', 'not_found', 'not_allowed', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -1491,7 +1500,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.remove': KindSpec(
         name='schedules.remove',
         delivery_class='request_reply',
-        addresses=('svc.team.schedules.remove',),
+        addresses={'team_services': 'svc.team.schedules.remove'},
         body_model=models.SchedulesRemoveBodyAdapter,
         reply_model=models.SchedulesRemoveReplyAdapter,
         reply_errors=('approval_required', 'not_found', 'not_allowed', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -1513,7 +1522,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.resume': KindSpec(
         name='schedules.resume',
         delivery_class='request_reply',
-        addresses=('svc.team.schedules.resume',),
+        addresses={'team_services': 'svc.team.schedules.resume'},
         body_model=models.SchedulesResumeBodyAdapter,
         reply_model=models.SchedulesResumeReplyAdapter,
         reply_errors=('approval_required', 'not_found', 'not_allowed', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -1535,7 +1544,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.set_worker': KindSpec(
         name='schedules.set_worker',
         delivery_class='request_reply',
-        addresses=('svc.team.schedules.set_worker',),
+        addresses={'team_services': 'svc.team.schedules.set_worker'},
         body_model=models.SchedulesSetWorkerBodyAdapter,
         reply_model=models.SchedulesSetWorkerReplyAdapter,
         reply_errors=('approval_required', 'not_found', 'not_allowed', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -1557,7 +1566,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.update': KindSpec(
         name='schedules.update',
         delivery_class='request_reply',
-        addresses=('svc.team.schedules.update',),
+        addresses={'team_services': 'svc.team.schedules.update'},
         body_model=models.SchedulesUpdateBodyAdapter,
         reply_model=models.SchedulesUpdateReplyAdapter,
         reply_errors=('approval_required', 'not_found', 'not_allowed', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -1579,7 +1588,7 @@ KINDS: dict[str, KindSpec] = {
     'skills.changed': KindSpec(
         name='skills.changed',
         delivery_class='event',
-        addresses=('evt.skills_changed',),
+        addresses={'team': 'evt.skills_changed'},
         body_model=models.SkillsChangedBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -1601,7 +1610,7 @@ KINDS: dict[str, KindSpec] = {
     'staged_changes.apply': KindSpec(
         name='staged_changes.apply',
         delivery_class='request_reply',
-        addresses=('svc.team.staged_changes.apply',),
+        addresses={'team_services': 'svc.team.staged_changes.apply'},
         body_model=models.StagedChangesApplyBodyAdapter,
         reply_model=models.StagedChangesApplyReplyAdapter,
         reply_errors=('waiting', 'agreement_required', 'already_applied', 'not_found', 'not_allowed', 'denied', 'withdrawn', 'changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy', 'runtime_error'),
@@ -1623,7 +1632,7 @@ KINDS: dict[str, KindSpec] = {
     'steering.decide': KindSpec(
         name='steering.decide',
         delivery_class='request_reply',
-        addresses=('svc.team.steering.decide',),
+        addresses={'team_services': 'svc.team.steering.decide'},
         body_model=models.SteeringDecideBodyAdapter,
         reply_model=models.SteeringDecideReplyAdapter,
         reply_errors=('not_found', 'hold_expired', 'extension_used', 'tasks_not_covered', 'not_own_request'),
@@ -1645,7 +1654,7 @@ KINDS: dict[str, KindSpec] = {
     'task.account': KindSpec(
         name='task.account',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.TaskAccountBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -1667,7 +1676,7 @@ KINDS: dict[str, KindSpec] = {
     'task.answer': KindSpec(
         name='task.answer',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.TaskAnswerBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -1689,7 +1698,7 @@ KINDS: dict[str, KindSpec] = {
     'task.claimed': KindSpec(
         name='task.claimed',
         delivery_class='durable',
-        addresses=('work.agent.{agent}', 'work.team'),
+        addresses={'agent': 'work.agent.{agent}', 'team_services': 'work.team'},
         body_model=models.TaskClaimedBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -1711,7 +1720,7 @@ KINDS: dict[str, KindSpec] = {
     'task.handback': KindSpec(
         name='task.handback',
         delivery_class='durable',
-        addresses=('work.agent.{agent}', 'work.team'),
+        addresses={'agent': 'work.agent.{agent}', 'team_services': 'work.team'},
         body_model=models.TaskHandbackBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -1733,7 +1742,7 @@ KINDS: dict[str, KindSpec] = {
     'task.probe': KindSpec(
         name='task.probe',
         delivery_class='request_reply',
-        addresses=('ctl.agent.{agent}.task.probe',),
+        addresses={'agent': 'ctl.agent.{agent}.task.probe'},
         body_model=models.TaskProbeBodyAdapter,
         reply_model=models.TaskProbeReplyAdapter,
         reply_errors=(),
@@ -1755,7 +1764,7 @@ KINDS: dict[str, KindSpec] = {
     'task.progress': KindSpec(
         name='task.progress',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.TaskProgressBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -1777,7 +1786,7 @@ KINDS: dict[str, KindSpec] = {
     'task.question': KindSpec(
         name='task.question',
         delivery_class='durable',
-        addresses=('work.agent.{agent}', 'work.edge.{edge}'),
+        addresses={'agent': 'work.agent.{agent}', 'edge': 'work.edge.{edge}'},
         body_model=models.TaskQuestionBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -1799,7 +1808,7 @@ KINDS: dict[str, KindSpec] = {
     'task.report': KindSpec(
         name='task.report',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.TaskReportBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -1821,7 +1830,7 @@ KINDS: dict[str, KindSpec] = {
     'task.request': KindSpec(
         name='task.request',
         delivery_class='durable',
-        addresses=('work.agent.{agent}', 'work.pool.{pool}', 'work.team'),
+        addresses={'agent': 'work.agent.{agent}', 'pool': 'work.pool.{pool}', 'team_services': 'work.team'},
         body_model=models.TaskRequestBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -1843,7 +1852,7 @@ KINDS: dict[str, KindSpec] = {
     'task.result': KindSpec(
         name='task.result',
         delivery_class='durable',
-        addresses=('work.agent.{agent}', 'work.edge.{edge}', 'work.team'),
+        addresses={'agent': 'work.agent.{agent}', 'edge': 'work.edge.{edge}', 'team_services': 'work.team'},
         body_model=models.TaskResultBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -1865,7 +1874,7 @@ KINDS: dict[str, KindSpec] = {
     'task.steer': KindSpec(
         name='task.steer',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.TaskSteerBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -1887,7 +1896,7 @@ KINDS: dict[str, KindSpec] = {
     'task.stop': KindSpec(
         name='task.stop',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.TaskStopBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -1909,7 +1918,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.cancel': KindSpec(
         name='tasks.cancel',
         delivery_class='request_reply',
-        addresses=('svc.team.tasks.cancel',),
+        addresses={'team_services': 'svc.team.tasks.cancel'},
         body_model=models.TasksCancelBodyAdapter,
         reply_model=models.TasksCancelReplyAdapter,
         reply_errors=('no_matching_work', 'runtime_error'),
@@ -1931,7 +1940,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.inventory': KindSpec(
         name='tasks.inventory',
         delivery_class='request_reply',
-        addresses=('svc.team.tasks.inventory',),
+        addresses={'team_services': 'svc.team.tasks.inventory'},
         body_model=models.TasksInventoryBodyAdapter,
         reply_model=models.TasksInventoryReplyAdapter,
         reply_errors=('runtime_error',),
@@ -1953,7 +1962,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.list': KindSpec(
         name='tasks.list',
         delivery_class='request_reply',
-        addresses=('svc.team.tasks.list', 'ctl.agent.{agent}.tasks.list'),
+        addresses={'team_services': 'svc.team.tasks.list', 'agent': 'ctl.agent.{agent}.tasks.list'},
         body_model=models.TasksListBodyAdapter,
         reply_model=models.TasksListReplyAdapter,
         reply_errors=('not_allowed', 'runtime_error'),
@@ -1975,7 +1984,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.list_finished': KindSpec(
         name='tasks.list_finished',
         delivery_class='request_reply',
-        addresses=('svc.team.tasks.list_finished', 'ctl.agent.{agent}.tasks.list_finished'),
+        addresses={'team_services': 'svc.team.tasks.list_finished', 'agent': 'ctl.agent.{agent}.tasks.list_finished'},
         body_model=models.TasksListFinishedBodyAdapter,
         reply_model=models.TasksListFinishedReplyAdapter,
         reply_errors=('not_allowed', 'runtime_error'),
@@ -1997,7 +2006,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.probe': KindSpec(
         name='tasks.probe',
         delivery_class='request_reply',
-        addresses=('svc.team.tasks.probe',),
+        addresses={'team_services': 'svc.team.tasks.probe'},
         body_model=models.TasksProbeBodyAdapter,
         reply_model=models.TasksProbeReplyAdapter,
         reply_errors=(),
@@ -2019,7 +2028,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.progress': KindSpec(
         name='tasks.progress',
         delivery_class='request_reply',
-        addresses=('svc.team.tasks.progress',),
+        addresses={'team_services': 'svc.team.tasks.progress'},
         body_model=models.TasksProgressBodyAdapter,
         reply_model=models.TasksProgressReplyAdapter,
         reply_errors=('not_allowed',),
@@ -2041,7 +2050,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.purge': KindSpec(
         name='tasks.purge',
         delivery_class='request_reply',
-        addresses=('svc.team.tasks.purge', 'ctl.agent.{agent}.tasks.purge'),
+        addresses={'team_services': 'svc.team.tasks.purge', 'agent': 'ctl.agent.{agent}.tasks.purge'},
         body_model=models.TasksPurgeBodyAdapter,
         reply_model=models.TasksPurgeReplyAdapter,
         reply_errors=('queue_changed', 'not_found', 'not_allowed', 'runtime_error'),
@@ -2063,7 +2072,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.remove': KindSpec(
         name='tasks.remove',
         delivery_class='request_reply',
-        addresses=('svc.team.tasks.remove', 'ctl.agent.{agent}.tasks.remove'),
+        addresses={'team_services': 'svc.team.tasks.remove', 'agent': 'ctl.agent.{agent}.tasks.remove'},
         body_model=models.TasksRemoveBodyAdapter,
         reply_model=models.TasksRemoveReplyAdapter,
         reply_errors=('queue_changed', 'not_found', 'not_allowed', 'runtime_error'),
@@ -2085,7 +2094,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.steer': KindSpec(
         name='tasks.steer',
         delivery_class='request_reply',
-        addresses=('svc.team.tasks.steer',),
+        addresses={'team_services': 'svc.team.tasks.steer'},
         body_model=models.TasksSteerBodyAdapter,
         reply_model=models.TasksSteerReplyAdapter,
         reply_errors=('not_started', 'request_finished', 'feature_off', 'not_allowed'),
@@ -2107,7 +2116,7 @@ KINDS: dict[str, KindSpec] = {
     'tool.setup.request': KindSpec(
         name='tool.setup.request',
         delivery_class='durable',
-        addresses=('work.edge.{edge}',),
+        addresses={'edge': 'work.edge.{edge}'},
         body_model=models.ToolSetupRequestBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -2129,7 +2138,7 @@ KINDS: dict[str, KindSpec] = {
     'tool.setup.result': KindSpec(
         name='tool.setup.result',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.ToolSetupResultBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -2151,7 +2160,7 @@ KINDS: dict[str, KindSpec] = {
     'topics.find_threads': KindSpec(
         name='topics.find_threads',
         delivery_class='request_reply',
-        addresses=('svc.team.topics.find_threads',),
+        addresses={'team_services': 'svc.team.topics.find_threads'},
         body_model=models.TopicsFindThreadsBodyAdapter,
         reply_model=models.TopicsFindThreadsReplyAdapter,
         reply_errors=('invalid_request', 'runtime_error'),
@@ -2173,7 +2182,7 @@ KINDS: dict[str, KindSpec] = {
     'topics.list_tags': KindSpec(
         name='topics.list_tags',
         delivery_class='request_reply',
-        addresses=('svc.team.topics.list_tags',),
+        addresses={'team_services': 'svc.team.topics.list_tags'},
         body_model=models.TopicsListTagsBodyAdapter,
         reply_model=models.TopicsListTagsReplyAdapter,
         reply_errors=('runtime_error',),
@@ -2195,7 +2204,7 @@ KINDS: dict[str, KindSpec] = {
     'topics.tag_thread': KindSpec(
         name='topics.tag_thread',
         delivery_class='request_reply',
-        addresses=('svc.team.topics.tag_thread',),
+        addresses={'team_services': 'svc.team.topics.tag_thread'},
         body_model=models.TopicsTagThreadBodyAdapter,
         reply_model=models.TopicsTagThreadReplyAdapter,
         reply_errors=('not_found', 'invalid_request', 'runtime_error'),
@@ -2214,4 +2223,11 @@ KINDS: dict[str, KindSpec] = {
         body_shape={'properties': {'request_id': None, 'conversation_id': None, 'tags': {'items': None}, 'private': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'applied_tags': {'items': None}}}, 'not_found': {'properties': {'outcome': None, 'message': None}}, 'invalid_request': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
     ),
+}
+
+STATE_RECORDS: dict[str, StateSpec] = {
+    'agent_session': StateSpec(name='agent_session', bucket='UA1_CERTS', key='session.<installation>.<team>.<session>', signer='host', signer_roles=('team_services',), writers=('team_services', 'edge_adapter'), body_model=models.AgentSessionStateAdapter),
+    'agreement': StateSpec(name='agreement', bucket='UA1_CERTS', key='agreement.<peer>', signer='authority', signer_roles=(), writers=('installation_authority',), body_model=models.AgreementStateAdapter),
+    'certificate': StateSpec(name='certificate', bucket='UA1_CERTS', key='host.<installation>.<runtime>.<membership_epoch>', signer='authority', signer_roles=(), writers=('installation_authority', 'edge_adapter'), body_model=models.CertificateStateAdapter),
+    'revocations': StateSpec(name='revocations', bucket='UA1_CERTS', key='revocations.<installation>', signer='authority', signer_roles=(), writers=('installation_authority', 'edge_adapter'), body_model=models.RevocationsStateAdapter),
 }

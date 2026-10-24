@@ -4,9 +4,14 @@
   "title": "Shared values of protocol 1",
   "$defs": {
     "token_id": {
-      "description": "An id that is one NATS subject token. Ids starting with an underscore are reserved for the system; ids starting with x- name other installations.",
+      "description": "An id that is one NATS subject token. Ids starting with an underscore are reserved for the system; runtime ids starting with x- are reserved, because that sender slot names other installations.",
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
+    "installation_id": {
+      "description": "An installation: one authority and the hosts it certifies. At most 62 characters, so that x-<installation> is one subject token.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,61}$"
     },
     "team_id": {
       "$ref": "#/$defs/token_id"
@@ -20,6 +25,10 @@
       "$ref": "#/$defs/token_id"
     },
     "agent_type": {
+      "$ref": "#/$defs/token_id"
+    },
+    "session_id": {
+      "description": "One run of an agent on one host, named by its agent session certificate. A restart or a move starts a new session.",
       "$ref": "#/$defs/token_id"
     },
     "record_id": {
@@ -44,9 +53,9 @@
       "maxLength": 96
     },
     "timestamp": {
-      "description": "A UTC time with exactly three fractional digits.",
+      "description": "A UTC time from 1970 to 9999 with exactly three fractional digits. Receivers also refuse dates that do not exist, such as 30 February.",
       "type": "string",
-      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+      "pattern": "^(19[7-9][0-9]|[2-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
     },
     "epoch": {
       "type": "integer",
@@ -115,9 +124,12 @@
       "additionalProperties": false
     },
     "issuer": {
-      "description": "Who signed the frame: the host, and the agent session it signed for.",
+      "description": "Who signed the frame: the host, by its certificate, and the agent session it signed for. Receivers look the certificate and the session up in their trust store; nothing here is trusted until those records confirm it.",
       "type": "object",
       "properties": {
+        "installation": {
+          "$ref": "#/$defs/installation_id"
+        },
         "team": {
           "$ref": "#/$defs/team_id"
         },
@@ -128,7 +140,7 @@
           "$ref": "#/$defs/agent_id"
         },
         "session": {
-          "$ref": "#/$defs/token_id"
+          "$ref": "#/$defs/session_id"
         },
         "membership_epoch": {
           "$ref": "#/$defs/epoch"
@@ -141,6 +153,7 @@
         }
       },
       "required": [
+        "installation",
         "team",
         "runtime",
         "membership_epoch",
@@ -150,9 +163,12 @@
       "additionalProperties": false
     },
     "audience": {
-      "description": "Who the frame is for. Agents are named by id, never by the host that runs them.",
+      "description": "Who the frame is for. Agents are named by id, never by the host that runs them. Broadcast events name their whole team (target team, id the team id); team services also use the team id.",
       "type": "object",
       "properties": {
+        "installation": {
+          "$ref": "#/$defs/installation_id"
+        },
         "team": {
           "$ref": "#/$defs/team_id"
         },
@@ -162,6 +178,7 @@
             "agent",
             "pool",
             "team_services",
+            "team",
             "edge",
             "installation_service"
           ]
@@ -174,6 +191,7 @@
         }
       },
       "required": [
+        "installation",
         "team",
         "target",
         "id"
@@ -181,7 +199,7 @@
       "additionalProperties": false
     },
     "authority_token": {
-      "description": "Proof that work acts for a person, issued by the gateway or the scheduler and bound to one root task or one command. It is copied unchanged down a delegation tree.",
+      "description": "Proof that work acts for a person, issued by a gateway or scheduler host and bound to one root task or one command. It names the team the person asked (its audience), and only that team presents it, copied unchanged down a delegation tree. The signature covers the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/authority-token/v1 and a newline.",
       "type": "object",
       "properties": {
         "token_id": {
@@ -190,28 +208,47 @@
         "issuer": {
           "type": "object",
           "properties": {
-            "team": {
-              "$ref": "#/$defs/team_id"
+            "installation": {
+              "$ref": "#/$defs/installation_id"
             },
             "runtime": {
               "$ref": "#/$defs/runtime_id"
+            },
+            "membership_epoch": {
+              "$ref": "#/$defs/epoch"
             },
             "key_id": {
               "$ref": "#/$defs/key_id"
             }
           },
           "required": [
-            "team",
+            "installation",
             "runtime",
+            "membership_epoch",
             "key_id"
           ],
-          "additionalProperties": false
+          "additionalProperties": false,
+          "description": "The gateway or scheduler host that signed the token, by its certificate."
+        },
+        "audience": {
+          "type": "object",
+          "properties": {
+            "installation": {
+              "$ref": "#/$defs/installation_id"
+            },
+            "team": {
+              "$ref": "#/$defs/team_id"
+            }
+          },
+          "required": [
+            "installation",
+            "team"
+          ],
+          "additionalProperties": false,
+          "description": "The team the person asked; only that team presents the token. Its installation is the issuer's."
         },
         "person": {
           "$ref": "#/$defs/person_ref"
-        },
-        "team": {
-          "$ref": "#/$defs/team_id"
         },
         "bound_to": {
           "type": "object",
@@ -249,8 +286,8 @@
       "required": [
         "token_id",
         "issuer",
+        "audience",
         "person",
-        "team",
         "bound_to",
         "issued_at",
         "expires_at",
@@ -258,6 +295,135 @@
         "signature"
       ],
       "additionalProperties": false
+    },
+    "host_role": {
+      "description": "A host role from the registry's host_roles.",
+      "type": "string",
+      "enum": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "installation_authority",
+        "scheduler"
+      ]
+    },
+    "agent_role": {
+      "description": "An agent's place in its team, from team-topologies.yaml.",
+      "type": "string",
+      "enum": [
+        "lead",
+        "worker"
+      ]
+    },
+    "protocol_label": {
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]{0,3})-pre$"
+    },
+    "nats_user_key": {
+      "description": "A NATS user public key (NKey).",
+      "type": "string",
+      "pattern": "^U[A-Z2-7]{55}$"
+    },
+    "application_key": {
+      "description": "A host's or authority's Ed25519 signing key and the id that frames and records name it by.",
+      "type": "object",
+      "properties": {
+        "key_id": {
+          "$ref": "#/$defs/key_id"
+        },
+        "public_key": {
+          "$ref": "#/$defs/ed25519_public_key"
+        }
+      },
+      "required": [
+        "key_id",
+        "public_key"
+      ],
+      "additionalProperties": false
+    },
+    "software": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,6}([-+][0-9A-Za-z.-]{1,32})?$"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "state_key": {
+      "description": "A key-value key: one to four tokens joined by dots.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}(\\.[A-Za-z0-9_-]{1,64}){0,3}$"
+    },
+    "state_writer": {
+      "description": "Who signed a state record: an installation's authority key, or a host by its certificate.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "authority"
+            },
+            "installation": {
+              "$ref": "#/$defs/installation_id"
+            },
+            "key_id": {
+              "$ref": "#/$defs/key_id"
+            }
+          },
+          "required": [
+            "type",
+            "installation",
+            "key_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "host"
+            },
+            "installation": {
+              "$ref": "#/$defs/installation_id"
+            },
+            "runtime": {
+              "$ref": "#/$defs/runtime_id"
+            },
+            "membership_epoch": {
+              "$ref": "#/$defs/epoch"
+            },
+            "key_id": {
+              "$ref": "#/$defs/key_id"
+            }
+          },
+          "required": [
+            "type",
+            "installation",
+            "runtime",
+            "membership_epoch",
+            "key_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "state_sequence": {
+      "description": "The writer's counter for this key; readers keep the record with the highest one.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
     },
     "short_text": {
       "type": "string",

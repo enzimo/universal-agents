@@ -1,0 +1,45 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.request",
+  "message_id": "01928f3a-7b2c-7130-8000-000000000130",
+  "idempotency_key": "task_request:task_sub_2:01928f3a-7b2c-7130-8000-000000000130",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "pool",
+    "id": "researcher"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.work.pool.researcher",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_sub_2",
+    "work": {
+      "origin": "delegation",
+      "root_task_id": "task_root_1",
+      "topology": "hub_and_spoke"
+    },
+    "instructions": "Find the three largest invoices.",
+    "reassignment": {
+      "handback_id": "hb_1",
+      "prior_holder": "researcher-1",
+      "prior_disposition": "interrupted",
+      "interruption_count": 1,
+      "actions": []
+    }
+  },
+  "causation_id": "01928f3a-7b2c-710f-8000-00000000010f",
+  "body_digest": "OYRgx9sGmckR1AlxPLlrXJBuOoU7L-F7mX_l5cdzWxs",
+  "signature": "446R6faYtR1rk7klUlaqL9R-6Q3ou5_xslK2mwYLWh3ElRSbDuqyqVEWi3AYqrOCkiFhGeEIA3f50NZcEsRdBQ"
+}

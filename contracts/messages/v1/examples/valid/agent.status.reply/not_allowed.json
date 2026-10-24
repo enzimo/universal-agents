@@ -4,19 +4,23 @@
   "message_id": "01928f3a-7b2c-74d9-8000-0000000004d9",
   "idempotency_key": "agent.status:01928f3a-7b2c-74d7-8000-0000000004d7:reply",
   "issuer": {
+    "installation": "install_example",
     "team": "team_example",
-    "runtime": "lead-host-1",
-    "agent": "lead",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
     "membership_epoch": 3,
     "revocation_epoch": 1,
-    "key_id": "test-lead-key-1"
+    "key_id": "test-worker-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "team_example",
     "target": "agent",
-    "id": "lead"
+    "id": "lead",
+    "runtime": "lead-host-1"
   },
-  "subject": "ua.v1.team_example.lead-host-1.ctl.agent.researcher-2.status",
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-74d7-8000-0000000004d7",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
@@ -26,5 +30,5 @@
   },
   "causation_id": "01928f3a-7b2c-74d7-8000-0000000004d7",
   "body_digest": "ndygni9OJ0mKj0moIMNE8d_WpJsDHbcv-NSrk03DUfg",
-  "signature": "V-9EzWsL3ohd6PnxzV1E5d3vPvXoNP567lkCsQoMKS1ZkkTTjubIUAOGxeW6VqUlxUm_Ua0aNxke_SXJCPOICg"
+  "signature": "zZhvCCVzuwbdnPMu2xOLVF8doQi_t-9bPT0SenHAtMcMOAATV1Bpg9GNCHfTbGB0Wrj_HerLDYp8otGr1Z5SAg"
 }

@@ -1,0 +1,14 @@
+{
+  "description": "The token names another team than the one presenting it.",
+  "refusal": "bad_authority",
+  "at": "/authority/audience/team",
+  "base": "task.stop/for-person.json",
+  "changes": [
+    {
+      "set": "/authority/audience/team",
+      "to": "team_other"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.stop\", \"message_id\": \"01928f3a-7b2c-7004-8000-000000000004\", \"idempotency_key\": \"task.stop:_HWvLKp0FruRbmcSpynfGaVTLXXA5i-hmwUXf15LzHY\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.lead-host-1.work.agent.researcher-2\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7010-8000-000000000010\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_other\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"root_task\", \"id\": \"task_root_7f\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-23T04:29:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"6GkVxla2EwlkRiiqoqZhpmL15WwQFg2Ft3IoXUNy4-HUWFrQoHOiwxUz_N-UgBmNImXSoPi4NR1orpJW-ZbNDg\"}, \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_7f3a\", \"stop_id\": \"stop_2\", \"reason\": \"The person asked to stop this task.\", \"cascade_to_subtasks\": true}, \"body_digest\": \"wnqyQzN29TdExEaICPbIxLgQBUJwJjBof2Ejelckevw\", \"signature\": \"Lj5NfOwxKhWLr46pGK_j8nVlH5777zw0NS2rJTlzeqsWFbJH_TXIZ9YnC7HCD9BcckyBR4OZDrEt8h0onP8pDg\"}"
+}

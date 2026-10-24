@@ -1,0 +1,44 @@
+{
+  "record": "certificate",
+  "key": "host.install_example.team-services-1.2",
+  "writer": {
+    "type": "authority",
+    "installation": "install_example",
+    "key_id": "test-authority-key-1"
+  },
+  "sequence": 1,
+  "issued_at": "2026-10-22T00:00:00.000Z",
+  "expires_at": "2026-11-21T00:00:00.000Z",
+  "body": {
+    "certificate_id": "cert_team_services_1",
+    "installation": "install_example",
+    "runtime": "team-services-1",
+    "teams": [
+      "team_example"
+    ],
+    "roles": [
+      "team_services"
+    ],
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "application_key": {
+      "key_id": "test-services-key-1",
+      "public_key": "iC0Oo7KGTnpYfz5pjOpEWZmDEuZV4F-l6LURnYuqyM0"
+    },
+    "nats_public_key": "USSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS",
+    "agent_types": [],
+    "session_limit": 0,
+    "protocol": "1.0-pre",
+    "deployment": "local",
+    "profile_sha256": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo",
+    "software": {
+      "name": "universal-agents",
+      "version": "0.10.0"
+    },
+    "issued_at": "2026-10-22T00:00:00.000Z",
+    "expires_at": "2026-11-21T00:00:00.000Z"
+  },
+  "algorithm": "ed25519",
+  "body_digest": "37Bm3lAh0Tg01xt2UMdX0DadybIGbnT9V4dc5y7oUPM",
+  "signature": "dWD0XhhLM4AjQkukEzz_zw-yAuv_6fsk49MltEAzbrahS-KYFzikI6a1bb2h5nAxny3k7bR_vdcVHY8QXHCWDQ"
+}

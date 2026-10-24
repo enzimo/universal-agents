@@ -205,6 +205,15 @@ jobs:
         run: python -m pip install --require-hashes -r requirements-dev.lock.txt
       - name: Start NATS with JetStream
         run: python .github/runner/start_service.py nats
+      - name: Provide the NATS server binary for isolated permission checks
+        # The alpine image keeps the server in /usr/local/bin. Its own folder keeps
+        # it from shadowing anything else, and the variable makes the live
+        # contract test fail rather than skip when the copy is missing.
+        run: |
+          mkdir -p "$RUNNER_TEMP/nats-bin"
+          docker cp "$NATS_DOCKER_CONTAINER:/usr/local/bin/nats-server" "$RUNNER_TEMP/nats-bin/nats-server"
+          chmod +x "$RUNNER_TEMP/nats-bin/nats-server"
+          echo "LIVE_TEST_NATS_SERVER=$RUNNER_TEMP/nats-bin/nats-server" >> "$GITHUB_ENV"
       - name: Wait for NATS
         run: |
           python - <<'PY'

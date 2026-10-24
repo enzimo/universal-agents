@@ -1,0 +1,28 @@
+{
+  "record": "agent_session",
+  "key": "session.install_peer.team_peer.s-peer-lead-1",
+  "writer": {
+    "type": "host",
+    "installation": "install_peer",
+    "runtime": "peer-lead-host-1",
+    "membership_epoch": 1,
+    "key_id": "test-peer-lead-key-1"
+  },
+  "sequence": 1,
+  "issued_at": "2026-10-22T04:00:00.000Z",
+  "body": {
+    "session": "s-peer-lead-1",
+    "installation": "install_peer",
+    "team": "team_peer",
+    "agent": "lead",
+    "agent_type": "team_lead",
+    "agent_role": "lead",
+    "runtime": "peer-lead-host-1",
+    "placement_revision": 3,
+    "started_at": "2026-10-22T04:00:00.000Z",
+    "ends_at": "2026-10-23T04:00:00.000Z"
+  },
+  "algorithm": "ed25519",
+  "body_digest": "kUqeFt5IDeTXMY-lsxk_UIBY_d3o_3BP3hg8JOw2yKE",
+  "signature": "WDEMceB61HA7UQLjQNYPX5iqjeqzKxNqa8IycfXR6o2dYKzK5NUztNOESaI27-KVs8zwvGbOPLmKN5XXPrs_CA"
+}

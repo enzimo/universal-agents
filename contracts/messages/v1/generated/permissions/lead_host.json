@@ -1,6 +1,15 @@
 {
+  "allow_responses": {
+    "expires": "38s",
+    "max": 1
+  },
   "publish": [
-    "_INBOX.*.>",
+    "$JS.ACK.UA1_WORK.agent~{team}~{agent}.>",
+    "$JS.ACK.UA1_WORK.pool~{team}~{pool}.>",
+    "$JS.API.CONSUMER.INFO.UA1_WORK.agent~{team}~{agent}",
+    "$JS.API.CONSUMER.INFO.UA1_WORK.pool~{team}~{pool}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.agent~{team}~{agent}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.pool~{team}~{pool}",
     "ua.v1.{team}.{self}.ctl.agent.*.exit",
     "ua.v1.{team}.{self}.ctl.agent.*.pause",
     "ua.v1.{team}.{self}.ctl.agent.*.resume",
@@ -61,19 +70,15 @@
   "role": "lead_host",
   "subscribe": [
     "_INBOX.{self}.>",
-    "ua.v1.{team}.*.ctl.agent.*.exit",
-    "ua.v1.{team}.*.ctl.agent.*.pause",
-    "ua.v1.{team}.*.ctl.agent.*.resume",
-    "ua.v1.{team}.*.ctl.agent.*.status",
-    "ua.v1.{team}.*.ctl.agent.*.task.probe",
-    "ua.v1.{team}.*.ctl.agent.*.tasks.list",
-    "ua.v1.{team}.*.ctl.agent.*.tasks.list_finished",
-    "ua.v1.{team}.*.ctl.agent.*.tasks.purge",
-    "ua.v1.{team}.*.ctl.agent.*.tasks.remove",
-    "ua.v1.{team}.*.evt.skills_changed",
-    "ua.v1.{team}.*.svc.team.tasks.list",
-    "ua.v1.{team}.*.svc.team.tasks.list_finished",
-    "ua.v1.{team}.*.svc.team.tasks.purge",
-    "ua.v1.{team}.*.svc.team.tasks.remove"
+    "ua.v1.{team}.*.ctl.agent.{agent}.exit",
+    "ua.v1.{team}.*.ctl.agent.{agent}.pause",
+    "ua.v1.{team}.*.ctl.agent.{agent}.resume",
+    "ua.v1.{team}.*.ctl.agent.{agent}.status",
+    "ua.v1.{team}.*.ctl.agent.{agent}.task.probe",
+    "ua.v1.{team}.*.ctl.agent.{agent}.tasks.list",
+    "ua.v1.{team}.*.ctl.agent.{agent}.tasks.list_finished",
+    "ua.v1.{team}.*.ctl.agent.{agent}.tasks.purge",
+    "ua.v1.{team}.*.ctl.agent.{agent}.tasks.remove",
+    "ua.v1.{team}.*.evt.skills_changed"
   ]
 }

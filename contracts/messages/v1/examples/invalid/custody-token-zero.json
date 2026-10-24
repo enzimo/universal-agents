@@ -2,6 +2,36 @@
   "description": "Custody tokens start at 1.",
   "refusal": "invalid_body",
   "at": "/body/custody_token",
+  "base": "task.progress/full.json",
+  "changes": [
+    {
+      "set": "/body/sequence",
+      "to": 1
+    },
+    {
+      "set": "/body/custody_token",
+      "to": 0
+    },
+    {
+      "set": "/body/status",
+      "to": "Working."
+    },
+    {
+      "remove": "/body/checkpoint"
+    },
+    {
+      "remove": "/body/assumptions"
+    },
+    {
+      "remove": "/body/held_actions"
+    },
+    {
+      "remove": "/body/expected_finish"
+    },
+    {
+      "remove": "/body/steering_seen"
+    }
+  ],
   "context": {},
-  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.progress\", \"message_id\": \"01928f3a-7b2c-7127-8000-000000000127\", \"idempotency_key\": \"invalid:custody-token-zero\", \"issuer\": {\"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"agent\": \"lead\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"team\": \"team_example\", \"target\": \"agent\", \"id\": \"lead\"}, \"subject\": \"ua.v1.team_example.worker-host-1.work.agent.lead\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_sub_1\", \"sequence\": 1, \"custody_token\": 0, \"status\": \"Working.\", \"state\": \"working\"}, \"body_digest\": \"KNkJImfoq58u8wjOgq0c5E5gIr0DmfQXq4blvhVjwbU\", \"signature\": \"4aa0JDJQX8Shtgy2XyLGF3MdhSgFbIE0P6Mvr1M-r_1yB7jQsyk-4x-D34oClmyzwoOlP3lyrzvVo63HyxL0Ag\"}"
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.progress\", \"message_id\": \"01928f3a-7b2c-710b-8000-00000000010b\", \"idempotency_key\": \"task_progress:task_sub_1:2\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"agent\": \"researcher-2\", \"session\": \"s-researcher-2-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"lead\"}, \"subject\": \"ua.v1.team_example.worker-host-1.work.agent.lead\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_sub_1\", \"sequence\": 1, \"custody_token\": 0, \"status\": \"Working.\", \"state\": \"working\"}, \"body_digest\": \"KNkJImfoq58u8wjOgq0c5E5gIr0DmfQXq4blvhVjwbU\", \"signature\": \"tL99whfkwbCvrkEtcn7xNS5bt_lIEKH1Aw8jSYbi5NXRIeXH77OGE4iZiknbyX_qlLXwlExhh5eNytAWLQn9BQ\"}"
 }

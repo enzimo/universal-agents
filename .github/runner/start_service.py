@@ -24,7 +24,7 @@ def start(service):
     ]
     container_port = 4222 if service == "nats" else 5432
     image_args = (
-        ["nats:2.10-alpine", "--jetstream"]
+        ["nats:2.15.1-alpine", "--jetstream"]
         if service == "nats"
         else [
             "--env",

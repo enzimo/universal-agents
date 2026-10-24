@@ -1,0 +1,16 @@
+{
+  "description": "The sender's far expiry is capped by the kind's lifetime plus the clock tolerance.",
+  "refusal": "expired",
+  "at": "/issued_at",
+  "base": "task.stop/basic.json",
+  "changes": [
+    {
+      "set": "/expires_at",
+      "to": "9999-12-31T23:59:59.999Z"
+    }
+  ],
+  "context": {
+    "now": "2026-10-23T04:30:08.000Z"
+  },
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.stop\", \"message_id\": \"01928f3a-7b2c-7001-8000-000000000001\", \"idempotency_key\": \"task.stop:U4tM9vOywwgHU_aC_5CvRx833uRNK7enxSgIBy3SkvA\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.lead-host-1.work.agent.researcher-2\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"9999-12-31T23:59:59.999Z\", \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_7f3a\", \"stop_id\": \"stop_1\", \"reason\": \"The person cancelled the request.\", \"cascade_to_subtasks\": true}, \"body_digest\": \"NQVHb1wr_tFo5VU7huWwM0jQ7uKDjMvo8rcS0SxcgyQ\", \"signature\": \"_Eh06h6-5Mti7ckKfiudRs-UbI_nOvsbbLpN5r3HEVT_Sy-5_dlZ4ctq-3A5iXr2pet5pmKQ7FftEqkOytUsAw\"}"
+}

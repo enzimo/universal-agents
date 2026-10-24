@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/frame.schema.json",
   "title": "Signed frame of protocol 1",
-  "description": "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The body is checked against the schema its kind names in the registry.",
+  "description": "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The issuer's host certificate and agent session are looked up in the receiver's trust store. The body is checked against the schema its kind names in the registry.",
   "type": "object",
   "properties": {
     "protocol": {
@@ -26,9 +26,9 @@
       "$ref": "common.schema.json#/$defs/audience"
     },
     "subject": {
-      "description": "The NATS subject the sender published on. A receiver refuses a frame that arrives on another subject.",
+      "description": "The exact NATS delivery subject. Work, requests and events use ua.v1.<audience team>.<sender slot>.<address>, where the sender slot is the issuer's runtime, or x-<issuer installation> for a frame from another installation. Operation replies use _INBOX.<audience.runtime>.<inbox token(s)> and name their request in causation_id.",
       "type": "string",
-      "pattern": "^ua\\.v1\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+$",
+      "pattern": "^(ua\\.v1\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+|_INBOX\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*)$",
       "maxLength": 512
     },
     "causation_id": {
