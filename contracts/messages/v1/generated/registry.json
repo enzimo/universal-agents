@@ -172,6 +172,11 @@
       },
       "authority": "none",
       "body": "bodies/access.review.schema.json",
+      "body_rules": [
+        {
+          "unique": "/body/state/choices"
+        }
+      ],
       "class": "durable",
       "description": "An access review for the gateway's Inbox, from the team services; a refused decision returns this way too.",
       "expiry_seconds": 604800,
@@ -537,7 +542,7 @@
       "senders": [
         "gateway"
       ],
-      "topology_edge": "person",
+      "topology_edge": "none",
       "wakes_model": "next_turn"
     },
     "custody.decide": {
@@ -693,7 +698,9 @@
       "description": "A receiver refused a message; sent back to its sender.",
       "expiry_seconds": 86400,
       "idempotency": [
-        "/body/refused_message_id"
+        "/body/refused_message_id",
+        "/issuer/runtime",
+        "/issuer/agent"
       ],
       "ledger": "send_refused",
       "receivers": [
@@ -712,6 +719,12 @@
         "gateway",
         "edge_adapter"
       ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host",
+          "team_services"
+        ]
+      },
       "topology_edge": "none",
       "wakes_model": "never"
     },
@@ -2735,6 +2748,12 @@
         "team_services",
         "lead_host"
       ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host",
+          "team_services"
+        ]
+      },
       "topology_edge": [
         "down",
         "out"
@@ -3473,6 +3492,11 @@
         "worker_host",
         "edge_adapter"
       ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host"
+        ]
+      },
       "topology_edge": [
         "down",
         "sideways",
@@ -3665,6 +3689,12 @@
         "lead_host",
         "edge_adapter"
       ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "worker_host",
+          "lead_host"
+        ]
+      },
       "topology_edge": [
         "up",
         "person",
@@ -3782,6 +3812,7 @@
       "expiry_seconds": 604800,
       "idempotency": [
         "/body/task_id",
+        "/issuer/agent",
         "/body/outcome/custody_token",
         "/body/sequence"
       ],
@@ -3799,6 +3830,13 @@
         "edge_adapter",
         "team_services"
       ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "worker_host",
+          "lead_host",
+          "team_services"
+        ]
+      },
       "topology_edge": [
         "up",
         "person",
@@ -3851,6 +3889,12 @@
         "lead_host",
         "team_services"
       ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host",
+          "team_services"
+        ]
+      },
       "topology_edge": [
         "down",
         "out"
@@ -3898,6 +3942,12 @@
         "lead_host",
         "team_services"
       ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host",
+          "team_services"
+        ]
+      },
       "topology_edge": [
         "down",
         "out"
@@ -4319,7 +4369,7 @@
       "senders": [
         "gateway"
       ],
-      "topology_edge": "person",
+      "topology_edge": "none",
       "wakes_model": "never"
     },
     "topics.find_threads": {
@@ -4527,7 +4577,7 @@
     },
     {
       "code": "wrong_sender",
-      "meaning": "none of the certificate's roles may send the kind (for a reply, receive its request); or the frame comes from another installation with a kind, class or destination team its agreement does not allow"
+      "meaning": "none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request); or the frame comes from another installation with a kind, class or destination team its agreement does not allow; or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)"
     },
     {
       "code": "wrong_team",

@@ -74,7 +74,11 @@ progress, claims and reports go to (registry routing `requester`).
 - A result or question sent to a gateway route carries the task's `delivery_ref` and
   `conversation_id` from its work context. The gateway resolves the reference from its
   own records; a result for a task it did not start, such as a scheduled run, has
-  nothing else to match.
+  nothing else to match, so the gateway refuses one without a delivery reference with
+  `delivery.refused` (the schema cannot require it only for gateway routes: an outside
+  agent's results carry none). The gateway takes a worker's result for a person as the
+  reply the task's signed reply target asked for; only the gateway and the scheduler
+  name a gateway route there.
 - A kind routed to the requester that has no address for its target goes only to its
   copies: a scheduled run's claims, progress and handbacks reach the team services, and
   its worker tells the person things with `person.notify`.
@@ -97,8 +101,10 @@ given the task, sideways to another agent of the team, person to a gateway route
 outside agent or another team. `custom_messages.wire.topology.edge_allowed` checks the edge
 against the kind and the sender's role (from its agent session); a message on an edge the
 topology does not allow is refused with `delivery.refused`. Work a person gave an agent
-directly reports to the person whatever the agent's role. Messages that hosts send without
-an agent (gateway, scheduler, team services) are not topology checks.
+directly reports to the person whatever the agent's role. A kind whose `topology_edge` is
+`none` is not a topology check: it goes to the team services (access requests, refusals) or
+only hosts send it; `edge_allowed` allows it. Messages that hosts send without an agent
+(gateway, scheduler, team services) are not topology checks either.
 
 ## What bodies carry
 
@@ -106,7 +112,8 @@ an agent (gateway, scheduler, team services) are not topology checks.
 required when others have given values, or that a body needs at least one of several
 fields. A kind's `body_rules` say it, and receivers check them right after the schema,
 refusing as `invalid_body` at the rule's field:
-- `{unique: <list>, by: <member>}`: no two items (or their members) are equal;
+- `{unique: <list>, by: <member>}`: no two items are equal; for object items, no two
+  values of the member every item carries, while plain values compare whole;
 - `{requires: <field>, when: [{at: <field>, is: <value>}, ...]}`: the field is present
   whenever every condition holds;
 - `{any_of: [<field>, ...]}`: at least one is present.
@@ -271,9 +278,11 @@ frame it checks, in the registry's order:
 6. **Sender (`wrong_sender`):** one of the certificate's roles may send the kind to its
    audience's address (for a reply, receive its request; a kind's `senders_by_address`
    narrows some addresses), and another installation's frame stays within its agreement.
-   Only the lead receives a frame whose sole sending role is `edge_adapter`, which speaks
-   for outside agents: the receiving host states its agent's role (`Receiver.agent_role`),
-   and a worker or pool refuses such a frame.
+   Contact with outside agents goes through the lead, in both directions. A frame whose
+   sole sending role is `edge_adapter`, which speaks for outside agents, reaches only the
+   lead's inbox or the team services: the receiving host states its agent's role
+   (`Receiver.agent_role`). An adapter receiving for an outside agent
+   (`Receiver.outside`) accepts frames only from a lead agent or the team services.
 
 The accepted residual risks:
 - A compromised host can speak as the agents placed on it, including agents that moved
@@ -398,7 +407,10 @@ absent optional field is `null`. For example `task.stop` lists `[/body/task_id,
   key within 128 characters, whatever the ids' lengths; kind names stay within 84.
 - Parts name every value that tells two messages apart. A holder numbers its messages per
   task and a new holder starts again, so progress and result keys include the custody
-  token as well as the sequence number.
+  token as well as the sequence number; result keys also name the sending agent, because
+  two agents can refuse one task before either holds it, and the team services pass
+  results on in their own numbering. A refusal's key names its sender, because several
+  receivers can refuse one frame.
 
 The Python helper is `custom_messages.wire.frame.idempotency_key(kind, *values)`. A
 receiver recomputes the key after checking the body and refuses a different one as
@@ -487,6 +499,8 @@ Within one protocol label:
 
 The frame states its minor, so the receiver chooses before reading the body. A change that an
 older receiver must understand needs a new major, which brings new subjects and streams.
+Receivers recompute keys, so a kind's key parts and copies are fixed for the major: a newer
+minor never adds, removes or reorders them.
 
 ## Operation inputs and outcomes
 

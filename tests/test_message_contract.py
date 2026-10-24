@@ -440,6 +440,10 @@ def test_a_copy_and_its_original_carry_different_keys_and_the_copy_has_no_receiv
     ({"topology_edge": ["up", "none"]}, "or none alone"),
     ({"wakes_model": {"by": "outcome.stat", "values": {"completed": "next_turn"}}}, "must name a body oneOf"),
     ({"wakes_model": {"by": "outcome.state", "values": {"completed": "next_turn", "failed": "always"}}}, "must name a body oneOf"),
+    ({"body_rules": [{"unique": "/body/outcome/artifacts", "by": "no_such_member"}]}, "is not a unique"),
+    ({"body_rules": [{"requires": "/body/summary", "when": [{"at": "/body/outcome/state", "is": "untill"}]}]}, "is not a unique"),
+    ({"idempotency": ["/body/summary"]}, "names no part every frame carries"),
+    ({"senders": ["gateway"], "senders_by_address": {}}, "not a topology check"),
 ])
 def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change: dict, problem: str) -> None:
     registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
@@ -458,10 +462,18 @@ def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change
     ("task.result", "worker", "person", False, False),  # delegated work reports through the lead
     ("task.result", "worker", "person", True, True),    # a run of the person's own schedule reports to them
     ("task.progress", "lead", "person", True, False),   # progress has no person edge
+    ("access.request", "worker", "up", False, True),    # to the team services: not a topology check
 ])
 def test_edges_follow_the_kind_and_the_senders_role(kind: str, role: str, edge: str, given_by_person: bool,
                                                     allowed: bool) -> None:
     assert topology.edge_allowed(kind, "hub_and_spoke", role, edge, given_by_person=given_by_person) is allowed
+
+
+def test_a_token_binding_must_name_a_field_every_body_carries() -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["kinds"]["tool.setup.request"]["authority_binding"] = {"type": "root_task", "at": "/body/delivery_ref"}
+    with pytest.raises(EXPORT.ContractError, match="names no field every body carries"):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
 
 
 def test_every_reply_example_names_exactly_one_request() -> None:
