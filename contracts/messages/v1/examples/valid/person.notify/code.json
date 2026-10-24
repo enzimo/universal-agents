@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "person.notify",
   "message_id": "01928f3a-7b2c-7119-8000-000000000119",
-  "idempotency_key": "notify:notice_2",
+  "idempotency_key": "person.notify:aeUn9zYxxTzHvq9kN1lvWXuG0aSQSfyrib8JMAoiDnE",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -23,7 +23,10 @@
   "algorithm": "ed25519",
   "body": {
     "notice_id": "notice_2",
-    "delivery_ref": "dref_1",
+    "recipient": {
+      "type": "person",
+      "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0"
+    },
     "text": "Your scheduled run waited too long and stopped.",
     "urgency": "urgent",
     "reason": {
@@ -31,6 +34,6 @@
       "code": "task_wait_limit_reached"
     }
   },
-  "body_digest": "nycKvD3xMnUYplhsu0XYLHCwI29vODSD5Lt7hmaZQ2Q",
-  "signature": "ZBgA9EpJNOZE3BjneBYwhsoJ-KPzAl0U5xG80ZQQ0c6MGuxTW-urNX3twza8-NAxGyTMsrFYTfzfSHpWRCctCg"
+  "body_digest": "xjLfuTUO8HyAa-xAWG6brLKSiiRMhLL73SN4K2b2Pgw",
+  "signature": "Mgl3zP6dprBU0wg4WjPNFJVXbmwxFywVMwPaQc6fvExlvnI_h5hovX-xBNVXGsIKj_ZhUAzQcpxg42CWC-PZAQ"
 }

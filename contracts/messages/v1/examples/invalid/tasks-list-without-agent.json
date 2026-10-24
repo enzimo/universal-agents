@@ -1,0 +1,13 @@
+{
+  "description": "A tasks.list request without its agent.",
+  "refusal": "invalid_body",
+  "at": "/body/agent",
+  "base": "tasks.list/full.json",
+  "changes": [
+    {
+      "remove": "/body/agent"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"tasks.list\", \"message_id\": \"01928f3a-7b2c-7407-8000-000000000407\", \"idempotency_key\": \"tasks.list:6rpSzgNToJ6_HlCl9J5kabrS823z9vrHV0gDB7LUjUQ\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"revocation_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.gateway-1.svc.team.tasks.list\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7208-9000-000000000208\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"command\", \"id\": \"cmd_000208\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-23T04:29:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"BwXx0VkQfN02TbXvmnbvgxVEbrm-4ABYCd3alFpKMawOn53fR-7iioxYygkCdutE8jyVDf2mxFPFBpO3_ElsBQ\"}, \"algorithm\": \"ed25519\", \"body\": {\"offset\": 3, \"limit\": 3}, \"body_digest\": \"dBgswryTuZRams2R6IGeSIcxY1ZAp4e4jCyN0leTRu4\", \"signature\": \"reD_coe76dYBlOnKe5oy0HTs0BgrpUZbeY9K-EugcHcQl0Z3KlNRvp_fJtkORAft_VeE9kudf1Pcf1SGa767DQ\"}"
+}

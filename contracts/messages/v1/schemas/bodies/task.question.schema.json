@@ -11,6 +11,14 @@
     "task_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
     },
+    "delivery_ref": {
+      "description": "Copied from the task's work context when the message goes to a gateway route, so the gateway knows whom it is for.",
+      "$ref": "../common.schema.json#/$defs/delivery_ref"
+    },
+    "conversation_id": {
+      "description": "Copied from the task's work context when the message goes to a gateway route.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
     "sequence": {
       "$ref": "../common.schema.json#/$defs/count"
     },
@@ -53,7 +61,8 @@
               "items": {
                 "$ref": "../common.schema.json#/$defs/question_choice"
               },
-              "maxItems": 20
+              "maxItems": 20,
+              "minItems": 1
             },
             "allow_free_text": {
               "type": "boolean"
@@ -287,7 +296,8 @@
               "items": {
                 "$ref": "../common.schema.json#/$defs/question_choice"
               },
-              "maxItems": 20
+              "maxItems": 20,
+              "minItems": 1
             }
           },
           "required": [

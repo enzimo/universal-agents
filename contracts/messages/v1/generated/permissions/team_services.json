@@ -22,6 +22,7 @@
     "ua.v1.{team}.{self}.svc.team.tasks.remove",
     "ua.v1.{team}.{self}.work.agent.*",
     "ua.v1.{team}.{self}.work.edge.*",
+    "ua.v1.{team}.{self}.work.pool.*",
     "ua.v1.{team}.{self}.work.team"
   ],
   "role": "team_services",

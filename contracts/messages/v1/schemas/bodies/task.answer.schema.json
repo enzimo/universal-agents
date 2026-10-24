@@ -14,6 +14,10 @@
     "text": {
       "$ref": "../common.schema.json#/$defs/long_text"
     },
+    "text_file": {
+      "description": "The answer as a text file in the object store, when it is longer than text allows.",
+      "$ref": "../common.schema.json#/$defs/blob_ref"
+    },
     "selected_choice_ids": {
       "type": "array",
       "items": {

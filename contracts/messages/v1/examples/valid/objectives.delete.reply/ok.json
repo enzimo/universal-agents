@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "objectives.delete.reply",
   "message_id": "01928f3a-7b2c-7423-8000-000000000423",
-  "idempotency_key": "objectives.delete:request_id_1:reply",
+  "idempotency_key": "objectives.delete.reply:3yke2YUcCMdMYny7T50yQsqTPs9lCh5c2gyrKxBckdI",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -45,5 +45,5 @@
   },
   "causation_id": "01928f3a-7b2c-7422-8000-000000000422",
   "body_digest": "_7AiY4PnGodXu9dWaFQsf0WBy-zmI4y3kScYk3atP6Q",
-  "signature": "4rHJuMjZ3Pdt6qG7xEN1Pb_qQEPuMenoE0E4Pw5oRF1VySczHBgQRJ25wpLHt7etN-OOPGDPo-tD7AZ4QuV2BQ"
+  "signature": "bKSjynHCK7p4l2WRN4SYvdujFZ57pLnUjGhy_7WEh0IulOOYsGNuiM4pRx-ARSpwEFoXS1nqCHKQyoOj9E-LBQ"
 }

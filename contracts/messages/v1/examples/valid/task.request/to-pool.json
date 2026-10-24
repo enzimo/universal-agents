@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.request",
   "message_id": "01928f3a-7b2c-7102-8000-000000000102",
-  "idempotency_key": "task_request:task_sub_2:01928f3a-7b2c-7102-8000-000000000102",
+  "idempotency_key": "task.request:Ro55Tq55pJQXYK0klc9u25rDMCwc3XMMPLi2wLJrW9U",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -27,11 +27,15 @@
     "task_id": "task_sub_2",
     "work": {
       "origin": "delegation",
+      "reply_to": {
+        "target": "agent",
+        "id": "lead"
+      },
       "root_task_id": "task_root_1",
       "topology": "hub_and_spoke"
     },
     "instructions": "Find the three largest invoices."
   },
-  "body_digest": "ygtS-U5oy6ENBUSZU7avbXfb74FFcz6lrIiGKUjXlcE",
-  "signature": "SC8tgHzq7iAvwhV9wJx_rvlQHZrl0Pl8xzZn_nVv9qbDo6dx-Cda88HoNH_5bE85sYQjTFNMbsxJ1k7i-htWAQ"
+  "body_digest": "3ieO4db41llCCHkCYwNaQ3wXURS-G-XiJjtBt95yFMY",
+  "signature": "1JQtcMFFW8GWM1Kk45YEZEcNVIqc6ERX5IWxQHe9rEzSqpwIaS-gTFVtbSlRELt20-WK_FNAfdI9dMIHkguEDg"
 }

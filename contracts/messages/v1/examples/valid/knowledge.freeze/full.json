@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.freeze",
   "message_id": "01928f3a-7b2c-748e-8000-00000000048e",
-  "idempotency_key": "knowledge.freeze:request_id_1",
+  "idempotency_key": "knowledge.freeze:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -53,5 +53,5 @@
     "minutes": 60
   },
   "body_digest": "7CBg9W72sOMXE4zQ62FMSngUlD4hwjXGQmIYACNspjs",
-  "signature": "kGLCiZhCGwrrQowaNqHBwPwdTQz55NcfGpSUo129u1ppV9wPxgATarY9YUGOo2Coi9qiLFzwloLmDErH6_AbAg"
+  "signature": "in_L52TFRXzCXcObZFp-A8TXy_9brTrbgGOyerqxKmV0lm9HbAZpylkt67fx1tFByv4fFT2Hn1bcAwHWw0wqAQ"
 }

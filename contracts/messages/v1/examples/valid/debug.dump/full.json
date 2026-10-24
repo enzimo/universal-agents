@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "debug.dump",
   "message_id": "01928f3a-7b2c-74ab-8000-0000000004ab",
-  "idempotency_key": "debug.dump:request_id_1",
+  "idempotency_key": "debug.dump:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -50,5 +50,5 @@
     "agent": "token_id_1"
   },
   "body_digest": "NcQWTqJmuRMrzpD3-NoPUGvr5QE6IAtuJ0-owEQrnjI",
-  "signature": "c_yb5MA3X1erzNaWaO_nUl_eEroSycODNd8mfRrgd78YWvH4qrr697loGdrz4zdrI5DeUWyXOX6fKc5N-gdvDQ"
+  "signature": "k59iom3Fa6hFDmlIV9ilGWO2dgfuYrCMYfweOaA9427az6_hnfT4m2hrpK4kPbdc4LxjtO6Ud6oTcgHfC6WVDw"
 }

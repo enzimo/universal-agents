@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "skills.changed",
   "message_id": "01928f3a-7b2c-7004-8000-000000000004",
-  "idempotency_key": "skills_changed:skill_install_0123456789ab",
+  "idempotency_key": "skills.changed:kDJwfBbNqcOk3Ui33zaPZg6dRfvD37kkVdEtwy5wq0c",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -30,5 +30,5 @@
     "installed_tree_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   },
   "body_digest": "zEr0bHkxvuzbXXJWLxDvQyqYXyMIvdzuDCwctSDkkvM",
-  "signature": "nw3FFjAWcaAecGUFZUzKx5v1dAYGes2VFl4XPK8JgwxGH05ZkHwnHkngtzYpKxurjbzQMwCl9ERtzmy9z9ReBw"
+  "signature": "Y6ILOfrrf_8L-LQdDPZIC6iPQ84wAiv9E5meaN9xUKTgs9269Tn-gUGaI3EcGKronQPnzYungrGdIpbkgZc8Bg"
 }

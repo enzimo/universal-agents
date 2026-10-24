@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "delivery.receipt",
   "message_id": "01928f3a-7b2c-711a-8000-00000000011a",
-  "idempotency_key": "receipt_9f2c",
+  "idempotency_key": "delivery.receipt:EqGk3zqCyFXm8lNP3jeizwZqnBuiHnVFlOrUqSrwXcQ",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -30,5 +30,5 @@
     "via": "immediate"
   },
   "body_digest": "PEUtEHhDMWvYhTlwyK-pLDb-yjyp6E7nUStzFjhceUk",
-  "signature": "v8Lq0Ft53gsPReSFlCBWb4RTgcAvYXL2lfLTvfl4ehNzUZJOtA5VEp9yYhP94OtmVc33b1uh-4jqyo2t9B5WDA"
+  "signature": "RSIWFWs8WT0BFwlNd3NfvUVrRYZ1Ktip0PCAbnLwg7GfFvdfcVOg-7U9iD5j3StfY17alowam3xb9HXG6LdCBQ"
 }

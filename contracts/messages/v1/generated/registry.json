@@ -23,6 +23,7 @@
       "meaning": "another request is writing the file or sign-in; carries when to try again"
     }
   ],
+  "decision_token_domain": "universal-agents/decision-token/v1",
   "frame_schema": "frame.schema.json",
   "host_roles": {
     "edge_adapter": "connects outside agents (A2A)",
@@ -43,10 +44,28 @@
       },
       "authority": "none",
       "body": "bodies/access.decision.schema.json",
+      "body_rules": [
+        {
+          "requires": "/body/status/expires_at",
+          "when": [
+            {
+              "at": "/body/status/state",
+              "is": "granted"
+            },
+            {
+              "at": "/body/status/lifetime",
+              "is": "until"
+            }
+          ]
+        }
+      ],
       "class": "durable",
       "description": "What became of an access request, sent to the waiting task.",
       "expiry_seconds": 604800,
-      "idempotency": "access_decision:<request_id>:<state>",
+      "idempotency": [
+        "/body/request_id",
+        "/body/status/state"
+      ],
       "ledger": "access_wait_closed",
       "receivers": [
         "worker_host",
@@ -79,11 +98,27 @@
         "priority": "normal"
       },
       "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/access.request.schema.json",
+      "body_rules": [
+        {
+          "requires": "/body/what/hours",
+          "when": [
+            {
+              "at": "/body/what/lifetime",
+              "is": "until"
+            }
+          ]
+        }
+      ],
       "class": "durable",
       "description": "A task asks the team services for access; no model decides it.",
       "expiry_seconds": 604800,
-      "idempotency": "access_request:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "access_wait_open",
       "receivers": [
         "team_services"
@@ -105,11 +140,17 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "access_request"
+      },
       "body": "bodies/access.resolved.schema.json",
       "class": "durable",
       "description": "A person's decision on an access request, from the gateway to the team services.",
       "expiry_seconds": 604800,
-      "idempotency": "access_res:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -122,6 +163,35 @@
       "topology_edge": "none",
       "wakes_model": "never"
     },
+    "access.review": {
+      "address": "work.edge.{edge}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/access.review.schema.json",
+      "class": "durable",
+      "description": "An access review for the gateway's Inbox, from the team services; a refused decision returns this way too.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/request_id",
+        "/body/state/type",
+        "/body/state/refused_message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "gateway"
+      ],
+      "rendering": "none",
+      "routing": "person",
+      "senders": [
+        "team_services"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
     "access.withdraw": {
       "address": "svc.team.access.withdraw",
       "admission": {
@@ -130,11 +200,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/access.withdraw.schema.json",
       "class": "request_reply",
       "description": "The lead withdraws a task's access request.",
       "expiry_seconds": 30,
-      "idempotency": "access.withdraw:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -166,7 +241,9 @@
       "class": "request_reply",
       "description": "Stop an agent after its current step.",
       "expiry_seconds": 30,
-      "idempotency": "agent.exit:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "lead_host",
@@ -196,7 +273,10 @@
       "class": "request_reply",
       "description": "Pause one agent at its next safe point; it keeps its queued work.",
       "expiry_seconds": 30,
-      "idempotency": "agent_pause:<agent>:<request_id>",
+      "idempotency": [
+        "/audience/id",
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "lead_host",
@@ -229,7 +309,9 @@
       "class": "request_reply",
       "description": "Resume a paused agent.",
       "expiry_seconds": 30,
-      "idempotency": "agent.resume:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "lead_host",
@@ -262,7 +344,9 @@
       "class": "request_reply",
       "description": "An agent's status: basic for anyone allowed, full only for the team's lead.",
       "expiry_seconds": 30,
-      "idempotency": "agent.status:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "lead_host",
@@ -292,11 +376,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/conflicts.cancel.schema.json",
       "class": "request_reply",
       "description": "An administrator cancels a change conflict.",
       "expiry_seconds": 30,
-      "idempotency": "conflicts.cancel:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -324,11 +413,16 @@
         "priority": "high"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/conflicts.decide.schema.json",
       "class": "request_reply",
       "description": "A person decides a change conflict.",
       "expiry_seconds": 30,
-      "idempotency": "conflicts.decide:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -358,11 +452,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/conflicts.list.schema.json",
       "class": "request_reply",
       "description": "Open and recent change conflicts, for administrators.",
       "expiry_seconds": 30,
-      "idempotency": "conflicts.list:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -389,11 +488,17 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "at": "/body/root_task_id",
+        "type": "root_task"
+      },
       "body": "bodies/credential.form.request.schema.json",
       "class": "durable",
       "description": "Ask the gateway to collect, set up or delete a credential through a secure form.",
       "expiry_seconds": 604800,
-      "idempotency": "credential_form:<form_id>",
+      "idempotency": [
+        "/body/form_id"
+      ],
       "ledger": "form_wait_open",
       "receivers": [
         "gateway"
@@ -403,7 +508,9 @@
       "senders": [
         "lead_host"
       ],
-      "topology_edge": "person",
+      "topology_edge": [
+        "person"
+      ],
       "wakes_model": "never"
     },
     "credential.form.result": {
@@ -418,7 +525,9 @@
       "class": "durable",
       "description": "What became of a credential form.",
       "expiry_seconds": 604800,
-      "idempotency": "secure_result:credential_form:<form_id>",
+      "idempotency": [
+        "/body/form_id"
+      ],
       "ledger": "form_wait_closed",
       "receivers": [
         "lead_host"
@@ -439,11 +548,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/custody.decide.schema.json",
       "class": "request_reply",
       "description": "The lead reassigns a task or adopts late work.",
       "expiry_seconds": 30,
-      "idempotency": "custody.decide:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -467,7 +581,10 @@
       "wakes_model": "never"
     },
     "custody.moved": {
-      "address": "work.agent.{agent}",
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -478,11 +595,15 @@
       "class": "durable",
       "description": "Tells a former holder that its task moved; later results are kept as late work.",
       "expiry_seconds": 604800,
-      "idempotency": "custody_moved:<task_id>:<custody_token>",
+      "idempotency": [
+        "/body/task_id",
+        "/body/custody_token"
+      ],
       "ledger": "custody_lost",
       "receivers": [
         "worker_host",
-        "lead_host"
+        "lead_host",
+        "edge_adapter"
       ],
       "rendering": "none",
       "routing": "named",
@@ -500,11 +621,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/debug.dump.schema.json",
       "class": "request_reply",
       "description": "Turn an agent's diagnostic context dumps on or off.",
       "expiry_seconds": 30,
-      "idempotency": "debug.dump:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -535,7 +661,9 @@
       "class": "durable",
       "description": "The gateway delivered an answer or notice to a person.",
       "expiry_seconds": 604800,
-      "idempotency": "<receipt_id>",
+      "idempotency": [
+        "/body/receipt_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -564,7 +692,9 @@
       "class": "durable",
       "description": "A receiver refused a message; sent back to its sender.",
       "expiry_seconds": 86400,
-      "idempotency": "refused:<message_id>",
+      "idempotency": [
+        "/body/refused_message_id"
+      ],
       "ledger": "send_refused",
       "receivers": [
         "lead_host",
@@ -593,11 +723,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/heartbeat_items.add.schema.json",
       "class": "request_reply",
       "description": "The lead adds a heartbeat item.",
       "expiry_seconds": 30,
-      "idempotency": "heartbeat_items.add:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -631,6 +766,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/heartbeat_items.disable.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -639,7 +777,9 @@
       },
       "description": "The lead disables a heartbeat item.",
       "expiry_seconds": 30,
-      "idempotency": "heartbeat_items.disable:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -673,6 +813,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/heartbeat_items.enable.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -681,7 +824,9 @@
       },
       "description": "The lead enables a heartbeat item.",
       "expiry_seconds": 30,
-      "idempotency": "heartbeat_items.enable:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -715,6 +860,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/heartbeat_items.remove.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -723,7 +871,9 @@
       },
       "description": "The lead removes a heartbeat item.",
       "expiry_seconds": 30,
-      "idempotency": "heartbeat_items.remove:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -757,6 +907,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/heartbeat_items.update.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -765,7 +918,9 @@
       },
       "description": "The lead changes a heartbeat item.",
       "expiry_seconds": 30,
-      "idempotency": "heartbeat_items.update:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -799,11 +954,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/intent.set.schema.json",
       "class": "request_reply",
       "description": "The lead states a request's current intent.",
       "expiry_seconds": 30,
-      "idempotency": "intent.set:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -833,11 +993,19 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/knowledge.add_note.schema.json",
       "class": "request_reply",
       "description": "Add a note to a knowledge page.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.add_note:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -886,6 +1054,12 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/knowledge.archive.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -894,7 +1068,9 @@
       },
       "description": "Archive a knowledge page.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.archive:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -943,11 +1119,19 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/knowledge.count_contributions.schema.json",
       "class": "request_reply",
       "description": "How many contributions wait for a curator.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.count_contributions:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -978,6 +1162,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/knowledge.freeze.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -986,7 +1173,9 @@
       },
       "description": "A curator freezes a page.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.freeze:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1033,11 +1222,19 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/knowledge.history.schema.json",
       "class": "request_reply",
       "description": "A knowledge page's revisions.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.history:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1069,11 +1266,19 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/knowledge.list.schema.json",
       "class": "request_reply",
       "description": "List knowledge pages.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.list:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1104,11 +1309,19 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/knowledge.list_contributions.schema.json",
       "class": "request_reply",
       "description": "Contributions waiting for a curator.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.list_contributions:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1139,6 +1352,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/knowledge.merge.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -1147,7 +1363,9 @@
       },
       "description": "A curator merges a page into another.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.merge:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1194,6 +1412,12 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/knowledge.publish_contribution.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -1202,7 +1426,9 @@
       },
       "description": "Publish a contribution, edited or as it is.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.publish_contribution:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1250,11 +1476,19 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/knowledge.read.schema.json",
       "class": "request_reply",
       "description": "Read a knowledge page.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.read:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1286,11 +1520,19 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/knowledge.read_contribution.schema.json",
       "class": "request_reply",
       "description": "Read one contribution.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.read_contribution:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1322,6 +1564,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/knowledge.reject_contribution.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -1330,7 +1575,9 @@
       },
       "description": "A curator rejects a contribution.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.reject_contribution:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1377,6 +1624,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/knowledge.resolve_note.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -1385,7 +1635,9 @@
       },
       "description": "A curator resolves a note on a page.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.resolve_note:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1432,6 +1684,12 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/knowledge.revert.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -1440,7 +1698,9 @@
       },
       "description": "Revert a knowledge page to an earlier revision.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.revert:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1488,6 +1748,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/knowledge.unfreeze.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -1496,7 +1759,9 @@
       },
       "description": "A curator unfreezes a page.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.unfreeze:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1543,11 +1808,19 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/knowledge.withdraw_contribution.schema.json",
       "class": "request_reply",
       "description": "Withdraw one's own contribution.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.withdraw_contribution:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1579,6 +1852,12 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/knowledge.write.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -1587,7 +1866,9 @@
       },
       "description": "Create or edit a knowledge page.",
       "expiry_seconds": 30,
-      "idempotency": "knowledge.write:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1640,7 +1921,9 @@
       "class": "durable",
       "description": "A fact for an agent's work ledger from the team services.",
       "expiry_seconds": 604800,
-      "idempotency": "ledger_fact:<fact_id>",
+      "idempotency": [
+        "/body/fact_id"
+      ],
       "ledger": "fact_recorded",
       "receivers": [
         "lead_host",
@@ -1662,11 +1945,19 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/memory.create.schema.json",
       "class": "request_reply",
       "description": "Add a memory fact.",
       "expiry_seconds": 30,
-      "idempotency": "memory.create:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1704,6 +1995,12 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/memory.delete.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -1712,7 +2009,9 @@
       },
       "description": "Delete a memory fact.",
       "expiry_seconds": 30,
-      "idempotency": "memory.delete:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1750,11 +2049,19 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/memory.list.schema.json",
       "class": "request_reply",
       "description": "List a memory bank's facts.",
       "expiry_seconds": 30,
-      "idempotency": "memory.list:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1784,6 +2091,12 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/memory.replace.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -1792,7 +2105,9 @@
       },
       "description": "Replace a memory fact's text or tags.",
       "expiry_seconds": 30,
-      "idempotency": "memory.replace:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1830,11 +2145,19 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/memory.show.schema.json",
       "class": "request_reply",
       "description": "Show one memory fact.",
       "expiry_seconds": 30,
-      "idempotency": "memory.show:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1865,6 +2188,12 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/memory.undo.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -1873,7 +2202,9 @@
       },
       "description": "Undo one memory change.",
       "expiry_seconds": 30,
-      "idempotency": "memory.undo:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1911,6 +2242,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/objectives.abandon.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -1919,7 +2253,9 @@
       },
       "description": "Abandon one of the person's Objectives.",
       "expiry_seconds": 30,
-      "idempotency": "objectives.abandon:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1950,11 +2286,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/objectives.create.schema.json",
       "class": "request_reply",
       "description": "The lead creates an Objective.",
       "expiry_seconds": 30,
-      "idempotency": "objectives.create:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -1990,6 +2331,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/objectives.delete.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -1998,7 +2342,9 @@
       },
       "description": "Delete one of the person's Objectives.",
       "expiry_seconds": 30,
-      "idempotency": "objectives.delete:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2029,11 +2375,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/objectives.list.schema.json",
       "class": "request_reply",
       "description": "The person's Objectives.",
       "expiry_seconds": 30,
-      "idempotency": "objectives.list:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2060,6 +2411,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/objectives.pause.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2068,7 +2422,9 @@
       },
       "description": "Pause one of the person's Objectives.",
       "expiry_seconds": 30,
-      "idempotency": "objectives.pause:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2099,6 +2455,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/objectives.resume.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2107,7 +2466,9 @@
       },
       "description": "Resume one of the person's Objectives.",
       "expiry_seconds": 30,
-      "idempotency": "objectives.resume:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2138,6 +2499,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/objectives.stop.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2146,7 +2510,9 @@
       },
       "description": "Stop one of the person's Objectives.",
       "expiry_seconds": 30,
-      "idempotency": "objectives.stop:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2177,6 +2543,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/objectives.update_progress.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2185,7 +2554,9 @@
       },
       "description": "The lead records progress on an Objective.",
       "expiry_seconds": 30,
-      "idempotency": "objectives.update_progress:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2221,6 +2592,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/objectives.update_status.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2229,7 +2603,9 @@
       },
       "description": "The lead changes an Objective's status.",
       "expiry_seconds": 30,
-      "idempotency": "objectives.update_status:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2265,11 +2641,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/people.set_standing.schema.json",
       "class": "request_reply",
       "description": "Settle a person's work after their standing changed.",
       "expiry_seconds": 30,
-      "idempotency": "people.set_standing:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2297,11 +2678,16 @@
         "priority": "normal"
       },
       "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/person.notify.schema.json",
       "class": "durable",
       "description": "A notice for a person, delivered by the gateway.",
       "expiry_seconds": 604800,
-      "idempotency": "notify:<notice_id>",
+      "idempotency": [
+        "/body/notice_id"
+      ],
       "ledger": "person_notified",
       "receivers": [
         "gateway"
@@ -2313,11 +2699,16 @@
         "worker_host",
         "team_services"
       ],
-      "topology_edge": "person",
+      "topology_edge": [
+        "person"
+      ],
       "wakes_model": "never"
     },
     "question.closed": {
-      "address": "work.agent.{agent}",
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
       "admission": {
         "accepted_while_paused": false,
         "execution_slot": true,
@@ -2328,11 +2719,14 @@
       "class": "durable",
       "description": "A question ended without an answer.",
       "expiry_seconds": 604800,
-      "idempotency": "question_closed:<question_id>",
+      "idempotency": [
+        "/body/question_id"
+      ],
       "ledger": "question_closed",
       "receivers": [
         "lead_host",
-        "worker_host"
+        "worker_host",
+        "edge_adapter"
       ],
       "rendering": "summary",
       "routing": "named",
@@ -2341,7 +2735,10 @@
         "team_services",
         "lead_host"
       ],
-      "topology_edge": "down",
+      "topology_edge": [
+        "down",
+        "out"
+      ],
       "wakes_model": "always"
     },
     "requests.pause": {
@@ -2352,11 +2749,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/requests.pause.schema.json",
       "class": "request_reply",
       "description": "The lead pauses its own request's work.",
       "expiry_seconds": 30,
-      "idempotency": "requests.pause:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2385,11 +2787,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/requests.resume.schema.json",
       "class": "request_reply",
       "description": "The lead resumes its own request's work.",
       "expiry_seconds": 30,
-      "idempotency": "requests.resume:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2422,7 +2829,9 @@
       "class": "request_reply",
       "description": "A worker running a scheduled job asks for the run's authority token.",
       "expiry_seconds": 30,
-      "idempotency": "run_context.sign:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2456,6 +2865,12 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/schedules.disable.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2464,7 +2879,9 @@
       },
       "description": "Disable a schedule.",
       "expiry_seconds": 30,
-      "idempotency": "schedules.disable:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2501,6 +2918,12 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/schedules.install.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2509,7 +2932,9 @@
       },
       "description": "Install a schedule: create, replace, ensure or refresh it.",
       "expiry_seconds": 30,
-      "idempotency": "schedules.install:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2548,11 +2973,19 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/schedules.list.schema.json",
       "class": "request_reply",
       "description": "The schedules the caller may see.",
       "expiry_seconds": 30,
-      "idempotency": "schedules.list:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2582,6 +3015,12 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/schedules.pause.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2590,7 +3029,9 @@
       },
       "description": "Pause a schedule until a time.",
       "expiry_seconds": 30,
-      "idempotency": "schedules.pause:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2627,6 +3068,12 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/schedules.remove.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2635,7 +3082,9 @@
       },
       "description": "Remove a schedule.",
       "expiry_seconds": 30,
-      "idempotency": "schedules.remove:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2672,6 +3121,12 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/schedules.resume.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2680,7 +3135,9 @@
       },
       "description": "Resume a schedule.",
       "expiry_seconds": 30,
-      "idempotency": "schedules.resume:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2717,6 +3174,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/schedules.set_worker.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2725,7 +3185,9 @@
       },
       "description": "Choose which worker runs a schedule.",
       "expiry_seconds": 30,
-      "idempotency": "schedules.set_worker:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2761,6 +3223,12 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": [
+          "command",
+          "root_task"
+        ]
+      },
       "body": "bodies/schedules.update.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2769,7 +3237,9 @@
       },
       "description": "Change a schedule's instruction, timing or delivery.",
       "expiry_seconds": 30,
-      "idempotency": "schedules.update:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2810,7 +3280,9 @@
       "class": "event",
       "description": "Hint that a managed skill was installed or removed. Receivers verify the stored receipt before they refresh.",
       "expiry_seconds": 300,
-      "idempotency": "skills_changed:<change_id>",
+      "idempotency": [
+        "/body/change_id"
+      ],
       "ledger": "none",
       "receivers": [
         "lead_host",
@@ -2832,6 +3304,9 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/staged_changes.apply.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2840,7 +3315,9 @@
       },
       "description": "The lead applies a staged change the person reviewed.",
       "expiry_seconds": 30,
-      "idempotency": "staged_changes.apply:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2879,11 +3356,16 @@
         "priority": "high"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/steering.decide.schema.json",
       "class": "request_reply",
       "description": "The lead decides what each held task changes, or extends the hold once.",
       "expiry_seconds": 30,
-      "idempotency": "steering.decide:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -2916,9 +3398,16 @@
       "authority": "none",
       "body": "bodies/task.account.schema.json",
       "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
       "description": "A held holder's account of where its task stopped.",
       "expiry_seconds": 86400,
-      "idempotency": "task_account:<task_id>:<steer_id>:<stage>",
+      "idempotency": [
+        "/body/task_id",
+        "/body/steer_id",
+        "/body/stage/type"
+      ],
       "ledger": "hold_account",
       "receivers": [
         "lead_host"
@@ -2929,26 +3418,51 @@
         "worker_host",
         "lead_host"
       ],
-      "topology_edge": "up",
+      "topology_edge": [
+        "up"
+      ],
       "wakes_model": "never"
     },
     "task.answer": {
-      "address": "work.agent.{agent}",
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
       "admission": {
         "accepted_while_paused": false,
         "execution_slot": true,
         "priority": "high"
       },
       "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/task.answer.schema.json",
+      "body_rules": [
+        {
+          "unique": "/body/selected_choice_ids"
+        },
+        {
+          "any_of": [
+            "/body/text",
+            "/body/text_file",
+            "/body/selected_choice_ids",
+            "/body/decision",
+            "/body/decision_token"
+          ]
+        }
+      ],
       "class": "durable",
       "description": "The answer to one question.",
       "expiry_seconds": 604800,
-      "idempotency": "question_answer:<question_id>",
+      "idempotency": [
+        "/body/question_id"
+      ],
       "ledger": "question_answered",
       "receivers": [
         "lead_host",
-        "worker_host"
+        "worker_host",
+        "edge_adapter"
       ],
       "rendering": "full",
       "routing": "named",
@@ -2956,9 +3470,14 @@
         "gateway",
         "lead_host",
         "team_services",
-        "worker_host"
+        "worker_host",
+        "edge_adapter"
       ],
-      "topology_edge": "down",
+      "topology_edge": [
+        "down",
+        "sideways",
+        "out"
+      ],
       "wakes_model": "always"
     },
     "task.claimed": {
@@ -2976,11 +3495,12 @@
       ],
       "description": "A holder took a task.",
       "expiry_seconds": 86400,
-      "idempotency": "task_claimed:<claim_id>",
+      "idempotency": [
+        "/body/claim_id"
+      ],
       "ledger": "standin_holder",
       "receivers": [
-        "lead_host",
-        "team_services"
+        "lead_host"
       ],
       "rendering": "none",
       "routing": "requester",
@@ -2989,7 +3509,9 @@
         "lead_host",
         "edge_adapter"
       ],
-      "topology_edge": "up",
+      "topology_edge": [
+        "up"
+      ],
       "wakes_model": "never"
     },
     "task.handback": {
@@ -3007,11 +3529,12 @@
       ],
       "description": "A holder that lost its lease returns a task.",
       "expiry_seconds": 604800,
-      "idempotency": "handback_<sha256>",
+      "idempotency": [
+        "/body/handback_id"
+      ],
       "ledger": "standin_returned",
       "receivers": [
-        "lead_host",
-        "team_services"
+        "lead_host"
       ],
       "rendering": "summary",
       "routing": "requester",
@@ -3019,7 +3542,9 @@
         "worker_host",
         "lead_host"
       ],
-      "topology_edge": "up",
+      "topology_edge": [
+        "up"
+      ],
       "wakes_model": "never"
     },
     "task.probe": {
@@ -3034,7 +3559,9 @@
       "class": "request_reply",
       "description": "Whether the holder still has a task, asked by the watchdog.",
       "expiry_seconds": 30,
-      "idempotency": "task.probe:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "lead_host",
@@ -3063,9 +3590,16 @@
       "authority": "none",
       "body": "bodies/task.progress.schema.json",
       "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
       "description": "Where a task stands, from its holder to its requester.",
       "expiry_seconds": 86400,
-      "idempotency": "task_progress:<task_id>:<sequence>",
+      "idempotency": [
+        "/body/task_id",
+        "/body/custody_token",
+        "/body/sequence"
+      ],
       "ledger": "standin_progress",
       "receivers": [
         "lead_host"
@@ -3077,7 +3611,9 @@
         "lead_host",
         "edge_adapter"
       ],
-      "topology_edge": "up",
+      "topology_edge": [
+        "up"
+      ],
       "wakes_model": "never"
     },
     "task.question": {
@@ -3092,10 +3628,30 @@
       },
       "authority": "none",
       "body": "bodies/task.question.schema.json",
+      "body_rules": [
+        {
+          "by": "choice_id",
+          "unique": "/body/purpose/choices"
+        },
+        {
+          "unique": "/body/purpose/allowed_decisions"
+        },
+        {
+          "requires": "/body/purpose/choices",
+          "when": [
+            {
+              "at": "/body/purpose/allow_free_text",
+              "is": false
+            }
+          ]
+        }
+      ],
       "class": "durable",
       "description": "A question from a task's holder to the one who can answer it.",
       "expiry_seconds": 604800,
-      "idempotency": "task_question:<question_id>",
+      "idempotency": [
+        "/body/question_id"
+      ],
       "ledger": "question_open",
       "receivers": [
         "lead_host",
@@ -3109,7 +3665,12 @@
         "lead_host",
         "edge_adapter"
       ],
-      "topology_edge": "up",
+      "topology_edge": [
+        "up",
+        "person",
+        "sideways",
+        "out"
+      ],
       "wakes_model": "next_turn"
     },
     "task.report": {
@@ -3124,7 +3685,9 @@
       "class": "durable",
       "description": "A report from a holder to its requester; the lead decides whether a person sees it.",
       "expiry_seconds": 604800,
-      "idempotency": "task_report:<report_id>",
+      "idempotency": [
+        "/body/report_id"
+      ],
       "ledger": "report_received",
       "receivers": [
         "lead_host"
@@ -3135,13 +3698,16 @@
         "worker_host",
         "lead_host"
       ],
-      "topology_edge": "up",
+      "topology_edge": [
+        "up"
+      ],
       "wakes_model": "next_turn"
     },
     "task.request": {
       "address": [
         "work.agent.{agent}",
-        "work.pool.{pool}"
+        "work.pool.{pool}",
+        "work.edge.{edge}"
       ],
       "admission": {
         "accepted_while_paused": false,
@@ -3149,6 +3715,10 @@
         "priority": "normal"
       },
       "authority": "optional",
+      "authority_binding": {
+        "at": "/body/work/root_task_id",
+        "type": "root_task"
+      },
       "body": "bodies/task.request.schema.json",
       "class": "durable",
       "copy_to": [
@@ -3156,13 +3726,15 @@
       ],
       "description": "Give a task to an agent or a pool.",
       "expiry_seconds": 604800,
-      "idempotency": "task_request:<task_id>:<message_id>",
+      "idempotency": [
+        "/body/task_id",
+        "/message_id"
+      ],
       "ledger": "task_held",
       "receivers": [
         "lead_host",
         "worker_host",
-        "edge_adapter",
-        "team_services"
+        "edge_adapter"
       ],
       "rendering": "full",
       "routing": "named",
@@ -3170,9 +3742,24 @@
         "gateway",
         "lead_host",
         "scheduler",
-        "edge_adapter"
+        "edge_adapter",
+        "team_services"
       ],
-      "topology_edge": "down",
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host"
+        ],
+        "work.pool.{pool}": [
+          "gateway",
+          "lead_host",
+          "scheduler",
+          "team_services"
+        ]
+      },
+      "topology_edge": [
+        "down",
+        "out"
+      ],
       "wakes_model": "always"
     },
     "task.result": {
@@ -3193,22 +3780,30 @@
       ],
       "description": "The final answer of a task, sent by its holder.",
       "expiry_seconds": 604800,
-      "idempotency": "task_result:<task_id>:<custody_token>",
+      "idempotency": [
+        "/body/task_id",
+        "/body/outcome/custody_token",
+        "/body/sequence"
+      ],
       "ledger": "delegated_resolved",
       "receivers": [
         "lead_host",
         "gateway",
-        "edge_adapter",
-        "team_services"
+        "edge_adapter"
       ],
       "rendering": "full",
       "routing": "requester",
       "senders": [
         "worker_host",
         "lead_host",
-        "edge_adapter"
+        "edge_adapter",
+        "team_services"
       ],
-      "topology_edge": "up",
+      "topology_edge": [
+        "up",
+        "person",
+        "out"
+      ],
       "wakes_model": {
         "by": "outcome.state",
         "values": {
@@ -3223,22 +3818,32 @@
       }
     },
     "task.steer": {
-      "address": "work.agent.{agent}",
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
         "priority": "high"
       },
       "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/task.steer.schema.json",
       "class": "durable",
       "description": "Steering for the holder of one named task.",
       "expiry_seconds": 86400,
-      "idempotency": "task_steer:<task_id>:<steer_id>",
+      "idempotency": [
+        "/body/task_id",
+        "/body/steer_id"
+      ],
       "ledger": "steering_received",
       "receivers": [
         "worker_host",
-        "lead_host"
+        "lead_host",
+        "edge_adapter"
       ],
       "rendering": "full",
       "routing": "holder",
@@ -3246,7 +3851,10 @@
         "lead_host",
         "team_services"
       ],
-      "topology_edge": "down",
+      "topology_edge": [
+        "down",
+        "out"
+      ],
       "wakes_model": {
         "by": "action.type",
         "values": {
@@ -3257,22 +3865,32 @@
       }
     },
     "task.stop": {
-      "address": "work.agent.{agent}",
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
         "priority": "high"
       },
       "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/task.stop.schema.json",
       "class": "durable",
       "description": "Stop one task. Sent only to the task's current holder.",
       "expiry_seconds": 86400,
-      "idempotency": "task.stop:<base64url(sha256(RFC8785([task_id, stop_id])))>",
+      "idempotency": [
+        "/body/task_id",
+        "/body/stop_id"
+      ],
       "ledger": "task_stopped",
       "receivers": [
         "lead_host",
-        "worker_host"
+        "worker_host",
+        "edge_adapter"
       ],
       "rendering": "none",
       "routing": "holder",
@@ -3280,7 +3898,10 @@
         "lead_host",
         "team_services"
       ],
-      "topology_edge": "down",
+      "topology_edge": [
+        "down",
+        "out"
+      ],
       "wakes_model": "never"
     },
     "tasks.cancel": {
@@ -3291,11 +3912,16 @@
         "priority": "high"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/tasks.cancel.schema.json",
       "class": "request_reply",
       "description": "Stop a task, a conversation's work, a delivery's work or all of the person's work.",
       "expiry_seconds": 30,
-      "idempotency": "tasks.cancel:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -3323,11 +3949,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/tasks.inventory.schema.json",
       "class": "request_reply",
       "description": "The person's running work and schedules.",
       "expiry_seconds": 30,
-      "idempotency": "tasks.inventory:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -3357,11 +3988,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/tasks.list.schema.json",
       "class": "request_reply",
       "description": "One agent's task queue.",
       "expiry_seconds": 30,
-      "idempotency": "tasks.list:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services",
@@ -3395,11 +4031,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/tasks.list_finished.schema.json",
       "class": "request_reply",
       "description": "One agent's finished tasks.",
       "expiry_seconds": 30,
-      "idempotency": "tasks.list_finished:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services",
@@ -3430,11 +4071,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/tasks.probe.schema.json",
       "class": "request_reply",
       "description": "Whether a task the person owns is still known.",
       "expiry_seconds": 30,
-      "idempotency": "tasks.probe:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -3459,11 +4105,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/tasks.progress.schema.json",
       "class": "request_reply",
       "description": "Where the person's request in one conversation stands.",
       "expiry_seconds": 30,
-      "idempotency": "tasks.progress:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -3493,11 +4144,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/tasks.purge.schema.json",
       "class": "request_reply",
       "description": "Remove every queued task that is not running from an agent's queue.",
       "expiry_seconds": 30,
-      "idempotency": "tasks.purge:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services",
@@ -3533,11 +4189,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/tasks.remove.schema.json",
       "class": "request_reply",
       "description": "Remove one queued task from an agent's queue.",
       "expiry_seconds": 30,
-      "idempotency": "tasks.remove:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services",
@@ -3570,11 +4231,16 @@
         "priority": "high"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/tasks.steer.schema.json",
       "class": "request_reply",
       "description": "The person's guidance for a running request; stored before it is accepted.",
       "expiry_seconds": 30,
-      "idempotency": "tasks.steer:<steer_id>",
+      "idempotency": [
+        "/body/steer_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -3604,11 +4270,17 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "at": "/body/root_task_id",
+        "type": "root_task"
+      },
       "body": "bodies/tool.setup.request.schema.json",
       "class": "durable",
       "description": "Ask the gateway to have a person or administrator set a tool up.",
       "expiry_seconds": 604800,
-      "idempotency": "<setup_request_id>",
+      "idempotency": [
+        "/body/setup_request_id"
+      ],
       "ledger": "setup_wait_open",
       "receivers": [
         "gateway"
@@ -3618,7 +4290,9 @@
       "senders": [
         "lead_host"
       ],
-      "topology_edge": "person",
+      "topology_edge": [
+        "person"
+      ],
       "wakes_model": "never"
     },
     "tool.setup.result": {
@@ -3633,7 +4307,9 @@
       "class": "durable",
       "description": "What became of a tool setup.",
       "expiry_seconds": 604800,
-      "idempotency": "secure_result:tool_setup:<setup_request_id>",
+      "idempotency": [
+        "/body/setup_request_id"
+      ],
       "ledger": "setup_wait_closed",
       "receivers": [
         "lead_host"
@@ -3654,11 +4330,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/topics.find_threads.schema.json",
       "class": "request_reply",
       "description": "Threads with the given tags.",
       "expiry_seconds": 30,
-      "idempotency": "topics.find_threads:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -3686,11 +4367,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/topics.list_tags.schema.json",
       "class": "request_reply",
       "description": "The thread tags in use.",
       "expiry_seconds": 30,
-      "idempotency": "topics.list_tags:<message_id>",
+      "idempotency": [
+        "/message_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -3717,11 +4403,16 @@
         "priority": "normal"
       },
       "authority": "required",
+      "authority_binding": {
+        "type": "command"
+      },
       "body": "bodies/topics.tag_thread.schema.json",
       "class": "request_reply",
       "description": "Tag a thread.",
       "expiry_seconds": 30,
-      "idempotency": "topics.tag_thread:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -3868,11 +4559,11 @@
     },
     {
       "code": "invalid_body",
-      "meaning": "the body breaks the kind's schema"
+      "meaning": "the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give"
     },
     {
       "code": "bad_authority",
-      "meaning": "the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names another team than the issuer's, was not valid when the frame was issued, lasts longer than authority_token_max_seconds, or is bound to another root task or command than the one the receiver holds"
+      "meaning": "the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, lasts longer than authority_token_max_seconds, or is bound to another record than its kind's binding names or the receiver holds; or a change-conflict decision token in the body is not signed by a team-services certificate of the frame's installation and team, or was not valid when the frame was issued"
     },
     {
       "code": "access_denied",

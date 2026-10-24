@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "memory.delete",
   "message_id": "01928f3a-7b2c-7455-8000-000000000455",
-  "idempotency_key": "memory.delete:request_id_1",
+  "idempotency_key": "memory.delete:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -50,5 +50,5 @@
     "seen_version": "v3"
   },
   "body_digest": "RE8F1D_c4OrG93utVqcI2GfkPyC3ifOjvO83suDy_rA",
-  "signature": "r33w3x-2HYFjRxbeFyOoymVH4herTjcSRLDGhF3pQSRoDtkBbYXGc12gfNeFa-BqDDWu1gbTFTxocxuCCNp-Cw"
+  "signature": "cAIYttAGPvT3ATrp1Lyne36VjjF-xnnWqO0am8ZgDDsbIYpJjEADioLbkAN9Hc2JoFXnQgi3M9QBSrB1ZK6ZBw"
 }

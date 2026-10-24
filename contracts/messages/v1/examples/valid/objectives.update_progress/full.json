@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "objectives.update_progress",
   "message_id": "01928f3a-7b2c-7428-8000-000000000428",
-  "idempotency_key": "objectives.update_progress:request_id_1",
+  "idempotency_key": "objectives.update_progress:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -52,5 +52,5 @@
     "progress_summary": "Example progress summary"
   },
   "body_digest": "LQJnwlPo94lKByCpkQYFxKmL28S6ZMNn4dqj5C88D7o",
-  "signature": "ok9BK-_2MDguPid8070Jdt_6xfWNxzxmg0c9Nah0MCDko14zyd4G4bIWFXhX33XzQD3H0oNcVOj9fM03g1YzDw"
+  "signature": "3B-A6eg4954k6OH4c74q0uiOO4iKt89AdCj1J9acegHNN5awPoI7r8zmFoQguD3uDRIvuYe9ifa42gM4XfNrDg"
 }

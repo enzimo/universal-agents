@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.probe",
   "message_id": "01928f3a-7b2c-74da-8000-0000000004da",
-  "idempotency_key": "task.probe:01928f3a-7b2c-74da-8000-0000000004da",
+  "idempotency_key": "task.probe:kGmzE47Ad27v5_v7kn9WxGzDJNqszHLph86cqXJzg44",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -28,5 +28,5 @@
     "custody_token": 3
   },
   "body_digest": "LKCzUQctTh7pG5oUIepeRgp2sK7R1WirnyztjDcyjX4",
-  "signature": "IwtlFdqsnUHWKMkNh4w2tmuIm6uhB4AbkxkAkJGq6gMPwI0XZADje2WmGchRAf2hAfADTTGQxmuV82QLQB3kCA"
+  "signature": "l09Xdd2wyuCMnTeQoyB1EZSFD8U3DqOYIVs5CcvPL3ut3IEVHljVUbuUl6ZxFXclU_4acX2lnkwY-7k9wb5JDg"
 }

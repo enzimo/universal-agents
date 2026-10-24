@@ -1,0 +1,37 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "ledger.fact",
+  "message_id": "01928f3a-7b2c-7313-8000-000000000313",
+  "idempotency_key": "ledger.fact:62BnrYkxT4vRGqmEavjJ7UbZIE4j2hnbLbLA8Px71Do",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.team-services-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "fact_id": "fact_13",
+    "task_id": "task_root_1",
+    "fact": {
+      "type": "colleague_exchange",
+      "question_id": "q_9",
+      "asker": "researcher-2",
+      "answerer": "researcher-3",
+      "state": "answered"
+    }
+  },
+  "body_digest": "AikeE-0A_o7V6EzIXbMiXkKf6jqgQ3FWGs7v3G3YVkI",
+  "signature": "25M8Rrr94Vqd5bALmIoqXZkwz3S5TyhFwEEFw4CCbWbvibeWy5c6z1pmxW621MnVhQ66QqSTuz86ZgFdSlKqCQ"
+}

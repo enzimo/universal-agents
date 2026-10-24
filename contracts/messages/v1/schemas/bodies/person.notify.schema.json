@@ -8,8 +8,8 @@
     "notice_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
     },
-    "delivery_ref": {
-      "$ref": "../common.schema.json#/$defs/delivery_ref"
+    "recipient": {
+      "$ref": "../common.schema.json#/$defs/recipient"
     },
     "task_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
@@ -115,6 +115,7 @@
   },
   "required": [
     "notice_id",
+    "recipient",
     "text",
     "urgency",
     "reason"

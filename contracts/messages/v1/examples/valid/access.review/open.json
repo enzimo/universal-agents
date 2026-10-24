@@ -1,0 +1,57 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "access.review",
+  "message_id": "01928f3a-7b2c-7222-8000-000000000222",
+  "idempotency_key": "access.review:Ipg9nmb6aUvbLtH5rf5SgCbH_AdOMJtfdx7fBDBOn2A",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.work.edge.web",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "areq_1",
+    "state": {
+      "type": "open",
+      "task_id": "task_sub_1",
+      "decider": {
+        "type": "person",
+        "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0"
+      },
+      "requester_agent": "researcher-2",
+      "what": {
+        "type": "access",
+        "target": {
+          "kind": "folder",
+          "id": "team/finance"
+        },
+        "level": "read",
+        "lifetime": "task",
+        "hours": 24,
+        "hand_on": false,
+        "action_digest": "a1b2c3"
+      },
+      "reason": "The report needs last quarter's invoices.",
+      "choices": [
+        "approve",
+        "approve_task",
+        "deny"
+      ],
+      "expires_at": "2026-10-24T04:30:00.000Z"
+    }
+  },
+  "body_digest": "jGcjT4ZvioUWJ_RTxMa3g7YE4r4_KmHIsZ7T0Blreeg",
+  "signature": "8cpztT1Aumw46Q8Oju7Tuy4UA9OplKj4CFZl7BCcV0JztKuYNHSm4apk4_FHESCg4leB2mriF9kJRMDK_YYoDQ"
+}

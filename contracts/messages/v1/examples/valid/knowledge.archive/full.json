@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.archive",
   "message_id": "01928f3a-7b2c-7473-8000-000000000473",
-  "idempotency_key": "knowledge.archive:request_id_1",
+  "idempotency_key": "knowledge.archive:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -51,5 +51,5 @@
     "reason": "These instructions have been replaced."
   },
   "body_digest": "6aQ_CbAuOi-orCDjHHVsjJrddKftTckfqOb-3i9MpSI",
-  "signature": "XT-9H5uN2zGyHZ-YN1EEu8CBr0lwt97n6Inllo9J1ooXGpCE0uYBekiXNykfK0yjLZWctEzX9x6oSonjQpICBw"
+  "signature": "O5VqAhsr-cM8ioON9WBAs3R4go1iAUJkojChzw3gD8E9etTE0Rofmvvq-kGXNZASv1orVCw6yQL1VJd7NwgZCw"
 }

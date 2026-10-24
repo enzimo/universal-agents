@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "agent.pause",
   "message_id": "01928f3a-7b2c-7007-8000-000000000007",
-  "idempotency_key": "agent_pause:researcher-3:pause_1",
+  "idempotency_key": "agent.pause:BbSuMcFHE6qABUrYVML3xLGAnOrzWfnq_3cixWfH50E",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -27,5 +27,5 @@
     "request_id": "pause_1"
   },
   "body_digest": "BlUzEHTAj5IJoKHaKhwxIwqU_bzN8ciQ1Rtebz-rmrA",
-  "signature": "suuGxxgBUjQ3uRfQY4uS1B_1MHepEJIGJmf1iljQ9GQBy17o-wyN0LE3XxN2BaI7HqoLAdv4yNI6uEfjHjatCg"
+  "signature": "de7AD9b9m4dnyg_IstSYodYglkXn5V55WDP3mkBoRAcwE8ku_O86R0MsQO1pbRufr8-zPVFXt8kVahOMSfgpBw"
 }

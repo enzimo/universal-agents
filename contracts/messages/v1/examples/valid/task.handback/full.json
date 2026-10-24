@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.handback",
   "message_id": "01928f3a-7b2c-7110-8000-000000000110",
-  "idempotency_key": "handback_0123abcd",
+  "idempotency_key": "task.handback:jviywYtFDFKoVpJV5ZMskS9TKgqa0mXHpNiU70TzwgA",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -26,6 +26,7 @@
   "body": {
     "handback_id": "handback_0123abcd",
     "task_id": "task_sub_1",
+    "custody_token": 3,
     "disposition": "interrupted",
     "launch_id": "launch_7",
     "interrupted_at": "2026-10-22T04:10:00.000Z",
@@ -93,6 +94,6 @@
       }
     }
   },
-  "body_digest": "796sdRwOEqQysTrV2-AFuedY7SI07LEmRn-WzmYXKhw",
-  "signature": "hkUj9XkGh7dTvrpv2dYDVzTz8iGlOrMMUNunKsdw0gvIfLHkgU-GGJJ-hOdruNbJuZFPcau1N57te9gQ2EkzBg"
+  "body_digest": "VBXEzbPzB36G2aH8oNnGo-jSnigcUsCE9EiTZA8IoDU",
+  "signature": "YZcuHVjW6-pqAB9XylovlICnv2syvETeeh0kdz7bkRVUm4sL9G6W6ziAHolowgwJgLmJG8du5p6B2XVDOVGfAg"
 }

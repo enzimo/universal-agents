@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "agent.status",
   "message_id": "01928f3a-7b2c-74d7-8000-0000000004d7",
-  "idempotency_key": "agent.status:01928f3a-7b2c-74d7-8000-0000000004d7",
+  "idempotency_key": "agent.status:fg4GzSPyI1injcooEyIfUEPssS-Qfh5gJDJF3PhZtf4",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -27,5 +27,5 @@
     "level": "basic"
   },
   "body_digest": "3WJJn9b18MrK-sv4UiFtbXUReSpJy3r2qmFdKKRqcEw",
-  "signature": "sSIHtCtXmfz4n98YOW2T3dxDQJHrlGNk_xzDhYXK211QSJ5ecP360rq0uwo23Y3tkO-7dXACNtlvUTSxFmVHCg"
+  "signature": "-2ZbXZkSEp0ClLuGd8Kig3LfQXOL4iwTpYoYf67j1p26kI6BnNeXzIh5_MtdrOhHcD72BzQzGLkNxpMVLkIIAQ"
 }

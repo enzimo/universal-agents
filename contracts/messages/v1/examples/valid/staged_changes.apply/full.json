@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "staged_changes.apply",
   "message_id": "01928f3a-7b2c-74cf-8000-0000000004cf",
-  "idempotency_key": "staged_changes.apply:request_id_1",
+  "idempotency_key": "staged_changes.apply:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -53,5 +53,5 @@
     "confirmed": true
   },
   "body_digest": "kkbDBYdjkWktmMYFG56S-6i92cC4T98q1wj6jzlY-oA",
-  "signature": "yJEnQQIemoLCw81JAaZN45LFFyOu422NcWnHyqa4MoKd5YsGcYu0vrtQSOvZJI3OlqQczLKj11zwKdlywe63Dg"
+  "signature": "iDwh35WhfI1czs695GdDqU_y_GGS4A29LyqIgYfiqYSRKcP2V_6RdEQbTxzKz4w-KNzR4TyRS-FZBevJ9c-kBQ"
 }
