@@ -1,0 +1,25 @@
+{
+  "description": "Two defects: epochs are checked before the issuer's fields.",
+  "refusal": "epoch_too_old",
+  "also": [
+    "wrong_issuer"
+  ],
+  "at": "/issuer/membership_epoch",
+  "base": "agent.pause/basic.json",
+  "changes": [
+    {
+      "set": "/issuer/revocation_epoch",
+      "to": 9
+    }
+  ],
+  "context": {
+    "minimum_epochs": [
+      {
+        "installation": "install_example",
+        "runtime": "lead-host-1",
+        "membership": 4
+      }
+    ]
+  },
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"agent.pause\", \"message_id\": \"01928f3a-7b2c-7002-8000-000000000002\", \"idempotency_key\": \"agent_pause:researcher-2:pause_1\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 9, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.lead-host-1.ctl.agent.researcher-2.pause\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"request_id\": \"pause_1\"}, \"body_digest\": \"BlUzEHTAj5IJoKHaKhwxIwqU_bzN8ciQ1Rtebz-rmrA\", \"signature\": \"c18VaOgikv6OW-7DEVe_4rzyoddmEaPvQ3FP6c9He9AI6fzZ-fdqigN5d78RHomSUqpjmR0kGaUXUhbYw9hFDQ\"}"
+}

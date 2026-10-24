@@ -4,6 +4,7 @@
   "message_id": "01928f3a-7b2c-7701-8000-000000000701",
   "idempotency_key": "host.join:join_1",
   "issuer": {
+    "installation": "install_example",
     "team": "_install",
     "runtime": "new-host-1",
     "membership_epoch": 0,
@@ -11,6 +12,7 @@
     "key_id": "new-host-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "_install",
     "target": "installation_service",
     "id": "authority"
@@ -32,7 +34,7 @@
     ],
     "application_key": {
       "key_id": "new-host-key-1",
-      "public_key": "AgvUJ0RrcjQk2A0srTUro982SdDvj6rgyn6yVEOUGyk"
+      "public_key": "7VSln7GsOlEjk1E2KUG4aOhaYOPXskhdgogh3Hppwnk"
     },
     "nats_public_key": "UBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
     "agent_types": [
@@ -46,6 +48,6 @@
       "version": "0.9.8"
     }
   },
-  "body_digest": "I_x2jpmTsnNTJDmG8jGB0Ynds5LPHHPKwTPtRtdiwng",
-  "signature": "ZrJTXzGKto4Ol12EbSgkUc9Nr21pT8nVK3GJXu_1NLRfvF1Z624i7UfDqGm3bndzEuOrfNEG4_ncCbS2ujdRCQ"
+  "body_digest": "FtFcJ8QhVZbqURHybgyFspNrOpxpcRUjhlbr-Aeyr2U",
+  "signature": "bkSXXuF2GZwi9xlO6967e59yeBLmkb4O1dqyTdgpe8l76M2j8AVk9Kp0wpHBBd1QQW2l1xpKmfnA5fnO3DTpCg"
 }

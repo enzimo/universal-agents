@@ -4,6 +4,7 @@
   "message_id": "01928f3a-7b2c-7708-8000-000000000708",
   "idempotency_key": "host.renew:renew_rotate_1",
   "issuer": {
+    "installation": "install_example",
     "team": "_install",
     "runtime": "lead-host-1",
     "membership_epoch": 3,
@@ -11,6 +12,7 @@
     "key_id": "test-lead-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "_install",
     "target": "installation_service",
     "id": "authority"
@@ -31,11 +33,11 @@
     "application_key_rotation": {
       "key": {
         "key_id": "test-lead-key-2",
-        "public_key": "5_FioQvsVZr-oZXk3OhLaVaNXSywlj60RsBoXisX8vA"
+        "public_key": "bI0UsEdZPXEX3ERZV9i91ncsMD0GQpf9yOMpkn03C9o"
       },
-      "proof": "TCG2WWFkChwBmDT4_kdB3YTI6r1poHRnPuSS2p2urCcgddVT7-8oBYHF4bAQ7pbXLAGThTbLfULDiwiYWgppBw"
+      "proof": "wNCghWW7TZ7IMEU8FNV9P15dcaNoxoTJgBezTtgEAPHeBB__Wkb8o3bSGyAVhXLKINiHTCR99ULE2ACadrh5Dg"
     }
   },
-  "body_digest": "rOAl2pAHz4y5A7fJtPLaouvq7rvryAVd9XeohnTKQcs",
-  "signature": "aBWbTDp0bZDIwBoiVwagtU-XZfpjrRZL7kWcflFMr9Vyti3O7U1ddhMoiiBlBHnMHxTgHavtFlZXfwvyiFxeBg"
+  "body_digest": "JdWys9It0FEI3mxWfH5nPnRs_QuLVCjGNHuFMhEctYs",
+  "signature": "PPfWqtXUlwzoBgmTlyVf3FfBTGmmCjCbCZzP5Cyyp2f-2L_1WukIL3ORMHsU6NwrOZPsQPqd97z5-vDFncKFAA"
 }

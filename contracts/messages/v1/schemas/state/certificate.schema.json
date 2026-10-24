@@ -1,15 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/state/certificate.schema.json",
-  "title": "certificate state record body",
-  "description": "A host's membership certificate, issued by the installation authority.",
+  "title": "Host membership certificate",
+  "description": "Issued by an installation's authority: which key a host signs with, for which teams, roles and agent types, and from when to when. A receiver checks a frame with the certificate that was valid when the frame was issued, unless any revocation lists it.",
   "type": "object",
   "properties": {
     "certificate_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
     },
     "installation": {
-      "$ref": "../common.schema.json#/$defs/token_id"
+      "$ref": "../common.schema.json#/$defs/installation_id"
     },
     "runtime": {
       "$ref": "../common.schema.json#/$defs/runtime_id"
@@ -19,16 +19,16 @@
       "items": {
         "$ref": "../common.schema.json#/$defs/team_id"
       },
-      "maxItems": 64,
-      "minItems": 1
+      "minItems": 1,
+      "maxItems": 64
     },
     "roles": {
       "type": "array",
       "items": {
         "$ref": "../common.schema.json#/$defs/host_role"
       },
-      "maxItems": 7,
-      "minItems": 1
+      "minItems": 1,
+      "maxItems": 7
     },
     "membership_epoch": {
       "type": "integer",

@@ -1,29 +1,14 @@
 {
   "description": "The agent record's key names another agent than its body.",
   "refusal": "invalid_body",
-  "document": {
-    "record": "agent",
-    "key": "team_example.researcher-2",
-    "writer": {
-      "runtime": "lead-host-1",
-      "membership_epoch": 3,
-      "revocation_epoch": 1,
-      "key_id": "test-lead-key-1",
-      "team": "team_example"
-    },
-    "sequence": 12,
-    "issued_at": "2026-10-22T04:30:00.000Z",
-    "algorithm": "ed25519",
-    "body": {
-      "team": "team_example",
-      "agent": "lead",
-      "agent_type": "TeamArchitect",
-      "session": "session_7",
-      "state": "busy",
-      "accepting_work": true,
-      "since": "2026-10-22T04:29:00.000Z"
-    },
-    "body_digest": "VV93gFoPmHei-4IBdjEAth19XWv_vIcmQyYp0Zi1zyg",
-    "signature": "VFa4P1NbB_FVMs6ug7Oc7_NjtxhuuaI2OkOHxPDkaZ1qeoziR1cvXW0TSqLWXoZgbuJIOCg_aKWc5TtvVWzZCQ"
-  }
+  "at": "/key",
+  "base": "agent/lead-busy.json",
+  "changes": [
+    {
+      "set": "/key",
+      "to": "team_example.researcher-2"
+    }
+  ],
+  "context": {},
+  "document_text": "{\"record\": \"agent\", \"key\": \"team_example.researcher-2\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"lead-host-1\", \"membership_epoch\": 3, \"key_id\": \"test-lead-key-1\"}, \"sequence\": 12, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"body\": {\"team\": \"team_example\", \"agent\": \"lead\", \"agent_type\": \"TeamArchitect\", \"session\": \"session_7\", \"state\": \"busy\", \"accepting_work\": true, \"since\": \"2026-10-22T04:29:00.000Z\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"VV93gFoPmHei-4IBdjEAth19XWv_vIcmQyYp0Zi1zyg\", \"signature\": \"f7BglGZ7kjFhMSTEqn1wvMFEQcRU7fb2Ex44boDKAiFE_rHMRCXm99fIuMqLCkz_WRUvke1clumghqdADU7BDA\"}"
 }

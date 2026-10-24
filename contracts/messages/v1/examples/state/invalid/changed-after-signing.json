@@ -1,34 +1,15 @@
 {
-  "description": "The body changed after signing.",
+  "description": "The body changed, and its digest was not recomputed; the signature still covers the old digest.",
   "refusal": "bad_digest",
-  "document": {
-    "record": "placement",
-    "key": "team_example.lead",
-    "writer": {
-      "runtime": "team-services-1",
-      "membership_epoch": 3,
-      "revocation_epoch": 1,
-      "key_id": "test-services-key-1",
-      "team": "team_example"
-    },
-    "sequence": 1,
-    "issued_at": "2026-10-22T04:30:00.000Z",
-    "algorithm": "ed25519",
-    "body": {
-      "team": "team_example",
-      "agent": "lead",
-      "agent_type": "TeamArchitect",
-      "host": "lead-host-1",
-      "host_epoch": 4,
-      "definition_sha256": "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws",
-      "required_labels": [
-        "sandbox:container"
-      ],
-      "placed_at": "2026-10-22T04:00:00.000Z",
-      "reason": "initial",
-      "previous_host": "lead-host-0"
-    },
-    "body_digest": "Ja2l8J5cis9x2RSMFOPCaJ62lY_FLeIycFclM7P0IaY",
-    "signature": "6mHNusfKpNo1vnadk7AHb5REYXqDK9b68GzLnbbaPUps5wha2Mpz_3NIVvjOZ9fzD8cZht4U-lLJJQWD_5WzDw"
-  }
+  "at": "/body_digest",
+  "base": "placement/lead.json",
+  "changes": [
+    {
+      "set": "/body/reason",
+      "to": "operator"
+    }
+  ],
+  "signing": "stale_digest",
+  "context": {},
+  "document_text": "{\"record\": \"placement\", \"key\": \"team_example.lead\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"key_id\": \"test-services-key-1\"}, \"sequence\": 1, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"body\": {\"team\": \"team_example\", \"agent\": \"lead\", \"agent_type\": \"TeamArchitect\", \"host\": \"lead-host-1\", \"host_epoch\": 3, \"definition_sha256\": \"CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws\", \"required_labels\": [\"sandbox:container\"], \"placed_at\": \"2026-10-22T04:00:00.000Z\", \"reason\": \"operator\", \"previous_host\": \"lead-host-0\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"Ja2l8J5cis9x2RSMFOPCaJ62lY_FLeIycFclM7P0IaY\", \"signature\": \"aLYnzPuFbDXMzmG-I-obP3C5GC3tMyNPN3orGotg1Gtp8T7BDQWjNPb59N5oB0HiPJxWscKku3OZ81l7G_o4Dg\"}"
 }

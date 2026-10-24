@@ -4,6 +4,7 @@
   "message_id": "01928f3a-7b2c-7704-8000-000000000704",
   "idempotency_key": "host.renew:renew_1",
   "issuer": {
+    "installation": "install_example",
     "team": "_install",
     "runtime": "lead-host-1",
     "membership_epoch": 3,
@@ -11,6 +12,7 @@
     "key_id": "test-lead-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "_install",
     "target": "installation_service",
     "id": "authority"
@@ -30,5 +32,5 @@
     }
   },
   "body_digest": "PAECrdGqQ1Ms_rIO2ok3D_OxMx1wNAnbhDtq-Hr-rXQ",
-  "signature": "iIVgVh_K_T6xptsB6NoSsc4jnrW6zvbyfctGbiB5wFOHyJ9pcb_S9plS22WyMlSpn_OaYro3QHzL1TmGY4HcCg"
+  "signature": "IAjSmXn4lvTYgud8CgUWrfu_nbtNwB2MOUr_U26ukrXkjMPqjcElM6SUFhqDx7CfWWI9Pe2RJPzePuS1yfcBAQ"
 }

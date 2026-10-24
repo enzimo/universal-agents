@@ -4,18 +4,21 @@
   "message_id": "01928f3a-7b2c-7706-8000-000000000706",
   "idempotency_key": "host.renew:renew_1:reply:revoked",
   "issuer": {
+    "installation": "install_example",
     "team": "_install",
-    "runtime": "team-services-1",
-    "membership_epoch": 3,
+    "runtime": "authority-1",
+    "membership_epoch": 1,
     "revocation_epoch": 1,
-    "key_id": "test-services-key-1"
+    "key_id": "test-authority-host-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "_install",
     "target": "installation_service",
-    "id": "lead-host-1"
+    "id": "lead-host-1",
+    "runtime": "lead-host-1"
   },
-  "subject": "ua.v1._install.team-services-1.svc.host.renew",
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7704-8000-000000000704",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
@@ -25,5 +28,5 @@
   },
   "causation_id": "01928f3a-7b2c-7704-8000-000000000704",
   "body_digest": "dhFMNsKFmB5DDEPRH2-R8vU1rYv7AeslmInhXLxjr3Y",
-  "signature": "TS3SfdEcAb2oz3YGvmzziy8VnF2LLVzAuwQgdD5VP4T4B3KUu84smEW0FRR9s-_7_m-dtwve94zwp7h9no8oAA"
+  "signature": "jwqABufPGei6SoGwa1Q664WR_iRznd2h3_4Efnc9v-te3UgdM_V1sltP2h707Zjv6xDKb9dcTkc9sGruQENUAg"
 }

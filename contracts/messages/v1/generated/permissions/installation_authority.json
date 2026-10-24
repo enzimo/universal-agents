@@ -1,6 +1,9 @@
 {
+  "allow_responses": {
+    "expires": "38s",
+    "max": 1
+  },
   "publish": [
-    "_INBOX.*.>",
     "ua.v1.{team}.{self}.dlq.notice.*",
     "ua.v1.{team}.{self}.dlq.raw.*"
   ],

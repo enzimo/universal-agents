@@ -2,16 +2,19 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.freeze",
   "message_id": "01928f3a-7b2c-748e-8000-00000000048e",
-  "idempotency_key": "knowledge.freeze:example_1166",
+  "idempotency_key": "knowledge.freeze:request_id_1",
   "issuer": {
+    "installation": "install_example",
     "team": "team_example",
     "runtime": "lead-host-1",
     "agent": "lead",
+    "session": "s-lead-1",
     "membership_epoch": 3,
     "revocation_epoch": 1,
     "key_id": "test-lead-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "team_example",
     "target": "team_services",
     "id": "team_example"
@@ -19,13 +22,36 @@
   "subject": "ua.v1.team_example.lead-host-1.svc.team.knowledge.freeze",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7130-9000-000000000130",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "ym0Ai_H4Qz3rPtIZmU2E8hDN8hG7OoNVECv8He5P9nsDRxHNtxbGCAOf836cM6Fej1h4cvlGXq-Fbg3YAYn1BA"
+  },
   "algorithm": "ed25519",
   "body": {
     "request_id": "request_id_1",
     "space": "team",
     "page": "Example page",
-    "seen_version": "v3"
+    "seen_version": "v3",
+    "minutes": 60
   },
-  "body_digest": "UH6s6pN5KCymyrbcleMxmd1Ui1owFGUli2zgHppi_Ew",
-  "signature": "aiwAA5v0AFspkZgu2B8_yq6GNqje-3iJq1oQ6hP8ThgQK5Ph-TUii0rYH6eGZEiZABksNnSP4RTsYhwhVojPCw"
+  "body_digest": "7CBg9W72sOMXE4zQ62FMSngUlD4hwjXGQmIYACNspjs",
+  "signature": "kGLCiZhCGwrrQowaNqHBwPwdTQz55NcfGpSUo129u1ppV9wPxgATarY9YUGOo2Coi9qiLFzwloLmDErH6_AbAg"
 }

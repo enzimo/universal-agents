@@ -11,8 +11,10 @@ writes:
 - custom_messages/wire/models.py: Pydantic models for the shared values, the
   frame and every body;
 - custom_messages/wire/kinds.py: the registry as Python constants, each kind's
-  body and reply model, and the body shapes used to drop unknown fields that a
-  newer minor version may send.
+  body and reply model, each state record's model, and the body shapes used to
+  drop unknown fields that a newer minor version may send;
+- the digests, signatures and invalid frame texts of the examples, trust
+  fixtures and signing vectors (scripts/message_contract_examples.py).
 
 ``--check`` renders in memory and fails on any difference, and on any file in a
 generated folder that this script does not write.
@@ -33,6 +35,12 @@ import yaml
 from jsonschema import Draft202012Validator
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.contract_schema_export import canonical_json_text as json_text  # noqa: E402
+from scripts.message_contract_examples import render_examples  # noqa: E402
+
 CONTRACT = REPO_ROOT / "contracts" / "messages" / "v1"
 SCHEMAS = CONTRACT / "schemas"
 GENERATED = CONTRACT / "generated"
@@ -57,23 +65,45 @@ REQUIRED_ENTRY_FIELDS = ENTRY_FIELDS - {"reply", "covered_change", "copy_to", "v
 # The schema subset (contracts/messages/v1/README.md).
 ALLOWED_KEYWORDS = {
     "$schema", "$id", "$ref", "$defs", "title", "description", "type", "enum", "const", "properties",
-    "required", "additionalProperties", "items", "minItems", "maxItems", "uniqueItems", "minLength",
+    "required", "additionalProperties", "items", "minItems", "maxItems", "minLength",
     "maxLength", "pattern", "minimum", "maximum", "oneOf", "examples",
 }
 ALLOWED_TYPES = {"object", "string", "integer", "boolean", "array"}
+# Keywords that check a value only of one type. Generated models apply them only
+# there, so anywhere else they would be dropped silently.
+TYPED_KEYWORDS = {
+    "minLength": "string", "maxLength": "string", "pattern": "string",
+    "minimum": "integer", "maximum": "integer",
+    "items": "array", "minItems": "array", "maxItems": "array",
+    "properties": "object", "required": "object", "additionalProperties": "object",
+}
+# Keywords that change no validation; only these may stand beside $ref, const or
+# enum, whose generated models ignore every other keyword.
+ANNOTATIONS = {"title", "description", "examples"}
 MAX_SAFE_INTEGER = 2**53 - 1
-UNPORTABLE_PATTERN = re.compile(r"\(\?[=!<>:]|\\[1-9]|[*+?}]\+|\\[AZzbBpP]")
-# The frame's and the state document's bodies are the open objects: the schema
-# their kind or record names checks them.
+# Escaped characters that every common engine reads as the character itself.
+PORTABLE_ESCAPES = set(".-\\[](){}*+?|^$/")
+# Characters an id may hold (common.schema.json token_id). Consumer names join ids
+# with a character outside this set.
+ID_CHARACTER = re.compile(r"[A-Za-z0-9_-]")
+# Address placeholders that name the receiver. A sender may address any receiver in
+# its team; a receiver reads only its own, so subscriptions and consumer grants keep
+# them as placeholders for membership code to fill per assigned id.
+RECEIVER_PLACEHOLDERS = ("agent", "pool", "edge")
+# Other address placeholders: a dead-letter copy id (one subject token the sender
+# chooses), and the sender of an installation address (_install.{sender}.svc.<op>).
+COPY_PLACEHOLDER, SENDER_PLACEHOLDER = "copy", "sender"
+INSTALLATION_ADDRESS = "_install.{sender}."
+# The frame's and the state record's bodies are the open objects: the schema their
+# kind or record names checks them.
 OPEN_OBJECTS = {("frame.schema.json", "/properties/body"), ("state.schema.json", "/properties/body")}
+STATE_FIELDS = {"description", "bucket", "key", "signer", "signer_roles", "writers", "body", "ttl_seconds", "write_rule"}
+REQUIRED_STATE_FIELDS = {"description", "bucket", "key", "signer", "writers", "body", "write_rule"}
+SIGNERS = {"authority", "host"}
 
 
 class ContractError(ValueError):
     pass
-
-
-def json_text(payload: Any) -> str:
-    return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
 def load_yaml(name: str) -> dict[str, Any]:
@@ -98,55 +128,141 @@ def load_schemas() -> dict[str, dict[str, Any]]:
     return schemas
 
 
-def check_subset(name: str, node: Any, pointer: str) -> None:
-    """Refuse anything outside the documented schema subset."""
+def pattern_problem(pattern: str) -> str | None:
+    """Why ``pattern`` could match differently in Python, ECMAScript or Pydantic's engine, if it could.
 
-    if isinstance(node, list):
-        for index, item in enumerate(node):
-            check_subset(name, item, f"{pointer}/{index}")
-        return
+    Allowed: literal characters, character classes, escaped punctuation, groups,
+    ``(?:``, alternatives inside a group, and quantifiers. ``$`` means the end of
+    the value; Python's ``re`` also matches it before a final newline, which the
+    README tells Python validators to refuse.
+    """
+
+    if len(pattern) < 2 or not (pattern.startswith("^") and pattern.endswith("$")) or pattern.endswith("\\$"):
+        return "anchor the whole pattern with ^ and $"
+    body, depth, in_class, index = pattern[1:-1], 0, False, 0
+    while index < len(body):
+        character, following = body[index], body[index + 1:index + 2]
+        if character == "\\":
+            if following not in PORTABLE_ESCAPES:
+                return f"\\{following} reads differently between engines; list the characters instead"
+            index += 2
+            continue
+        if in_class:
+            if character == "[":
+                return "a [ inside a character class, such as [[:alpha:]], reads differently between engines"
+            in_class = character != "]"
+        elif character == "[":
+            in_class = True
+        elif character == "(":
+            if following == "?" and body[index + 2:index + 3] != ":":
+                return "group extensions other than (?: differ between engines"
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        elif character == "|" and depth == 0:
+            return "group top-level alternatives, or ^ and $ apply to only one of them"
+        elif character == ".":
+            return "an unescaped . matches different characters in different engines"
+        elif character in "^$":
+            return "anchors belong only at the two ends"
+        elif character in "*+?}" and following == "+":
+            return "possessive quantifiers are not portable"
+        index += 1
+    return "a character class is not closed" if in_class else None
+
+
+def _of_type(value: Any, kind: str) -> bool:
+    if kind == "string":
+        return isinstance(value, str)
+    if kind == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    return kind == "boolean" and isinstance(value, bool)
+
+
+def _check_values(where: str, node: dict[str, Any], kind: Any) -> None:
+    """``const`` and ``enum`` hold scalars of the stated type, with only annotations beside them."""
+
+    for word in ("const", "enum"):
+        if word not in node:
+            continue
+        values = [node["const"]] if word == "const" else node["enum"]
+        if any(value is None or isinstance(value, (dict, list, float)) for value in values):
+            raise ContractError(f"{where}: {word} values are strings, integers or booleans, never null")
+        beside = set(node) - ANNOTATIONS - {word, "type"}
+        if beside:
+            raise ContractError(f"{where}: generated models would drop {sorted(beside)} beside {word}")
+        if kind is not None and not all(_of_type(value, kind) for value in values):
+            raise ContractError(f"{where}: {word} values must have type {kind}")
+
+
+def check_subset(name: str, node: Any, pointer: str) -> None:
+    """Refuse anything outside the documented schema subset.
+
+    The walk follows keywords, so a property or definition named like a keyword
+    (``properties``, ``$defs``) is still a schema and still checked. Every rule
+    here keeps the generated models exactly as strict as the schema.
+    """
+
+    where = f"{name}{pointer}"
     if not isinstance(node, dict):
-        return
+        raise ContractError(f"{where}: a schema must be an object")
     unknown = set(node) - ALLOWED_KEYWORDS
-    if unknown and not pointer.endswith(("/properties", "/$defs")):
-        raise ContractError(f"{name}{pointer}: keywords outside the subset: {sorted(unknown)}")
-    if pointer.endswith(("/properties", "/$defs")):
-        for key, child in node.items():
-            check_subset(name, child, f"{pointer}/{key}")
-        return
-    if "type" in node and node["type"] not in ALLOWED_TYPES:
-        raise ContractError(f"{name}{pointer}: type {node['type']!r} is outside the subset")
-    if node.get("type") == "object" and (name, pointer) not in OPEN_OBJECTS:
+    if unknown:
+        raise ContractError(f"{where}: keywords outside the subset: {sorted(unknown)}")
+    kind = node.get("type")
+    if kind is not None and (not isinstance(kind, str) or kind not in ALLOWED_TYPES):
+        raise ContractError(f"{where}: type {kind!r} is outside the subset")
+    for word, expected in TYPED_KEYWORDS.items():
+        if word in node and kind != expected:
+            raise ContractError(f"{where}: {word} needs type {expected}")
+    if "$ref" in node:
+        if "://" in node["$ref"]:
+            raise ContractError(f"{where}: $ref must be local to the contract")
+        if set(node) - ANNOTATIONS - {"$ref"}:
+            raise ContractError(f"{where}: generated models would drop {sorted(set(node) - ANNOTATIONS - {'$ref'})} beside $ref")
+    _check_values(where, node, kind)
+    if kind == "object" and (name, pointer) not in OPEN_OBJECTS:
         if node.get("additionalProperties") is not False or "properties" not in node:
-            raise ContractError(f"{name}{pointer}: objects list their properties and set additionalProperties false")
-    if node.get("type") == "integer":
+            raise ContractError(f"{where}: objects list their properties and set additionalProperties false")
+    if "additionalProperties" in node and node["additionalProperties"] is not False:
+        raise ContractError(f"{where}: additionalProperties may only be false")
+    missing = set(node.get("required", [])) - set(node.get("properties", {}))
+    if missing:
+        raise ContractError(f"{where}: required names properties the object does not define: {sorted(missing)}")
+    if kind == "integer" and "const" not in node and "enum" not in node:
         for bound in ("minimum", "maximum"):
             if bound not in node or abs(node[bound]) > MAX_SAFE_INTEGER:
-                raise ContractError(f"{name}{pointer}: integers state {bound} within ±(2^53 - 1)")
+                raise ContractError(f"{where}: integers state {bound} within ±(2^53 - 1)")
+    if kind == "array" and "items" not in node:
+        raise ContractError(f"{where}: arrays state their items")
     if "pattern" in node:
-        pattern = node["pattern"]
-        if not (pattern.startswith("^") and pattern.endswith("$")) or UNPORTABLE_PATTERN.search(pattern):
-            raise ContractError(f"{name}{pointer}: pattern {pattern!r} is anchored badly or not portable")
-    if "$ref" in node and "://" in node["$ref"]:
-        raise ContractError(f"{name}{pointer}: $ref must be local to the contract")
+        problem = pattern_problem(node["pattern"])
+        if problem:
+            raise ContractError(f"{where}: pattern {node['pattern']!r} is not portable: {problem}")
     if "oneOf" in node:
         discriminator(name, pointer, node)
-    for key, child in node.items():
-        if key in {"properties", "$defs", "items", "oneOf"}:
-            check_subset(name, child, f"{pointer}/{key}")
+    for word in ("properties", "$defs"):
+        for key, child in node.get(word, {}).items():
+            check_subset(name, child, f"{pointer}/{word}/{key}")
+    if "items" in node:
+        check_subset(name, node["items"], f"{pointer}/items")
+    for index, variant in enumerate(node.get("oneOf", [])):
+        check_subset(name, variant, f"{pointer}/oneOf/{index}")
 
 
 def discriminator(name: str, pointer: str, node: dict[str, Any]) -> str:
     """The property whose ``const`` tells the alternatives of a ``oneOf`` apart."""
 
     variants = node["oneOf"]
-    common = None
+    common: set[str] | None = None
     for variant in variants:
         consts = {key for key, value in variant.get("properties", {}).items() if "const" in value}
         common = consts if common is None else common & consts
     if not common or len(common) != 1:
         raise ContractError(f"{name}{pointer}: oneOf alternatives need one shared const property")
     key = next(iter(common))
+    if not all(key in variant.get("required", []) for variant in variants):
+        raise ContractError(f"{name}{pointer}: every oneOf alternative requires its {key!r} property")
     values = [variant["properties"][key]["const"] for variant in variants]
     if len(set(values)) != len(values):
         raise ContractError(f"{name}{pointer}: oneOf const values must differ")
@@ -155,6 +271,8 @@ def discriminator(name: str, pointer: str, node: dict[str, Any]) -> str:
 
 def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologies: dict[str, Any],
                    schemas: dict[str, dict[str, Any]]) -> None:
+    check_state_records(registry, transport, schemas)
+    check_shared_lists(registry, transport, topologies, schemas)
     roles = set(registry["host_roles"])
     edges = set(EDGES) - {"none"}
     for topology, spec in topologies["topologies"].items():
@@ -184,44 +302,61 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
             raise ContractError(f"{where}: admission states execution_slot, accepted_while_paused and priority")
         if not set(entry["senders"]) <= roles or not set(entry["receivers"]) <= roles:
             raise ContractError(f"{where}: senders and receivers must be host roles")
-        if not 1 <= entry["expiry_seconds"] <= transport["replay_ledger_retention_seconds"]:
-            raise ContractError(f"{where}: expiry must be positive and within the replay record's retention")
+        if not 1 <= entry["expiry_seconds"] <= transport["classes"][entry["class"]]["max_expiry_seconds"]:
+            raise ContractError(f"{where}: expiry must be positive and within its class's max_expiry_seconds")
         if entry["body"] not in schemas:
             raise ContractError(f"{where}: body schema {entry['body']} is missing")
         if (entry["class"] == "request_reply") != ("reply" in entry):
             raise ContractError(f"{where}: request/reply kinds, and only they, have a reply")
         if "reply" in entry and entry["reply"]["body"] not in schemas:
             raise ContractError(f"{where}: reply schema {entry['reply']['body']} is missing")
+        check_request_idempotency(where, entry, schemas)
         for address in entry_addresses(entry):
             if not any(address_matches(address, template, name)
                        for template in class_addresses(transport, entry["class"])):
                 raise ContractError(f"{where}: address {address!r} fits no {entry['class']} address")
+            allowed = set(RECEIVER_PLACEHOLDERS) | {COPY_PLACEHOLDER}
+            if address.startswith(INSTALLATION_ADDRESS):
+                allowed.add(SENDER_PLACEHOLDER)
+            if not set(re.findall(r"\{([a-z_]+)\}", address)) <= allowed:
+                raise ContractError(f"{where}: an address's placeholders name its receiver, a copy or an installation sender")
+        targets = [audience_target(address) for address in entry_addresses(entry)]
+        if len(set(targets)) != len(targets):
+            raise ContractError(f"{where}: two of its addresses deliver to one audience target")
+        for address, target in zip(entry_addresses(entry), targets):
+            if not receiving_roles(entry, address, transport):
+                raise ContractError(f"{where}: none of its receivers serves {target} audiences, so nobody receives {address}")
         if entry.get("verification", "standard") not in VERIFICATION:
             raise ContractError(f"{where}: verification must be one of {sorted(VERIFICATION)}")
         if entry.get("verification") == "proof_of_possession" and entry["class"] != "request_reply":
             raise ContractError(f"{where}: only an installation request proves possession of its own key")
         if entry.get("copy_to") and entry["class"] != "durable":
             raise ContractError(f"{where}: only durable kinds are copied to other inboxes")
+    names: dict[str, str] = {}
+    for name in registry["kinds"]:
+        # Generated model and adapter names come from the kind name; two kinds
+        # with one name would silently share the second kind's schema.
+        other = names.setdefault(class_name(name), name)
+        if other != name:
+            raise ContractError(f"registry.yaml: kinds {other} and {name} generate the same model names")
 
 
-STATE_FIELDS = {"description", "bucket", "key", "writers", "body", "ttl_seconds", "write_rule"}
+def check_request_idempotency(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """A retry key must be derivable from fields every caller supplies.
 
+    Placeholders name required body or frame fields, or address parameters.
+    Authority bindings are not implicit aliases for command identifiers.
+    """
 
-def check_state_records(registry: dict[str, Any], transport: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
-    """Each state record names its bucket, key form, writer roles and body schema."""
-
-    roles = set(registry["host_roles"])
-    state_enum = set(schemas["state.schema.json"]["properties"]["record"]["enum"])
-    if set(registry["state_records"]) != state_enum:
-        raise ContractError("registry.yaml state_records and state.schema.json record names differ")
-    for name, entry in registry["state_records"].items():
-        where = f"registry.yaml state_records.{name}"
-        if set(entry) - STATE_FIELDS or {"description", "bucket", "key", "writers", "body"} - set(entry):
-            raise ContractError(f"{where}: fields must be {sorted(STATE_FIELDS)}")
-        if entry["bucket"] not in transport["key_value"]:
-            raise ContractError(f"{where}: bucket {entry['bucket']} is not in transport.yaml")
-        if not set(entry["writers"]) <= roles or entry["body"] not in schemas:
-            raise ContractError(f"{where}: writers must be host roles and the body schema must exist")
+    if entry["class"] != "request_reply":
+        return
+    supplied = set(schemas[entry["body"]].get("required", []))
+    supplied.update(schemas["frame.schema.json"]["required"])
+    for address in entry_addresses(entry):
+        supplied.update(re.findall(r"\{([a-z_]+)\}", address))
+    missing = set(re.findall(r"<([^>]+)>", entry["idempotency"])) - supplied
+    if missing:
+        raise ContractError(f"{where}: idempotency names fields the request does not supply: {sorted(missing)}")
 
 
 def full_subject(address: str, owner: str) -> str:
@@ -239,6 +374,18 @@ def entry_addresses(entry: dict[str, Any]) -> list[str]:
     return list(own) + list(entry.get("copy_to", []))
 
 
+def receiving_roles(entry: dict[str, Any], address: str, transport: dict[str, Any]) -> list[str]:
+    """The kind's receivers that serve the address's audience target (transport.yaml audience_targets).
+
+    A role listed as a receiver gets permissions only for the addresses it can
+    serve: team services receive a task's copy on work.team, not the agent and
+    pool inboxes the same kind also uses.
+    """
+
+    serving = set(transport["audience_targets"][audience_target(address)])
+    return [role for role in entry["receivers"] if role in serving]
+
+
 def check_wakes(where: str, wakes: Any) -> None:
     """``wakes_model`` is one value, or one value per alternative of a body property."""
 
@@ -251,6 +398,115 @@ def check_wakes(where: str, wakes: Any) -> None:
     for variant, value in wakes["values"].items():
         if value not in WAKES:
             raise ContractError(f"{where}: wakes_model for {variant!r} is not one of {sorted(WAKES)}")
+
+
+def check_state_records(registry: dict[str, Any], transport: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """Each signed record names its bucket, key form, signer, writer roles and body schema."""
+
+    roles = set(registry["host_roles"])
+    names = set(schemas[registry["state_schema"]]["properties"]["record"]["enum"])
+    if set(registry["state_records"]) != names:
+        raise ContractError(f"registry.yaml state_records and {registry['state_schema']} record names differ")
+    for name, entry in registry["state_records"].items():
+        where = f"registry.yaml state_records.{name}"
+        if set(entry) - STATE_FIELDS or REQUIRED_STATE_FIELDS - set(entry):
+            raise ContractError(f"{where}: fields are {sorted(REQUIRED_STATE_FIELDS)}, optionally {sorted(STATE_FIELDS - REQUIRED_STATE_FIELDS)}")
+        if entry["bucket"] not in transport["key_value"]:
+            raise ContractError(f"{where}: bucket {entry['bucket']} is not in transport.yaml")
+        if entry["signer"] not in SIGNERS:
+            raise ContractError(f"{where}: signer must be one of {sorted(SIGNERS)}")
+        if ("signer_roles" in entry) != (entry["signer"] == "host") or not set(entry.get("signer_roles", [])) <= roles:
+            raise ContractError(f"{where}: host-signed records, and only they, name signer_roles from host_roles")
+        if not set(entry["writers"]) <= roles or entry["body"] not in schemas:
+            raise ContractError(f"{where}: writers must be host roles and the body schema must exist")
+
+
+def check_shared_lists(registry: dict[str, Any], transport: dict[str, Any], topologies: dict[str, Any],
+                       schemas: dict[str, dict[str, Any]]) -> None:
+    """Lists the schemas repeat must match the registry and topologies they come from."""
+
+    common = schemas["common.schema.json"]["$defs"]
+    if set(common["host_role"]["enum"]) != set(registry["host_roles"]):
+        raise ContractError("common.schema.json host_role must list registry.yaml host_roles")
+    targets = transport["audience_targets"]
+    if set(targets) != set(common["audience"]["properties"]["target"]["enum"]):
+        raise ContractError("transport.yaml audience_targets must name every audience target")
+    if not all(set(roles) <= set(registry["host_roles"]) for roles in targets.values()):
+        raise ContractError("transport.yaml audience_targets name host roles only")
+    if set(common["agent_role"]["enum"]) != set(topologies["agent_roles"]):
+        raise ContractError("common.schema.json agent_role must list team-topologies.yaml agent_roles")
+
+
+def audience_target(address: str) -> str:
+    """The audience target an address delivers to (README, "Delivery")."""
+
+    for placeholder in RECEIVER_PLACEHOLDERS:
+        if "{" + placeholder + "}" in address:
+            return placeholder
+    if address.startswith("evt."):
+        return "team"
+    if address.startswith("dlq."):
+        return "team_services"
+    if address == "work.team" or address.startswith("svc.team."):
+        return "team_services"
+    if address.startswith("_install."):
+        return "installation_service"
+    raise ContractError(f"address {address!r} names no audience target")
+
+
+def check_consumer_names(transport: dict[str, Any]) -> None:
+    """Different ids must never produce one consumer name.
+
+    NATS silently updates an existing consumer's filter when a consumer with the
+    same name is created, so one team could take another's work. Each name starts
+    with a fixed word that ends in a character ids cannot contain, separates its
+    ids the same way, and uses exactly its filter's placeholders.
+    """
+
+    prefixes = []
+    for key, consumer in transport["consumers"].items():
+        where = f"transport.yaml consumers.{key}"
+        parts = re.split(r"(\{[a-z_]+\})", consumer["name"])
+        literals, placeholders = parts[::2], parts[1::2]
+        if sorted(placeholders) != sorted(re.findall(r"\{[a-z_]+\}", consumer["filter"])):
+            raise ContractError(f"{where}: the name must use exactly the filter's placeholders")
+        if not literals[0] or ID_CHARACTER.fullmatch(literals[0][-1]):
+            raise ContractError(f"{where}: start the name with a fixed word ending in a character ids cannot contain")
+        if any(all(ID_CHARACTER.fullmatch(character) for character in literal) for literal in literals[1:-1]):
+            raise ContractError(f"{where}: separate the ids with a character they cannot contain")
+        if re.search(r"[\s.*>/\\]", consumer["name"]):
+            raise ContractError(f"{where}: NATS consumer names cannot hold whitespace, ., *, >, / or \\")
+        prefixes.append(literals[0])
+    for prefix in prefixes:
+        if any(other != prefix and other.startswith(prefix) for other in prefixes):
+            raise ContractError(f"transport.yaml: consumer name prefix {prefix!r} begins another prefix")
+
+
+def check_transport(transport: dict[str, Any]) -> None:
+    """Expiry, stream age and replay retention must agree, or valid messages are lost or replayed.
+
+    A stream that drops a message before its class's longest expiry loses work a
+    receiver would still accept; a replay record forgotten earlier lets a copy of
+    an old message in again.
+    """
+
+    skew = transport["clock_skew_seconds"]
+    if not isinstance(skew, int) or not 0 <= skew <= 300:
+        raise ContractError("transport.yaml: clock_skew_seconds is a whole number of seconds from 0 to 300")
+    longest = max(spec["max_expiry_seconds"] for spec in transport["classes"].values())
+    if transport["replay_ledger_retention_seconds"] < longest + skew:
+        raise ContractError("transport.yaml: replay records must outlive the longest class expiry plus the clock tolerance")
+    for name, spec in transport["classes"].items():
+        if not isinstance(spec.get("between_installations"), bool):
+            raise ContractError(f"transport.yaml: class {name} states between_installations")
+        if "stream" not in spec:
+            continue
+        stream = transport["streams"].get(spec["stream"])
+        if stream is None:
+            raise ContractError(f"transport.yaml: class {name} names an unknown stream {spec['stream']}")
+        if stream.get("max_age_seconds", 0) < spec["max_expiry_seconds"] + skew:
+            raise ContractError(f"transport.yaml: stream {spec['stream']} must keep messages for class {name}'s "
+                                "max_expiry_seconds plus the clock tolerance")
 
 
 def class_addresses(transport: dict[str, Any], delivery_class: str) -> list[str]:
@@ -266,8 +522,11 @@ def address_matches(address: str, template: str, kind: str) -> bool:
 
 # -- generated JSON ------------------------------------------------------------------------------
 
-def subject_pattern(address: str) -> str:
-    """An address with its placeholders as wildcards, except the sender, which permissions bind to the publisher."""
+def send_pattern(address: str) -> str:
+    """The subjects a sender may publish an address to: any receiver of its team and any copy id.
+
+    The sender placeholder stays: full_subject binds it to the publisher.
+    """
 
     return re.sub(r"\{(?!sender\})[a-z_]+\}", "*", address)
 
@@ -281,45 +540,112 @@ def publication_addresses(entry: dict[str, Any], transport: dict[str, Any]) -> l
     return addresses
 
 
-def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Per host role: subjects it may publish (only under its own id) and subscribe to."""
+def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
+    """Pull, inspect and acknowledge only the consumers for this delivery address.
 
+    Consumer names keep their {team} and receiver placeholders; membership code
+    fills them with the host's own team and each id it serves, never with
+    wildcards. Creating consumers stays with the topology owner.
+    """
+
+    expected_filter = transport["subject_prefix"].replace("{sender}", "*") + "." + address
+    matches = [consumer for consumer in transport["consumers"].values() if consumer["filter"] == expected_filter]
+    if not matches:
+        raise ContractError(f"no pull consumer for {address}")
+    subjects = set()
+    for consumer in matches:
+        stream, name = consumer["stream"], consumer["name"]
+        subjects.update({
+            f"$JS.API.CONSUMER.INFO.{stream}.{name}",
+            f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{name}",
+            f"$JS.ACK.{stream}.{name}.>",
+        })
+    return subjects
+
+
+def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Per host role: the NATS permissions it gets, as templates.
+
+    {team} is each team the host serves and {self} its runtime id. {agent},
+    {pool} and {edge} are each id the host serves: membership code repeats a
+    subject once per id and never turns one into a wildcard, so a host receives
+    only its own agents' requests and work. A host publishes only under its own
+    id. A receiver of requests answers each one once, within the class's
+    expiry, through NATS allow_responses; it holds no grant on other runtimes'
+    inboxes.
+    """
+
+    reply_window = transport["classes"]["request_reply"]["max_expiry_seconds"] + transport["clock_skew_seconds"]
     result = {}
     for role in registry["host_roles"]:
-        publish, subscribe = set(), {f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"}
-        for name, entry in registry["kinds"].items():
+        publish: set[str] = set()
+        subscribe = {f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"}
+        answers_requests = False
+        for entry in registry["kinds"].values():
             if role in entry["senders"]:
-                publish.update(full_subject(subject_pattern(address), "{self}")
+                publish.update(full_subject(send_pattern(address), "{self}")
                                for address in publication_addresses(entry, transport))
-            if role in entry["receivers"] and entry["class"] not in {"durable", "dead_letter"}:
-                subscribe.update(full_subject(subject_pattern(address), "*") for address in entry_addresses(entry))
-            if role in entry["receivers"] and entry["class"] == "request_reply":
-                publish.add("_INBOX.*.>")
-        result[role] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
+            for address in entry_addresses(entry):
+                if role not in receiving_roles(entry, address, transport):
+                    continue
+                if entry["class"] == "durable":
+                    publish.update(consumer_permissions(address, transport))
+                elif entry["class"] != "dead_letter":  # dead-letter readers get stream grants later
+                    subscribe.add(full_subject(address, "*"))
+                answers_requests = answers_requests or entry["class"] == "request_reply"
+        document: dict[str, Any] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
+        if answers_requests:
+            document["allow_responses"] = {"max": 1, "expires": f"{reply_window}s"}
+        result[role] = document
     return result
+
+
+def channel(address: str, key: str) -> dict[str, Any]:
+    return {
+        "address": address,
+        "parameters": {name: {"description": f"The {name} subject token."}
+                       for name in re.findall(r"\{([a-z_]+)\}", address)},
+        "messages": {key: {"$ref": f"#/components/messages/{key}"}},
+    }
+
+
+def framed_payload(registry: dict[str, Any], kind: str, body: str) -> dict[str, Any]:
+    """A complete frame constrained to this kind, retaining the frame's closed fields."""
+
+    return {"allOf": [
+        {"$ref": f"../schemas/{registry['frame_schema']}"},
+        {"type": "object", "properties": {"kind": {"const": kind}, "body": {"$ref": f"../schemas/{body}"}}},
+    ]}
 
 
 def asyncapi(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, Any]:
     channels, operations, messages = {}, {}, {}
     for name, entry in sorted(registry["kinds"].items()):
         key = name.replace(".", "_")
-        for index, address in enumerate(entry_addresses(entry)):
-            channel = key if index == 0 else f"{key}_{index}"
-            channels[channel] = {
-                "address": full_subject(address, "{sender}"),
-                "messages": {key: {"$ref": f"#/components/messages/{key}"}},
-            }
         messages[key] = {
             "name": name,
             "summary": entry["description"],
-            "payload": {"$ref": f"../schemas/{entry['body']}"},
+            "payload": framed_payload(registry, name, entry["body"]),
         }
-        operations[f"send_{key}"] = {"action": "send", "channel": {"$ref": f"#/channels/{key}"}}
-        operations[f"receive_{key}"] = {"action": "receive", "channel": {"$ref": f"#/channels/{key}"}}
         if "reply" in entry:
             reply_key = f"{key}_reply"
-            messages[reply_key] = {"name": f"{name}.reply", "payload": {"$ref": f"../schemas/{entry['reply']['body']}"}}
-            operations[f"send_{key}"]["reply"] = {"messages": [{"$ref": f"#/components/messages/{reply_key}"}]}
+            messages[reply_key] = {
+                "name": f"{name}.reply",
+                "payload": framed_payload(registry, f"{name}.reply", entry["reply"]["body"]),
+            }
+            channels[reply_key] = channel(transport["reply_inbox_prefix"] + ".{inbox}", reply_key)
+            reply = {
+                "channel": {"$ref": f"#/channels/{reply_key}"},
+                "messages": [{"$ref": f"#/channels/{reply_key}/messages/{reply_key}"}],
+            }
+        for index, address in enumerate(entry_addresses(entry)):
+            channel_key = key if index == 0 else f"{key}_{index}"
+            channels[channel_key] = channel(full_subject(address, "{sender}"), key)
+            operations[f"send_{channel_key}"] = {"action": "send", "channel": {"$ref": f"#/channels/{channel_key}"}}
+            operations[f"receive_{channel_key}"] = {"action": "receive", "channel": {"$ref": f"#/channels/{channel_key}"}}
+            if "reply" in entry:
+                operations[f"send_{channel_key}"]["reply"] = reply
+                operations[f"receive_{channel_key}"]["reply"] = reply
     return {
         "asyncapi": "3.1.0",
         "info": {"title": "Universal Agents messages", "version": registry["protocol"]},
@@ -338,7 +664,10 @@ def compatibility(registry: dict[str, Any]) -> dict[str, Any]:
         "accepts": {"major": int(major), "label": rest.split("-", 1)[1] if "-" in rest else None,
                     "minors": "any; a newer minor's unknown optional fields are ignored"},
         "signing_domain": registry["signing_domain"],
+        "state_signing_domain": registry["state_signing_domain"],
+        "authority_token_domain": registry["authority_token_domain"],
         "kinds": sorted(registry["kinds"]),
+        "state_records": sorted(registry["state_records"]),
     }
 
 
@@ -355,6 +684,14 @@ class ModelWriter:
         self.schemas = schemas
         self.blocks: list[str] = []
         self.names: dict[tuple[str, str], str] = {}
+        self.defined: set[str] = {"WireModel"}
+
+    def define(self, name: str, where: str) -> None:
+        """Claim a generated name; a second schema with the same name would silently replace the first."""
+
+        if name in self.defined:
+            raise ContractError(f"{where}: generates the name {name}, which another schema already uses")
+        self.defined.add(name)
 
     def resolve(self, current: str, ref: str) -> tuple[str, str]:
         file, _, fragment = ref.partition("#")
@@ -373,6 +710,8 @@ class ModelWriter:
         node: Any = self.schemas[file]
         for part in [p for p in pointer.split("/") if p]:
             node = node[part]
+        if not isinstance(node, dict):
+            raise ContractError(f"{file}#{pointer}: a reference must name a schema object")
         return node
 
     def type_of(self, file: str, schema: dict[str, Any], hint: str) -> str:
@@ -414,11 +753,15 @@ class ModelWriter:
         name = class_name(fragment.rsplit("/", 1)[-1]) if fragment else class_name(Path(file).name.removesuffix(".schema.json"))
         self.names[key] = name
         rendered = self.type_of(file, schema, name)
+        if file == "common.schema.json" and fragment == "/$defs/timestamp":
+            rendered = f"Annotated[{rendered}, AfterValidator(validate_timestamp)]"
         if rendered != name:
+            self.define(name, f"{file}#{fragment}")
             self.blocks.append(f"{name} = {rendered}\n")
         return name
 
     def model(self, file: str, schema: dict[str, Any], name: str) -> str:
+        self.define(name, file)
         required = set(schema.get("required", []))
         lines = [f"class {name}(WireModel):"]
         if schema.get("description"):
@@ -431,7 +774,7 @@ class ModelWriter:
             if prop in required:
                 lines.append(f"    {attribute}: {prop_type}" + (f" = Field({alias[2:]})" if alias else ""))
             else:
-                lines.append(f"    {attribute}: Optional[{prop_type}] = Field(default=None{alias})")
+                lines.append(f"    {attribute}: Union[{prop_type}, MISSING] = Field(default=MISSING{alias})")
         self.blocks.append("\n".join(lines) + "\n")
         return name
 
@@ -460,18 +803,16 @@ def shape(writer: ModelWriter, file: str, schema: dict[str, Any]) -> Any:
     return None
 
 
-def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> dict[Path, str]:
+def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], transport: dict[str, Any]) -> dict[Path, str]:
     writer = ModelWriter(schemas)
     for fragment in schemas["common.schema.json"]["$defs"]:
         writer.named("common.schema.json", f"/$defs/{fragment}")
     writer.named("frame.schema.json", "")
-    writer.named("state.schema.json", "")
-    states = []
-    for name, entry in sorted(registry["state_records"].items()):
-        body = writer.type_of(entry["body"], schemas[entry["body"]], class_name(name) + "State")
-        # Nested certificate documents reuse the record's existing body model.
+    writer.named(registry["state_schema"], "")
+    states = [(name, entry, writer.type_of(entry["body"], schemas[entry["body"]], class_name(name) + "State"))
+              for name, entry in sorted(registry["state_records"].items())]
+    for _name, entry, body in states:
         writer.names[(entry["body"], "")] = body
-        states.append((name, entry, body))
     kinds = []
     for name, entry in sorted(registry["kinds"].items()):
         body = writer.type_of(f"bodies/{Path(entry['body']).name}", schemas[entry["body"]], class_name(name) + "Body")
@@ -482,8 +823,9 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) 
     header = '"""Generated by scripts/export_message_contract.py from contracts/messages/v1. Do not edit."""\n\n'
     models = header + (
         "from __future__ import annotations\n\n"
-        "from typing import Annotated, Any, Literal, Optional, Union\n\n"
-        "from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter\n\n\n"
+        "from typing import Annotated, Any, Literal, Union\n\n"
+        "from pydantic import MISSING, AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter\n\n"
+        "from custom_messages.wire.values import validate_timestamp\n\n\n"
         "class WireModel(BaseModel):\n"
         "    \"\"\"Strict, immutable and closed to unknown fields.\"\"\"\n\n"
         "    model_config = ConfigDict(extra=\"forbid\", frozen=True, strict=True, populate_by_name=True)\n\n\n"
@@ -510,7 +852,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) 
             f"    {name!r}: KindSpec(\n"
             f"        name={name!r},\n"
             f"        delivery_class={entry['class']!r},\n"
-            f"        addresses={tuple(entry_addresses(entry))!r},\n"
+            f"        addresses={ {audience_target(address): address for address in entry_addresses(entry)}!r},\n"
             f"        body_model=models.{class_name(name)}BodyAdapter,\n"
             f"        reply_model={reply_text},\n"
             f"        reply_errors={tuple(entry.get('reply', {}).get('errors', ()))!r},\n"
@@ -531,6 +873,13 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) 
             f"        verification={entry.get('verification', 'standard')!r},\n"
             "    ),"
         )
+    state_specs = [
+        f"    {name!r}: StateSpec(name={name!r}, bucket={entry['bucket']!r}, key={entry['key']!r}, "
+        f"signer={entry['signer']!r}, signer_roles={tuple(entry.get('signer_roles', ()))!r}, "
+        f"writers={tuple(entry['writers'])!r}, body_model=models.{class_name(name)}StateAdapter),"
+        for name, entry, _body in states
+    ]
+    between = sorted(name for name, spec in transport["classes"].items() if spec["between_installations"])
     kinds_text = header + (
         "from __future__ import annotations\n\n"
         "from custom_messages.wire import models\n"
@@ -538,20 +887,22 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) 
         f"PROTOCOL = {registry['protocol']!r}\n"
         f"SIGNING_DOMAIN = {registry['signing_domain']!r}\n"
         f"RENEW_KEY_PROOF_DOMAIN = {registry['renew_key_proof_domain']!r}\n"
+        f"STATE_SIGNING_DOMAIN = {registry['state_signing_domain']!r}\n"
+        f"AUTHORITY_TOKEN_DOMAIN = {registry['authority_token_domain']!r}\n"
+        f"AUTHORITY_TOKEN_MAX_SECONDS = {registry['authority_token_max_seconds']!r}\n"
         f"MAX_FRAME_BYTES = {registry['max_frame_bytes']!r}\n"
+        f"MAX_NESTING_DEPTH = {registry['max_nesting_depth']!r}\n"
+        f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
+        f"SUBJECT_PREFIX = {transport['subject_prefix']!r}\n"
+        f"PEER_SENDER_SLOT = {transport['peer_sender_slot']!r}\n"
+        f"REPLY_INBOX_PREFIX = {transport['reply_inbox_prefix']!r}\n"
+        f"BETWEEN_INSTALLATIONS = frozenset({between!r})\n"
         f"VERIFICATION_REFUSALS = {tuple(item['code'] for item in registry['verification_refusals'])!r}\n"
         f"CHANGE_REFUSALS = {tuple(item['code'] for item in registry['change_refusals'])!r}\n"
         f"HOST_ROLES = {tuple(registry['host_roles'])!r}\n"
         f"FRAME_SHAPE = {shape(writer, 'frame.schema.json', schemas['frame.schema.json'])!r}\n\n"
         "KINDS: dict[str, KindSpec] = {\n" + "\n".join(specs) + "\n}\n\n"
-        f"STATE_SIGNING_DOMAIN = {registry['state_signing_domain']!r}\n"
-        "STATE_RECORDS: dict[str, StateSpec] = {\n"
-        + "\n".join(
-            f"    {name!r}: StateSpec(name={name!r}, bucket={entry['bucket']!r}, key={entry['key']!r}, "
-            f"writers={tuple(entry['writers'])!r}, ttl_seconds={entry.get('ttl_seconds')!r}, "
-            f"body_model=models.{class_name(name)}StateAdapter),"
-            for name, entry, _body in states)
-        + "\n}\n"
+        "STATE_RECORDS: dict[str, StateSpec] = {\n" + "\n".join(state_specs) + "\n}\n"
     )
     return {WIRE / "models.py": models, WIRE / "kinds.py": kinds_text}
 
@@ -561,6 +912,8 @@ def render() -> dict[Path, str]:
     schemas = load_schemas()
     if registry["max_frame_bytes"] != transport["limits"]["max_frame_bytes"]:
         raise ContractError("registry.yaml and transport.yaml disagree on the frame size limit")
+    check_transport(transport)
+    check_consumer_names(transport)
     check_registry(registry, transport, topologies, schemas)
     files: dict[Path, str] = {
         GENERATED / "registry.json": json_text(registry),
@@ -571,7 +924,10 @@ def render() -> dict[Path, str]:
     }
     for role, document in permissions(registry, transport).items():
         files[GENERATED / "permissions" / f"{role}.json"] = json_text(document)
-    files.update(render_python(registry, schemas))
+    files.update(render_python(registry, schemas, transport))
+    # Examples are sources whose digests and signatures this run fills in; the
+    # manifest records them as rendered.
+    files.update(render_examples(registry))
     sources = sorted(path for path in CONTRACT.rglob("*") if path.is_file() and GENERATED not in path.parents)
     entries = {path.relative_to(REPO_ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}
     entries.update({path.relative_to(REPO_ROOT).as_posix(): hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -580,16 +936,21 @@ def render() -> dict[Path, str]:
     return files
 
 
-def stale(files: dict[Path, str]) -> list[str]:
-    problems = [path.relative_to(REPO_ROOT).as_posix() for path, text in files.items()
-                if not path.is_file() or path.read_text(encoding="utf-8") != text]
-    written = set(files)
-    for path in sorted(GENERATED.rglob("*")):
-        if path.is_file() and path not in written:
-            problems.append(f"{path.relative_to(REPO_ROOT).as_posix()} (not generated)")
-    for path in (WIRE / "models.py", WIRE / "kinds.py"):
-        if path not in written:
-            problems.append(path.relative_to(REPO_ROOT).as_posix())
+def stale(files: dict[Path, str], generated: Path = GENERATED) -> list[str]:
+    """Generated files that differ from what the sources produce, byte for byte, and stray files.
+
+    Bytes, not text: reading text would turn CRLF line endings back into LF, so a
+    rewritten file would pass while its digest no longer matched the manifest.
+    """
+
+    def shown(path: Path) -> str:
+        return path.relative_to(REPO_ROOT).as_posix() if path.is_relative_to(REPO_ROOT) else str(path)
+
+    problems = [shown(path) for path, text in files.items()
+                if not path.is_file() or path.read_bytes() != text.encode("utf-8")]
+    for path in sorted(generated.rglob("*")):
+        if path.is_file() and path not in files:
+            problems.append(f"{shown(path)} (not generated)")
     return problems
 
 
@@ -611,7 +972,7 @@ def main() -> int:
             path.unlink()
     for path, text in files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        path.write_bytes(text.encode("utf-8"))
     return 0
 
 

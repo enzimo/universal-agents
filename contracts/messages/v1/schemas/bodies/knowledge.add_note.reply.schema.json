@@ -133,12 +133,37 @@
             "pattern": "^[a-z][a-z0-9_]{0,63}$"
           },
           "maxItems": 20
+        },
+        "note": {
+          "$ref": "../common.schema.json#/$defs/knowledge_note"
         }
       },
       "required": [
         "outcome",
         "page",
-        "review_flags"
+        "review_flags",
+        "note"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "pending_review"
+        },
+        "contribution_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "contribution_id"
       ],
       "additionalProperties": false
     },

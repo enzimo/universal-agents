@@ -4,16 +4,19 @@
   "message_id": "01928f3a-7b2c-7004-8000-000000000004",
   "idempotency_key": "skills_changed:skill_install_0123456789ab",
   "issuer": {
+    "installation": "install_example",
     "team": "team_example",
     "runtime": "lead-host-1",
     "agent": "lead",
+    "session": "s-lead-1",
     "membership_epoch": 3,
     "revocation_epoch": 1,
     "key_id": "test-lead-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "team_example",
-    "target": "team_services",
+    "target": "team",
     "id": "team_example"
   },
   "subject": "ua.v1.team_example.lead-host-1.evt.skills_changed",
@@ -27,5 +30,5 @@
     "installed_tree_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   },
   "body_digest": "zEr0bHkxvuzbXXJWLxDvQyqYXyMIvdzuDCwctSDkkvM",
-  "signature": "XwoM16Evk-3xu0F8ENGDOTw-waSTxir43PBAD_ED6BC72XASuPi1QivzYhgE2UbMcnzimp2DQqU5RcbfQ9gNAw"
+  "signature": "nw3FFjAWcaAecGUFZUzKx5v1dAYGes2VFl4XPK8JgwxGH05ZkHwnHkngtzYpKxurjbzQMwCl9ERtzmy9z9ReBw"
 }

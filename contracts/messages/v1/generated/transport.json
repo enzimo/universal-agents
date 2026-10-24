@@ -1,12 +1,42 @@
 {
+  "audience_targets": {
+    "agent": [
+      "lead_host",
+      "worker_host"
+    ],
+    "edge": [
+      "gateway",
+      "edge_adapter"
+    ],
+    "installation_service": [
+      "installation_authority"
+    ],
+    "pool": [
+      "lead_host",
+      "worker_host"
+    ],
+    "team": [
+      "gateway",
+      "lead_host",
+      "worker_host",
+      "team_services",
+      "edge_adapter",
+      "installation_authority",
+      "scheduler"
+    ],
+    "team_services": [
+      "team_services"
+    ]
+  },
   "classes": {
     "dead_letter": {
       "addresses": [
         "dlq.raw.{copy}",
         "dlq.notice.{copy}"
       ],
-      "default_expiry_seconds": 2592000,
+      "between_installations": false,
       "description": "set-aside copies and notices, under the receiving runtime's id",
+      "max_expiry_seconds": 2592000,
       "stream": "UA1_DLQ"
     },
     "durable": {
@@ -16,29 +46,33 @@
         "work.edge.{edge}",
         "work.team"
       ],
-      "default_expiry_seconds": 604800,
+      "between_installations": true,
       "description": "at least once; the sender records before publishing, the receiver admits durably before acknowledging",
+      "max_expiry_seconds": 604800,
       "stream": "UA1_WORK"
     },
     "event": {
       "addresses": [
         "evt.{event}"
       ],
-      "default_expiry_seconds": 300,
-      "description": "at most once; never the only way something important happens"
+      "between_installations": false,
+      "description": "at most once; never the only way something important happens",
+      "max_expiry_seconds": 300
     },
     "request_reply": {
       "addresses": [
         "svc.team.{operation}",
         "ctl.agent.{agent}.{operation}"
       ],
-      "default_expiry_seconds": 30,
+      "between_installations": false,
       "description": "answered at once or \"no responders\"; mutations carry an idempotency key and the receiver stores the outcome before replying",
       "installation_addresses": [
         "_install.{sender}.svc.{operation}"
-      ]
+      ],
+      "max_expiry_seconds": 30
     }
   },
+  "clock_skew_seconds": 8,
   "consumers": {
     "agent_inbox": {
       "ack": "explicit",
@@ -46,7 +80,7 @@
       "filter": "ua.v1.{team}.*.work.agent.{agent}",
       "max_deliveries": 20,
       "mode": "pull",
-      "name": "agent_{team}_{agent}",
+      "name": "agent~{team}~{agent}",
       "stream": "UA1_WORK"
     },
     "edge": {
@@ -55,7 +89,7 @@
       "filter": "ua.v1.{team}.*.work.edge.{edge}",
       "max_deliveries": 20,
       "mode": "pull",
-      "name": "edge_{team}_{edge}",
+      "name": "edge~{team}~{edge}",
       "stream": "UA1_WORK"
     },
     "pool": {
@@ -64,7 +98,7 @@
       "filter": "ua.v1.{team}.*.work.pool.{pool}",
       "max_deliveries": 20,
       "mode": "pull",
-      "name": "pool_{team}_{pool}",
+      "name": "pool~{team}~{pool}",
       "stream": "UA1_WORK"
     },
     "team_services": {
@@ -73,7 +107,7 @@
       "filter": "ua.v1.{team}.*.work.team",
       "max_deliveries": 20,
       "mode": "pull",
-      "name": "team_{team}",
+      "name": "team~{team}",
       "stream": "UA1_WORK"
     }
   },
@@ -83,7 +117,7 @@
       "per_key_ttl_seconds": 0
     },
     "UA1_CERTS": {
-      "description": "host certificates and the installation's revocations; written only by the installation authority",
+      "description": "host certificates, revocations, agent sessions and agreements (registry state_records); each record is signed, so readers trust the signature, not the bucket",
       "per_key_ttl_seconds": 0
     },
     "UA1_HOSTS": {
@@ -103,17 +137,23 @@
     "max_frame_bytes": 262144,
     "nats_max_payload_bytes": 1048576
   },
-  "nats_server_minimum": "2.15.1",
   "object_store": {
     "UA1_BLOBS": {
       "description": "files and long text, named by SHA-256; the owner deletes them"
     }
   },
-  "replay_ledger_retention_seconds": 2592000,
+  "peer_sender_slot": "x-{installation}",
+  "replay_ledger_retention_seconds": 2592060,
   "reply_inbox_prefix": "_INBOX.{runtime}",
+  "server": {
+    "jetstream": {
+      "sync_interval": "always"
+    },
+    "minimum_version": "2.15.1"
+  },
   "streams": {
     "UA1_DLQ": {
-      "max_age_seconds": 2592000,
+      "max_age_seconds": 2592060,
       "retention": "limits",
       "storage": "file",
       "subjects": [
@@ -122,14 +162,14 @@
     },
     "UA1_WORK": {
       "duplicate_window_seconds": 120,
+      "max_age_seconds": 604860,
       "max_consumers": 4096,
       "max_message_bytes": 262144,
       "retention": "workqueue",
       "storage": "file",
       "subjects": [
         "ua.v1.*.*.work.>"
-      ],
-      "sync_interval": "always"
+      ]
     }
   },
   "subject_prefix": "ua.v1.{team}.{sender}"

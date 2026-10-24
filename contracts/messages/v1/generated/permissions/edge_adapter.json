@@ -1,5 +1,8 @@
 {
   "publish": [
+    "$JS.ACK.UA1_WORK.edge~{team}~{edge}.>",
+    "$JS.API.CONSUMER.INFO.UA1_WORK.edge~{team}~{edge}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.edge~{team}~{edge}",
     "ua.v1._install.{self}.svc.host.join",
     "ua.v1._install.{self}.svc.host.renew",
     "ua.v1.{team}.{self}.dlq.notice.*",

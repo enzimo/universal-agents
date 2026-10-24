@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/state/revocations.schema.json",
-  "title": "revocations state record body",
-  "description": "The installation's revoked certificates; a listed certificate refuses all its frames and records.",
+  "title": "Revoked certificates",
+  "description": "An installation's revoked host certificates. A listed certificate stops every frame and record that relies on it and was not already admitted, whenever that frame or record says it was issued.",
   "type": "object",
   "properties": {
     "installation": {
-      "$ref": "../common.schema.json#/$defs/token_id"
+      "$ref": "../common.schema.json#/$defs/installation_id"
     },
     "revocation_epoch": {
       "type": "integer",
@@ -15,6 +15,7 @@
     },
     "entries": {
       "type": "array",
+      "maxItems": 2000,
       "items": {
         "type": "object",
         "properties": {
@@ -47,8 +48,7 @@
           "reason"
         ],
         "additionalProperties": false
-      },
-      "maxItems": 2000
+      }
     }
   },
   "required": [

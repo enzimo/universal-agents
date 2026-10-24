@@ -4,6 +4,7 @@
   "message_id": "01928f3a-7b2c-7707-8000-000000000707",
   "idempotency_key": "dlq.notice:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "issuer": {
+    "installation": "install_example",
     "team": "team_example",
     "runtime": "worker-host-1",
     "membership_epoch": 3,
@@ -11,6 +12,7 @@
     "key_id": "test-worker-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "team_example",
     "target": "team_services",
     "id": "team_example"
@@ -46,5 +48,5 @@
     "release": "0.9.8"
   },
   "body_digest": "GeR8XjITcqE2mTe_GyM9aHgMfmmJmc8-5lEPFrO1mus",
-  "signature": "W_EpsoTsjWAl5YXm2wuuaetPgiaoZUZQ8ol6cMmq9WgNp14RvLMZ0jndQLXKr0emCXclrQRP1jJdimEtQh38DA"
+  "signature": "KJ3PEGHLTjzMewwyEosURYqkhF1acqbc1cJS_MurHSJe2rHZsk7q8dcRgqC7KtfvJocKG_lHZse-EgXgqktgCw"
 }

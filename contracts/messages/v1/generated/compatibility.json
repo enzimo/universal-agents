@@ -4,6 +4,7 @@
     "major": 1,
     "minors": "any; a newer minor's unknown optional fields are ignored"
   },
+  "authority_token_domain": "universal-agents/authority-token/v1",
   "kinds": [
     "access.decision",
     "access.request",
@@ -110,5 +111,16 @@
     "topics.tag_thread"
   ],
   "protocol": "1.0-pre",
-  "signing_domain": "universal-agents/message-frame/v1"
+  "signing_domain": "universal-agents/message-frame/v1",
+  "state_records": [
+    "agent",
+    "agent_session",
+    "agreement",
+    "certificate",
+    "host",
+    "placement",
+    "revocations",
+    "team_view"
+  ],
+  "state_signing_domain": "universal-agents/state-record/v1"
 }

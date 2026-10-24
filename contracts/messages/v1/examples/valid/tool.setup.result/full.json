@@ -4,13 +4,15 @@
   "message_id": "01928f3a-7b2c-7120-8000-000000000120",
   "idempotency_key": "secure_result:tool_setup:setup_1",
   "issuer": {
+    "installation": "install_example",
     "team": "team_example",
     "runtime": "gateway-1",
-    "membership_epoch": 3,
+    "membership_epoch": 1,
     "revocation_epoch": 1,
     "key_id": "test-gateway-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "team_example",
     "target": "agent",
     "id": "lead"
@@ -39,5 +41,5 @@
     "broker_session_id": "bs_2"
   },
   "body_digest": "0c5Gn03nBNW65IlTxojv63eivnYY0zumQYD9c5yGmb0",
-  "signature": "ES0ooHu2N1hNAodf6sW7t9PracWqepT2oUnJCoRY9m7KcPJXLfgyZQxBa9dSz6x7hbCFWBEXnOfQ1mIjN542CQ"
+  "signature": "M9qca_18ZTsDPgyE2HyIVkIzetAft7yhYUTPe2fDYBwJN3m9sQ6Zw8jhcp_c1CCJWbkt-kaNPTDOmSgcTgbECQ"
 }

@@ -4,13 +4,15 @@
   "message_id": "01928f3a-7b2c-7124-8000-000000000124",
   "idempotency_key": "question_closed:q_2",
   "issuer": {
+    "installation": "install_example",
     "team": "team_example",
     "runtime": "gateway-1",
-    "membership_epoch": 3,
+    "membership_epoch": 1,
     "revocation_epoch": 1,
     "key_id": "test-gateway-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "team_example",
     "target": "agent",
     "id": "lead"
@@ -25,5 +27,5 @@
     "reason": "withdrawn_by_guidance"
   },
   "body_digest": "hocbQCsOyMzXVXnPDZQzBkR34b9CaHqgZua3E3aBW5E",
-  "signature": "vq9yrjK93bKkJR4PfRJ13CdrzhiPxfKLxqP9cRCI0-fhfekazfD5GzsgLOdbS1kDJ72OA4QQJH1uO420x5d7AQ"
+  "signature": "GtTkFqs3MHaZYtyEnUd_eKYuF_kNIyY4m-SfltgPTIUhXhpin0YAYwG0Fg-lpIbocJqj8IPEIHHJS9IKC2sQAQ"
 }

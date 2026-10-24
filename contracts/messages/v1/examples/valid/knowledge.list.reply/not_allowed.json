@@ -2,20 +2,23 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.list.reply",
   "message_id": "01928f3a-7b2c-7466-8000-000000000466",
-  "idempotency_key": "knowledge.list:example_1126:reply",
+  "idempotency_key": "knowledge.list:01928f3a-7b2c-7464-8000-000000000464:reply",
   "issuer": {
+    "installation": "install_example",
     "team": "team_example",
     "runtime": "team-services-1",
-    "membership_epoch": 3,
+    "membership_epoch": 2,
     "revocation_epoch": 1,
     "key_id": "test-services-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "team_example",
     "target": "edge",
-    "id": "web"
+    "id": "web",
+    "runtime": "gateway-1"
   },
-  "subject": "ua.v1.team_example.team-services-1.svc.team.knowledge.list",
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7464-8000-000000000464",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
@@ -25,5 +28,5 @@
   },
   "causation_id": "01928f3a-7b2c-7464-8000-000000000464",
   "body_digest": "ndygni9OJ0mKj0moIMNE8d_WpJsDHbcv-NSrk03DUfg",
-  "signature": "Y4n9O-QzOLcSZUgSXvGbShQ67umKBTmyN-SX5FzSAdcVdxYpvGbQbhwaucw-qCHxthTNQFVnD9QMNz3qNeARBA"
+  "signature": "opzOoRMusS-0jFKADSvbOUe4EIRN87fbjo4gMIHiUarXbsBalmB2BXkympvYRwFB5VAKm5fRj7o983NHNLxRDg"
 }

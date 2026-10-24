@@ -1,18 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/state.schema.json",
-  "title": "Signed state document of protocol 1",
-  "description": "Every key-value record is one state document, signed with Ed25519 over the domain prefix universal-agents/state-record/v1 and a newline, then the RFC 8785 canonical JSON of the document without its signature. The body is checked against the schema its record names in the registry.",
+  "title": "Signed state record of protocol 1",
+  "description": "Every key-value record is one state record, signed with Ed25519 over the domain prefix universal-agents/state-record/v1 and a newline, then the RFC 8785 canonical JSON of the record without its signature. The registry names, per record, who signs it and the schema its body follows. Readers verify every record they use; where it is stored adds no trust.",
   "type": "object",
   "properties": {
     "record": {
       "type": "string",
       "enum": [
-        "certificate",
-        "revocations",
-        "host",
         "agent",
+        "agent_session",
+        "agreement",
+        "certificate",
+        "host",
         "placement",
+        "revocations",
         "team_view"
       ]
     },
@@ -35,6 +37,7 @@
       "const": "ed25519"
     },
     "body_digest": {
+      "description": "SHA-256 of the RFC 8785 canonical JSON of the body.",
       "$ref": "common.schema.json#/$defs/sha256_digest"
     },
     "body": {

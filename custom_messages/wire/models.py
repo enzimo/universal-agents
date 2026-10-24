@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
+from pydantic import MISSING, AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
+
+from custom_messages.wire.values import validate_timestamp
 
 
 class WireModel(BaseModel):
@@ -14,6 +16,9 @@ class WireModel(BaseModel):
 
 
 TokenId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')]
+
+
+InstallationId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,61}$')]
 
 
 TeamId = TokenId
@@ -28,6 +33,9 @@ AgentId = TokenId
 AgentType = TokenId
 
 
+SessionId = TokenId
+
+
 RecordId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$')]
 
 
@@ -40,7 +48,7 @@ IdempotencyKey = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-
 Kind = Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$', max_length=96)]
 
 
-Timestamp = Annotated[str, StringConstraints(pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$')]
+Timestamp = Annotated[Annotated[str, StringConstraints(pattern='^(19[7-9][0-9]|[2-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$')], AfterValidator(validate_timestamp)]
 
 
 Epoch = Annotated[int, Field(ge=0, le=9007199254740991)]
@@ -73,37 +81,49 @@ class BlobRef(WireModel):
     sha256: Sha256Digest
     size: Count
     media_type: Annotated[str, StringConstraints(pattern='^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$')]
-    name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=255)]] = Field(default=None)
+    name: Union[Annotated[str, StringConstraints(min_length=1, max_length=255)], MISSING] = Field(default=MISSING)
 
 
 ScopeId = Annotated[str, StringConstraints(pattern='^(_install|[A-Za-z0-9][A-Za-z0-9_-]{0,63})$')]
 
 
 class Issuer(WireModel):
-    "Who signed the frame: the host, and the agent session it signed for."
+    "Who signed the frame: the host, by its certificate, and the agent session it signed for. Receivers look the certificate and the session up in their trust store; nothing here is trusted until those records confirm it."
 
+    installation: InstallationId
     team: ScopeId
     runtime: RuntimeId
-    agent: Optional[AgentId] = Field(default=None)
-    session: Optional[TokenId] = Field(default=None)
+    agent: Union[AgentId, MISSING] = Field(default=MISSING)
+    session: Union[SessionId, MISSING] = Field(default=MISSING)
     membership_epoch: Epoch
     revocation_epoch: Epoch
     key_id: KeyId
 
 
 class Audience(WireModel):
-    "Who the frame is for. Agents are named by id, never by the host that runs them."
+    "Who the frame is for. Agents are named by id, never by the host that runs them. Broadcast events name their whole team (target team, id the team id); team services also use the team id."
 
+    installation: InstallationId
     team: ScopeId
-    target: Literal['agent', 'pool', 'team_services', 'edge', 'installation_service']
+    target: Literal['agent', 'pool', 'team_services', 'team', 'edge', 'installation_service']
     id: TokenId
-    runtime: Optional[RuntimeId] = Field(default=None)
+    runtime: Union[RuntimeId, MISSING] = Field(default=MISSING)
 
 
 class AuthorityTokenIssuer(WireModel):
-    team: TeamId
+    "The gateway or scheduler host that signed the token, by its certificate."
+
+    installation: InstallationId
     runtime: RuntimeId
+    membership_epoch: Epoch
     key_id: KeyId
+
+
+class AuthorityTokenAudience(WireModel):
+    "The team the person asked; only that team presents the token. Its installation is the issuer's."
+
+    installation: InstallationId
+    team: TeamId
 
 
 class AuthorityTokenBoundTo(WireModel):
@@ -112,17 +132,64 @@ class AuthorityTokenBoundTo(WireModel):
 
 
 class AuthorityToken(WireModel):
-    "Proof that work acts for a person, issued by the gateway or the scheduler and bound to one root task or one command. It is copied unchanged down a delegation tree."
+    "Proof that work acts for a person, issued by a gateway or scheduler host and bound to one root task or one command. It names the team the person asked (its audience), and only that team presents it, copied unchanged down a delegation tree. The signature covers the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/authority-token/v1 and a newline."
 
     token_id: MessageId
     issuer: AuthorityTokenIssuer
+    audience: AuthorityTokenAudience
     person: PersonRef
-    team: TeamId
     bound_to: AuthorityTokenBoundTo
     issued_at: Timestamp
     expires_at: Timestamp
     algorithm: Literal['ed25519']
     signature: Ed25519Signature
+
+
+HostRole = Literal['gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler']
+
+
+AgentRole = Literal['lead', 'worker']
+
+
+ProtocolLabel = Annotated[str, StringConstraints(pattern='^1\\.(0|[1-9][0-9]{0,3})-pre$')]
+
+
+NatsUserKey = Annotated[str, StringConstraints(pattern='^U[A-Z2-7]{55}$')]
+
+
+class ApplicationKey(WireModel):
+    "A host's or authority's Ed25519 signing key and the id that frames and records name it by."
+
+    key_id: KeyId
+    public_key: Ed25519PublicKey
+
+
+class Software(WireModel):
+    name: Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_-]{0,63}$')]
+    version: Annotated[str, StringConstraints(pattern='^[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,6}([-+][0-9A-Za-z.-]{1,32})?$')]
+
+
+StateKey = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,64}(\\.[A-Za-z0-9_-]{1,64}){0,3}$')]
+
+
+class StateWriterAuthority(WireModel):
+    type: Literal['authority']
+    installation: InstallationId
+    key_id: KeyId
+
+
+class StateWriterHost(WireModel):
+    type: Literal['host']
+    installation: InstallationId
+    runtime: RuntimeId
+    membership_epoch: Epoch
+    key_id: KeyId
+
+
+StateWriter = Annotated[Union[StateWriterAuthority, StateWriterHost], Field(discriminator='type')]
+
+
+StateSequence = Annotated[int, Field(ge=1, le=9007199254740991)]
 
 
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=500)]
@@ -155,64 +222,64 @@ class Attachment(WireModel):
     attachment_id: RecordId
     blob: BlobRef
     kind: Literal['image', 'document', 'audio', 'video', 'other']
-    caption: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    caption: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
 
 
 class RepliedMessage(WireModel):
     "The message the person replied to."
 
     author: Literal['assistant', 'requester', 'other']
-    author_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=128)]] = Field(default=None)
+    author_name: Union[Annotated[str, StringConstraints(min_length=1, max_length=128)], MISSING] = Field(default=MISSING)
     text: Annotated[str, StringConstraints(min_length=1, max_length=16000)]
     shortened: bool
-    quoted_text: Optional[Annotated[str, StringConstraints(min_length=1, max_length=16000)]] = Field(default=None)
-    sent_at: Optional[Timestamp] = Field(default=None)
+    quoted_text: Union[Annotated[str, StringConstraints(min_length=1, max_length=16000)], MISSING] = Field(default=MISSING)
+    sent_at: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class FailureProviderLimited(WireModel):
     category: Literal['provider_limited']
     provider: Annotated[str, StringConstraints(min_length=1, max_length=120)]
     model_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    status_code: Optional[Annotated[int, Field(ge=100, le=599)]] = Field(default=None)
+    status_code: Union[Annotated[int, Field(ge=100, le=599)], MISSING] = Field(default=MISSING)
     attempts: Count
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class FailureWorkerLost(WireModel):
     category: Literal['worker_lost']
     attempts: Count
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class FailureAdmissionRefused(WireModel):
     category: Literal['admission_refused']
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class FailureBudgetExhausted(WireModel):
     category: Literal['budget_exhausted']
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class FailureDeadlineReached(WireModel):
     category: Literal['deadline_reached']
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class FailureNotAllowed(WireModel):
     category: Literal['not_allowed']
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class FailureError(WireModel):
     category: Literal['error']
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class FailureOutcomeUnknown(WireModel):
     category: Literal['outcome_unknown']
     attempts: Count
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 Failure = Annotated[Union[FailureProviderLimited, FailureWorkerLost, FailureAdmissionRefused, FailureBudgetExhausted, FailureDeadlineReached, FailureNotAllowed, FailureError, FailureOutcomeUnknown], Field(discriminator='category')]
@@ -221,7 +288,7 @@ Failure = Annotated[Union[FailureProviderLimited, FailureWorkerLost, FailureAdmi
 class QuestionChoice(WireModel):
     choice_id: Annotated[str, StringConstraints(pattern='^[a-z0-9_-]{1,64}$')]
     label: Annotated[str, StringConstraints(min_length=1, max_length=200)]
-    description: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    description: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
     recommended: bool
 
 
@@ -230,7 +297,7 @@ class Assumption(WireModel):
 
     assumption_id: RecordId
     text: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    affects: Optional[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=200)]], Field(max_length=20)]] = Field(default=None)
+    affects: Union[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=200)]], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class HeldAction(WireModel):
@@ -289,26 +356,26 @@ class WorkContext(WireModel):
 
     origin: Literal['person_request', 'delegation', 'schedule_run', 'system_work', 'other_team', 'outside_agent']
     root_task_id: RecordId
-    parent_task_id: Optional[RecordId] = Field(default=None)
-    conversation_id: Optional[RecordId] = Field(default=None)
-    follows_task_id: Optional[RecordId] = Field(default=None)
-    objective_id: Optional[RecordId] = Field(default=None)
-    schedule_id: Optional[RecordId] = Field(default=None)
-    time_zone: Optional[TimeZone] = Field(default=None)
-    delivery_ref: Optional[DeliveryRef] = Field(default=None)
-    started_on_purpose: Optional[bool] = Field(default=None)
+    parent_task_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    conversation_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    follows_task_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    schedule_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    time_zone: Union[TimeZone, MISSING] = Field(default=MISSING)
+    delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
+    started_on_purpose: Union[bool, MISSING] = Field(default=MISSING)
     topology: Literal['hub_and_spoke', 'same_type_peers', 'all_peers', 'nested']
-    intent: Optional[WorkContextIntent] = Field(default=None)
-    root_request: Optional[BlobRef] = Field(default=None)
-    deadline: Optional[WorkContextDeadline] = Field(default=None)
-    expected_offline_until: Optional[Timestamp] = Field(default=None)
-    decisions_ahead: Optional[Annotated[list[DecisionAhead], Field(max_length=8)]] = Field(default=None)
+    intent: Union[WorkContextIntent, MISSING] = Field(default=MISSING)
+    root_request: Union[BlobRef, MISSING] = Field(default=MISSING)
+    deadline: Union[WorkContextDeadline, MISSING] = Field(default=MISSING)
+    expected_offline_until: Union[Timestamp, MISSING] = Field(default=MISSING)
+    decisions_ahead: Union[Annotated[list[DecisionAhead], Field(max_length=8)], MISSING] = Field(default=MISSING)
 
 
 class LedgerSnapshotDelegationsItem(WireModel):
     task_id: RecordId
     number: Count
-    holder: Optional[AgentId] = Field(default=None)
+    holder: Union[AgentId, MISSING] = Field(default=MISSING)
     state: Literal['open', 'standin', 'resolved', 'late_work']
 
 
@@ -328,9 +395,9 @@ class LedgerSnapshotCounters(WireModel):
 class LedgerSnapshot(WireModel):
     "A task's open work, carried by a handback so its new holder keeps the same labels."
 
-    plan: Optional[BlobRef] = Field(default=None)
-    checkpoint: Optional[BlobRef] = Field(default=None)
-    history_summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    plan: Union[BlobRef, MISSING] = Field(default=MISSING)
+    checkpoint: Union[BlobRef, MISSING] = Field(default=MISSING)
+    history_summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=4000)], MISSING] = Field(default=MISSING)
     delegations: Annotated[list[LedgerSnapshotDelegationsItem], Field(max_length=200)]
     questions: Annotated[list[LedgerSnapshotQuestionsItem], Field(max_length=50)]
     assumptions: Annotated[list[Assumption], Field(max_length=50)]
@@ -344,23 +411,43 @@ RecordVersion = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$
 ProgressState = Literal['abandoned', 'accepted', 'cancelled', 'completed', 'finalizing_plan', 'failed', 'in_progress', 'not_started', 'partial', 'paused', 'preparing', 'retrying', 'undefined', 'waiting']
 
 
-HostRole = Literal['gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler']
+class TextContentInline(WireModel):
+    type: Literal['inline']
+    text: LongText
 
 
-ProtocolLabel = Annotated[str, StringConstraints(pattern='^1\\.(0|[1-9][0-9]{0,3})-pre$')]
+class TextContentBlob(WireModel):
+    type: Literal['blob']
+    ref: BlobRef
 
 
-NatsUserKey = Annotated[str, StringConstraints(pattern='^U[A-Z2-7]{55}$')]
+TextContent = Annotated[Union[TextContentInline, TextContentBlob], Field(discriminator='type')]
 
 
-class ApplicationKey(WireModel):
-    key_id: KeyId
-    public_key: Ed25519PublicKey
+class KnowledgeEditorAgent(WireModel):
+    kind: Literal['agent']
+    agent_type: AgentType
 
 
-class Software(WireModel):
-    name: Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_-]{0,63}$')]
-    version: Annotated[str, StringConstraints(pattern='^[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,6}([-+][0-9A-Za-z.-]{1,32})?$')]
+class KnowledgeEditorPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class KnowledgeEditorSystem(WireModel):
+    kind: Literal['system']
+
+
+KnowledgeEditor = Annotated[Union[KnowledgeEditorAgent, KnowledgeEditorPerson, KnowledgeEditorSystem], Field(discriminator='kind')]
+
+
+class KnowledgeNote(WireModel):
+    "An open note whose id can be passed to knowledge.resolve_note."
+
+    note_id: RecordId
+    content: TextContent
+    created_at: Timestamp
+    created_by: KnowledgeEditor
 
 
 PlacementLabel = Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,31}:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')]
@@ -380,22 +467,8 @@ class ConnectionCredential(WireModel):
     expires_at: Timestamp
 
 
-StateKey = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,64}(\\.[A-Za-z0-9_-]{1,64}){0,3}$')]
-
-
-class StateWriter(WireModel):
-    runtime: RuntimeId
-    team: Optional[ScopeId] = Field(default=None)
-    membership_epoch: Epoch
-    revocation_epoch: Epoch
-    key_id: KeyId
-
-
-StateSequence = Annotated[int, Field(ge=1, le=9007199254740991)]
-
-
 class Frame(WireModel):
-    "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The body is checked against the schema its kind names in the registry."
+    "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The issuer's host certificate and agent session are looked up in the receiver's trust store. The body is checked against the schema its kind names in the registry."
 
     protocol: Annotated[str, StringConstraints(pattern='^1\\.(0|[1-9][0-9]{0,3})-pre$')]
     kind: Kind
@@ -403,12 +476,12 @@ class Frame(WireModel):
     idempotency_key: IdempotencyKey
     issuer: Issuer
     audience: Audience
-    subject: Annotated[str, StringConstraints(pattern='^ua\\.v1\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+$', max_length=512)]
-    causation_id: Optional[MessageId] = Field(default=None)
+    subject: Annotated[str, StringConstraints(pattern='^(ua\\.v1\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+|_INBOX\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*)$', max_length=512)]
+    causation_id: Union[MessageId, MISSING] = Field(default=MISSING)
     issued_at: Timestamp
-    not_before: Optional[Timestamp] = Field(default=None)
+    not_before: Union[Timestamp, MISSING] = Field(default=MISSING)
     expires_at: Timestamp
-    authority: Optional[AuthorityToken] = Field(default=None)
+    authority: Union[AuthorityToken, MISSING] = Field(default=MISSING)
     algorithm: Literal['ed25519']
     body_digest: Sha256Digest
     body: dict[str, Any]
@@ -416,14 +489,14 @@ class Frame(WireModel):
 
 
 class State(WireModel):
-    "Every key-value record is one state document, signed with Ed25519 over the domain prefix universal-agents/state-record/v1 and a newline, then the RFC 8785 canonical JSON of the document without its signature. The body is checked against the schema its record names in the registry."
+    "Every key-value record is one state record, signed with Ed25519 over the domain prefix universal-agents/state-record/v1 and a newline, then the RFC 8785 canonical JSON of the record without its signature. The registry names, per record, who signs it and the schema its body follows. Readers verify every record they use; where it is stored adds no trust."
 
-    record: Literal['certificate', 'revocations', 'host', 'agent', 'placement', 'team_view']
+    record: Literal['agent', 'agent_session', 'agreement', 'certificate', 'host', 'placement', 'revocations', 'team_view']
     key: StateKey
     writer: StateWriter
     sequence: StateSequence
     issued_at: Timestamp
-    expires_at: Optional[Timestamp] = Field(default=None)
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     algorithm: Literal['ed25519']
     body_digest: Sha256Digest
     body: dict[str, Any]
@@ -442,11 +515,39 @@ class AgentState(WireModel):
     since: Timestamp
 
 
+class AgentSessionState(WireModel):
+    "Issued by the team services when they start or move an agent: this agent, of this type and team role, runs on this host from started_at until ends_at. The team services renew a running session before ends_at and rewrite it with the actual end when the agent stops or moves. A frame that names an agent must fall inside one of its sessions on the signing host."
+
+    session: SessionId
+    installation: InstallationId
+    team: TeamId
+    agent: AgentId
+    agent_type: AgentType
+    agent_role: AgentRole
+    runtime: RuntimeId
+    placement_revision: Annotated[int, Field(ge=1, le=9007199254740991)]
+    started_at: Timestamp
+    ends_at: Timestamp
+
+
+class AgreementState(WireModel):
+    "Recorded by this installation's authority: another installation's authority keys, which of this installation's teams it may send to, and which durable kinds. Frames, certificates and sessions from that installation are checked against these keys and limits only."
+
+    agreement_id: RecordId
+    installation: InstallationId
+    peer: InstallationId
+    authority_keys: Annotated[list[ApplicationKey], Field(min_length=1, max_length=4)]
+    teams: Annotated[list[TeamId], Field(min_length=1, max_length=64)]
+    kinds: Annotated[list[Kind], Field(min_length=1, max_length=256)]
+    issued_at: Timestamp
+    expires_at: Timestamp
+
+
 class CertificateState(WireModel):
-    "A host's membership certificate, issued by the installation authority."
+    "Issued by an installation's authority: which key a host signs with, for which teams, roles and agent types, and from when to when. A receiver checks a frame with the certificate that was valid when the frame was issued, unless any revocation lists it."
 
     certificate_id: RecordId
-    installation: TokenId
+    installation: InstallationId
     runtime: RuntimeId
     teams: Annotated[list[TeamId], Field(min_length=1, max_length=64)]
     roles: Annotated[list[HostRole], Field(min_length=1, max_length=7)]
@@ -459,16 +560,16 @@ class CertificateState(WireModel):
     protocol: ProtocolLabel
     deployment: Literal['local', 'operator_managed', 'third_party']
     profile_sha256: Sha256Digest
-    software: Optional[Software] = Field(default=None)
+    software: Union[Software, MISSING] = Field(default=MISSING)
     issued_at: Timestamp
     expires_at: Timestamp
-    replaces: Optional[RecordId] = Field(default=None)
+    replaces: Union[RecordId, MISSING] = Field(default=MISSING)
 
 
 class HostStateComponentsItem(WireModel):
     component: TokenId
     state: Literal['healthy', 'degraded', 'unhealthy']
-    code: Optional[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]] = Field(default=None)
+    code: Union[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')], MISSING] = Field(default=MISSING)
 
 
 class HostState(WireModel):
@@ -490,7 +591,7 @@ class HostState(WireModel):
     revocation_epoch_seen: Epoch
     started_at: Timestamp
     heartbeat_at: Timestamp
-    software: Optional[Software] = Field(default=None)
+    software: Union[Software, MISSING] = Field(default=MISSING)
 
 
 class PlacementState(WireModel):
@@ -502,10 +603,10 @@ class PlacementState(WireModel):
     host: RuntimeId
     host_epoch: Annotated[int, Field(ge=1, le=9007199254740991)]
     definition_sha256: Sha256Digest
-    required_labels: Optional[Annotated[list[PlacementLabel], Field(max_length=32)]] = Field(default=None)
+    required_labels: Union[Annotated[list[PlacementLabel], Field(max_length=32)], MISSING] = Field(default=MISSING)
     placed_at: Timestamp
     reason: Literal['initial', 'host_lost', 'rebalanced', 'drained', 'operator']
-    previous_host: Optional[RuntimeId] = Field(default=None)
+    previous_host: Union[RuntimeId, MISSING] = Field(default=MISSING)
 
 
 class RevocationsStateEntriesItem(WireModel):
@@ -517,9 +618,9 @@ class RevocationsStateEntriesItem(WireModel):
 
 
 class RevocationsState(WireModel):
-    "The installation's revoked certificates; a listed certificate refuses all its frames and records."
+    "An installation's revoked host certificates. A listed certificate stops every frame and record that relies on it and was not already admitted, whenever that frame or record says it was issued."
 
-    installation: TokenId
+    installation: InstallationId
     revocation_epoch: Annotated[int, Field(ge=1, le=9007199254740991)]
     entries: Annotated[list[RevocationsStateEntriesItem], Field(max_length=2000)]
 
@@ -527,7 +628,7 @@ class RevocationsState(WireModel):
 class TeamViewStateRoster(WireModel):
     entry: Literal['roster']
     agent: AgentId
-    display_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=80)]] = Field(default=None)
+    display_name: Union[Annotated[str, StringConstraints(min_length=1, max_length=80)], MISSING] = Field(default=MISSING)
     agent_type: AgentType
     role: Literal['lead', 'worker']
     availability: Literal['available', 'busy', 'paused', 'exiting', 'offline']
@@ -539,12 +640,12 @@ class TeamViewStateTask(WireModel):
     task_id: RecordId
     request_id: RecordId
     number: Count
-    holder: Optional[AgentId] = Field(default=None)
+    holder: Union[AgentId, MISSING] = Field(default=MISSING)
     requester: AgentId
     state: ProgressState
-    custody_token: Optional[CustodyToken] = Field(default=None)
+    custody_token: Union[CustodyToken, MISSING] = Field(default=MISSING)
     since: Timestamp
-    objective_id: Optional[RecordId] = Field(default=None)
+    objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
 
 
 class TeamViewStateRequest(WireModel):
@@ -588,12 +689,12 @@ class AccessDecisionBodyStatusGranted(WireModel):
     state: Literal['granted']
     level: Literal['read', 'write', 'full']
     lifetime: Literal['one_time', 'task', 'until', 'until_revoked']
-    expires_at: Optional[Timestamp] = Field(default=None)
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class AccessDecisionBodyStatusDenied(WireModel):
     state: Literal['denied']
-    note: Optional[NoteText] = Field(default=None)
+    note: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class AccessDecisionBodyStatusWithdrawn(WireModel):
@@ -624,9 +725,9 @@ class AccessRequestBodyWhatAccess(WireModel):
     target: AccessTarget
     level: Literal['read', 'write', 'full']
     lifetime: Literal['one_time', 'task', 'until', 'until_revoked']
-    hours: Optional[Annotated[int, Field(ge=1, le=2160)]] = Field(default=None)
+    hours: Union[Annotated[int, Field(ge=1, le=2160)], MISSING] = Field(default=MISSING)
     hand_on: bool
-    action_digest: Optional[Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$')]] = Field(default=None)
+    action_digest: Union[Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$')], MISSING] = Field(default=MISSING)
 
 
 class AccessRequestBodyWhatChange(WireModel):
@@ -650,9 +751,9 @@ class AccessResolvedBody(WireModel):
 
     request_id: RecordId
     choice: Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny']
-    note: Optional[NoteText] = Field(default=None)
-    kept_item_ids: Optional[Annotated[list[RecordId], Field(max_length=80)]] = Field(default=None)
-    keep_hours: Optional[Annotated[int, Field(ge=1, le=2160)]] = Field(default=None)
+    note: Union[NoteText, MISSING] = Field(default=MISSING)
+    kept_item_ids: Union[Annotated[list[RecordId], Field(max_length=80)], MISSING] = Field(default=MISSING)
+    keep_hours: Union[Annotated[int, Field(ge=1, le=2160)], MISSING] = Field(default=MISSING)
 
 
 class AccessWithdrawBody(WireModel):
@@ -660,30 +761,30 @@ class AccessWithdrawBody(WireModel):
 
     request_id: RecordId
     access_request_id: RecordId
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class AccessWithdrawReplyOk(WireModel):
     outcome: Literal['ok']
     state: Literal['withdrawn', 'already_decided']
-    decided_state: Optional[Literal['handed_down', 'granted', 'denied', 'withdrawn', 'refused']] = Field(default=None)
+    decided_state: Union[Literal['handed_down', 'granted', 'denied', 'withdrawn', 'refused'], MISSING] = Field(default=MISSING)
 
 
 class AccessWithdrawReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class AccessWithdrawReplyNotOwnRequest(WireModel):
     outcome: Literal['not_own_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class AgentExitBody(WireModel):
     "Stop an agent after its current step."
 
     request_id: RecordId
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class AgentExitReplyOk(WireModel):
@@ -693,7 +794,7 @@ class AgentExitReplyOk(WireModel):
 
 class AgentPauseBody(WireModel):
     request_id: RecordId
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class AgentPauseReplyOk(WireModel):
@@ -703,14 +804,14 @@ class AgentPauseReplyOk(WireModel):
 
 class AgentPauseReplyAgentExiting(WireModel):
     outcome: Literal['agent_exiting']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class AgentResumeBody(WireModel):
     "Resume a paused agent."
 
     request_id: RecordId
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class AgentResumeReplyOk(WireModel):
@@ -720,7 +821,7 @@ class AgentResumeReplyOk(WireModel):
 
 class AgentResumeReplyAgentExiting(WireModel):
     outcome: Literal['agent_exiting']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class AgentStatusBody(WireModel):
@@ -740,11 +841,11 @@ class AgentStatusReplyOkFindingsItem(WireModel):
     finding_id: Annotated[str, StringConstraints(min_length=1, max_length=200)]
     severity: Literal['info', 'warning', 'error', 'critical']
     title: Annotated[str, StringConstraints(min_length=1, max_length=200)]
-    summary: Optional[Annotated[str, StringConstraints(min_length=0, max_length=2000)]] = Field(default=None)
-    action: Optional[Annotated[str, StringConstraints(min_length=0, max_length=1000)]] = Field(default=None)
-    source: Optional[Annotated[str, StringConstraints(min_length=1, max_length=120)]] = Field(default=None)
-    since: Optional[Timestamp] = Field(default=None)
-    details: Optional[Annotated[str, StringConstraints(min_length=0, max_length=2000)]] = Field(default=None)
+    summary: Union[Annotated[str, StringConstraints(min_length=0, max_length=2000)], MISSING] = Field(default=MISSING)
+    action: Union[Annotated[str, StringConstraints(min_length=0, max_length=1000)], MISSING] = Field(default=MISSING)
+    source: Union[Annotated[str, StringConstraints(min_length=1, max_length=120)], MISSING] = Field(default=MISSING)
+    since: Union[Timestamp, MISSING] = Field(default=MISSING)
+    details: Union[Annotated[str, StringConstraints(min_length=0, max_length=2000)], MISSING] = Field(default=MISSING)
 
 
 class AgentStatusReplyOk(WireModel):
@@ -759,20 +860,20 @@ class AgentStatusReplyOk(WireModel):
     queued: Count
     waiting: Count
     deferred: Count
-    current_task_id: Optional[RecordId] = Field(default=None)
-    current_task_age_seconds: Optional[Count] = Field(default=None)
+    current_task_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    current_task_age_seconds: Union[Count, MISSING] = Field(default=MISSING)
     context: AgentStatusReplyOkContext
-    tool_call_budget_per_mille: Optional[Annotated[int, Field(ge=0, le=1000)]] = Field(default=None)
-    tool_result_budget_per_mille: Optional[Annotated[int, Field(ge=0, le=1000)]] = Field(default=None)
+    tool_call_budget_per_mille: Union[Annotated[int, Field(ge=0, le=1000)], MISSING] = Field(default=MISSING)
+    tool_result_budget_per_mille: Union[Annotated[int, Field(ge=0, le=1000)], MISSING] = Field(default=MISSING)
     tools: Annotated[list[ToolId], Field(max_length=500)]
     skills: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=160)]], Field(max_length=500)]
     findings: Annotated[list[AgentStatusReplyOkFindingsItem], Field(max_length=50)]
-    diagnostic_json: Optional[Annotated[str, StringConstraints(min_length=1, max_length=65536)]] = Field(default=None)
+    diagnostic_json: Union[Annotated[str, StringConstraints(min_length=1, max_length=65536)], MISSING] = Field(default=MISSING)
 
 
 class AgentStatusReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ConflictsCancelBody(WireModel):
@@ -780,7 +881,7 @@ class ConflictsCancelBody(WireModel):
 
     request_id: RecordId
     case_id: RecordId
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
 
 
 class ConflictsCancelReplyOk(WireModel):
@@ -790,12 +891,12 @@ class ConflictsCancelReplyOk(WireModel):
 
 class ConflictsCancelReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ConflictsCancelReplyAdministratorRequired(WireModel):
     outcome: Literal['administrator_required']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ConflictsDecideBodyChoiceKeepCurrent(WireModel):
@@ -822,6 +923,7 @@ class ConflictsDecideBody(WireModel):
     question_id: RecordId
     values_digest: Sha256Digest
     choice: Annotated[Union[ConflictsDecideBodyChoiceKeepCurrent, ConflictsDecideBodyChoiceUseThisChange, ConflictsDecideBodyChoiceRedoWithNote, ConflictsDecideBodyChoiceStopRequest], Field(discriminator='type')]
+    request_id: RecordId
 
 
 class ConflictsDecideReplyOk(WireModel):
@@ -833,22 +935,22 @@ class ConflictsDecideReplyOk(WireModel):
 
 class ConflictsDecideReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ConflictsDecideReplyCaseClosed(WireModel):
     outcome: Literal['case_closed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ConflictsDecideReplyValuesChanged(WireModel):
     outcome: Literal['values_changed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ConflictsDecideReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ConflictsListBody(WireModel):
@@ -856,7 +958,7 @@ class ConflictsListBody(WireModel):
 
     offset: Annotated[int, Field(ge=0, le=100000)]
     limit: Annotated[int, Field(ge=1, le=50)]
-    state: Optional[Literal['open', 'decided', 'withdrawn', 'expired', 'cancelled']] = Field(default=None)
+    state: Union[Literal['open', 'decided', 'withdrawn', 'expired', 'cancelled'], MISSING] = Field(default=MISSING)
 
 
 class ConflictsListReplyOkCasesItem(WireModel):
@@ -874,14 +976,14 @@ class ConflictsListReplyOk(WireModel):
 
 class ConflictsListReplyAdministratorRequired(WireModel):
     outcome: Literal['administrator_required']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class CredentialFormRequestBodyFlowCollectFieldsItemForm(WireModel):
     input_control: Literal['text', 'password', 'textarea', 'file']
-    autocomplete: Optional[Annotated[str, StringConstraints(min_length=1, max_length=64)]] = Field(default=None)
-    accept: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    help_text: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    autocomplete: Union[Annotated[str, StringConstraints(min_length=1, max_length=64)], MISSING] = Field(default=MISSING)
+    accept: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    help_text: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
 
 
 class CredentialFormRequestBodyFlowCollectFieldsItem(WireModel):
@@ -890,30 +992,30 @@ class CredentialFormRequestBodyFlowCollectFieldsItem(WireModel):
     kind: Literal['username', 'email', 'password', 'token', 'api_key', 'custom']
     visibility: Literal['metadata_visible', 'secret']
     value_source: Literal['user_input', 'agent_supplied_metadata', 'user_or_agent_supplied_metadata', 'store_generated_secret']
-    value: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
-    generation_policy: Optional[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]] = Field(default=None)
-    label: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    description: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
-    placeholder: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    form: Optional[CredentialFormRequestBodyFlowCollectFieldsItemForm] = Field(default=None)
+    value: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
+    generation_policy: Union[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')], MISSING] = Field(default=MISSING)
+    label: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    description: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
+    placeholder: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    form: Union[CredentialFormRequestBodyFlowCollectFieldsItemForm, MISSING] = Field(default=MISSING)
 
 
 class CredentialFormRequestBodyFlowCollect(WireModel):
     type: Literal['collect']
     service_name: Annotated[str, StringConstraints(min_length=1, max_length=200)]
     credential_key: CredentialKey
-    display_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    display_name: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
     purpose: NoteText
     store_target: Annotated[str, StringConstraints(min_length=1, max_length=200)]
-    signup_url: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    signup_url: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
     fields: Annotated[list[CredentialFormRequestBodyFlowCollectFieldsItem], Field(min_length=1, max_length=20)]
 
 
 class CredentialFormRequestBodyFlowManualSignupFieldsItemForm(WireModel):
     input_control: Literal['text', 'password', 'textarea', 'file']
-    autocomplete: Optional[Annotated[str, StringConstraints(min_length=1, max_length=64)]] = Field(default=None)
-    accept: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    help_text: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    autocomplete: Union[Annotated[str, StringConstraints(min_length=1, max_length=64)], MISSING] = Field(default=MISSING)
+    accept: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    help_text: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
 
 
 class CredentialFormRequestBodyFlowManualSignupFieldsItem(WireModel):
@@ -922,33 +1024,33 @@ class CredentialFormRequestBodyFlowManualSignupFieldsItem(WireModel):
     kind: Literal['username', 'email', 'password', 'token', 'api_key', 'custom']
     visibility: Literal['metadata_visible', 'secret']
     value_source: Literal['user_input', 'agent_supplied_metadata', 'user_or_agent_supplied_metadata', 'store_generated_secret']
-    value: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
-    generation_policy: Optional[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]] = Field(default=None)
-    label: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    description: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
-    placeholder: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    form: Optional[CredentialFormRequestBodyFlowManualSignupFieldsItemForm] = Field(default=None)
+    value: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
+    generation_policy: Union[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')], MISSING] = Field(default=MISSING)
+    label: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    description: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
+    placeholder: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    form: Union[CredentialFormRequestBodyFlowManualSignupFieldsItemForm, MISSING] = Field(default=MISSING)
 
 
 class CredentialFormRequestBodyFlowManualSignup(WireModel):
     type: Literal['manual_signup']
     service_name: Annotated[str, StringConstraints(min_length=1, max_length=200)]
     credential_key: CredentialKey
-    display_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    display_name: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
     purpose: NoteText
     store_target: Annotated[str, StringConstraints(min_length=1, max_length=200)]
     signup_url: Annotated[str, StringConstraints(min_length=1, max_length=2000)]
     fields: Annotated[list[CredentialFormRequestBodyFlowManualSignupFieldsItem], Field(min_length=1, max_length=20)]
-    automation_steps: Optional[Annotated[list[ShortText], Field(max_length=20)]] = Field(default=None)
+    automation_steps: Union[Annotated[list[ShortText], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class CredentialFormRequestBodyFlowDelete(WireModel):
     type: Literal['delete']
     credential_key: CredentialKey
     service_name: Annotated[str, StringConstraints(min_length=1, max_length=200)]
-    source: Optional[Annotated[str, StringConstraints(min_length=1, max_length=120)]] = Field(default=None)
-    source_item_id: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    source_item_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    source: Union[Annotated[str, StringConstraints(min_length=1, max_length=120)], MISSING] = Field(default=MISSING)
+    source_item_id: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    source_item_name: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
 
 
 class CredentialFormRequestBody(WireModel):
@@ -956,7 +1058,7 @@ class CredentialFormRequestBody(WireModel):
 
     form_id: RecordId
     task_id: RecordId
-    delivery_ref: Optional[DeliveryRef] = Field(default=None)
+    delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
     continue_task: bool
     user_approved: bool
     flow: Annotated[Union[CredentialFormRequestBodyFlowCollect, CredentialFormRequestBodyFlowManualSignup, CredentialFormRequestBodyFlowDelete], Field(discriminator='type')]
@@ -968,12 +1070,12 @@ class CredentialFormResultBodyCredentialFieldsItem(WireModel):
     visibility: Literal['metadata_visible', 'secret']
     value_source: Literal['user_input', 'agent_supplied_metadata', 'user_or_agent_supplied_metadata', 'store_generated_secret']
     secret: bool
-    value: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    value: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
 
 
 class CredentialFormResultBodyCredential(WireModel):
     fields: Annotated[list[CredentialFormResultBodyCredentialFieldsItem], Field(max_length=20)]
-    purpose: Optional[NoteText] = Field(default=None)
+    purpose: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class CredentialFormResultBody(WireModel):
@@ -985,12 +1087,12 @@ class CredentialFormResultBody(WireModel):
     continue_task: bool
     credential_key: CredentialKey
     service_name: Annotated[str, StringConstraints(min_length=1, max_length=200)]
-    display_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    broker_session_id: Optional[RecordId] = Field(default=None)
+    display_name: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    broker_session_id: Union[RecordId, MISSING] = Field(default=MISSING)
     flow: Literal['collect', 'manual_signup', 'delete']
-    message: Optional[NoteText] = Field(default=None)
-    error: Optional[NoteText] = Field(default=None)
-    credential: Optional[CredentialFormResultBodyCredential] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
+    error: Union[NoteText, MISSING] = Field(default=MISSING)
+    credential: Union[CredentialFormResultBodyCredential, MISSING] = Field(default=MISSING)
 
 
 class CustodyDecideBodyDecisionReassignToAgent(WireModel):
@@ -1006,7 +1108,7 @@ class CustodyDecideBodyDecisionReassignToPool(WireModel):
 class CustodyDecideBodyDecisionReassign(WireModel):
     type: Literal['reassign']
     to: Annotated[Union[CustodyDecideBodyDecisionReassignToAgent, CustodyDecideBodyDecisionReassignToPool], Field(discriminator='target')]
-    from_checkpoint: Optional[BlobRef] = Field(default=None)
+    from_checkpoint: Union[BlobRef, MISSING] = Field(default=MISSING)
 
 
 class CustodyDecideBodyDecisionAdoptLateWork(WireModel):
@@ -1027,33 +1129,33 @@ class CustodyDecideBody(WireModel):
 class CustodyDecideReplyOk(WireModel):
     outcome: Literal['ok']
     custody_token: CustodyToken
-    holder: Optional[AgentId] = Field(default=None)
+    holder: Union[AgentId, MISSING] = Field(default=MISSING)
 
 
 class CustodyDecideReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class CustodyDecideReplyStaleCustody(WireModel):
     outcome: Literal['stale_custody']
     current_custody_token: CustodyToken
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class CustodyDecideReplyLateWorkNotFound(WireModel):
     outcome: Literal['late_work_not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class CustodyDecideReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class CustodyDecideReplyNotOwnRequest(WireModel):
     outcome: Literal['not_own_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class CustodyMovedBody(WireModel):
@@ -1070,7 +1172,7 @@ class DebugDumpBody(WireModel):
     request_id: RecordId
     enabled: bool
     mode: Literal['always', 'on_error', 'on_budget_warning']
-    agent: Optional[AgentId] = Field(default=None)
+    agent: Union[AgentId, MISSING] = Field(default=MISSING)
 
 
 class DebugDumpReplyOk(WireModel):
@@ -1081,7 +1183,7 @@ class DebugDumpReplyOk(WireModel):
 
 class DebugDumpReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class DeliveryReceiptBody(WireModel):
@@ -1091,7 +1193,7 @@ class DeliveryReceiptBody(WireModel):
     delivered_message_id: MessageId
     task_id: RecordId
     conversation_id: RecordId
-    schedule_id: Optional[RecordId] = Field(default=None)
+    schedule_id: Union[RecordId, MISSING] = Field(default=MISSING)
     via: Literal['immediate', 'digest']
 
 
@@ -1100,9 +1202,9 @@ class DeliveryRefusedBody(WireModel):
 
     refused_message_id: MessageId
     refused_kind: Kind
-    task_id: Optional[RecordId] = Field(default=None)
+    task_id: Union[RecordId, MISSING] = Field(default=MISSING)
     reason: Literal['edge_not_allowed', 'not_holder', 'stale_custody', 'task_unknown', 'task_closed']
-    current_custody_token: Optional[CustodyToken] = Field(default=None)
+    current_custody_token: Union[CustodyToken, MISSING] = Field(default=MISSING)
 
 
 class DlqNoticeBodyOriginal(WireModel):
@@ -1115,11 +1217,11 @@ class DlqNoticeBodyOriginal(WireModel):
 class DlqNoticeBodyClaimed(WireModel):
     "What the set-aside message claimed about itself, unverified."
 
-    kind: Optional[Kind] = Field(default=None)
-    message_id: Optional[MessageId] = Field(default=None)
-    issuer_team: Optional[ScopeId] = Field(default=None)
-    issuer_runtime: Optional[RuntimeId] = Field(default=None)
-    protocol: Optional[ProtocolLabel] = Field(default=None)
+    kind: Union[Kind, MISSING] = Field(default=MISSING)
+    message_id: Union[MessageId, MISSING] = Field(default=MISSING)
+    issuer_team: Union[ScopeId, MISSING] = Field(default=MISSING)
+    issuer_runtime: Union[RuntimeId, MISSING] = Field(default=MISSING)
+    protocol: Union[ProtocolLabel, MISSING] = Field(default=MISSING)
 
 
 class DlqNoticeBodyRaw(WireModel):
@@ -1134,10 +1236,10 @@ class DlqNoticeBody(WireModel):
     copy_id: Annotated[str, StringConstraints(pattern='^[0-9a-f]{64}$')]
     stage: Literal['verification', 'handler', 'delivery_limit', 'upgrade']
     reason: Literal['too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'access_denied', 'handler_failed', 'delivery_limit', 'upgrade_drain']
-    pointer: Optional[Annotated[str, StringConstraints(min_length=1, max_length=512)]] = Field(default=None)
-    detail: Optional[ShortText] = Field(default=None)
+    pointer: Union[Annotated[str, StringConstraints(min_length=1, max_length=512)], MISSING] = Field(default=MISSING)
+    detail: Union[ShortText, MISSING] = Field(default=MISSING)
     original: DlqNoticeBodyOriginal
-    claimed: Optional[DlqNoticeBodyClaimed] = Field(default=None)
+    claimed: Union[DlqNoticeBodyClaimed, MISSING] = Field(default=MISSING)
     raw: DlqNoticeBodyRaw
     release: Annotated[str, StringConstraints(min_length=1, max_length=64)]
 
@@ -1147,17 +1249,17 @@ class HeartbeatItemsAddBody(WireModel):
 
     request_id: RecordId
     instruction: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
-    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    target_agent_type: Optional[AgentType] = Field(default=None)
-    objective_id: Optional[RecordId] = Field(default=None)
+    title: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    target_agent_type: Union[AgentType, MISSING] = Field(default=MISSING)
+    objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsAddReplyOkItem(WireModel):
     heartbeat_item_id: RecordId
-    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    title: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
     instruction: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
-    target_agent_type: Optional[AgentType] = Field(default=None)
-    objective_id: Optional[RecordId] = Field(default=None)
+    target_agent_type: Union[AgentType, MISSING] = Field(default=MISSING)
+    objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
     enabled: bool
     seen_version: RecordVersion
 
@@ -1165,53 +1267,53 @@ class HeartbeatItemsAddReplyOkItem(WireModel):
 class HeartbeatItemsAddReplyOk(WireModel):
     outcome: Literal['ok']
     item: HeartbeatItemsAddReplyOkItem
-    warning: Optional[Literal['heartbeat_off', 'launcher_missing']] = Field(default=None)
+    warning: Union[Literal['heartbeat_off', 'launcher_missing'], MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsAddReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsAddReplyObjectiveLinkRefused(WireModel):
     outcome: Literal['objective_link_refused']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsAddReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsAddReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsAddReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsAddReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsAddReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsAddReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsDisableBody(WireModel):
@@ -1224,10 +1326,10 @@ class HeartbeatItemsDisableBody(WireModel):
 
 class HeartbeatItemsDisableReplyOkItem(WireModel):
     heartbeat_item_id: RecordId
-    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    title: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
     instruction: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
-    target_agent_type: Optional[AgentType] = Field(default=None)
-    objective_id: Optional[RecordId] = Field(default=None)
+    target_agent_type: Union[AgentType, MISSING] = Field(default=MISSING)
+    objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
     enabled: bool
     seen_version: RecordVersion
 
@@ -1235,53 +1337,53 @@ class HeartbeatItemsDisableReplyOkItem(WireModel):
 class HeartbeatItemsDisableReplyOk(WireModel):
     outcome: Literal['ok']
     item: HeartbeatItemsDisableReplyOkItem
-    warning: Optional[Literal['heartbeat_off', 'launcher_missing']] = Field(default=None)
+    warning: Union[Literal['heartbeat_off', 'launcher_missing'], MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsDisableReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsDisableReplyObjectiveLinkRefused(WireModel):
     outcome: Literal['objective_link_refused']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsDisableReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsDisableReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsDisableReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsDisableReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsDisableReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsDisableReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsEnableBody(WireModel):
@@ -1294,10 +1396,10 @@ class HeartbeatItemsEnableBody(WireModel):
 
 class HeartbeatItemsEnableReplyOkItem(WireModel):
     heartbeat_item_id: RecordId
-    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    title: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
     instruction: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
-    target_agent_type: Optional[AgentType] = Field(default=None)
-    objective_id: Optional[RecordId] = Field(default=None)
+    target_agent_type: Union[AgentType, MISSING] = Field(default=MISSING)
+    objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
     enabled: bool
     seen_version: RecordVersion
 
@@ -1305,53 +1407,53 @@ class HeartbeatItemsEnableReplyOkItem(WireModel):
 class HeartbeatItemsEnableReplyOk(WireModel):
     outcome: Literal['ok']
     item: HeartbeatItemsEnableReplyOkItem
-    warning: Optional[Literal['heartbeat_off', 'launcher_missing']] = Field(default=None)
+    warning: Union[Literal['heartbeat_off', 'launcher_missing'], MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsEnableReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsEnableReplyObjectiveLinkRefused(WireModel):
     outcome: Literal['objective_link_refused']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsEnableReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsEnableReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsEnableReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsEnableReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsEnableReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsEnableReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsRemoveBody(WireModel):
@@ -1364,10 +1466,10 @@ class HeartbeatItemsRemoveBody(WireModel):
 
 class HeartbeatItemsRemoveReplyOkItem(WireModel):
     heartbeat_item_id: RecordId
-    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    title: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
     instruction: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
-    target_agent_type: Optional[AgentType] = Field(default=None)
-    objective_id: Optional[RecordId] = Field(default=None)
+    target_agent_type: Union[AgentType, MISSING] = Field(default=MISSING)
+    objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
     enabled: bool
     seen_version: RecordVersion
 
@@ -1375,53 +1477,53 @@ class HeartbeatItemsRemoveReplyOkItem(WireModel):
 class HeartbeatItemsRemoveReplyOk(WireModel):
     outcome: Literal['ok']
     item: HeartbeatItemsRemoveReplyOkItem
-    warning: Optional[Literal['heartbeat_off', 'launcher_missing']] = Field(default=None)
+    warning: Union[Literal['heartbeat_off', 'launcher_missing'], MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsRemoveReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsRemoveReplyObjectiveLinkRefused(WireModel):
     outcome: Literal['objective_link_refused']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsRemoveReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsRemoveReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsRemoveReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsRemoveReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsRemoveReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsRemoveReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsUpdateBody(WireModel):
@@ -1430,18 +1532,18 @@ class HeartbeatItemsUpdateBody(WireModel):
     request_id: RecordId
     heartbeat_item_id: RecordId
     seen_version: RecordVersion
-    instruction: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    target_agent_type: Optional[AgentType] = Field(default=None)
-    objective_id: Optional[RecordId] = Field(default=None)
+    instruction: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    title: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    target_agent_type: Union[AgentType, MISSING] = Field(default=MISSING)
+    objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsUpdateReplyOkItem(WireModel):
     heartbeat_item_id: RecordId
-    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    title: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
     instruction: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
-    target_agent_type: Optional[AgentType] = Field(default=None)
-    objective_id: Optional[RecordId] = Field(default=None)
+    target_agent_type: Union[AgentType, MISSING] = Field(default=MISSING)
+    objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
     enabled: bool
     seen_version: RecordVersion
 
@@ -1449,53 +1551,53 @@ class HeartbeatItemsUpdateReplyOkItem(WireModel):
 class HeartbeatItemsUpdateReplyOk(WireModel):
     outcome: Literal['ok']
     item: HeartbeatItemsUpdateReplyOkItem
-    warning: Optional[Literal['heartbeat_off', 'launcher_missing']] = Field(default=None)
+    warning: Union[Literal['heartbeat_off', 'launcher_missing'], MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsUpdateReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsUpdateReplyObjectiveLinkRefused(WireModel):
     outcome: Literal['objective_link_refused']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsUpdateReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsUpdateReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsUpdateReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsUpdateReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsUpdateReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HeartbeatItemsUpdateReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HostJoinBody(WireModel):
@@ -1513,7 +1615,7 @@ class HostJoinBody(WireModel):
     protocol: ProtocolLabel
     deployment: Literal['local', 'operator_managed', 'third_party']
     profile_sha256: Sha256Digest
-    software: Optional[Software] = Field(default=None)
+    software: Union[Software, MISSING] = Field(default=MISSING)
 
 
 class CertificateDocument(WireModel):
@@ -1524,7 +1626,7 @@ class CertificateDocument(WireModel):
     writer: StateWriter
     sequence: StateSequence
     issued_at: Timestamp
-    expires_at: Optional[Timestamp] = Field(default=None)
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     algorithm: Literal['ed25519']
     body_digest: Sha256Digest
     body: CertificateState
@@ -1542,25 +1644,25 @@ class HostJoinReplyPending(WireModel):
     join_id: RecordId
     review_code: Annotated[str, StringConstraints(pattern='^[A-Z2-9]{8}$')]
     retry_after_seconds: Annotated[int, Field(ge=1, le=3600)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HostJoinReplyDenied(WireModel):
     outcome: Literal['denied']
     reason: Literal['not_approved', 'key_mismatch', 'team_not_allowed', 'role_not_allowed', 'over_limit']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HostJoinReplyProtocolMismatch(WireModel):
     outcome: Literal['protocol_mismatch']
     accepted: ProtocolLabel
     install: Annotated[str, StringConstraints(min_length=1, max_length=500)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HostJoinReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HostRenewBodyApplicationKeyRotation(WireModel):
@@ -1577,9 +1679,9 @@ class HostRenewBody(WireModel):
     certificate_id: RecordId
     membership_epoch: Epoch
     profile_sha256: Sha256Digest
-    software: Optional[Software] = Field(default=None)
-    new_nats_public_key: Optional[NatsUserKey] = Field(default=None)
-    application_key_rotation: Optional[HostRenewBodyApplicationKeyRotation] = Field(default=None)
+    software: Union[Software, MISSING] = Field(default=MISSING)
+    new_nats_public_key: Union[NatsUserKey, MISSING] = Field(default=MISSING)
+    application_key_rotation: Union[HostRenewBodyApplicationKeyRotation, MISSING] = Field(default=MISSING)
 
 
 class HostRenewReplyOk(WireModel):
@@ -1591,25 +1693,25 @@ class HostRenewReplyOk(WireModel):
 class HostRenewReplyRevoked(WireModel):
     outcome: Literal['revoked']
     revocation_epoch: Epoch
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HostRenewReplyNeedsApproval(WireModel):
     outcome: Literal['needs_approval']
     join_id: RecordId
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HostRenewReplyProtocolMismatch(WireModel):
     outcome: Literal['protocol_mismatch']
     accepted: ProtocolLabel
     install: Annotated[str, StringConstraints(min_length=1, max_length=500)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class HostRenewReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class IntentSetBody(WireModel):
@@ -1628,23 +1730,23 @@ class IntentSetReplyOk(WireModel):
 
 class IntentSetReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class IntentSetReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class IntentSetReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class IntentSetReplyNotOwnRequest(WireModel):
     outcome: Literal['not_own_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteBody(WireModel):
@@ -1675,9 +1777,9 @@ class KnowledgeAddNoteReplyOkPage(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    body_ref: Optional[BlobRef] = Field(default=None)
+    summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=4000)], MISSING] = Field(default=MISSING)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    body_ref: Union[BlobRef, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
     status: Literal['active', 'archived']
     seen_version: RecordVersion
@@ -1689,116 +1791,123 @@ class KnowledgeAddNoteReplyOk(WireModel):
     outcome: Literal['ok']
     page: KnowledgeAddNoteReplyOkPage
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
+    note: KnowledgeNote
+
+
+class KnowledgeAddNoteReplyPendingReview(WireModel):
+    outcome: Literal['pending_review']
+    contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyPageExists(WireModel):
     outcome: Literal['page_exists']
     current_version: RecordVersion
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyMerged(WireModel):
     outcome: Literal['merged']
     merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyReviewRequired(WireModel):
     outcome: Literal['review_required']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplySensitiveContent(WireModel):
     outcome: Literal['sensitive_content']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyLimitReached(WireModel):
     outcome: Literal['limit_reached']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyPageFrozen(WireModel):
     outcome: Literal['page_frozen']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyRepeatsRecentRevision(WireModel):
     outcome: Literal['repeats_recent_revision']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyPersonalSpaceUnavailable(WireModel):
     outcome: Literal['personal_space_unavailable']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplySavedWriteMismatch(WireModel):
     outcome: Literal['saved_write_mismatch']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyContributionNotPending(WireModel):
     outcome: Literal['contribution_not_pending']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeAddNoteReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveBody(WireModel):
@@ -1808,6 +1917,7 @@ class KnowledgeArchiveBody(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     seen_version: RecordVersion
+    reason: ShortText
 
 
 class KnowledgeArchiveReplyOkPageUpdatedByAgent(WireModel):
@@ -1828,9 +1938,9 @@ class KnowledgeArchiveReplyOkPage(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    body_ref: Optional[BlobRef] = Field(default=None)
+    summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=4000)], MISSING] = Field(default=MISSING)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    body_ref: Union[BlobRef, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
     status: Literal['active', 'archived']
     seen_version: RecordVersion
@@ -1843,114 +1953,120 @@ class KnowledgeArchiveReplyOk(WireModel):
     page: KnowledgeArchiveReplyOkPage
 
 
+class KnowledgeArchiveReplyPendingReview(WireModel):
+    outcome: Literal['pending_review']
+    contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
 class KnowledgeArchiveReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyPageExists(WireModel):
     outcome: Literal['page_exists']
     current_version: RecordVersion
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyMerged(WireModel):
     outcome: Literal['merged']
     merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyReviewRequired(WireModel):
     outcome: Literal['review_required']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplySensitiveContent(WireModel):
     outcome: Literal['sensitive_content']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyLimitReached(WireModel):
     outcome: Literal['limit_reached']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyPageFrozen(WireModel):
     outcome: Literal['page_frozen']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyRepeatsRecentRevision(WireModel):
     outcome: Literal['repeats_recent_revision']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyPersonalSpaceUnavailable(WireModel):
     outcome: Literal['personal_space_unavailable']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplySavedWriteMismatch(WireModel):
     outcome: Literal['saved_write_mismatch']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyContributionNotPending(WireModel):
     outcome: Literal['contribution_not_pending']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeArchiveReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeCountContributionsBody(WireModel):
@@ -1965,17 +2081,17 @@ class KnowledgeCountContributionsReplyOk(WireModel):
 
 class KnowledgeCountContributionsReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeCountContributionsReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeCountContributionsReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeBody(WireModel):
@@ -1985,6 +2101,7 @@ class KnowledgeFreezeBody(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     seen_version: RecordVersion
+    minutes: Annotated[int, Field(ge=1, le=10080)]
 
 
 class KnowledgeFreezeReplyOkPageUpdatedByAgent(WireModel):
@@ -2005,9 +2122,9 @@ class KnowledgeFreezeReplyOkPage(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    body_ref: Optional[BlobRef] = Field(default=None)
+    summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=4000)], MISSING] = Field(default=MISSING)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    body_ref: Union[BlobRef, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
     status: Literal['active', 'archived']
     seen_version: RecordVersion
@@ -2022,112 +2139,112 @@ class KnowledgeFreezeReplyOk(WireModel):
 
 class KnowledgeFreezeReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyPageExists(WireModel):
     outcome: Literal['page_exists']
     current_version: RecordVersion
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyMerged(WireModel):
     outcome: Literal['merged']
     merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyReviewRequired(WireModel):
     outcome: Literal['review_required']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplySensitiveContent(WireModel):
     outcome: Literal['sensitive_content']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyLimitReached(WireModel):
     outcome: Literal['limit_reached']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyPageFrozen(WireModel):
     outcome: Literal['page_frozen']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyRepeatsRecentRevision(WireModel):
     outcome: Literal['repeats_recent_revision']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyPersonalSpaceUnavailable(WireModel):
     outcome: Literal['personal_space_unavailable']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplySavedWriteMismatch(WireModel):
     outcome: Literal['saved_write_mismatch']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyContributionNotPending(WireModel):
     outcome: Literal['contribution_not_pending']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeFreezeReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeHistoryBody(WireModel):
@@ -2155,9 +2272,9 @@ class KnowledgeHistoryReplyOkPage(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    body_ref: Optional[BlobRef] = Field(default=None)
+    summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=4000)], MISSING] = Field(default=MISSING)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    body_ref: Union[BlobRef, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
     status: Literal['active', 'archived']
     seen_version: RecordVersion
@@ -2183,7 +2300,7 @@ class KnowledgeHistoryReplyOkRevisionsItem(WireModel):
     revision: Count
     updated_at: Timestamp
     updated_by: Annotated[Union[KnowledgeHistoryReplyOkRevisionsItemUpdatedByAgent, KnowledgeHistoryReplyOkRevisionsItemUpdatedByPerson, KnowledgeHistoryReplyOkRevisionsItemUpdatedBySystem], Field(discriminator='kind')]
-    change_summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    change_summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class KnowledgeHistoryReplyOk(WireModel):
@@ -2195,22 +2312,22 @@ class KnowledgeHistoryReplyOk(WireModel):
 
 class KnowledgeHistoryReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeHistoryReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeHistoryReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeHistoryReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeListBody(WireModel):
@@ -2218,7 +2335,7 @@ class KnowledgeListBody(WireModel):
 
     space: Literal['team', 'personal']
     status: Literal['active', 'archived']
-    query: Optional[Annotated[str, StringConstraints(min_length=1, max_length=400)]] = Field(default=None)
+    query: Union[Annotated[str, StringConstraints(min_length=1, max_length=400)], MISSING] = Field(default=MISSING)
     offset: Annotated[int, Field(ge=0, le=100000)]
     limit: Annotated[int, Field(ge=1, le=20)]
 
@@ -2241,9 +2358,9 @@ class KnowledgeListReplyOkPagesItem(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    body_ref: Optional[BlobRef] = Field(default=None)
+    summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=4000)], MISSING] = Field(default=MISSING)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    body_ref: Union[BlobRef, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
     status: Literal['active', 'archived']
     seen_version: RecordVersion
@@ -2259,17 +2376,17 @@ class KnowledgeListReplyOk(WireModel):
 
 class KnowledgeListReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeListReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeListReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeListContributionsBody(WireModel):
@@ -2295,7 +2412,7 @@ class KnowledgeListContributionsReplyOkContributionsItemAuthorSystem(WireModel):
 
 class KnowledgeListContributionsReplyOkContributionsItem(WireModel):
     contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    page: Optional[Annotated[str, StringConstraints(min_length=1, max_length=240)]] = Field(default=None)
+    page: Union[Annotated[str, StringConstraints(min_length=1, max_length=240)], MISSING] = Field(default=MISSING)
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
     state: Literal['pending', 'published', 'withdrawn', 'rejected']
     seen_version: RecordVersion
@@ -2311,17 +2428,17 @@ class KnowledgeListContributionsReplyOk(WireModel):
 
 class KnowledgeListContributionsReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeListContributionsReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeListContributionsReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeBody(WireModel):
@@ -2332,6 +2449,11 @@ class KnowledgeMergeBody(WireModel):
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     seen_version: RecordVersion
     into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    target_seen_version: RecordVersion
+    content: TextContent
+    title: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
+    summary: Union[Annotated[str, StringConstraints(min_length=0, max_length=4000)], MISSING] = Field(default=MISSING)
+    confirm_review: bool
 
 
 class KnowledgeMergeReplyOkPageUpdatedByAgent(WireModel):
@@ -2352,9 +2474,9 @@ class KnowledgeMergeReplyOkPage(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    body_ref: Optional[BlobRef] = Field(default=None)
+    summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=4000)], MISSING] = Field(default=MISSING)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    body_ref: Union[BlobRef, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
     status: Literal['active', 'archived']
     seen_version: RecordVersion
@@ -2369,112 +2491,112 @@ class KnowledgeMergeReplyOk(WireModel):
 
 class KnowledgeMergeReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyPageExists(WireModel):
     outcome: Literal['page_exists']
     current_version: RecordVersion
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyMerged(WireModel):
     outcome: Literal['merged']
     merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyReviewRequired(WireModel):
     outcome: Literal['review_required']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplySensitiveContent(WireModel):
     outcome: Literal['sensitive_content']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyLimitReached(WireModel):
     outcome: Literal['limit_reached']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyPageFrozen(WireModel):
     outcome: Literal['page_frozen']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyRepeatsRecentRevision(WireModel):
     outcome: Literal['repeats_recent_revision']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyPersonalSpaceUnavailable(WireModel):
     outcome: Literal['personal_space_unavailable']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplySavedWriteMismatch(WireModel):
     outcome: Literal['saved_write_mismatch']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyContributionNotPending(WireModel):
     outcome: Literal['contribution_not_pending']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeMergeReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionBody(WireModel):
@@ -2484,10 +2606,10 @@ class KnowledgePublishContributionBody(WireModel):
     contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     seen_version: RecordVersion
     edited: bool
-    title: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
-    summary: Optional[Annotated[str, StringConstraints(min_length=0, max_length=4000)]] = Field(default=None)
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    tags: Optional[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]] = Field(default=None)
+    title: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
+    summary: Union[Annotated[str, StringConstraints(min_length=0, max_length=4000)], MISSING] = Field(default=MISSING)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    tags: Union[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)], MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyOkPageUpdatedByAgent(WireModel):
@@ -2508,9 +2630,9 @@ class KnowledgePublishContributionReplyOkPage(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    body_ref: Optional[BlobRef] = Field(default=None)
+    summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=4000)], MISSING] = Field(default=MISSING)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    body_ref: Union[BlobRef, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
     status: Literal['active', 'archived']
     seen_version: RecordVersion
@@ -2525,112 +2647,112 @@ class KnowledgePublishContributionReplyOk(WireModel):
 
 class KnowledgePublishContributionReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyPageExists(WireModel):
     outcome: Literal['page_exists']
     current_version: RecordVersion
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyMerged(WireModel):
     outcome: Literal['merged']
     merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyReviewRequired(WireModel):
     outcome: Literal['review_required']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplySensitiveContent(WireModel):
     outcome: Literal['sensitive_content']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyLimitReached(WireModel):
     outcome: Literal['limit_reached']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyPageFrozen(WireModel):
     outcome: Literal['page_frozen']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyRepeatsRecentRevision(WireModel):
     outcome: Literal['repeats_recent_revision']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyPersonalSpaceUnavailable(WireModel):
     outcome: Literal['personal_space_unavailable']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplySavedWriteMismatch(WireModel):
     outcome: Literal['saved_write_mismatch']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyContributionNotPending(WireModel):
     outcome: Literal['contribution_not_pending']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgePublishContributionReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeReadBody(WireModel):
@@ -2638,7 +2760,7 @@ class KnowledgeReadBody(WireModel):
 
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    revision: Optional[Count] = Field(default=None)
+    revision: Union[Count, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeReadReplyOkPageUpdatedByAgent(WireModel):
@@ -2659,14 +2781,15 @@ class KnowledgeReadReplyOkPage(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    body_ref: Optional[BlobRef] = Field(default=None)
+    summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=4000)], MISSING] = Field(default=MISSING)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    body_ref: Union[BlobRef, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
     status: Literal['active', 'archived']
     seen_version: RecordVersion
     updated_at: Timestamp
     updated_by: Annotated[Union[KnowledgeReadReplyOkPageUpdatedByAgent, KnowledgeReadReplyOkPageUpdatedByPerson, KnowledgeReadReplyOkPageUpdatedBySystem], Field(discriminator='kind')]
+    open_notes: Annotated[list[KnowledgeNote], Field(max_length=5)]
 
 
 class KnowledgeReadReplyOk(WireModel):
@@ -2676,22 +2799,22 @@ class KnowledgeReadReplyOk(WireModel):
 
 class KnowledgeReadReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeReadReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeReadReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeReadReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeReadContributionBody(WireModel):
@@ -2716,7 +2839,7 @@ class KnowledgeReadContributionReplyOkContributionAuthorSystem(WireModel):
 
 class KnowledgeReadContributionReplyOkContribution(WireModel):
     contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    page: Optional[Annotated[str, StringConstraints(min_length=1, max_length=240)]] = Field(default=None)
+    page: Union[Annotated[str, StringConstraints(min_length=1, max_length=240)], MISSING] = Field(default=MISSING)
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
     state: Literal['pending', 'published', 'withdrawn', 'rejected']
     seen_version: RecordVersion
@@ -2727,27 +2850,27 @@ class KnowledgeReadContributionReplyOkContribution(WireModel):
 class KnowledgeReadContributionReplyOk(WireModel):
     outcome: Literal['ok']
     contribution: KnowledgeReadContributionReplyOkContribution
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
 
 
 class KnowledgeReadContributionReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeReadContributionReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeReadContributionReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeReadContributionReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionBody(WireModel):
@@ -2756,7 +2879,7 @@ class KnowledgeRejectContributionBody(WireModel):
     request_id: RecordId
     contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     seen_version: RecordVersion
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyOkContributionAuthorAgent(WireModel):
@@ -2775,7 +2898,7 @@ class KnowledgeRejectContributionReplyOkContributionAuthorSystem(WireModel):
 
 class KnowledgeRejectContributionReplyOkContribution(WireModel):
     contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    page: Optional[Annotated[str, StringConstraints(min_length=1, max_length=240)]] = Field(default=None)
+    page: Union[Annotated[str, StringConstraints(min_length=1, max_length=240)], MISSING] = Field(default=MISSING)
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
     state: Literal['pending', 'published', 'withdrawn', 'rejected']
     seen_version: RecordVersion
@@ -2790,112 +2913,112 @@ class KnowledgeRejectContributionReplyOk(WireModel):
 
 class KnowledgeRejectContributionReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyPageExists(WireModel):
     outcome: Literal['page_exists']
     current_version: RecordVersion
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyMerged(WireModel):
     outcome: Literal['merged']
     merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyReviewRequired(WireModel):
     outcome: Literal['review_required']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplySensitiveContent(WireModel):
     outcome: Literal['sensitive_content']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyLimitReached(WireModel):
     outcome: Literal['limit_reached']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyPageFrozen(WireModel):
     outcome: Literal['page_frozen']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyRepeatsRecentRevision(WireModel):
     outcome: Literal['repeats_recent_revision']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyPersonalSpaceUnavailable(WireModel):
     outcome: Literal['personal_space_unavailable']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplySavedWriteMismatch(WireModel):
     outcome: Literal['saved_write_mismatch']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyContributionNotPending(WireModel):
     outcome: Literal['contribution_not_pending']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRejectContributionReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteBody(WireModel):
@@ -2906,6 +3029,7 @@ class KnowledgeResolveNoteBody(WireModel):
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     seen_version: RecordVersion
     note_id: RecordId
+    merged: bool
 
 
 class KnowledgeResolveNoteReplyOkPageUpdatedByAgent(WireModel):
@@ -2926,9 +3050,9 @@ class KnowledgeResolveNoteReplyOkPage(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    body_ref: Optional[BlobRef] = Field(default=None)
+    summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=4000)], MISSING] = Field(default=MISSING)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    body_ref: Union[BlobRef, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
     status: Literal['active', 'archived']
     seen_version: RecordVersion
@@ -2943,112 +3067,112 @@ class KnowledgeResolveNoteReplyOk(WireModel):
 
 class KnowledgeResolveNoteReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyPageExists(WireModel):
     outcome: Literal['page_exists']
     current_version: RecordVersion
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyMerged(WireModel):
     outcome: Literal['merged']
     merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyReviewRequired(WireModel):
     outcome: Literal['review_required']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplySensitiveContent(WireModel):
     outcome: Literal['sensitive_content']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyLimitReached(WireModel):
     outcome: Literal['limit_reached']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyPageFrozen(WireModel):
     outcome: Literal['page_frozen']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyRepeatsRecentRevision(WireModel):
     outcome: Literal['repeats_recent_revision']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyPersonalSpaceUnavailable(WireModel):
     outcome: Literal['personal_space_unavailable']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplySavedWriteMismatch(WireModel):
     outcome: Literal['saved_write_mismatch']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyContributionNotPending(WireModel):
     outcome: Literal['contribution_not_pending']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeResolveNoteReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertBody(WireModel):
@@ -3059,6 +3183,7 @@ class KnowledgeRevertBody(WireModel):
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     to_revision: Count
     seen_version: RecordVersion
+    reason: ShortText
 
 
 class KnowledgeRevertReplyOkPageUpdatedByAgent(WireModel):
@@ -3079,9 +3204,9 @@ class KnowledgeRevertReplyOkPage(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    body_ref: Optional[BlobRef] = Field(default=None)
+    summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=4000)], MISSING] = Field(default=MISSING)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    body_ref: Union[BlobRef, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
     status: Literal['active', 'archived']
     seen_version: RecordVersion
@@ -3096,112 +3221,112 @@ class KnowledgeRevertReplyOk(WireModel):
 
 class KnowledgeRevertReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyPageExists(WireModel):
     outcome: Literal['page_exists']
     current_version: RecordVersion
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyMerged(WireModel):
     outcome: Literal['merged']
     merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyReviewRequired(WireModel):
     outcome: Literal['review_required']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplySensitiveContent(WireModel):
     outcome: Literal['sensitive_content']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyLimitReached(WireModel):
     outcome: Literal['limit_reached']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyPageFrozen(WireModel):
     outcome: Literal['page_frozen']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyRepeatsRecentRevision(WireModel):
     outcome: Literal['repeats_recent_revision']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyPersonalSpaceUnavailable(WireModel):
     outcome: Literal['personal_space_unavailable']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplySavedWriteMismatch(WireModel):
     outcome: Literal['saved_write_mismatch']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyContributionNotPending(WireModel):
     outcome: Literal['contribution_not_pending']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeRevertReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeBody(WireModel):
@@ -3231,9 +3356,9 @@ class KnowledgeUnfreezeReplyOkPage(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    body_ref: Optional[BlobRef] = Field(default=None)
+    summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=4000)], MISSING] = Field(default=MISSING)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    body_ref: Union[BlobRef, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
     status: Literal['active', 'archived']
     seen_version: RecordVersion
@@ -3248,112 +3373,112 @@ class KnowledgeUnfreezeReplyOk(WireModel):
 
 class KnowledgeUnfreezeReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyPageExists(WireModel):
     outcome: Literal['page_exists']
     current_version: RecordVersion
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyMerged(WireModel):
     outcome: Literal['merged']
     merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyReviewRequired(WireModel):
     outcome: Literal['review_required']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplySensitiveContent(WireModel):
     outcome: Literal['sensitive_content']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyLimitReached(WireModel):
     outcome: Literal['limit_reached']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyPageFrozen(WireModel):
     outcome: Literal['page_frozen']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyRepeatsRecentRevision(WireModel):
     outcome: Literal['repeats_recent_revision']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyPersonalSpaceUnavailable(WireModel):
     outcome: Literal['personal_space_unavailable']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplySavedWriteMismatch(WireModel):
     outcome: Literal['saved_write_mismatch']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyContributionNotPending(WireModel):
     outcome: Literal['contribution_not_pending']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeUnfreezeReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWithdrawContributionBody(WireModel):
@@ -3379,7 +3504,7 @@ class KnowledgeWithdrawContributionReplyOkContributionAuthorSystem(WireModel):
 
 class KnowledgeWithdrawContributionReplyOkContribution(WireModel):
     contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    page: Optional[Annotated[str, StringConstraints(min_length=1, max_length=240)]] = Field(default=None)
+    page: Union[Annotated[str, StringConstraints(min_length=1, max_length=240)], MISSING] = Field(default=MISSING)
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
     state: Literal['pending', 'published', 'withdrawn', 'rejected']
     seen_version: RecordVersion
@@ -3394,22 +3519,22 @@ class KnowledgeWithdrawContributionReplyOk(WireModel):
 
 class KnowledgeWithdrawContributionReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWithdrawContributionReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWithdrawContributionReplyContributionNotPending(WireModel):
     outcome: Literal['contribution_not_pending']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWithdrawContributionReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteBody(WireModel):
@@ -3417,15 +3542,15 @@ class KnowledgeWriteBody(WireModel):
 
     request_id: RecordId
     space: Literal['team', 'personal']
-    page: Optional[Annotated[str, StringConstraints(min_length=1, max_length=240)]] = Field(default=None)
-    seen_version: Optional[RecordVersion] = Field(default=None)
+    page: Union[Annotated[str, StringConstraints(min_length=1, max_length=240)], MISSING] = Field(default=MISSING)
+    seen_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    summary: Optional[Annotated[str, StringConstraints(min_length=0, max_length=4000)]] = Field(default=None)
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    body_ref: Optional[BlobRef] = Field(default=None)
-    tags: Optional[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]] = Field(default=None)
-    page_type: Optional[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]] = Field(default=None)
-    change_summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    summary: Union[Annotated[str, StringConstraints(min_length=0, max_length=4000)], MISSING] = Field(default=MISSING)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    body_ref: Union[BlobRef, MISSING] = Field(default=MISSING)
+    tags: Union[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)], MISSING] = Field(default=MISSING)
+    page_type: Union[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')], MISSING] = Field(default=MISSING)
+    change_summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
     confirm_review: bool
 
 
@@ -3447,9 +3572,9 @@ class KnowledgeWriteReplyOkPage(WireModel):
     space: Literal['team', 'personal']
     page: Annotated[str, StringConstraints(min_length=1, max_length=240)]
     title: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
-    body: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    body_ref: Optional[BlobRef] = Field(default=None)
+    summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=4000)], MISSING] = Field(default=MISSING)
+    body: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    body_ref: Union[BlobRef, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=100)]
     status: Literal['active', 'archived']
     seen_version: RecordVersion
@@ -3466,117 +3591,117 @@ class KnowledgeWriteReplyOk(WireModel):
 class KnowledgeWriteReplyPendingReview(WireModel):
     outcome: Literal['pending_review']
     contribution_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyPageExists(WireModel):
     outcome: Literal['page_exists']
     current_version: RecordVersion
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyMerged(WireModel):
     outcome: Literal['merged']
     merged_into: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyReviewRequired(WireModel):
     outcome: Literal['review_required']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplySensitiveContent(WireModel):
     outcome: Literal['sensitive_content']
     review_flags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyLimitReached(WireModel):
     outcome: Literal['limit_reached']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyPageFrozen(WireModel):
     outcome: Literal['page_frozen']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyRepeatsRecentRevision(WireModel):
     outcome: Literal['repeats_recent_revision']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyPersonalSpaceUnavailable(WireModel):
     outcome: Literal['personal_space_unavailable']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplySavedWriteMismatch(WireModel):
     outcome: Literal['saved_write_mismatch']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyContributionNotPending(WireModel):
     outcome: Literal['contribution_not_pending']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeWriteReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class LedgerFactBodyFactCustodyConfirmed(WireModel):
@@ -3622,9 +3747,9 @@ class LedgerFactBodyFactSteeringSeen(WireModel):
 class LedgerFactBodyFactWait(WireModel):
     type: Literal['wait']
     kind: Literal['change_conflict', 'other_request_form']
-    case_id: Optional[RecordId] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
     state: Literal['open', 'resolved']
-    until: Optional[Timestamp] = Field(default=None)
+    until: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class LedgerFactBodyFactHoldTimedOut(WireModel):
@@ -3649,7 +3774,7 @@ class LedgerFactBody(WireModel):
     "A fact for an agent's work ledger from the team services."
 
     fact_id: RecordId
-    task_id: Optional[RecordId] = Field(default=None)
+    task_id: Union[RecordId, MISSING] = Field(default=MISSING)
     fact: Annotated[Union[LedgerFactBodyFactCustodyConfirmed, LedgerFactBodyFactAccessRequested, LedgerFactBodyFactAccessDecided, LedgerFactBodyFactDecisionAheadUsed, LedgerFactBodyFactColleagueExchange, LedgerFactBodyFactSteeringSeen, LedgerFactBodyFactWait, LedgerFactBodyFactHoldTimedOut, LedgerFactBodyFactLateWork, LedgerFactBodyFactIntentChanged], Field(discriminator='type')]
 
 
@@ -3660,15 +3785,15 @@ class MemoryCreateBody(WireModel):
     bank: Literal['coremem', 'usermem']
     fact_text: Annotated[str, StringConstraints(min_length=1, max_length=12000)]
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=20)]
-    valid_from: Optional[Timestamp] = Field(default=None)
-    expires: Optional[Timestamp] = Field(default=None)
+    valid_from: Union[Timestamp, MISSING] = Field(default=MISSING)
+    expires: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class MemoryCreateReplyOkFact(WireModel):
     memory_id: Annotated[int, Field(ge=1, le=9007199254740991)]
     fact_text: Annotated[str, StringConstraints(min_length=1, max_length=12000)]
-    valid_from: Optional[Timestamp] = Field(default=None)
-    expires: Optional[Timestamp] = Field(default=None)
+    valid_from: Union[Timestamp, MISSING] = Field(default=MISSING)
+    expires: Union[Timestamp, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=20)]
     created_at: Timestamp
     updated_at: Timestamp
@@ -3683,58 +3808,58 @@ class MemoryCreateReplyOk(WireModel):
 
 class MemoryCreateReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryCreateReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryCreateReplyCapacityReached(WireModel):
     outcome: Literal['capacity_reached']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryCreateReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryCreateReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryCreateReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryCreateReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryCreateReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryCreateReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryCreateReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryDeleteBody(WireModel):
@@ -3754,58 +3879,58 @@ class MemoryDeleteReplyOk(WireModel):
 
 class MemoryDeleteReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryDeleteReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryDeleteReplyCapacityReached(WireModel):
     outcome: Literal['capacity_reached']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryDeleteReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryDeleteReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryDeleteReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryDeleteReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryDeleteReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryDeleteReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryDeleteReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryListBody(WireModel):
@@ -3820,8 +3945,8 @@ class MemoryListBody(WireModel):
 class MemoryListReplyOkFactsItem(WireModel):
     memory_id: Annotated[int, Field(ge=1, le=9007199254740991)]
     fact_text: Annotated[str, StringConstraints(min_length=1, max_length=12000)]
-    valid_from: Optional[Timestamp] = Field(default=None)
-    expires: Optional[Timestamp] = Field(default=None)
+    valid_from: Union[Timestamp, MISSING] = Field(default=MISSING)
+    expires: Union[Timestamp, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=20)]
     created_at: Timestamp
     updated_at: Timestamp
@@ -3836,12 +3961,12 @@ class MemoryListReplyOk(WireModel):
 
 class MemoryListReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryListReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryReplaceBody(WireModel):
@@ -3853,15 +3978,15 @@ class MemoryReplaceBody(WireModel):
     seen_version: RecordVersion
     fact_text: Annotated[str, StringConstraints(min_length=1, max_length=12000)]
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=20)]
-    valid_from: Optional[Timestamp] = Field(default=None)
-    expires: Optional[Timestamp] = Field(default=None)
+    valid_from: Union[Timestamp, MISSING] = Field(default=MISSING)
+    expires: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class MemoryReplaceReplyOkFact(WireModel):
     memory_id: Annotated[int, Field(ge=1, le=9007199254740991)]
     fact_text: Annotated[str, StringConstraints(min_length=1, max_length=12000)]
-    valid_from: Optional[Timestamp] = Field(default=None)
-    expires: Optional[Timestamp] = Field(default=None)
+    valid_from: Union[Timestamp, MISSING] = Field(default=MISSING)
+    expires: Union[Timestamp, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=20)]
     created_at: Timestamp
     updated_at: Timestamp
@@ -3876,58 +4001,58 @@ class MemoryReplaceReplyOk(WireModel):
 
 class MemoryReplaceReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryReplaceReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryReplaceReplyCapacityReached(WireModel):
     outcome: Literal['capacity_reached']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryReplaceReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryReplaceReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryReplaceReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryReplaceReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryReplaceReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryReplaceReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryReplaceReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryShowBody(WireModel):
@@ -3940,8 +4065,8 @@ class MemoryShowBody(WireModel):
 class MemoryShowReplyOkFact(WireModel):
     memory_id: Annotated[int, Field(ge=1, le=9007199254740991)]
     fact_text: Annotated[str, StringConstraints(min_length=1, max_length=12000)]
-    valid_from: Optional[Timestamp] = Field(default=None)
-    expires: Optional[Timestamp] = Field(default=None)
+    valid_from: Union[Timestamp, MISSING] = Field(default=MISSING)
+    expires: Union[Timestamp, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=20)]
     created_at: Timestamp
     updated_at: Timestamp
@@ -3955,17 +4080,17 @@ class MemoryShowReplyOk(WireModel):
 
 class MemoryShowReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryShowReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryShowReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryUndoBody(WireModel):
@@ -3979,8 +4104,8 @@ class MemoryUndoBody(WireModel):
 class MemoryUndoReplyOkFact(WireModel):
     memory_id: Annotated[int, Field(ge=1, le=9007199254740991)]
     fact_text: Annotated[str, StringConstraints(min_length=1, max_length=12000)]
-    valid_from: Optional[Timestamp] = Field(default=None)
-    expires: Optional[Timestamp] = Field(default=None)
+    valid_from: Union[Timestamp, MISSING] = Field(default=MISSING)
+    expires: Union[Timestamp, MISSING] = Field(default=MISSING)
     tags: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=64)]], Field(max_length=20)]
     created_at: Timestamp
     updated_at: Timestamp
@@ -3992,64 +4117,64 @@ class MemoryUndoReplyOk(WireModel):
     event_id: RecordId
     undone_event_id: RecordId
     undone_event_type: Literal['create', 'replace', 'delete']
-    fact: Optional[MemoryUndoReplyOkFact] = Field(default=None)
+    fact: Union[MemoryUndoReplyOkFact, MISSING] = Field(default=MISSING)
     deleted: bool
 
 
 class MemoryUndoReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryUndoReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryUndoReplyCapacityReached(WireModel):
     outcome: Literal['capacity_reached']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryUndoReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryUndoReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryUndoReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryUndoReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryUndoReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryUndoReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class MemoryUndoReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesAbandonBody(WireModel):
@@ -4058,7 +4183,7 @@ class ObjectivesAbandonBody(WireModel):
     request_id: RecordId
     objective_id: RecordId
     seen_version: RecordVersion
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class ObjectivesAbandonReplyOkIncompleteItem(WireModel):
@@ -4085,29 +4210,29 @@ class ObjectivesAbandonReplyOk(WireModel):
 
 class ObjectivesAbandonReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesAbandonReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesAbandonReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesAbandonReplyActionUnavailable(WireModel):
     outcome: Literal['action_unavailable']
     current_status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesAbandonReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesCreateBody(WireModel):
@@ -4118,7 +4243,7 @@ class ObjectivesCreateBody(WireModel):
     desired_outcome: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
     horizon: Literal['finite', 'long_horizon', 'recurring', 'standing']
     priority: Literal['low', 'normal', 'high', 'critical']
-    success_criteria: Optional[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=2000)]], Field(max_length=50)]] = Field(default=None)
+    success_criteria: Union[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=2000)]], Field(max_length=50)], MISSING] = Field(default=MISSING)
 
 
 class ObjectivesCreateReplyOk(WireModel):
@@ -4129,58 +4254,58 @@ class ObjectivesCreateReplyOk(WireModel):
 
 class ObjectivesCreateReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesCreateReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesCreateReplyStatusNotSettable(WireModel):
     outcome: Literal['status_not_settable']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesCreateReplyConfirmationRequired(WireModel):
     outcome: Literal['confirmation_required']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesCreateReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesCreateReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesCreateReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesCreateReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesCreateReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesCreateReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesDeleteBody(WireModel):
@@ -4189,7 +4314,7 @@ class ObjectivesDeleteBody(WireModel):
     request_id: RecordId
     objective_id: RecordId
     seen_version: RecordVersion
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class ObjectivesDeleteReplyOkIncompleteItem(WireModel):
@@ -4216,29 +4341,29 @@ class ObjectivesDeleteReplyOk(WireModel):
 
 class ObjectivesDeleteReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesDeleteReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesDeleteReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesDeleteReplyActionUnavailable(WireModel):
     outcome: Literal['action_unavailable']
     current_status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesDeleteReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesListBody(WireModel):
@@ -4253,12 +4378,12 @@ class ObjectivesListReplyOkObjectivesItem(WireModel):
     status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
     horizon: Literal['finite', 'long_horizon', 'recurring', 'standing']
     priority: Literal['low', 'normal', 'high', 'critical']
-    desired_outcome: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    progress_summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
-    subgoals: Optional[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=2000)]], Field(max_length=50)]] = Field(default=None)
-    success_criteria: Optional[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=2000)]], Field(max_length=50)]] = Field(default=None)
-    schedule_ids: Optional[Annotated[list[RecordId], Field(max_length=50)]] = Field(default=None)
-    heartbeat_item_ids: Optional[Annotated[list[RecordId], Field(max_length=50)]] = Field(default=None)
+    desired_outcome: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    progress_summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
+    subgoals: Union[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=2000)]], Field(max_length=50)], MISSING] = Field(default=MISSING)
+    success_criteria: Union[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=2000)]], Field(max_length=50)], MISSING] = Field(default=MISSING)
+    schedule_ids: Union[Annotated[list[RecordId], Field(max_length=50)], MISSING] = Field(default=MISSING)
+    heartbeat_item_ids: Union[Annotated[list[RecordId], Field(max_length=50)], MISSING] = Field(default=MISSING)
     available_actions: Annotated[list[Literal['pause', 'resume', 'stop', 'abandon', 'delete']], Field(max_length=5)]
 
 
@@ -4269,7 +4394,7 @@ class ObjectivesListReplyOk(WireModel):
 
 class ObjectivesListReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesPauseBody(WireModel):
@@ -4278,7 +4403,7 @@ class ObjectivesPauseBody(WireModel):
     request_id: RecordId
     objective_id: RecordId
     seen_version: RecordVersion
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class ObjectivesPauseReplyOkIncompleteItem(WireModel):
@@ -4305,29 +4430,29 @@ class ObjectivesPauseReplyOk(WireModel):
 
 class ObjectivesPauseReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesPauseReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesPauseReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesPauseReplyActionUnavailable(WireModel):
     outcome: Literal['action_unavailable']
     current_status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesPauseReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesResumeBody(WireModel):
@@ -4336,7 +4461,7 @@ class ObjectivesResumeBody(WireModel):
     request_id: RecordId
     objective_id: RecordId
     seen_version: RecordVersion
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class ObjectivesResumeReplyOkIncompleteItem(WireModel):
@@ -4363,29 +4488,29 @@ class ObjectivesResumeReplyOk(WireModel):
 
 class ObjectivesResumeReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesResumeReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesResumeReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesResumeReplyActionUnavailable(WireModel):
     outcome: Literal['action_unavailable']
     current_status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesResumeReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesStopBody(WireModel):
@@ -4394,7 +4519,7 @@ class ObjectivesStopBody(WireModel):
     request_id: RecordId
     objective_id: RecordId
     seen_version: RecordVersion
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class ObjectivesStopReplyOkIncompleteItem(WireModel):
@@ -4421,29 +4546,29 @@ class ObjectivesStopReplyOk(WireModel):
 
 class ObjectivesStopReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesStopReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesStopReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesStopReplyActionUnavailable(WireModel):
     outcome: Literal['action_unavailable']
     current_status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned', 'deleting', 'deleted']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesStopReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateProgressBody(WireModel):
@@ -4463,58 +4588,58 @@ class ObjectivesUpdateProgressReplyOk(WireModel):
 
 class ObjectivesUpdateProgressReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateProgressReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateProgressReplyStatusNotSettable(WireModel):
     outcome: Literal['status_not_settable']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateProgressReplyConfirmationRequired(WireModel):
     outcome: Literal['confirmation_required']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateProgressReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateProgressReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateProgressReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateProgressReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateProgressReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateProgressReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateStatusBody(WireModel):
@@ -4524,7 +4649,7 @@ class ObjectivesUpdateStatusBody(WireModel):
     objective_id: RecordId
     seen_version: RecordVersion
     status: Literal['proposed', 'active', 'paused', 'blocked', 'satisfied', 'failed', 'cancelled', 'abandoned']
-    note: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    note: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
     confirmed: bool
 
 
@@ -4537,58 +4662,58 @@ class ObjectivesUpdateStatusReplyOk(WireModel):
 
 class ObjectivesUpdateStatusReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateStatusReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateStatusReplyStatusNotSettable(WireModel):
     outcome: Literal['status_not_settable']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateStatusReplyConfirmationRequired(WireModel):
     outcome: Literal['confirmation_required']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateStatusReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateStatusReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateStatusReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateStatusReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateStatusReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ObjectivesUpdateStatusReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class PeopleSetStandingBody(WireModel):
@@ -4601,35 +4726,35 @@ class PeopleSetStandingBody(WireModel):
 
 class PeopleSetStandingReplyOkTeamSchedulesMovedItem(WireModel):
     schedule_id: RecordId
-    schedule_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    schedule_name: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
     new_owner: PersonRef
 
 
 class PeopleSetStandingReplyOk(WireModel):
     outcome: Literal['ok']
     state: Literal['settled', 'settled_with_problems']
-    standing: Optional[Literal['active', 'disabled', 'removed']] = Field(default=None)
-    tasks_stopped: Optional[Count] = Field(default=None)
-    schedules_paused: Optional[Count] = Field(default=None)
-    schedules_moved: Optional[Count] = Field(default=None)
-    grants_revoked: Optional[Count] = Field(default=None)
-    requests_closed: Optional[Count] = Field(default=None)
-    memory_kept: Optional[Count] = Field(default=None)
-    pages_kept: Optional[Count] = Field(default=None)
-    threads_closed: Optional[Count] = Field(default=None)
-    forms_closed: Optional[Count] = Field(default=None)
+    standing: Union[Literal['active', 'disabled', 'removed'], MISSING] = Field(default=MISSING)
+    tasks_stopped: Union[Count, MISSING] = Field(default=MISSING)
+    schedules_paused: Union[Count, MISSING] = Field(default=MISSING)
+    schedules_moved: Union[Count, MISSING] = Field(default=MISSING)
+    grants_revoked: Union[Count, MISSING] = Field(default=MISSING)
+    requests_closed: Union[Count, MISSING] = Field(default=MISSING)
+    memory_kept: Union[Count, MISSING] = Field(default=MISSING)
+    pages_kept: Union[Count, MISSING] = Field(default=MISSING)
+    threads_closed: Union[Count, MISSING] = Field(default=MISSING)
+    forms_closed: Union[Count, MISSING] = Field(default=MISSING)
     team_schedules_moved: Annotated[list[PeopleSetStandingReplyOkTeamSchedulesMovedItem], Field(max_length=100)]
     problems: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=2000)]], Field(max_length=50)]
 
 
 class PeopleSetStandingReplyAdministratorRequired(WireModel):
     outcome: Literal['administrator_required']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class PeopleSetStandingReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class PersonNotifyBodyReasonAgent(WireModel):
@@ -4645,20 +4770,20 @@ class PersonNotifyBodyReasonCode(WireModel):
 class PersonNotifyBodyAttachmentsItem(WireModel):
     blob: BlobRef
     kind: Literal['auto', 'image', 'document', 'audio', 'video']
-    caption: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    caption: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
 
 
 class PersonNotifyBody(WireModel):
     "A notice for a person, delivered by the gateway."
 
     notice_id: RecordId
-    delivery_ref: Optional[DeliveryRef] = Field(default=None)
-    task_id: Optional[RecordId] = Field(default=None)
-    conversation_id: Optional[RecordId] = Field(default=None)
+    delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
+    task_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    conversation_id: Union[RecordId, MISSING] = Field(default=MISSING)
     text: LongText
     urgency: Literal['normal', 'urgent']
     reason: Annotated[Union[PersonNotifyBodyReasonAgent, PersonNotifyBodyReasonCode], Field(discriminator='source')]
-    attachments: Optional[Annotated[list[PersonNotifyBodyAttachmentsItem], Field(max_length=10)]] = Field(default=None)
+    attachments: Union[Annotated[list[PersonNotifyBodyAttachmentsItem], Field(max_length=10)], MISSING] = Field(default=MISSING)
 
 
 class QuestionClosedBody(WireModel):
@@ -4674,7 +4799,7 @@ class RequestsPauseBody(WireModel):
 
     request_id: RecordId
     root_task_id: RecordId
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class RequestsPauseReplyOk(WireModel):
@@ -4685,17 +4810,17 @@ class RequestsPauseReplyOk(WireModel):
 
 class RequestsPauseReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class RequestsPauseReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class RequestsPauseReplyNotOwnRequest(WireModel):
     outcome: Literal['not_own_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class RequestsResumeBody(WireModel):
@@ -4703,7 +4828,7 @@ class RequestsResumeBody(WireModel):
 
     request_id: RecordId
     root_task_id: RecordId
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class RequestsResumeReplyOk(WireModel):
@@ -4713,17 +4838,17 @@ class RequestsResumeReplyOk(WireModel):
 
 class RequestsResumeReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class RequestsResumeReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class RequestsResumeReplyNotOwnRequest(WireModel):
     outcome: Literal['not_own_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class RunContextSignBody(WireModel):
@@ -4734,53 +4859,53 @@ class RunContextSignBody(WireModel):
     claim_token: RecordId
     scheduled_job_id: RecordId
     conversation_id: RecordId
-    heartbeat_item_id: Optional[RecordId] = Field(default=None)
+    heartbeat_item_id: Union[RecordId, MISSING] = Field(default=MISSING)
 
 
 class RunContextSignReplyOk(WireModel):
     outcome: Literal['ok']
     system_work: bool
-    authority: Optional[AuthorityToken] = Field(default=None)
+    authority: Union[AuthorityToken, MISSING] = Field(default=MISSING)
 
 
 class RunContextSignReplySignerMissing(WireModel):
     outcome: Literal['signer_missing']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class RunContextSignReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class RunContextSignReplyClaimNotHeld(WireModel):
     outcome: Literal['claim_not_held']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class RunContextSignReplyScheduleStopped(WireModel):
     outcome: Literal['schedule_stopped']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class RunContextSignReplyScheduledJobMismatch(WireModel):
     outcome: Literal['scheduled_job_mismatch']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class RunContextSignReplyHeartbeatItemNotFound(WireModel):
     outcome: Literal['heartbeat_item_not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class RunContextSignReplyOwnerInactive(WireModel):
     outcome: Literal['owner_inactive']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class RunContextSignReplyCheckFailed(WireModel):
     outcome: Literal['check_failed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesDisableBody(WireModel):
@@ -4801,58 +4926,58 @@ class SchedulesDisableReplyOk(WireModel):
 class SchedulesDisableReplyApprovalRequired(WireModel):
     outcome: Literal['approval_required']
     change_id: RecordId
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesDisableReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesDisableReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesDisableReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesDisableReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesDisableReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesDisableReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesDisableReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesDisableReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallBodyWorker(WireModel):
     agent_type: AgentType
-    agent_id: Optional[AgentId] = Field(default=None)
+    agent_id: Union[AgentId, MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallBodyTimingInterval(WireModel):
@@ -4874,13 +4999,13 @@ class SchedulesInstallBodyTimingOnce(WireModel):
 class SchedulesInstallBodyActionTask(WireModel):
     type: Literal['task']
     instruction: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
-    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+    attachments: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallBodyActionFixedMessage(WireModel):
     type: Literal['fixed_message']
     text: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
-    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+    attachments: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallBodyRunNotesPolicy(WireModel):
@@ -4896,8 +5021,8 @@ class SchedulesInstallBodyRunNotes(WireModel):
 
 class SchedulesInstallBodyDeliverTo(WireModel):
     delivery_ref: DeliveryRef
-    conversation_id: Optional[RecordId] = Field(default=None)
-    time_zone: Optional[TimeZone] = Field(default=None)
+    conversation_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    time_zone: Union[TimeZone, MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallBody(WireModel):
@@ -4906,21 +5031,21 @@ class SchedulesInstallBody(WireModel):
     request_id: RecordId
     schedule_id: RecordId
     mode: Literal['create', 'replace', 'ensure', 'refresh']
-    seen_version: Optional[RecordVersion] = Field(default=None)
+    seen_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
     name: Annotated[str, StringConstraints(min_length=1, max_length=500)]
     management_class: Literal['user', 'system']
-    system_schedule_kind: Optional[Literal['unclassified', 'heartbeat_launcher', 'memory_review_coremem', 'memory_review_usermem', 'memory_review_stale_conversations', 'internal_improvement', 'after_action_report_review', 'delegation_assurance', 'isolated_recovery_checkpoint', 'provider_overload_retry', 'objective_work_session', 'knowledge_curation_person', 'knowledge_curation_team']] = Field(default=None)
-    objective_id: Optional[RecordId] = Field(default=None)
+    system_schedule_kind: Union[Literal['unclassified', 'heartbeat_launcher', 'memory_review_coremem', 'memory_review_usermem', 'memory_review_stale_conversations', 'internal_improvement', 'after_action_report_review', 'delegation_assurance', 'isolated_recovery_checkpoint', 'provider_overload_retry', 'objective_work_session', 'knowledge_curation_person', 'knowledge_curation_team'], MISSING] = Field(default=MISSING)
+    objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
     worker: SchedulesInstallBodyWorker
     timing: Annotated[Union[SchedulesInstallBodyTimingInterval, SchedulesInstallBodyTimingCron, SchedulesInstallBodyTimingOnce], Field(discriminator='kind')]
-    repeat_count: Optional[Annotated[int, Field(ge=1, le=100000)]] = Field(default=None)
-    expires_at: Optional[Timestamp] = Field(default=None)
-    paused_until: Optional[Timestamp] = Field(default=None)
+    repeat_count: Union[Annotated[int, Field(ge=1, le=100000)], MISSING] = Field(default=MISSING)
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+    paused_until: Union[Timestamp, MISSING] = Field(default=MISSING)
     enabled: bool
     action: Annotated[Union[SchedulesInstallBodyActionTask, SchedulesInstallBodyActionFixedMessage], Field(discriminator='type')]
-    run_notes: Optional[SchedulesInstallBodyRunNotes] = Field(default=None)
-    decisions_ahead: Optional[Annotated[list[DecisionAhead], Field(max_length=8)]] = Field(default=None)
-    deliver_to: Optional[SchedulesInstallBodyDeliverTo] = Field(default=None)
+    run_notes: Union[SchedulesInstallBodyRunNotes, MISSING] = Field(default=MISSING)
+    decisions_ahead: Union[Annotated[list[DecisionAhead], Field(max_length=8)], MISSING] = Field(default=MISSING)
+    deliver_to: Union[SchedulesInstallBodyDeliverTo, MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallReplyOk(WireModel):
@@ -4929,63 +5054,63 @@ class SchedulesInstallReplyOk(WireModel):
     schedule_id: RecordId
     seen_version: RecordVersion
     timing_revision: Count
-    next_fire_at: Optional[Timestamp] = Field(default=None)
+    next_fire_at: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallReplyIdInUse(WireModel):
     outcome: Literal['id_in_use']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallReplyNotSystemManaged(WireModel):
     outcome: Literal['not_system_managed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesInstallReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesListBody(WireModel):
@@ -4993,7 +5118,7 @@ class SchedulesListBody(WireModel):
 
     offset: Annotated[int, Field(ge=0, le=100000)]
     limit: Annotated[int, Field(ge=1, le=50)]
-    delivery_ref: Optional[DeliveryRef] = Field(default=None)
+    delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
 
 
 class SchedulesListReplyOkSchedulesItemTimingInterval(WireModel):
@@ -5014,20 +5139,20 @@ class SchedulesListReplyOkSchedulesItemTimingOnce(WireModel):
 
 class SchedulesListReplyOkSchedulesItemWorker(WireModel):
     agent_type: AgentType
-    agent_id: Optional[AgentId] = Field(default=None)
+    agent_id: Union[AgentId, MISSING] = Field(default=MISSING)
 
 
 class SchedulesListReplyOkSchedulesItem(WireModel):
     schedule_id: RecordId
     name: Annotated[str, StringConstraints(min_length=1, max_length=500)]
     management_class: Literal['user', 'system']
-    system_schedule_kind: Optional[Literal['unclassified', 'heartbeat_launcher', 'memory_review_coremem', 'memory_review_usermem', 'memory_review_stale_conversations', 'internal_improvement', 'after_action_report_review', 'delegation_assurance', 'isolated_recovery_checkpoint', 'provider_overload_retry', 'objective_work_session', 'knowledge_curation_person', 'knowledge_curation_team']] = Field(default=None)
-    objective_id: Optional[RecordId] = Field(default=None)
-    instruction_preview: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    system_schedule_kind: Union[Literal['unclassified', 'heartbeat_launcher', 'memory_review_coremem', 'memory_review_usermem', 'memory_review_stale_conversations', 'internal_improvement', 'after_action_report_review', 'delegation_assurance', 'isolated_recovery_checkpoint', 'provider_overload_retry', 'objective_work_session', 'knowledge_curation_person', 'knowledge_curation_team'], MISSING] = Field(default=MISSING)
+    objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    instruction_preview: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
     timing: Annotated[Union[SchedulesListReplyOkSchedulesItemTimingInterval, SchedulesListReplyOkSchedulesItemTimingCron, SchedulesListReplyOkSchedulesItemTimingOnce], Field(discriminator='kind')]
-    next_fire_at: Optional[Timestamp] = Field(default=None)
-    paused_until: Optional[Timestamp] = Field(default=None)
-    expires_at: Optional[Timestamp] = Field(default=None)
+    next_fire_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+    paused_until: Union[Timestamp, MISSING] = Field(default=MISSING)
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     enabled: bool
     timing_revision: Count
     seen_version: RecordVersion
@@ -5042,12 +5167,12 @@ class SchedulesListReplyOk(WireModel):
 
 class SchedulesListReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesListReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesPauseBody(WireModel):
@@ -5069,53 +5194,53 @@ class SchedulesPauseReplyOk(WireModel):
 class SchedulesPauseReplyApprovalRequired(WireModel):
     outcome: Literal['approval_required']
     change_id: RecordId
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesPauseReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesPauseReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesPauseReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesPauseReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesPauseReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesPauseReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesPauseReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesPauseReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesRemoveBody(WireModel):
@@ -5136,53 +5261,53 @@ class SchedulesRemoveReplyOk(WireModel):
 class SchedulesRemoveReplyApprovalRequired(WireModel):
     outcome: Literal['approval_required']
     change_id: RecordId
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesRemoveReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesRemoveReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesRemoveReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesRemoveReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesRemoveReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesRemoveReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesRemoveReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesRemoveReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesResumeBody(WireModel):
@@ -5203,58 +5328,58 @@ class SchedulesResumeReplyOk(WireModel):
 class SchedulesResumeReplyApprovalRequired(WireModel):
     outcome: Literal['approval_required']
     change_id: RecordId
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesResumeReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesResumeReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesResumeReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesResumeReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesResumeReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesResumeReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesResumeReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesResumeReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesSetWorkerBodyWorker(WireModel):
     agent_type: AgentType
-    agent_id: Optional[AgentId] = Field(default=None)
+    agent_id: Union[AgentId, MISSING] = Field(default=MISSING)
 
 
 class SchedulesSetWorkerBody(WireModel):
@@ -5276,53 +5401,53 @@ class SchedulesSetWorkerReplyOk(WireModel):
 class SchedulesSetWorkerReplyApprovalRequired(WireModel):
     outcome: Literal['approval_required']
     change_id: RecordId
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesSetWorkerReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesSetWorkerReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesSetWorkerReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesSetWorkerReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesSetWorkerReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesSetWorkerReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesSetWorkerReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesSetWorkerReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesUpdateBodyTimingInterval(WireModel):
@@ -5347,11 +5472,11 @@ class SchedulesUpdateBody(WireModel):
     request_id: RecordId
     schedule_id: RecordId
     seen_version: RecordVersion
-    name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    instruction: Optional[Annotated[str, StringConstraints(min_length=1, max_length=32768)]] = Field(default=None)
-    timing: Optional[Annotated[Union[SchedulesUpdateBodyTimingInterval, SchedulesUpdateBodyTimingCron, SchedulesUpdateBodyTimingOnce], Field(discriminator='kind')]] = Field(default=None)
-    expires_at: Optional[Timestamp] = Field(default=None)
-    repeat_count: Optional[Annotated[int, Field(ge=1, le=100000)]] = Field(default=None)
+    name: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    instruction: Union[Annotated[str, StringConstraints(min_length=1, max_length=32768)], MISSING] = Field(default=MISSING)
+    timing: Union[Annotated[Union[SchedulesUpdateBodyTimingInterval, SchedulesUpdateBodyTimingCron, SchedulesUpdateBodyTimingOnce], Field(discriminator='kind')], MISSING] = Field(default=MISSING)
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+    repeat_count: Union[Annotated[int, Field(ge=1, le=100000)], MISSING] = Field(default=MISSING)
 
 
 class SchedulesUpdateReplyOk(WireModel):
@@ -5364,53 +5489,53 @@ class SchedulesUpdateReplyOk(WireModel):
 class SchedulesUpdateReplyApprovalRequired(WireModel):
     outcome: Literal['approval_required']
     change_id: RecordId
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesUpdateReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesUpdateReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesUpdateReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesUpdateReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesUpdateReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesUpdateReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesUpdateReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SchedulesUpdateReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SkillsChangedBodyInstall(WireModel):
@@ -5445,82 +5570,82 @@ class StagedChangesApplyReplyOk(WireModel):
 class StagedChangesApplyReplyWaiting(WireModel):
     outcome: Literal['waiting']
     access_request_id: RecordId
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class StagedChangesApplyReplyAgreementRequired(WireModel):
     outcome: Literal['agreement_required']
     title: Annotated[str, StringConstraints(min_length=1, max_length=500)]
     effect: Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=2000)]], Field(max_length=20)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class StagedChangesApplyReplyAlreadyApplied(WireModel):
     outcome: Literal['already_applied']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class StagedChangesApplyReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class StagedChangesApplyReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class StagedChangesApplyReplyDenied(WireModel):
     outcome: Literal['denied']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class StagedChangesApplyReplyWithdrawn(WireModel):
     outcome: Literal['withdrawn']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class StagedChangesApplyReplyChangedSinceRead(WireModel):
     outcome: Literal['changed_since_read']
-    current_version: Optional[RecordVersion] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    current_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class StagedChangesApplyReplyChangeConflict(WireModel):
     outcome: Literal['change_conflict']
     case_id: RecordId
     brief: BlobRef
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class StagedChangesApplyReplyRequestClosed(WireModel):
     outcome: Literal['request_closed']
-    request_state: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    request_state: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class StagedChangesApplyReplyNeedsPersonDecision(WireModel):
     outcome: Literal['needs_person_decision']
-    case_id: Optional[RecordId] = Field(default=None)
-    message: Optional[ShortText] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class StagedChangesApplyReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class StagedChangesApplyReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SteeringDecideBodyDecisionDecidedActionsItemActionGuidance(WireModel):
     type: Literal['guidance']
     text: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
     source: Literal['lead', 'person_as_is']
-    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+    attachments: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class SteeringDecideBodyDecisionDecidedActionsItemActionRelease(WireModel):
@@ -5529,7 +5654,7 @@ class SteeringDecideBodyDecisionDecidedActionsItemActionRelease(WireModel):
 
 class SteeringDecideBodyDecisionDecidedActionsItemActionStop(WireModel):
     type: Literal['stop']
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class SteeringDecideBodyDecisionDecidedActionsItem(WireModel):
@@ -5540,7 +5665,7 @@ class SteeringDecideBodyDecisionDecidedActionsItem(WireModel):
 class SteeringDecideBodyDecisionDecided(WireModel):
     type: Literal['decided']
     actions: Annotated[list[SteeringDecideBodyDecisionDecidedActionsItem], Field(min_length=1, max_length=100)]
-    note: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    note: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
 
 
 class SteeringDecideBodyDecisionExtendHold(WireModel):
@@ -5565,41 +5690,41 @@ class SteeringDecideReplyOkSentItem(WireModel):
 class SteeringDecideReplyOk(WireModel):
     outcome: Literal['ok']
     state: Literal['decided', 'hold_extended']
-    hold_until: Optional[Timestamp] = Field(default=None)
+    hold_until: Union[Timestamp, MISSING] = Field(default=MISSING)
     sent: Annotated[list[SteeringDecideReplyOkSentItem], Field(max_length=100)]
     unreachable: Annotated[list[RecordId], Field(max_length=100)]
 
 
 class SteeringDecideReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SteeringDecideReplyHoldExpired(WireModel):
     outcome: Literal['hold_expired']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SteeringDecideReplyExtensionUsed(WireModel):
     outcome: Literal['extension_used']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SteeringDecideReplyTasksNotCovered(WireModel):
     outcome: Literal['tasks_not_covered']
     task_ids: Annotated[list[RecordId], Field(min_length=1, max_length=100)]
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class SteeringDecideReplyNotOwnRequest(WireModel):
     outcome: Literal['not_own_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TaskAccountBodyStageImmediate(WireModel):
     type: Literal['immediate']
-    current_step: Optional[ShortText] = Field(default=None)
-    checkpoint: Optional[BlobRef] = Field(default=None)
+    current_step: Union[ShortText, MISSING] = Field(default=MISSING)
+    checkpoint: Union[BlobRef, MISSING] = Field(default=MISSING)
     tools_in_progress: Annotated[list[ToolId], Field(max_length=20)]
     held_actions: Annotated[list[HeldAction], Field(max_length=50)]
     assumptions: Annotated[list[Assumption], Field(max_length=20)]
@@ -5629,12 +5754,12 @@ class TaskAnswerBody(WireModel):
 
     question_id: RecordId
     task_id: RecordId
-    text: Optional[LongText] = Field(default=None)
-    selected_choice_ids: Optional[Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z0-9_-]{1,64}$')]], Field(max_length=20)]] = Field(default=None)
-    decision: Optional[Literal['resume', 'partial', 'cancel', 'retry', 'retry_in_5_minutes', 'retry_in_10_minutes']] = Field(default=None)
-    replied_message: Optional[RepliedMessage] = Field(default=None)
-    passed_on: Optional[TaskAnswerBodyPassedOn] = Field(default=None)
-    decision_token: Optional[DecisionToken] = Field(default=None)
+    text: Union[LongText, MISSING] = Field(default=MISSING)
+    selected_choice_ids: Union[Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z0-9_-]{1,64}$')]], Field(max_length=20)], MISSING] = Field(default=MISSING)
+    decision: Union[Literal['resume', 'partial', 'cancel', 'retry', 'retry_in_5_minutes', 'retry_in_10_minutes'], MISSING] = Field(default=MISSING)
+    replied_message: Union[RepliedMessage, MISSING] = Field(default=MISSING)
+    passed_on: Union[TaskAnswerBodyPassedOn, MISSING] = Field(default=MISSING)
+    decision_token: Union[DecisionToken, MISSING] = Field(default=MISSING)
 
 
 class TaskClaimedBody(WireModel):
@@ -5642,7 +5767,7 @@ class TaskClaimedBody(WireModel):
 
     claim_id: RecordId
     task_id: RecordId
-    parent_task_id: Optional[RecordId] = Field(default=None)
+    parent_task_id: Union[RecordId, MISSING] = Field(default=MISSING)
     recovered: bool
 
 
@@ -5653,26 +5778,26 @@ class TaskHandbackBody(WireModel):
     task_id: RecordId
     disposition: Literal['not_started', 'interrupted']
     launch_id: RecordId
-    interrupted_at: Optional[Timestamp] = Field(default=None)
+    interrupted_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     reason: ShortText
-    scheduler_errors: Optional[Annotated[list[ShortText], Field(max_length=10)]] = Field(default=None)
+    scheduler_errors: Union[Annotated[list[ShortText], Field(max_length=10)], MISSING] = Field(default=MISSING)
     actions: Annotated[list[HeldAction], Field(max_length=50)]
-    ledger: Optional[LedgerSnapshot] = Field(default=None)
+    ledger: Union[LedgerSnapshot, MISSING] = Field(default=MISSING)
 
 
 class TaskProbeBody(WireModel):
     "Whether the holder still has a task, asked by the watchdog."
 
     task_id: RecordId
-    custody_token: Optional[CustodyToken] = Field(default=None)
+    custody_token: Union[CustodyToken, MISSING] = Field(default=MISSING)
 
 
 class TaskProbeReplyOk(WireModel):
     outcome: Literal['ok']
     known: bool
     current: bool
-    state: Optional[ProgressState] = Field(default=None)
-    last_update_at: Optional[Timestamp] = Field(default=None)
+    state: Union[ProgressState, MISSING] = Field(default=MISSING)
+    last_update_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     executing: bool
     exiting: bool
 
@@ -5685,16 +5810,16 @@ class TaskProgressBody(WireModel):
     custody_token: CustodyToken
     status: ShortText
     state: Literal['working', 'waiting', 'blocked', 'holding']
-    checkpoint: Optional[BlobRef] = Field(default=None)
-    assumptions: Optional[Annotated[list[Assumption], Field(max_length=20)]] = Field(default=None)
-    held_actions: Optional[Annotated[list[HeldAction], Field(max_length=50)]] = Field(default=None)
-    expected_finish: Optional[Timestamp] = Field(default=None)
-    steering_seen: Optional[RecordId] = Field(default=None)
+    checkpoint: Union[BlobRef, MISSING] = Field(default=MISSING)
+    assumptions: Union[Annotated[list[Assumption], Field(max_length=20)], MISSING] = Field(default=MISSING)
+    held_actions: Union[Annotated[list[HeldAction], Field(max_length=50)], MISSING] = Field(default=MISSING)
+    expected_finish: Union[Timestamp, MISSING] = Field(default=MISSING)
+    steering_seen: Union[RecordId, MISSING] = Field(default=MISSING)
 
 
 class TaskQuestionBodyPurposeInput(WireModel):
     type: Literal['input']
-    choice_mode: Optional[Literal['single', 'multiple']] = Field(default=None)
+    choice_mode: Union[Literal['single', 'multiple'], MISSING] = Field(default=MISSING)
     choices: Annotated[list[QuestionChoice], Field(max_length=20)]
     allow_free_text: bool
 
@@ -5713,13 +5838,13 @@ class TaskQuestionBodyPurposeScopeProposedChangesItem(WireModel):
 class TaskQuestionBodyPurposeScope(WireModel):
     type: Literal['scope']
     proposal: NoteText
-    proposed_changes: Optional[Annotated[list[TaskQuestionBodyPurposeScopeProposedChangesItem], Field(max_length=20)]] = Field(default=None)
+    proposed_changes: Union[Annotated[list[TaskQuestionBodyPurposeScopeProposedChangesItem], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class TaskQuestionBodyPurposeBudget(WireModel):
     type: Literal['budget']
     asked: Literal['time', 'budget']
-    until: Optional[Timestamp] = Field(default=None)
+    until: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class TaskQuestionBodyPurposeCoordination(WireModel):
@@ -5752,7 +5877,7 @@ class TaskQuestionBodyPurposeRuntimePause(WireModel):
 
 class TaskQuestionBodyPurposeRecoveryCheckpoint(WireModel):
     type: Literal['recovery_checkpoint']
-    choices: Optional[Annotated[list[QuestionChoice], Field(max_length=20)]] = Field(default=None)
+    choices: Union[Annotated[list[QuestionChoice], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class TaskQuestionBody(WireModel):
@@ -5763,9 +5888,9 @@ class TaskQuestionBody(WireModel):
     sequence: Count
     text: LongText
     can_answer: Literal['lead', 'person']
-    relays_question_id: Optional[RecordId] = Field(default=None)
-    deadline: Optional[Timestamp] = Field(default=None)
-    assumption: Optional[Assumption] = Field(default=None)
+    relays_question_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    deadline: Union[Timestamp, MISSING] = Field(default=MISSING)
+    assumption: Union[Assumption, MISSING] = Field(default=MISSING)
     purpose: Annotated[Union[TaskQuestionBodyPurposeInput, TaskQuestionBodyPurposeSetup, TaskQuestionBodyPurposeScope, TaskQuestionBodyPurposeBudget, TaskQuestionBodyPurposeCoordination, TaskQuestionBodyPurposeHelp, TaskQuestionBodyPurposeOutsideHelp, TaskQuestionBodyPurposeChangeConflict, TaskQuestionBodyPurposeRuntimePause, TaskQuestionBodyPurposeRecoveryCheckpoint], Field(discriminator='type')]
 
 
@@ -5780,7 +5905,7 @@ class TaskReportBodyKindLessons(WireModel):
 class TaskReportBodyKindWorkerResult(WireModel):
     type: Literal['worker_result']
     text: LongText
-    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+    attachments: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class TaskReportBodyKindRecordChanged(WireModel):
@@ -5808,13 +5933,13 @@ class TaskReportBody(WireModel):
 
 
 class TaskRequestBodyReassignment(WireModel):
-    handback_id: Optional[RecordId] = Field(default=None)
+    handback_id: Union[RecordId, MISSING] = Field(default=MISSING)
     prior_holder: AgentId
     prior_disposition: Literal['not_started', 'interrupted']
     interruption_count: Count
-    interrupted_at: Optional[Timestamp] = Field(default=None)
+    interrupted_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     actions: Annotated[list[HeldAction], Field(max_length=50)]
-    checkpoint: Optional[BlobRef] = Field(default=None)
+    checkpoint: Union[BlobRef, MISSING] = Field(default=MISSING)
 
 
 class TaskRequestBody(WireModel):
@@ -5823,9 +5948,9 @@ class TaskRequestBody(WireModel):
     task_id: RecordId
     work: WorkContext
     instructions: LongText
-    replied_message: Optional[RepliedMessage] = Field(default=None)
-    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
-    reassignment: Optional[TaskRequestBodyReassignment] = Field(default=None)
+    replied_message: Union[RepliedMessage, MISSING] = Field(default=MISSING)
+    attachments: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
+    reassignment: Union[TaskRequestBodyReassignment, MISSING] = Field(default=MISSING)
 
 
 class TaskResultBodyOutcomeCompletedAnswerText(WireModel):
@@ -5836,13 +5961,13 @@ class TaskResultBodyOutcomeCompletedAnswerText(WireModel):
 class TaskResultBodyOutcomeCompletedAnswerFromSubtask(WireModel):
     form: Literal['from_subtask']
     from_task_id: RecordId
-    note: Optional[NoteText] = Field(default=None)
+    note: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class TaskResultBodyOutcomeCompleted(WireModel):
     state: Literal['completed']
     answer: Annotated[Union[TaskResultBodyOutcomeCompletedAnswerText, TaskResultBodyOutcomeCompletedAnswerFromSubtask], Field(discriminator='form')]
-    artifacts: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+    artifacts: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class TaskResultBodyOutcomePartialAnswerText(WireModel):
@@ -5853,14 +5978,14 @@ class TaskResultBodyOutcomePartialAnswerText(WireModel):
 class TaskResultBodyOutcomePartialAnswerFromSubtask(WireModel):
     form: Literal['from_subtask']
     from_task_id: RecordId
-    note: Optional[NoteText] = Field(default=None)
+    note: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class TaskResultBodyOutcomePartial(WireModel):
     state: Literal['partial']
     answer: Annotated[Union[TaskResultBodyOutcomePartialAnswerText, TaskResultBodyOutcomePartialAnswerFromSubtask], Field(discriminator='form')]
     missing: NoteText
-    artifacts: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+    artifacts: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class TaskResultBodyOutcomeFailed(WireModel):
@@ -5876,7 +6001,7 @@ class TaskResultBodyOutcomeCancelled(WireModel):
 class TaskResultBodyOutcomePaused(WireModel):
     state: Literal['paused']
     trigger: Literal['tool_call_budget_exceeded', 'context_budget_exceeded', 'delegated_subtask_timeout', 'specialist_runtime_budget_pause', 'provider_overloaded']
-    detail: Optional[NoteText] = Field(default=None)
+    detail: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class TaskResultBodyOutcomeYielded(WireModel):
@@ -5887,7 +6012,7 @@ class TaskResultBodyOutcomeYielded(WireModel):
 class TaskResultBodyOutcomeRejected(WireModel):
     state: Literal['rejected']
     reason: Literal['queue_full', 'not_allowed']
-    detail: Optional[NoteText] = Field(default=None)
+    detail: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class TaskResultBody(WireModel):
@@ -5896,10 +6021,10 @@ class TaskResultBody(WireModel):
     task_id: RecordId
     sequence: Count
     custody_token: CustodyToken
-    intent_version: Optional[Count] = Field(default=None)
-    steering_seen: Optional[RecordId] = Field(default=None)
-    assumptions: Optional[Annotated[list[Assumption], Field(max_length=20)]] = Field(default=None)
-    summary: Optional[ShortText] = Field(default=None)
+    intent_version: Union[Count, MISSING] = Field(default=MISSING)
+    steering_seen: Union[RecordId, MISSING] = Field(default=MISSING)
+    assumptions: Union[Annotated[list[Assumption], Field(max_length=20)], MISSING] = Field(default=MISSING)
+    summary: Union[ShortText, MISSING] = Field(default=MISSING)
     outcome: Annotated[Union[TaskResultBodyOutcomeCompleted, TaskResultBodyOutcomePartial, TaskResultBodyOutcomeFailed, TaskResultBodyOutcomeCancelled, TaskResultBodyOutcomePaused, TaskResultBodyOutcomeYielded, TaskResultBodyOutcomeRejected], Field(discriminator='state')]
 
 
@@ -5911,8 +6036,8 @@ class TaskSteerBodyActionGuidance(WireModel):
     type: Literal['guidance']
     source: Literal['lead', 'person_as_is', 'person_after_timeout']
     text: LongText
-    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
-    replied_message: Optional[RepliedMessage] = Field(default=None)
+    attachments: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
+    replied_message: Union[RepliedMessage, MISSING] = Field(default=MISSING)
 
 
 class TaskSteerBodyActionRelease(WireModel):
@@ -5924,7 +6049,7 @@ class TaskSteerBody(WireModel):
 
     task_id: RecordId
     steer_id: RecordId
-    person_steering_id: Optional[RecordId] = Field(default=None)
+    person_steering_id: Union[RecordId, MISSING] = Field(default=MISSING)
     action: Annotated[Union[TaskSteerBodyActionHold, TaskSteerBodyActionGuidance, TaskSteerBodyActionRelease], Field(discriminator='type')]
 
 
@@ -5933,7 +6058,7 @@ class TaskStopBody(WireModel):
 
     task_id: RecordId
     stop_id: RecordId
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
     cascade_to_subtasks: bool
 
 
@@ -5960,7 +6085,7 @@ class TasksCancelBody(WireModel):
     "Stop a task, a conversation's work, a delivery's work or all of the person's work."
 
     request_id: RecordId
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
     selector: Annotated[Union[TasksCancelBodySelectorTask, TasksCancelBodySelectorConversation, TasksCancelBodySelectorDelivery, TasksCancelBodySelectorAll], Field(discriminator='by')]
 
 
@@ -5980,12 +6105,12 @@ class TasksCancelReplyOk(WireModel):
 
 class TasksCancelReplyNoMatchingWork(WireModel):
     outcome: Literal['no_matching_work']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksCancelReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksInventoryBody(WireModel):
@@ -5996,28 +6121,28 @@ class TasksInventoryBody(WireModel):
 class TasksInventoryReplyOkRootsItemChildrenItem(WireModel):
     task_id: RecordId
     state: ProgressState
-    last_updated_at: Optional[Timestamp] = Field(default=None)
-    agent_id: Optional[AgentId] = Field(default=None)
-    agent_type: Optional[AgentType] = Field(default=None)
+    last_updated_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+    agent_id: Union[AgentId, MISSING] = Field(default=MISSING)
+    agent_type: Union[AgentType, MISSING] = Field(default=MISSING)
 
 
 class TasksInventoryReplyOkRootsItem(WireModel):
     root_task_id: RecordId
     state: ProgressState
-    conversation_id: Optional[RecordId] = Field(default=None)
-    objective_id: Optional[RecordId] = Field(default=None)
-    objective_work_session_id: Optional[RecordId] = Field(default=None)
-    plan_id: Optional[RecordId] = Field(default=None)
-    latest_activity_at: Optional[Timestamp] = Field(default=None)
-    latest_activity: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    blocker: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    conversation_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    objective_work_session_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    plan_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    latest_activity_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+    latest_activity: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    blocker: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
     children: Annotated[list[TasksInventoryReplyOkRootsItemChildrenItem], Field(max_length=200)]
 
 
 class TasksInventoryReplyOkSchedulesItem(WireModel):
     schedule_id: RecordId
     name: Annotated[str, StringConstraints(min_length=1, max_length=500)]
-    next_fire_at: Optional[Timestamp] = Field(default=None)
+    next_fire_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     enabled: bool
 
 
@@ -6029,7 +6154,7 @@ class TasksInventoryReplyOk(WireModel):
 
 class TasksInventoryReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksListBody(WireModel):
@@ -6043,10 +6168,10 @@ class TasksListBody(WireModel):
 class TasksListReplyOkTasksItem(WireModel):
     task_id: RecordId
     state: ProgressState
-    problem_statement: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    problem_statement: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
     is_current: bool
-    queue_position: Optional[Count] = Field(default=None)
-    last_updated_at: Optional[Timestamp] = Field(default=None)
+    queue_position: Union[Count, MISSING] = Field(default=MISSING)
+    last_updated_at: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class TasksListReplyOk(WireModel):
@@ -6060,12 +6185,12 @@ class TasksListReplyOk(WireModel):
 
 class TasksListReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksListReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksListFinishedBody(WireModel):
@@ -6079,10 +6204,10 @@ class TasksListFinishedBody(WireModel):
 class TasksListFinishedReplyOkTasksItem(WireModel):
     task_id: RecordId
     state: ProgressState
-    problem_statement: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    problem_statement: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
     owner_agent_id: AgentId
-    finished_at: Optional[Timestamp] = Field(default=None)
-    answer: Optional[Annotated[str, StringConstraints(min_length=1, max_length=12288)]] = Field(default=None)
+    finished_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+    answer: Union[Annotated[str, StringConstraints(min_length=1, max_length=12288)], MISSING] = Field(default=MISSING)
 
 
 class TasksListFinishedReplyOk(WireModel):
@@ -6093,12 +6218,12 @@ class TasksListFinishedReplyOk(WireModel):
 
 class TasksListFinishedReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksListFinishedReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksProbeBody(WireModel):
@@ -6110,24 +6235,24 @@ class TasksProbeBody(WireModel):
 class TasksProbeReplyOk(WireModel):
     outcome: Literal['ok']
     known: bool
-    state: Optional[ProgressState] = Field(default=None)
-    last_update_at: Optional[Timestamp] = Field(default=None)
+    state: Union[ProgressState, MISSING] = Field(default=MISSING)
+    last_update_at: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class TasksProgressBody(WireModel):
     "Where the person's request in one conversation stands."
 
     conversation_id: RecordId
-    delivery_ref: Optional[DeliveryRef] = Field(default=None)
+    delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
 
 
 class TasksProgressReplyOkChildrenItem(WireModel):
     task_id: RecordId
-    agent_type: Optional[AgentType] = Field(default=None)
+    agent_type: Union[AgentType, MISSING] = Field(default=MISSING)
     state: ProgressState
     queue_status: Literal['queued', 'running', 'finished', 'failed', 'cancelled']
-    holder: Optional[AgentId] = Field(default=None)
-    last_updated_at: Optional[Timestamp] = Field(default=None)
+    holder: Union[AgentId, MISSING] = Field(default=MISSING)
+    last_updated_at: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class TasksProgressReplyOkSteering(WireModel):
@@ -6140,20 +6265,20 @@ class TasksProgressReplyOkSteering(WireModel):
 class TasksProgressReplyOk(WireModel):
     outcome: Literal['ok']
     state: Literal['active', 'idle']
-    root_task_id: Optional[RecordId] = Field(default=None)
-    root_state: Optional[ProgressState] = Field(default=None)
-    plan_phase: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
-    plan_status: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    root_task_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    root_state: Union[ProgressState, MISSING] = Field(default=MISSING)
+    plan_phase: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    plan_status: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
     children: Annotated[list[TasksProgressReplyOkChildrenItem], Field(max_length=100)]
-    last_activity_at: Optional[Timestamp] = Field(default=None)
-    last_activity: Optional[Annotated[str, StringConstraints(min_length=1, max_length=240)]] = Field(default=None)
-    blocker: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
-    steering: Optional[TasksProgressReplyOkSteering] = Field(default=None)
+    last_activity_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+    last_activity: Union[Annotated[str, StringConstraints(min_length=1, max_length=240)], MISSING] = Field(default=MISSING)
+    blocker: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
+    steering: Union[TasksProgressReplyOkSteering, MISSING] = Field(default=MISSING)
 
 
 class TasksProgressReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksPurgeBody(WireModel):
@@ -6162,7 +6287,7 @@ class TasksPurgeBody(WireModel):
     request_id: RecordId
     agent: AgentId
     seen_queue_digest: RecordVersion
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class TasksPurgeReplyOkReceiptsItem(WireModel):
@@ -6184,22 +6309,22 @@ class TasksPurgeReplyOk(WireModel):
 class TasksPurgeReplyQueueChanged(WireModel):
     outcome: Literal['queue_changed']
     current_digest: RecordVersion
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksPurgeReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksPurgeReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksPurgeReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksRemoveBody(WireModel):
@@ -6209,7 +6334,7 @@ class TasksRemoveBody(WireModel):
     agent: AgentId
     task_id: RecordId
     seen_queue_digest: RecordVersion
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class TasksRemoveReplyOkReceiptsItem(WireModel):
@@ -6231,22 +6356,22 @@ class TasksRemoveReplyOk(WireModel):
 class TasksRemoveReplyQueueChanged(WireModel):
     outcome: Literal['queue_changed']
     current_digest: RecordVersion
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksRemoveReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksRemoveReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksRemoveReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksSteerBody(WireModel):
@@ -6255,8 +6380,8 @@ class TasksSteerBody(WireModel):
     steer_id: RecordId
     task_id: RecordId
     text: Annotated[str, StringConstraints(min_length=1, max_length=32768)]
-    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
-    replied_message: Optional[RepliedMessage] = Field(default=None)
+    attachments: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
+    replied_message: Union[RepliedMessage, MISSING] = Field(default=MISSING)
 
 
 class TasksSteerReplyOk(WireModel):
@@ -6268,22 +6393,22 @@ class TasksSteerReplyOk(WireModel):
 
 class TasksSteerReplyNotStarted(WireModel):
     outcome: Literal['not_started']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksSteerReplyRequestFinished(WireModel):
     outcome: Literal['request_finished']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksSteerReplyFeatureOff(WireModel):
     outcome: Literal['feature_off']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TasksSteerReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class ToolSetupRequestBodySetupSignIn(WireModel):
@@ -6312,7 +6437,7 @@ class ToolSetupRequestBody(WireModel):
 
     setup_request_id: RecordId
     task_id: RecordId
-    delivery_ref: Optional[DeliveryRef] = Field(default=None)
+    delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
     tool_id: ToolId
     reason: NoteText
     setup: Annotated[Union[ToolSetupRequestBodySetupSignIn, ToolSetupRequestBodySetupAccountLink, ToolSetupRequestBodySetupTeamSignInApp, ToolSetupRequestBodySetupExternalStep], Field(discriminator='type')]
@@ -6349,12 +6474,12 @@ class ToolSetupResultBody(WireModel):
     setup: Annotated[Union[ToolSetupResultBodySetupSignIn, ToolSetupResultBodySetupAccountLink, ToolSetupResultBodySetupTeamSignInApp, ToolSetupResultBodySetupExternalStep], Field(discriminator='type')]
     source: Literal['task_request', 'person_action']
     attempt: Annotated[int, Field(ge=0, le=3)]
-    account_label: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    account_label: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
     needs_administrator: bool
-    reason_code: Optional[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]] = Field(default=None)
-    message: Optional[NoteText] = Field(default=None)
-    link_id: Optional[RecordId] = Field(default=None)
-    broker_session_id: Optional[RecordId] = Field(default=None)
+    reason_code: Union[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')], MISSING] = Field(default=MISSING)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
+    link_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    broker_session_id: Union[RecordId, MISSING] = Field(default=MISSING)
 
 
 class TopicsFindThreadsBody(WireModel):
@@ -6365,9 +6490,9 @@ class TopicsFindThreadsBody(WireModel):
 
 class TopicsFindThreadsReplyOkMatchesItem(WireModel):
     conversation_id: RecordId
-    latest_task_id: Optional[RecordId] = Field(default=None)
+    latest_task_id: Union[RecordId, MISSING] = Field(default=MISSING)
     status: ProgressState
-    subject_preview: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    subject_preview: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
     updated_at: Timestamp
     matched_tags: Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z0-9][a-z0-9_-]{0,63}$')]], Field(max_length=10)]
 
@@ -6379,12 +6504,12 @@ class TopicsFindThreadsReplyOk(WireModel):
 
 class TopicsFindThreadsReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TopicsFindThreadsReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TopicsListTagsBody(WireModel):
@@ -6405,7 +6530,7 @@ class TopicsListTagsReplyOk(WireModel):
 
 class TopicsListTagsReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TopicsTagThreadBody(WireModel):
@@ -6424,17 +6549,17 @@ class TopicsTagThreadReplyOk(WireModel):
 
 class TopicsTagThreadReplyNotFound(WireModel):
     outcome: Literal['not_found']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TopicsTagThreadReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 class TopicsTagThreadReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
-    message: Optional[ShortText] = Field(default=None)
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
 AccessDecisionBodyAdapter = TypeAdapter(AccessDecisionBody)
@@ -6483,9 +6608,9 @@ HostRenewReplyAdapter = TypeAdapter(Annotated[Union[HostRenewReplyOk, HostRenewR
 IntentSetBodyAdapter = TypeAdapter(IntentSetBody)
 IntentSetReplyAdapter = TypeAdapter(Annotated[Union[IntentSetReplyOk, IntentSetReplyChangedSinceRead, IntentSetReplyNotFound, IntentSetReplyRequestClosed, IntentSetReplyNotOwnRequest], Field(discriminator='outcome')])
 KnowledgeAddNoteBodyAdapter = TypeAdapter(KnowledgeAddNoteBody)
-KnowledgeAddNoteReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeAddNoteReplyOk, KnowledgeAddNoteReplyNotFound, KnowledgeAddNoteReplyNotAllowed, KnowledgeAddNoteReplyFeatureOff, KnowledgeAddNoteReplyPageExists, KnowledgeAddNoteReplyMerged, KnowledgeAddNoteReplyReviewRequired, KnowledgeAddNoteReplySensitiveContent, KnowledgeAddNoteReplyLimitReached, KnowledgeAddNoteReplyPageFrozen, KnowledgeAddNoteReplyRepeatsRecentRevision, KnowledgeAddNoteReplyPersonalSpaceUnavailable, KnowledgeAddNoteReplySavedWriteMismatch, KnowledgeAddNoteReplyContributionNotPending, KnowledgeAddNoteReplyInvalidRequest, KnowledgeAddNoteReplyChangedSinceRead, KnowledgeAddNoteReplyChangeConflict, KnowledgeAddNoteReplyRequestClosed, KnowledgeAddNoteReplyNeedsPersonDecision, KnowledgeAddNoteReplyRecordBusy, KnowledgeAddNoteReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeAddNoteReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeAddNoteReplyOk, KnowledgeAddNoteReplyPendingReview, KnowledgeAddNoteReplyNotFound, KnowledgeAddNoteReplyNotAllowed, KnowledgeAddNoteReplyFeatureOff, KnowledgeAddNoteReplyPageExists, KnowledgeAddNoteReplyMerged, KnowledgeAddNoteReplyReviewRequired, KnowledgeAddNoteReplySensitiveContent, KnowledgeAddNoteReplyLimitReached, KnowledgeAddNoteReplyPageFrozen, KnowledgeAddNoteReplyRepeatsRecentRevision, KnowledgeAddNoteReplyPersonalSpaceUnavailable, KnowledgeAddNoteReplySavedWriteMismatch, KnowledgeAddNoteReplyContributionNotPending, KnowledgeAddNoteReplyInvalidRequest, KnowledgeAddNoteReplyChangedSinceRead, KnowledgeAddNoteReplyChangeConflict, KnowledgeAddNoteReplyRequestClosed, KnowledgeAddNoteReplyNeedsPersonDecision, KnowledgeAddNoteReplyRecordBusy, KnowledgeAddNoteReplyRuntimeError], Field(discriminator='outcome')])
 KnowledgeArchiveBodyAdapter = TypeAdapter(KnowledgeArchiveBody)
-KnowledgeArchiveReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeArchiveReplyOk, KnowledgeArchiveReplyNotFound, KnowledgeArchiveReplyNotAllowed, KnowledgeArchiveReplyFeatureOff, KnowledgeArchiveReplyPageExists, KnowledgeArchiveReplyMerged, KnowledgeArchiveReplyReviewRequired, KnowledgeArchiveReplySensitiveContent, KnowledgeArchiveReplyLimitReached, KnowledgeArchiveReplyPageFrozen, KnowledgeArchiveReplyRepeatsRecentRevision, KnowledgeArchiveReplyPersonalSpaceUnavailable, KnowledgeArchiveReplySavedWriteMismatch, KnowledgeArchiveReplyContributionNotPending, KnowledgeArchiveReplyInvalidRequest, KnowledgeArchiveReplyChangedSinceRead, KnowledgeArchiveReplyChangeConflict, KnowledgeArchiveReplyRequestClosed, KnowledgeArchiveReplyNeedsPersonDecision, KnowledgeArchiveReplyRecordBusy, KnowledgeArchiveReplyRuntimeError], Field(discriminator='outcome')])
+KnowledgeArchiveReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeArchiveReplyOk, KnowledgeArchiveReplyPendingReview, KnowledgeArchiveReplyNotFound, KnowledgeArchiveReplyNotAllowed, KnowledgeArchiveReplyFeatureOff, KnowledgeArchiveReplyPageExists, KnowledgeArchiveReplyMerged, KnowledgeArchiveReplyReviewRequired, KnowledgeArchiveReplySensitiveContent, KnowledgeArchiveReplyLimitReached, KnowledgeArchiveReplyPageFrozen, KnowledgeArchiveReplyRepeatsRecentRevision, KnowledgeArchiveReplyPersonalSpaceUnavailable, KnowledgeArchiveReplySavedWriteMismatch, KnowledgeArchiveReplyContributionNotPending, KnowledgeArchiveReplyInvalidRequest, KnowledgeArchiveReplyChangedSinceRead, KnowledgeArchiveReplyChangeConflict, KnowledgeArchiveReplyRequestClosed, KnowledgeArchiveReplyNeedsPersonDecision, KnowledgeArchiveReplyRecordBusy, KnowledgeArchiveReplyRuntimeError], Field(discriminator='outcome')])
 KnowledgeCountContributionsBodyAdapter = TypeAdapter(KnowledgeCountContributionsBody)
 KnowledgeCountContributionsReplyAdapter = TypeAdapter(Annotated[Union[KnowledgeCountContributionsReplyOk, KnowledgeCountContributionsReplyNotAllowed, KnowledgeCountContributionsReplyFeatureOff, KnowledgeCountContributionsReplyRuntimeError], Field(discriminator='outcome')])
 KnowledgeFreezeBodyAdapter = TypeAdapter(KnowledgeFreezeBody)
@@ -6618,6 +6743,8 @@ TopicsListTagsReplyAdapter = TypeAdapter(Annotated[Union[TopicsListTagsReplyOk, 
 TopicsTagThreadBodyAdapter = TypeAdapter(TopicsTagThreadBody)
 TopicsTagThreadReplyAdapter = TypeAdapter(Annotated[Union[TopicsTagThreadReplyOk, TopicsTagThreadReplyNotFound, TopicsTagThreadReplyInvalidRequest, TopicsTagThreadReplyRuntimeError], Field(discriminator='outcome')])
 AgentStateAdapter = TypeAdapter(AgentState)
+AgentSessionStateAdapter = TypeAdapter(AgentSessionState)
+AgreementStateAdapter = TypeAdapter(AgreementState)
 CertificateStateAdapter = TypeAdapter(CertificateState)
 HostStateAdapter = TypeAdapter(HostState)
 PlacementStateAdapter = TypeAdapter(PlacementState)

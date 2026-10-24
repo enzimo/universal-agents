@@ -25,6 +25,10 @@
     },
     "note_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "merged": {
+      "type": "boolean",
+      "description": "True after incorporating the note; false to dismiss it."
     }
   },
   "required": [
@@ -32,7 +36,8 @@
     "space",
     "page",
     "seen_version",
-    "note_id"
+    "note_id",
+    "merged"
   ],
   "additionalProperties": false
 }

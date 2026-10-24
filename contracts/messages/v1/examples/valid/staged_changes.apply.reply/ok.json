@@ -2,20 +2,23 @@
   "protocol": "1.0-pre",
   "kind": "staged_changes.apply.reply",
   "message_id": "01928f3a-7b2c-74d0-8000-0000000004d0",
-  "idempotency_key": "staged_changes.apply:example_1232:reply",
+  "idempotency_key": "staged_changes.apply:request_id_1:reply",
   "issuer": {
+    "installation": "install_example",
     "team": "team_example",
     "runtime": "team-services-1",
-    "membership_epoch": 3,
+    "membership_epoch": 2,
     "revocation_epoch": 1,
     "key_id": "test-services-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "team_example",
     "target": "agent",
-    "id": "lead"
+    "id": "lead",
+    "runtime": "lead-host-1"
   },
-  "subject": "ua.v1.team_example.team-services-1.svc.team.staged_changes.apply",
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-74cf-8000-0000000004cf",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
@@ -25,5 +28,5 @@
   },
   "causation_id": "01928f3a-7b2c-74cf-8000-0000000004cf",
   "body_digest": "nEuxy1B1GAelW9iC_wWkxBbPry7MI4Yo-ezQxp9TXQ0",
-  "signature": "_re7Aze-eOwVCEHQWeHz9aZJmmdOEcnAVXAtacfyNienUG-xwbs9__vSNZ0U5RWD24nRetuUDQieuMumgqSHBg"
+  "signature": "ZeFEWFTtteR1DWsPu3DD9WDlqTP-xHPJjPn5lFE9wrCqmvq0jziSLxMmV4mzoPmvB6dnbn36jUpa-OzW0YkVAA"
 }

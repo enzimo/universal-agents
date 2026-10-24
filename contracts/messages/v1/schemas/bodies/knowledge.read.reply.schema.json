@@ -112,6 +112,14 @@
                   "additionalProperties": false
                 }
               ]
+            },
+            "open_notes": {
+              "type": "array",
+              "description": "The oldest open notes on this page. Reading after resolution exposes the next notes.",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/knowledge_note"
+              },
+              "maxItems": 5
             }
           },
           "required": [
@@ -122,7 +130,8 @@
             "status",
             "seen_version",
             "updated_at",
-            "updated_by"
+            "updated_by",
+            "open_notes"
           ],
           "additionalProperties": false
         }

@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.add_note.reply",
+  "message_id": "01928f3a-7b2c-7c01-8000-000000000c01",
+  "idempotency_key": "knowledge.add_note:request_id_1:reply",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7470-8000-000000000470",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "pending_review",
+    "contribution_id": "contribution_1"
+  },
+  "causation_id": "01928f3a-7b2c-7470-8000-000000000470",
+  "body_digest": "Vr16VA3nmNwv10B-dNXYitNcqXkW7QVmgiekn7lU7VQ",
+  "signature": "DE8mMPD59iy6O8ImsPN5qtz634TnjYInm8yTCxHjpPACC51Fu7JMJj5aMy7zeCfKgidCP3dcNHhwuQtEOlQECQ"
+}

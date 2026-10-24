@@ -22,13 +22,19 @@
     },
     "seen_version": {
       "$ref": "../common.schema.json#/$defs/record_version"
+    },
+    "minutes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10080
     }
   },
   "required": [
     "request_id",
     "space",
     "page",
-    "seen_version"
+    "seen_version",
+    "minutes"
   ],
   "additionalProperties": false
 }

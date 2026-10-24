@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/state/agreement.schema.json",
+  "title": "Federation agreement",
+  "description": "Recorded by this installation's authority: another installation's authority keys, which of this installation's teams it may send to, and which durable kinds. Frames, certificates and sessions from that installation are checked against these keys and limits only.",
+  "type": "object",
+  "properties": {
+    "agreement_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "installation": {
+      "$ref": "../common.schema.json#/$defs/installation_id"
+    },
+    "peer": {
+      "$ref": "../common.schema.json#/$defs/installation_id"
+    },
+    "authority_keys": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/application_key"
+      },
+      "minItems": 1,
+      "maxItems": 4
+    },
+    "teams": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/team_id"
+      },
+      "minItems": 1,
+      "maxItems": 64
+    },
+    "kinds": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/kind"
+      },
+      "minItems": 1,
+      "maxItems": 256
+    },
+    "issued_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "expires_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    }
+  },
+  "required": [
+    "agreement_id",
+    "installation",
+    "peer",
+    "authority_keys",
+    "teams",
+    "kinds",
+    "issued_at",
+    "expires_at"
+  ],
+  "additionalProperties": false
+}

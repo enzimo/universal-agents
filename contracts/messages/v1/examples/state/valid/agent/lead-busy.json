@@ -2,15 +2,14 @@
   "record": "agent",
   "key": "team_example.lead",
   "writer": {
+    "type": "host",
+    "installation": "install_example",
     "runtime": "lead-host-1",
     "membership_epoch": 3,
-    "revocation_epoch": 1,
-    "key_id": "test-lead-key-1",
-    "team": "team_example"
+    "key_id": "test-lead-key-1"
   },
   "sequence": 12,
   "issued_at": "2026-10-22T04:30:00.000Z",
-  "algorithm": "ed25519",
   "body": {
     "team": "team_example",
     "agent": "lead",
@@ -20,6 +19,7 @@
     "accepting_work": true,
     "since": "2026-10-22T04:29:00.000Z"
   },
+  "algorithm": "ed25519",
   "body_digest": "VV93gFoPmHei-4IBdjEAth19XWv_vIcmQyYp0Zi1zyg",
-  "signature": "FXUBIWsw57W9XOAcuUOemgpAoDozoQfKgJlVbHvGYldCV90gfJUQ7QZHzuBu0jgpxZxFmrRfCsMEb-iJd88jDA"
+  "signature": "vLcheQdzRnHpFDTDXs7-s8zlTZreZtoncMf1Rp0l6K_uVtfwGM8QSA99VeGqiaeYwlit8ZrQTCX-6TgHAdATAw"
 }

@@ -1,6 +1,12 @@
 {
+  "allow_responses": {
+    "expires": "38s",
+    "max": 1
+  },
   "publish": [
-    "_INBOX.*.>",
+    "$JS.ACK.UA1_WORK.team~{team}.>",
+    "$JS.API.CONSUMER.INFO.UA1_WORK.team~{team}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.team~{team}",
     "ua.v1._install.{self}.svc.host.join",
     "ua.v1._install.{self}.svc.host.renew",
     "ua.v1.{team}.{self}.ctl.agent.*.pause",
@@ -25,10 +31,6 @@
   "role": "team_services",
   "subscribe": [
     "_INBOX.{self}.>",
-    "ua.v1.{team}.*.ctl.agent.*.tasks.list",
-    "ua.v1.{team}.*.ctl.agent.*.tasks.list_finished",
-    "ua.v1.{team}.*.ctl.agent.*.tasks.purge",
-    "ua.v1.{team}.*.ctl.agent.*.tasks.remove",
     "ua.v1.{team}.*.svc.team.access.withdraw",
     "ua.v1.{team}.*.svc.team.conflicts.cancel",
     "ua.v1.{team}.*.svc.team.conflicts.decide",

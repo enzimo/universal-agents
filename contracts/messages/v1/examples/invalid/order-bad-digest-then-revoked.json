@@ -1,0 +1,24 @@
+{
+  "description": "Two defects: the digest is checked before revocation.",
+  "refusal": "bad_digest",
+  "also": [
+    "revoked"
+  ],
+  "at": "/body_digest",
+  "base": "task.stop/basic.json",
+  "signing": "stale_digest",
+  "changes": [
+    {
+      "set": "/body/reason",
+      "to": "Another reason."
+    }
+  ],
+  "context": {
+    "trust": {
+      "add": [
+        "extra/lead-host-revoked-after-issue.json"
+      ]
+    }
+  },
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.stop\", \"message_id\": \"01928f3a-7b2c-7001-8000-000000000001\", \"idempotency_key\": \"task.stop:U4tM9vOywwgHU_aC_5CvRx833uRNK7enxSgIBy3SkvA\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.lead-host-1.work.agent.researcher-2\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_7f3a\", \"stop_id\": \"stop_1\", \"reason\": \"Another reason.\", \"cascade_to_subtasks\": true}, \"body_digest\": \"NQVHb1wr_tFo5VU7huWwM0jQ7uKDjMvo8rcS0SxcgyQ\", \"signature\": \"SK0Fz6C_tlBeo-_0cIhqUYfuw0lbO2Xh77gMowO7bP3AJa-4zy7TNUirnxWRKUYCmwUvP-mVU5TfCNVJMvnsDw\"}"
+}

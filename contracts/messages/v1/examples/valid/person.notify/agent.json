@@ -4,14 +4,17 @@
   "message_id": "01928f3a-7b2c-7118-8000-000000000118",
   "idempotency_key": "notify:notice_1",
   "issuer": {
+    "installation": "install_example",
     "team": "team_example",
     "runtime": "lead-host-1",
     "agent": "lead",
+    "session": "s-lead-1",
     "membership_epoch": 3,
     "revocation_epoch": 1,
     "key_id": "test-lead-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "team_example",
     "target": "edge",
     "id": "web"
@@ -45,5 +48,5 @@
     ]
   },
   "body_digest": "nWRZd0JSziRuO0C-cRzw08avVueFCLCg8b2V4Ne-5-4",
-  "signature": "ZHBge152B4GwnBA_OliL5JD7k4_sCGZi33Law3L55IXP-Jlg5b6UHkH8DY_tJ_W4h4RLpDdy9dqMUkAHGdPIDQ"
+  "signature": "epaLsbtGqqcS48C3nHsWHLXAPshdTwX906gZE7paznflXNDcnb6lGN6xKtrKJ48UWBZvEAqE_pC0x1LmdaUVDA"
 }

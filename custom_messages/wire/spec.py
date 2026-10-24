@@ -32,7 +32,9 @@ def prune(value: Any, shape: Any) -> Any:
 class KindSpec:
     name: str
     delivery_class: str
-    addresses: tuple[str, ...]
+    # Audience target -> the address that delivers to it: the kind's own addresses
+    # and its copies (registry copy_to). Each address delivers to one target.
+    addresses: dict[str, str]
     body_model: TypeAdapter[Any]
     reply_model: Optional[TypeAdapter[Any]]
     reply_errors: tuple[str, ...]
@@ -50,7 +52,7 @@ class KindSpec:
     rendering: str
     body_shape: Any
     reply_shape: Any
-
+    # standard, or proof_of_possession: signed by the key the body presents (a join).
     verification: str = "standard"
 
     def prune(self, body: Any) -> Any:
@@ -59,11 +61,12 @@ class KindSpec:
 
 @dataclass(frozen=True)
 class StateSpec:
-    """A signed key-value record: its bucket, key form, the roles that may write it and its body model."""
+    """A signed key-value record: its bucket and key form, who signs and stores it, and its body model."""
 
     name: str
     bucket: str
     key: str
+    signer: str
+    signer_roles: tuple[str, ...]
     writers: tuple[str, ...]
-    ttl_seconds: Optional[int]
     body_model: TypeAdapter[Any]

@@ -2,15 +2,14 @@
   "record": "host",
   "key": "lead-host-1",
   "writer": {
+    "type": "host",
+    "installation": "install_example",
     "runtime": "lead-host-1",
     "membership_epoch": 3,
-    "revocation_epoch": 1,
-    "key_id": "test-lead-key-1",
-    "team": "team_example"
+    "key_id": "test-lead-key-1"
   },
   "sequence": 91,
   "issued_at": "2026-10-22T04:30:00.000Z",
-  "algorithm": "ed25519",
   "body": {
     "runtime": "lead-host-1",
     "certificate": {
@@ -56,6 +55,7 @@
     }
   },
   "expires_at": "2026-10-22T04:31:00.000Z",
+  "algorithm": "ed25519",
   "body_digest": "HMy0reGhr4lt1IPLWqkcgOi8Ejs6GyGpO66BtcV8O5o",
-  "signature": "wzscx17KhlQ2IsxMNMaNYxmBcNb3U9YKbNWHcq6QiwDiHS8dG3_bTh0lOYksyHjqnCVGbzMuSBoHKsDYBoCGBA"
+  "signature": "hx-NubDVA84L3xhuFRTjhj6gfJFRPTojV9VwGaAKDoowTUV5BszcjG8pMNOEBPOAMydw6FbHUrhkp5tikuCrDQ"
 }

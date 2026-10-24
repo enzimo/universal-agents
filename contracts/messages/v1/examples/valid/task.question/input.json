@@ -4,14 +4,17 @@
   "message_id": "01928f3a-7b2c-7107-8000-000000000107",
   "idempotency_key": "task_question:q_1",
   "issuer": {
+    "installation": "install_example",
     "team": "team_example",
     "runtime": "worker-host-1",
     "agent": "researcher-2",
+    "session": "s-researcher-2-1",
     "membership_epoch": 3,
     "revocation_epoch": 1,
     "key_id": "test-worker-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "team_example",
     "target": "agent",
     "id": "lead"
@@ -50,5 +53,5 @@
     }
   },
   "body_digest": "8q3BFJDoMcUyFmgrSl6EIMeSHOzpZwjNZeWhFqJKGZY",
-  "signature": "LgYhTfFWzBmrqC_NkrGfIZWMunb36X8YvJrKQyUGY5THiTq9Q8E2SikZx8jT11ewlk7XvaiJGuiqTCXj9JBkCQ"
+  "signature": "itgUQ8rxHMiUJx6uebMtvEpTAj9pxrn9UyZXB4yMHGo8Y5R_5yf77rRQ1wSEC4V5x3Do2tTk4FAOQpY3dGE2AA"
 }
