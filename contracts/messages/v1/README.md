@@ -90,8 +90,15 @@ subjects. Before installing permissions, trusted membership code must expand
 `{team}`, `{self}` and each assigned `{agent}`, `{pool}` or `{edge}` to exact
 identities, unioning entries when a host runs several agents. These identity
 placeholders must never become wildcards. Clients use `_INBOX.<runtime>` as their
-inbox prefix. Workers cannot create consumers, fetch other consumers or acknowledge
-their work. The live conformance tests prove both allowed and refused operations.
+inbox prefix. Workers cannot create or delete consumers, read streams, fetch from other
+consumers or acknowledge other consumers' work. The live conformance tests prove both
+allowed and refused operations.
+
+`transport.yaml` states the broker settings too: the minimum NATS version and the
+server-wide JetStream settings under `server`, then each stream and consumer. A delivery
+class's `max_expiry_seconds` caps its kinds' `expiry_seconds`; its stream keeps messages
+at least that long, and replay records outlive the longest class expiry. The generator
+refuses settings that break these rules.
 
 When a receiver has the current time, it accepts a frame only from `issued_at`
 through the earlier of `expires_at` and `issued_at + expiry_seconds` for its kind.
@@ -109,12 +116,21 @@ keeps the result within the key's length limit for maximum-length ids.
 
 Run `tests/test_message_contract.py` for contract agreement and hostile input
 refusals. `tests/test_live_message_contract.py` starts a separate authenticated
-broker from `nats-server` on PATH, since the role-permission checks require their
-own users and authorization file. It uses public fixture signing keys and no
-operator credentials. Run it with NATS 2.15.1 or later. It checks real publish,
-pull, acknowledgement and signed inbox replies, plus denied cross-consumer
-operations. The NATS CI job supplies the same server version and binary. A team
-`config.yaml` or `debug.env` cannot supply this isolated authorization fixture.
+broker, since the role-permission checks require their own users and authorization
+file. It uses public fixture signing keys and no operator credentials.
+
+- **Server binary:** `LIVE_TEST_NATS_SERVER` names it and makes the test fail when it
+  is missing; the NATS CI job sets it. Without the variable the test uses `nats-server`
+  from PATH and skips when there is none. Either way it fails on a server older than
+  `server.minimum_version`.
+- **Settings:** the broker, stream and consumers are created from `transport.yaml`, and
+  the test checks that the server reports the same values back.
+- **What it proves:** real publish, pull, acknowledgement and signed inbox replies; and
+  refusals of other consumers' fetches and acknowledgements, consumer creation and
+  deletion, stream reads, publishing under another runtime's id, and subscribing to
+  another runtime's inbox or to stream subjects.
+
+A team `config.yaml` or `debug.env` cannot supply this isolated authorization fixture.
 
 ## Versions
 

@@ -180,8 +180,8 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
             raise ContractError(f"{where}: admission states execution_slot, accepted_while_paused and priority")
         if not set(entry["senders"]) <= roles or not set(entry["receivers"]) <= roles:
             raise ContractError(f"{where}: senders and receivers must be host roles")
-        if not 1 <= entry["expiry_seconds"] <= transport["replay_ledger_retention_seconds"]:
-            raise ContractError(f"{where}: expiry must be positive and within the replay record's retention")
+        if not 1 <= entry["expiry_seconds"] <= transport["classes"][entry["class"]]["max_expiry_seconds"]:
+            raise ContractError(f"{where}: expiry must be positive and within its class's max_expiry_seconds")
         if entry["body"] not in schemas:
             raise ContractError(f"{where}: body schema {entry['body']} is missing")
         if (entry["class"] == "request_reply") != ("reply" in entry):
@@ -191,6 +191,27 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         if not any(address_matches(entry["address"], template, name)
                    for template in class_addresses(transport, entry["class"])):
             raise ContractError(f"{where}: address {entry['address']!r} fits no {entry['class']} address")
+
+
+def check_transport(transport: dict[str, Any]) -> None:
+    """Expiry, stream age and replay retention must agree, or valid messages are lost or replayed.
+
+    A stream that drops a message before its class's longest expiry loses work a
+    receiver would still accept; a replay record forgotten earlier lets a copy of
+    an old message in again.
+    """
+
+    longest = max(spec["max_expiry_seconds"] for spec in transport["classes"].values())
+    if transport["replay_ledger_retention_seconds"] < longest:
+        raise ContractError("transport.yaml: replay records must outlive the longest class expiry")
+    for name, spec in transport["classes"].items():
+        if "stream" not in spec:
+            continue
+        stream = transport["streams"].get(spec["stream"])
+        if stream is None:
+            raise ContractError(f"transport.yaml: class {name} names an unknown stream {spec['stream']}")
+        if stream.get("max_age_seconds", 0) < spec["max_expiry_seconds"]:
+            raise ContractError(f"transport.yaml: stream {spec['stream']} must keep messages for class {name}'s max_expiry_seconds")
 
 
 def class_addresses(transport: dict[str, Any], delivery_class: str) -> list[str]:
@@ -524,6 +545,7 @@ def render() -> dict[Path, str]:
     schemas = load_schemas()
     if registry["max_frame_bytes"] != transport["limits"]["max_frame_bytes"]:
         raise ContractError("registry.yaml and transport.yaml disagree on the frame size limit")
+    check_transport(transport)
     check_registry(registry, transport, topologies, schemas)
     files: dict[Path, str] = {
         GENERATED / "registry.json": json_text(registry),

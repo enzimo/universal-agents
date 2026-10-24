@@ -5,8 +5,8 @@
         "dlq.raw.{copy}",
         "dlq.notice.{copy}"
       ],
-      "default_expiry_seconds": 2592000,
       "description": "set-aside copies and notices, under the receiving runtime's id",
+      "max_expiry_seconds": 2592000,
       "stream": "UA1_DLQ"
     },
     "durable": {
@@ -16,27 +16,27 @@
         "work.edge.{edge}",
         "work.team"
       ],
-      "default_expiry_seconds": 604800,
       "description": "at least once; the sender records before publishing, the receiver admits durably before acknowledging",
+      "max_expiry_seconds": 604800,
       "stream": "UA1_WORK"
     },
     "event": {
       "addresses": [
         "evt.{event}"
       ],
-      "default_expiry_seconds": 300,
-      "description": "at most once; never the only way something important happens"
+      "description": "at most once; never the only way something important happens",
+      "max_expiry_seconds": 300
     },
     "request_reply": {
       "addresses": [
         "svc.team.{operation}",
         "ctl.agent.{agent}.{operation}"
       ],
-      "default_expiry_seconds": 30,
       "description": "answered at once or \"no responders\"; mutations carry an idempotency key and the receiver stores the outcome before replying",
       "installation_addresses": [
         "_install.{sender}.svc.{operation}"
-      ]
+      ],
+      "max_expiry_seconds": 30
     }
   },
   "consumers": {
@@ -99,7 +99,6 @@
     "max_frame_bytes": 262144,
     "nats_max_payload_bytes": 1048576
   },
-  "nats_server_minimum": "2.15.1",
   "object_store": {
     "UA1_BLOBS": {
       "description": "files and long text, named by SHA-256; the owner deletes them"
@@ -107,6 +106,12 @@
   },
   "replay_ledger_retention_seconds": 2592000,
   "reply_inbox_prefix": "_INBOX.{runtime}",
+  "server": {
+    "jetstream": {
+      "sync_interval": "always"
+    },
+    "minimum_version": "2.15.1"
+  },
   "streams": {
     "UA1_DLQ": {
       "max_age_seconds": 2592000,
@@ -118,14 +123,14 @@
     },
     "UA1_WORK": {
       "duplicate_window_seconds": 120,
+      "max_age_seconds": 604860,
       "max_consumers": 4096,
       "max_message_bytes": 262144,
       "retention": "workqueue",
       "storage": "file",
       "subjects": [
         "ua.v1.*.*.work.>"
-      ],
-      "sync_interval": "always"
+      ]
     }
   },
   "subject_prefix": "ua.v1.{team}.{sender}"

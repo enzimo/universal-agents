@@ -131,6 +131,34 @@ def test_the_schema_subset_refuses_what_other_implementations_read_differently(s
         EXPORT.check_subset("test.schema.json", schema, "")
 
 
+TRANSPORT = json.loads((CONTRACT / "generated" / "transport.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        (lambda t: t["streams"]["UA1_WORK"].update(max_age_seconds=t["classes"]["durable"]["max_expiry_seconds"] - 1),
+         "must keep messages"),
+        (lambda t: t["streams"]["UA1_WORK"].pop("max_age_seconds"), "must keep messages"),
+        (lambda t: t["classes"]["durable"].update(stream="UA1_MISSING"), "unknown stream"),
+        (lambda t: t.update(replay_ledger_retention_seconds=t["classes"]["durable"]["max_expiry_seconds"] - 1),
+         "replay records"),
+    ],
+)
+def test_transport_settings_that_would_lose_or_replay_messages_are_refused(change, problem) -> None:
+    transport = copy.deepcopy(TRANSPORT)
+    change(transport)
+    with pytest.raises(EXPORT.ContractError, match=problem):
+        EXPORT.check_transport(transport)
+
+
+def test_a_kind_cannot_outlive_its_delivery_class() -> None:
+    registry = EXPORT.load_yaml("registry.yaml")
+    registry["kinds"]["agent.pause"]["expiry_seconds"] = TRANSPORT["classes"]["request_reply"]["max_expiry_seconds"] + 1
+    with pytest.raises(EXPORT.ContractError, match="max_expiry_seconds"):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
 def test_every_kind_has_a_model_and_every_model_a_kind() -> None:
     assert set(kinds.KINDS) == set(REGISTRY["kinds"])
     adapters = {name.removesuffix("BodyAdapter") for name in dir(models) if name.endswith("BodyAdapter")}

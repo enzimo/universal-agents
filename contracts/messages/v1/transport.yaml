@@ -7,7 +7,13 @@
 
 subject_prefix: ua.v1.{team}.{sender}
 reply_inbox_prefix: _INBOX.{runtime}
-nats_server_minimum: 2.15.1
+
+# Every broker that carries protocol 1 runs at least this version, with these
+# server-wide JetStream settings (NATS has no per-stream equivalent).
+server:
+  minimum_version: 2.15.1
+  jetstream:
+    sync_interval: always       # a confirmed write must survive power loss
 
 limits:
   max_frame_bytes: 262144      # larger content goes to the object store by reference
@@ -22,7 +28,7 @@ classes:
       - work.pool.{pool}
       - work.edge.{edge}
       - work.team
-    default_expiry_seconds: 604800
+    max_expiry_seconds: 604800
   request_reply:
     description: answered at once or "no responders"; mutations carry an idempotency key and the receiver stores the outcome before replying
     addresses:
@@ -30,26 +36,26 @@ classes:
       - ctl.agent.{agent}.{operation}
     installation_addresses:
       - _install.{sender}.svc.{operation}
-    default_expiry_seconds: 30
+    max_expiry_seconds: 30
   event:
     description: at most once; never the only way something important happens
     addresses:
       - evt.{event}
-    default_expiry_seconds: 300
+    max_expiry_seconds: 300
   dead_letter:
     description: set-aside copies and notices, under the receiving runtime's id
     stream: UA1_DLQ
     addresses:
       - dlq.raw.{copy}
       - dlq.notice.{copy}
-    default_expiry_seconds: 2592000
+    max_expiry_seconds: 2592000
 
 streams:
   UA1_WORK:
     subjects: [ua.v1.*.*.work.>]
     retention: workqueue
     storage: file
-    sync_interval: always       # a confirmed write must survive power loss
+    max_age_seconds: 604860     # the durable class's longest expiry plus a minute: no receiver could still accept older work
     duplicate_window_seconds: 120
     max_consumers: 4096         # NATS 2.15 defaults to 1,000 per stream
     max_message_bytes: 262144
