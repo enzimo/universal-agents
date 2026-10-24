@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "tasks.remove",
   "message_id": "01928f3a-7b2c-740d-8000-00000000040d",
-  "idempotency_key": "tasks.remove:request_id_1",
+  "idempotency_key": "tasks.remove:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -51,5 +51,5 @@
     "reason": "Example reason"
   },
   "body_digest": "lDR-LsYS1b7Cpjvj4THmAoMB0vc7QQadwY-sSvAu8rs",
-  "signature": "OMiX0fhzCkAwRDXgZu1wLKefZImovcA8M-9mzipna5FbMAAqjYk0VVdfscS5ji4-lmt38u31r5aQm9HrxgmGBA"
+  "signature": "LWj-8FK9lCiHWfeN-pxxH52FIX0OwKRWSVAtPlmwVI_8Yysk13TzbeCkkv924HZ7CQL0cGshvmDe06oBAKeuAw"
 }

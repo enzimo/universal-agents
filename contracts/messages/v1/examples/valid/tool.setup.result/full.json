@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "tool.setup.result",
   "message_id": "01928f3a-7b2c-7120-8000-000000000120",
-  "idempotency_key": "secure_result:tool_setup:setup_1",
+  "idempotency_key": "tool.setup.result:AZ_z54toYcnKnhI5IATQeidPJyuBKG3h46lyFn4oBU0",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -38,8 +38,8 @@
     "reason_code": "linked",
     "message": "Connected.",
     "link_id": "link_1",
-    "broker_session_id": "bs_2"
+    "broker_session_id": "Tq3nW8yHs2LkP5vR0cXe7A"
   },
-  "body_digest": "0c5Gn03nBNW65IlTxojv63eivnYY0zumQYD9c5yGmb0",
-  "signature": "M9qca_18ZTsDPgyE2HyIVkIzetAft7yhYUTPe2fDYBwJN3m9sQ6Zw8jhcp_c1CCJWbkt-kaNPTDOmSgcTgbECQ"
+  "body_digest": "k8WFX1mVgR0ICJlxfvXnP8bgs1ZcTBeakpE-LhgAI7c",
+  "signature": "6xLWwwtO-HlileIOyohYzTVDBXlqUkG1zmNEC8p4YRn6mvFCvp_SISwv7esoNd-uvPb4xxNLumSFRt8GXdgHAw"
 }

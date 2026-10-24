@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.result",
   "message_id": "01928f3a-7b2c-7105-8000-000000000105",
-  "idempotency_key": "task_result:task_sub_2:1",
+  "idempotency_key": "task.result:TruhBxb8XsTFbCwptNj6FXAz4o5iGorf5SRcr8QAw4U",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -26,9 +26,9 @@
   "body": {
     "task_id": "task_sub_2",
     "sequence": 2,
-    "custody_token": 1,
     "outcome": {
       "state": "failed",
+      "custody_token": 1,
       "failure": {
         "category": "provider_limited",
         "provider": "example-provider",
@@ -39,6 +39,6 @@
       }
     }
   },
-  "body_digest": "PI8nLmFmC4U9etvamq9Y_g8dVq-atfTM_FsSmrjDdDo",
-  "signature": "95AVyuSMa5K3FD1GIcOXnqtVnmExb1prNZGb99C299UOkth0IFFEKSabGLHZOR4z2t61FZjn_l_fzIgTo69pAg"
+  "body_digest": "l2g1dMUYY0w9v2GyhPai94oF8DsnngvnRbu_5jpOnxU",
+  "signature": "zpeH-lX-XxQar6q0qvX3ToxewsAsbluglLhIMLcvG5qZv03D3R4d5X6HUiquuXK0Z4PnktJ9Ry_qzq_zqosLAA"
 }

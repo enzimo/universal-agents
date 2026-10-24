@@ -11,6 +11,10 @@
     "task_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
     },
+    "custody_token": {
+      "description": "The custody the holder hands back; a hand-back from a former holder is kept as late work.",
+      "$ref": "../common.schema.json#/$defs/custody_token"
+    },
     "disposition": {
       "type": "string",
       "enum": [
@@ -48,6 +52,7 @@
   "required": [
     "handback_id",
     "task_id",
+    "custody_token",
     "disposition",
     "launch_id",
     "reason",

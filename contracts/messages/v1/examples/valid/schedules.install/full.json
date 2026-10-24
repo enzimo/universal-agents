@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.install",
   "message_id": "01928f3a-7b2c-743d-8000-00000000043d",
-  "idempotency_key": "schedules.install:request_id_1",
+  "idempotency_key": "schedules.install:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -96,11 +96,11 @@
       }
     ],
     "deliver_to": {
-      "delivery_ref": "dref_1",
+      "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
       "conversation_id": "conversation_id_1",
       "time_zone": "Europe/Berlin"
     }
   },
-  "body_digest": "OvdRIEr1iHnPSOV0Jx21emuO83kse3oontRasl6zMdU",
-  "signature": "r6BvlTEkO4yBXuralXDXdX-kY_sI2AfF7hmZZylZOC1WUNSN-xNbaMGYSH1JaicpmiPqGSCRvN1be2SpcSxgDQ"
+  "body_digest": "aPlqBRpa6gmfTTOyj-bx6gZRzmUWgDtyi6aTYzWOq0U",
+  "signature": "K3hNbcQ8J7JgMdvAJmwsmUiAraOlWJ3aOtirSpn3mEo2Qv5mRX5naseDBDAWsc8s1ZprzGYsL8lGQgAEkqdDCw"
 }

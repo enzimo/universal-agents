@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.result",
   "message_id": "01928f3a-7b2c-7106-8000-000000000106",
-  "idempotency_key": "task_result:task_sub_3:2",
+  "idempotency_key": "task.result:Egv3sleX0Rt7lwA3TblFZ2cBF4oz6ggmbIuB3rAaXBw",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -26,13 +26,13 @@
   "body": {
     "task_id": "task_sub_3",
     "sequence": 5,
-    "custody_token": 2,
     "outcome": {
       "state": "paused",
+      "custody_token": 2,
       "trigger": "tool_call_budget_exceeded",
       "detail": "Used all tool calls for this turn."
     }
   },
-  "body_digest": "C_-gN1NZmeVgVHnijLWXHmqapELndchCgul3MyW-jCY",
-  "signature": "ES9lne58giCgVq6U_9tLJy8RyJxqht4TOwB6UoP4TWjRmhHQloib1iDfIhq4QaSuIbvZKjhCpWOVHIvqstAGBg"
+  "body_digest": "tJiO5kK-59nCfkm0wcvxI80L2Rmi8K8n2bLTyX8trZE",
+  "signature": "dpADTIQg__lZrq1KhaTKf_6g1RvKF4oT0g-QO228JuXVR9ufHgHz98CC6bSjmoEGZyW-QRdZdyMwD1HxOC1BAw"
 }

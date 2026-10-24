@@ -1,13 +1,8 @@
 # Team topologies: who may send which kinds to whom.
 #
-# An agent role is the agent's place in its team (not a host role). Edges name the
-# direction a message travels:
-#   up        worker to its lead
-#   down      lead to its worker
-#   person    to or from the person the work is for, through the gateway
-#   sideways  between agents of the same team other than lead and worker
-#   out       to another team or installation
-# The registry gives each kind its edge; a topology allows or refuses each edge.
+# An agent role is the agent's place in its team (not a host role). An edge is the
+# direction a message travels (edges, below). The registry lists the edges each kind may
+# travel; a topology allows or refuses each edge for each agent role.
 # Edit by hand, then run scripts/export_message_contract.py.
 
 agent_roles:
@@ -15,12 +10,25 @@ agent_roles:
   worker: does the work its lead or a person's own schedule gives it
 
 # Rules that hold in every topology.
+# The edge a message travels on, from the receiver's place relative to the sender for the
+# task the message is about (the task's thread record, plan 11A.1). A receiver works it out,
+# checks it is in the kind's topology_edge list and allowed for the sending agent's role in
+# the request's topology, and refuses otherwise with delivery.refused. Messages hosts send
+# without an agent (gateway, scheduler, team services) are not topology checks.
+edges:
+  up: the receiver is the task's requester
+  down: the receiver holds the task, or is given it (a delegation)
+  sideways: another agent of the same team, with no request between them
+  person: a gateway route that reaches the person
+  out: an outside agent through an edge adapter, or another team or installation
+
 fixed_rules:
   - access requests and decisions go to the team services, never to a model
   - the output of work a person gave a worker directly (a run of the person's own schedule, or system work with a configured route) goes to the person
   - notifications for delegated work come from the lead
   - a receiver refuses a message whose edge its topology does not allow, and the sender gets delivery.refused
   - a message from an agent that does not hold the task it names is refused
+  - only the lead receives work, answers and other messages from outside agents
 
 topologies:
   hub_and_spoke:

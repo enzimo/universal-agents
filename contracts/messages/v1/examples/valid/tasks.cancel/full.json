@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "tasks.cancel",
   "message_id": "01928f3a-7b2c-7404-8000-000000000404",
-  "idempotency_key": "tasks.cancel:request_id_1",
+  "idempotency_key": "tasks.cancel:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -52,5 +52,5 @@
     }
   },
   "body_digest": "S-iy6A3tnuPMOJ3IJLeqzj0sAPJrJfLUZyfB1jEMqIA",
-  "signature": "T-56HKqMfeayIO4BNznCex3Hf1tHBm1HkhnE2JJnrb3RBZU9mLyhGOzzfejXh7aEJs2OEK6I75psQrv2DS8eCg"
+  "signature": "BzN0oPlSyNiCHzKrVFNcliQmV1QkFBba3V5pM1DZv6aTYvdNjXy3RVyo4FI3Ki-K0BmnfRMi6AfAN3NcblxGBg"
 }

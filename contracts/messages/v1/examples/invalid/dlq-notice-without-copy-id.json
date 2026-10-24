@@ -1,0 +1,13 @@
+{
+  "description": "A dlq.notice without its copy id.",
+  "refusal": "invalid_body",
+  "at": "/body/copy_id",
+  "base": "dlq.notice/bad-signature.json",
+  "changes": [
+    {
+      "remove": "/body/copy_id"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"dlq.notice\", \"message_id\": \"01928f3a-7b2c-7707-8000-000000000707\", \"idempotency_key\": \"dlq.notice:HY_GzrH5TGMm1tVIPSWPyy4XnphpMlskXRBcIhm_af0\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.worker-host-1.dlq.notice.cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"stage\": \"verification\", \"reason\": \"bad_signature\", \"pointer\": \"/signature\", \"detail\": \"The signature did not verify.\", \"original\": {\"subject\": \"ua.v1.team_example.lead-host-1.work.agent.researcher-2\", \"stream\": \"UA1_WORK\", \"stream_sequence\": 4411, \"deliveries\": 1}, \"claimed\": {\"kind\": \"task.request\", \"message_id\": \"01928f3a-7b2c-7bbb-8000-00000000bbbb\", \"issuer_team\": \"team_example\", \"issuer_runtime\": \"lead-host-1\", \"protocol\": \"1.0-pre\"}, \"raw\": {\"stored\": true, \"size\": 2048, \"sha256\": \"DAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw\"}, \"release\": \"0.9.8\"}, \"body_digest\": \"Yfpego1BZsBO1L9-A9RqUpUi2y7Q4xvvjkAn5PIHuyQ\", \"signature\": \"sm_CtxhGOKdwrg0_rf9TSFOVT1ZpQShizQB9IIZIO6Ept2daq4uw4GSOm9e2YcxSveIcvB6TtEqWhu5CuxoCBg\"}"
+}

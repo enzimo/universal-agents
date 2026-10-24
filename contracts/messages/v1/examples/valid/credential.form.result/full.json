@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "credential.form.result",
   "message_id": "01928f3a-7b2c-711e-8000-00000000011e",
-  "idempotency_key": "secure_result:credential_form:form_1",
+  "idempotency_key": "credential.form.result:Mz4Ldx3wlgFm_ySqDkrOk_ZaJb7_7iJE91y0siAoIbY",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -29,7 +29,7 @@
     "credential_key": "example_analytics.api_key",
     "service_name": "Example Analytics",
     "display_name": "Example Analytics key",
-    "broker_session_id": "bs_1",
+    "broker_session_id": "-Xk2rQ9vT1mZpL0aB7cD4eF",
     "flow": "collect",
     "message": "Stored.",
     "error": "none",
@@ -39,13 +39,19 @@
           "name": "api_key",
           "kind": "api_key",
           "visibility": "secret",
-          "value_source": "user_input",
-          "secret": true
+          "value_source": "user_input"
+        },
+        {
+          "name": "account_name",
+          "kind": "account_id",
+          "visibility": "metadata_visible",
+          "value_source": "agent_supplied_metadata",
+          "value": "analytics-team"
         }
       ],
       "purpose": "Read last quarter's usage figures."
     }
   },
-  "body_digest": "LRSJZqMpSST2jZ1JXqvpIHfIpuj0lvcaNElqzK10M-0",
-  "signature": "oXRPaXHQ00BC1ifeYqaUWzVDecjURDzvT6Bf0JYlRUE80jp1CyTRbjoi9OL_lFPzwqjPn8ZjJgcFgTZV-tCQCw"
+  "body_digest": "OSOrMmnfarzUV09IHuJ2k4F02ngJ-WPh5tmTL2wWOa0",
+  "signature": "C_TikwkbIwkIM53rm5N-98sd6FCBX1yXwZcJhOPsRQ8QqsllmLxETW5MaJZdE_tPxvn2xcaHIvNxF-uXmmbLBQ"
 }

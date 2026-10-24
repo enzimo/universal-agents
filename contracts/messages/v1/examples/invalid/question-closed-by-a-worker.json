@@ -1,0 +1,23 @@
+{
+  "description": "A worker does not close questions.",
+  "refusal": "wrong_sender",
+  "at": "/kind",
+  "base": "question.closed/full.json",
+  "changes": [
+    {
+      "set": "/issuer",
+      "to": {
+        "installation": "install_example",
+        "team": "team_example",
+        "runtime": "worker-host-1",
+        "agent": "researcher-2",
+        "session": "s-researcher-2-1",
+        "membership_epoch": 3,
+        "revocation_epoch": 1,
+        "key_id": "test-worker-key-1"
+      }
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"question.closed\", \"message_id\": \"01928f3a-7b2c-7124-8000-000000000124\", \"idempotency_key\": \"question.closed:p9ImreC3pIzCBkIwDmPm-qjSHwkKAZU_GEq5foF1XE0\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"agent\": \"researcher-2\", \"session\": \"s-researcher-2-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"lead\"}, \"subject\": \"ua.v1.team_example.gateway-1.work.agent.lead\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"question_id\": \"q_2\", \"task_id\": \"task_root_1\", \"reason\": \"withdrawn_by_guidance\"}, \"body_digest\": \"hocbQCsOyMzXVXnPDZQzBkR34b9CaHqgZua3E3aBW5E\", \"signature\": \"mpGBDS7T4RV4PT20NyZZyLSaKrEep940xfU1mvq3106cQE1C9MPq2j9-CyjYl6Ae6DUD7BJ3Dmg069YgXm75Bw\"}"
+}

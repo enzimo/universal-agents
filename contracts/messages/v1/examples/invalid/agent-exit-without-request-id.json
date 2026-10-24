@@ -1,0 +1,13 @@
+{
+  "description": "A agent.exit request without its request id.",
+  "refusal": "invalid_body",
+  "at": "/body/request_id",
+  "base": "agent.exit/full.json",
+  "changes": [
+    {
+      "remove": "/body/request_id"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"agent.exit\", \"message_id\": \"01928f3a-7b2c-74d5-8000-0000000004d5\", \"idempotency_key\": \"agent.exit:HY_GzrH5TGMm1tVIPSWPyy4XnphpMlskXRBcIhm_af0\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.lead-host-1.ctl.agent.researcher-2.exit\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"reason\": \"Example reason\"}, \"body_digest\": \"vFmeW03JDHLI9N7q-126BVc7wp_TA_h3xdxlrI-BA0o\", \"signature\": \"vQ2D5mwnQy3yOMANAqG8saZnWcRMt-9HfkLLUj8IbEEAJ8ZwOGbMtkJyrAXKr48g5SDPVL8iQwnyfCzRKyPuDQ\"}"
+}

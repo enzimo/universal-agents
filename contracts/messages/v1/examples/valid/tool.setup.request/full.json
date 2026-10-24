@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "tool.setup.request",
   "message_id": "01928f3a-7b2c-711f-8000-00000000011f",
-  "idempotency_key": "setup_1",
+  "idempotency_key": "tool.setup.request:AZ_z54toYcnKnhI5IATQeidPJyuBKG3h46lyFn4oBU0",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -48,7 +48,8 @@
   "body": {
     "setup_request_id": "setup_1",
     "task_id": "task_root_1",
-    "delivery_ref": "dref_1",
+    "root_task_id": "task_root_7f",
+    "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
     "tool_id": "mcp:example.calendar",
     "reason": "Read your calendar to plan the meeting.",
     "setup": {
@@ -57,6 +58,6 @@
       "step_id": "connect_calendar"
     }
   },
-  "body_digest": "Qw62S18gGF_0lSbGc1sAsL64EkefsvEky8JP6N_yDS0",
-  "signature": "YVxzZXDO21QyGA_r9vRjbYxHJ3druxi1fqyn0hD4r-_YChIZzUDZ1Zo6WsQ0cxDDWWu_aThX2FYNzePa700cBA"
+  "body_digest": "EgUks9Mn-m_1O15Lt5zapkvOK2D_449gDunfcEU_Z2c",
+  "signature": "tIet5aHh2Fi2oqJXzF3VOLqvKhQIQT7fsW7vEPPFp2yUu64qcq4S7x3T3hlmVFlftY8lbi3-yWN8guAf9UmvBA"
 }

@@ -1,0 +1,31 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.answer",
+  "message_id": "01928f3a-7b2c-7207-8000-000000000207",
+  "idempotency_key": "task.answer:s-8yK6MnPz11eFxc03_-eWUqG9MfBXIfPIiiO4BZOq8",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "edge-adapter-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-edge-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.edge-adapter-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "question_id": "q_out_1",
+    "task_id": "task_in_1",
+    "text": "Use the blue logo."
+  },
+  "body_digest": "Wt12iPLwvvrV_4aGNfmJzVg0OFmUBXGJhO7OsK0UaF0",
+  "signature": "0YFxZWqunXAE67srEflfNDcukpGf5aIojgk8uNlCykASLyi6W3snhkPmYCm0Ee_geFdsktIoEM4nSPHLoK13Cw"
+}

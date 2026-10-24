@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "memory.undo",
   "message_id": "01928f3a-7b2c-7458-8000-000000000458",
-  "idempotency_key": "memory.undo:request_id_1",
+  "idempotency_key": "memory.undo:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -49,5 +49,5 @@
     "event_id": "event_id_1"
   },
   "body_digest": "an3c2ey6q8_LeKz2ufQKaReWOYL7gm0cWk3Whs_7zIs",
-  "signature": "DD6WAVADloaA1R6jvDcp9_LLl6Fp-BPblJdssBKx9GwduWBBYVoSsi6F0WCPNblIH3TJRS9KTy3yFeIY1ESjBw"
+  "signature": "80Sr0wnG1kwPAvjCUBWr3GvPYrO9rMHdAZAWgLwdK6vpWOwHzUwPqWF8u8hprqgfThhm2-2ctOyKFxzCToYIDg"
 }

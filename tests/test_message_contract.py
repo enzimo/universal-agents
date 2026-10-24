@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import importlib.util
 import json
 import re
@@ -20,6 +21,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+import rfc8785
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from jsonschema import Draft202012Validator, ValidationError as SchemaError, validators
 from pydantic import ValidationError
@@ -27,7 +29,7 @@ from referencing import Registry
 from referencing.jsonschema import DRAFT202012
 
 from custom_messages.enums import ChangeRefusal
-from custom_messages.wire import canonical, frame as wire_frame, kinds, models
+from custom_messages.wire import canonical, frame as wire_frame, kinds, models, topology
 from custom_messages.wire.canonical import CanonicalJsonError
 from custom_messages.wire.frame import (
     FrameRefused,
@@ -114,11 +116,30 @@ def invalid_examples() -> list[Path]:
     return sorted((EXAMPLES / "invalid").glob("*.json"))
 
 
-def task_request_key(frame: dict) -> str:
-    """Resolve the registry's frame and body placeholders for a dispatch."""
+def pointed(document: dict, pointer: str):
+    value = document
+    for step in pointer[1:].split("/"):
+        if not isinstance(value, dict) or step not in value:
+            return None
+        value = value[step]
+    return value
 
-    rule = REGISTRY["kinds"]["task.request"]["idempotency"]
-    return rule.replace("<task_id>", frame["body"]["task_id"]).replace("<message_id>", frame["message_id"])
+
+def registry_key(frame: dict) -> str:
+    """The README's key rule, written out here: the kind, a colon, and the digest of the listed values.
+
+    A reply's single part is its request's key; a copy adds its audience target.
+    """
+
+    kind = frame["kind"]
+    if kind.endswith(".reply"):
+        parts = [fixtures.answered_request(frame).idempotency_key]
+    else:
+        entry = REGISTRY["kinds"][kind]
+        parts = [pointed(frame, pointer) for pointer in entry["idempotency"]]
+        if frame["audience"]["target"] in {EXPORT.audience_target(address) for address in entry.get("copy_to", [])}:
+            parts.append(frame["audience"]["target"])
+    return f"{kind}:{b64url(hashlib.sha256(rfc8785.dumps(parts)).digest())}"
 
 
 def invalid_case(path: Path) -> tuple[dict, bytes]:
@@ -148,7 +169,7 @@ def test_generated_files_are_current() -> None:
 @pytest.mark.parametrize("kind", ["tasks.steer", "conflicts.decide"])
 def test_export_refuses_retry_keys_with_missing_inputs(kind: str) -> None:
     registry = deepcopy(REGISTRY)
-    registry["kinds"][kind]["idempotency"] = f"{kind}:<undefined_command_id>"
+    registry["kinds"][kind]["idempotency"] = ["/body/undefined_command_id"]
     with pytest.raises(EXPORT.ContractError, match="undefined_command_id"):
         EXPORT.check_registry(registry, EXPORT.load_yaml("transport.yaml"),
                               EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
@@ -156,7 +177,7 @@ def test_export_refuses_retry_keys_with_missing_inputs(kind: str) -> None:
 
 def test_export_refuses_a_retry_key_based_on_an_optional_field() -> None:
     registry = deepcopy(REGISTRY)
-    registry["kinds"]["tasks.steer"]["idempotency"] = "tasks.steer:<replied_message>"
+    registry["kinds"]["tasks.steer"]["idempotency"] = ["/body/replied_message/author"]
     with pytest.raises(EXPORT.ContractError, match="replied_message"):
         EXPORT.check_registry(registry, EXPORT.load_yaml("transport.yaml"),
                               EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
@@ -310,6 +331,12 @@ def test_every_kind_has_a_model_and_every_model_a_kind() -> None:
         assert spec.reply_errors == tuple(entry.get("reply", {}).get("errors", ()))
         addresses = {EXPORT.audience_target(address): address for address in EXPORT.entry_addresses(entry)}
         assert (spec.delivery_class, spec.addresses, spec.expiry_seconds) == (entry["class"], addresses, entry["expiry_seconds"])
+        copies = tuple(EXPORT.audience_target(address) for address in entry.get("copy_to", []))
+        assert (spec.copies, spec.idempotency) == (copies, tuple(entry["idempotency"]))
+        assert spec.topology_edges == tuple(EXPORT.topology_edges(entry))
+        assert spec.authority_binding == EXPORT.binding_spec(entry)
+        for address in EXPORT.own_addresses(entry):
+            assert spec.senders_by_target.get(EXPORT.audience_target(address), spec.senders) == tuple(EXPORT.address_senders(entry, address))
     assert kinds.VERIFICATION_REFUSALS == tuple(item["code"] for item in REGISTRY["verification_refusals"])
 
 
@@ -332,7 +359,7 @@ def test_permissions_name_exact_identities_and_publish_only_under_the_senders_ow
         receives_requests = False
         for entry in REGISTRY["kinds"].values():
             for address in EXPORT.entry_addresses(entry):
-                if role in entry["senders"]:
+                if role in EXPORT.address_senders(entry, address):
                     assert EXPORT.full_subject(EXPORT.send_pattern(address), "{self}") in document["publish"]
                 receives = role in EXPORT.receiving_roles(entry, address, TRANSPORT)
                 if entry["class"] not in {"durable", "dead_letter"}:
@@ -340,6 +367,12 @@ def test_permissions_name_exact_identities_and_publish_only_under_the_senders_ow
                 receives_requests |= receives and entry["class"] == "request_reply"
         expires = f"{TRANSPORT['classes']['request_reply']['max_expiry_seconds'] + TRANSPORT['clock_skew_seconds']}s"
         assert document.get("allow_responses") == ({"max": 1, "expires": expires} if receives_requests else None)
+
+
+def test_outside_agents_cannot_publish_into_worker_pools() -> None:
+    edge = json.loads((CONTRACT / "generated" / "permissions" / "edge_adapter.json").read_text(encoding="utf-8"))
+    assert "ua.v1.{team}.{self}.work.pool.*" not in edge["publish"]
+    assert "ua.v1.{team}.{self}.work.agent.*" in edge["publish"]
 
 
 def test_a_receiver_role_gets_only_the_addresses_it_serves() -> None:
@@ -351,33 +384,161 @@ def test_a_receiver_role_gets_only_the_addresses_it_serves() -> None:
     assert consumers == {TRANSPORT["consumers"]["team_services"]["name"]}
 
 
-def test_asyncapi_describes_both_operations_for_every_address() -> None:
+def test_asyncapi_describes_both_operations_for_every_kind_and_destination() -> None:
+    """One channel per address; each kind it carries has a send and a receive operation there."""
+
     document = json.loads((CONTRACT / "generated" / "asyncapi.json").read_text(encoding="utf-8"))
     operations = document["operations"]
-    for channel, spec in document["channels"].items():
-        if channel.endswith("_reply"):
-            continue  # reply inboxes are referenced by the request's operations
-        actions = {
-            operation["action"]
-            for operation in operations.values()
-            if operation["channel"]["$ref"] == f"#/channels/{channel}"
-        }
-        assert actions == {"send", "receive"}, spec["address"]
     for name, entry in REGISTRY["kinds"].items():
-        if "reply" not in entry:
-            continue
-        message = name.replace(".", "_")
-        for operation in operations.values():
-            channel = document["channels"][operation["channel"]["$ref"].rsplit("/", 1)[1]]
-            if message in channel["messages"] and not channel["address"].startswith("_INBOX."):
-                assert operation["reply"]["messages"] == [{"$ref": f"#/channels/{message}_reply/messages/{message}_reply"}]
+        key = name.replace(".", "_")
+        for address in EXPORT.entry_addresses(entry):
+            is_copy = address in entry.get("copy_to", [])
+            channel_id = EXPORT.channel_name(address)
+            assert document["channels"][channel_id]["address"] == EXPORT.full_subject(address, "{sender}")
+            assert key in document["channels"][channel_id]["messages"]
+            for action in ("send", "receive"):
+                operation = operations[f"{action}_{key}_{'copy_' if is_copy else ''}{EXPORT.audience_target(address)}"]
+                assert operation["channel"] == {"$ref": f"#/channels/{channel_id}"}
+                assert operation["messages"] == [{"$ref": f"#/channels/{channel_id}/messages/{key}"}]
+                assert operation.get("x-ua-copy", False) is is_copy
+                if "reply" in entry:
+                    assert operation["reply"]["messages"] == [{"$ref": f"#/channels/reply_inbox/messages/{key}_reply"}]
+                else:
+                    assert "reply" not in operation
 
 
 def test_reassignment_preserves_the_task_but_changes_the_dispatch_key() -> None:
     original = fixtures.example_frame("task.request", "to-pool")
     replacement = fixtures.example_frame("task.request", "reassignment")
     assert replacement["body"]["task_id"] == original["body"]["task_id"]
-    assert task_request_key(replacement) != task_request_key(original)
+    assert replacement["idempotency_key"] != original["idempotency_key"]
+
+
+def test_a_copy_and_its_original_carry_different_keys_and_the_copy_has_no_receiver_rules() -> None:
+    """The broker drops repeats of one Nats-Msg-Id across the whole stream (README, "Durable copies")."""
+
+    original = fixtures.example_frame("task.result", "completed")
+    copy_frame = fixtures.example_frame("task.result", "copy-to-team-services")
+    assert copy_frame["body"] == original["body"] and copy_frame["audience"]["target"] == "team_services"
+    assert copy_frame["idempotency_key"] != original["idempotency_key"]
+    fixtures.verify(json.dumps(copy_frame).encode(), copy_frame)
+    assert "team_services" not in kinds.KINDS["task.result"].receivers
+    assert kinds.KINDS["task.result"].copies == ("team_services",)
+
+
+@pytest.mark.parametrize(("change", "problem"), [
+    ({"idempotency": ["/body/no_such_field"]}, "names no string or integer field"),
+    ({"idempotency": ["/body/assumptions"]}, "names no string or integer field"),
+    ({"idempotency": "task_result:<task_id>"}, "lists the JSON pointers"),
+    ({"copy_to": ["work.agent.{agent}"]}, "two of its addresses deliver to one audience target"),
+    ({"copy_to": ["work.pool.{pool}"]}, "copies go only to"),
+    ({"receivers": ["lead_host", "gateway", "edge_adapter", "scheduler"]}, "serve none of its addresses"),
+    ({"body_rules": [{"unique": "/body/summary"}]}, "is not a unique, requires or any_of rule"),
+    ({"body_rules": [{"requires": "/body/no_such_field", "when": [{"at": "/body/sequence", "is": 1}]}]}, "is not a unique"),
+    ({"body_rules": [{"any_of": ["/body/summary"]}]}, "is not a unique"),
+    ({"authority": "optional"}, "state authority_binding"),
+    ({"senders_by_address": {"work.pool.{pool}": ["lead_host"]}}, "narrows the senders of one of its own addresses"),
+    ({"topology_edge": ["up", "none"]}, "or none alone"),
+    ({"wakes_model": {"by": "outcome.stat", "values": {"completed": "next_turn"}}}, "must name a body oneOf"),
+    ({"wakes_model": {"by": "outcome.state", "values": {"completed": "next_turn", "failed": "always"}}}, "must name a body oneOf"),
+    ({"body_rules": [{"unique": "/body/outcome/artifacts", "by": "no_such_member"}]}, "is not a unique"),
+    ({"body_rules": [{"requires": "/body/summary", "when": [{"at": "/body/outcome/state", "is": "untill"}]}]}, "is not a unique"),
+    ({"idempotency": ["/body/summary"]}, "names no part every frame carries"),
+    ({"senders": ["gateway"], "senders_by_address": {}}, "not a topology check"),
+])
+def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change: dict, problem: str) -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["kinds"]["task.result"].update(change)
+    with pytest.raises(EXPORT.ContractError, match=problem):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+@pytest.mark.parametrize(("kind", "role", "edge", "given_by_person", "allowed"), [
+    ("task.result", "lead", "person", False, True),     # the lead answers the person (forwarded-as-is)
+    ("task.question", "lead", "person", False, True),   # the lead asks the person (change-conflict)
+    ("task.result", "worker", "up", False, True),       # a worker answers its lead
+    ("task.answer", "lead", "down", False, True),       # the lead answers its worker
+    ("task.request", "lead", "out", False, True),       # the lead delegates to an outside agent
+    ("task.question", "worker", "sideways", False, False),  # hub and spoke: workers do not ask each other
+    ("task.result", "worker", "person", False, False),  # delegated work reports through the lead
+    ("task.result", "worker", "person", True, True),    # a run of the person's own schedule reports to them
+    ("task.progress", "lead", "person", True, False),   # progress has no person edge
+    ("access.request", "worker", "up", False, True),    # to the team services: not a topology check
+])
+def test_edges_follow_the_kind_and_the_senders_role(kind: str, role: str, edge: str, given_by_person: bool,
+                                                    allowed: bool) -> None:
+    assert topology.edge_allowed(kind, "hub_and_spoke", role, edge, given_by_person=given_by_person) is allowed
+
+
+def test_a_token_binding_must_name_a_field_every_body_carries() -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["kinds"]["tool.setup.request"]["authority_binding"] = {"type": "root_task", "at": "/body/delivery_ref"}
+    with pytest.raises(EXPORT.ContractError, match="names no field every body carries"):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+def test_every_reply_example_names_exactly_one_request() -> None:
+    """A reply example finds its request by message id, so no other example may share that id."""
+
+    frames = [json.loads(path.read_text(encoding="utf-8")) for path in valid_examples()]
+    ids = [frame["message_id"] for frame in frames]
+    shared = sorted({frame["causation_id"] for frame in frames if "causation_id" in frame and ids.count(frame["causation_id"]) != 1})
+    assert not shared, shared
+
+
+def test_every_kind_has_an_invalid_example() -> None:
+    """Plan 13A.8: every kind has a full example and invalid examples."""
+
+    refused = set()
+    for path in invalid_examples():
+        case = json.loads(path.read_text(encoding="utf-8"))
+        refused.add(json.loads((EXAMPLES / "valid" / case["base"]).read_text(encoding="utf-8"))["kind"])
+    assert set(REGISTRY["kinds"]) <= refused, sorted(set(REGISTRY["kinds"]) - refused)
+
+
+RESOLVER = EXPORT.ModelWriter(EXPORT.load_schemas())
+
+
+def variant_values(file: str, node: dict, path: str, found: dict, depth: int = 0) -> None:
+    """Each oneOf in a body schema: its JSON path and the constant that names each alternative."""
+
+    while "$ref" in node:
+        file, fragment = RESOLVER.resolve(file, node["$ref"])
+        node = RESOLVER.node(file, fragment)
+    if depth > 8:
+        return
+    if "oneOf" in node:
+        key = EXPORT.discriminator(file, "", node)
+        found.setdefault(f"{path}.{key}", set()).update(variant["properties"][key]["const"] for variant in node["oneOf"])
+        for variant in node["oneOf"]:
+            variant_values(file, variant, path, found, depth + 1)
+    if node.get("type") == "array":
+        variant_values(file, node["items"], path + "[]", found, depth + 1)
+    for name, child in node.get("properties", {}).items():
+        variant_values(file, child, f"{path}.{name}", found, depth + 1)
+
+
+def example_values(value, path: str, wanted: dict, seen: dict) -> None:
+    if isinstance(value, dict):
+        for name, item in value.items():
+            if f"{path}.{name}" in wanted:
+                seen.setdefault(f"{path}.{name}", set()).add(item)
+            example_values(item, f"{path}.{name}", wanted, seen)
+    elif isinstance(value, list):
+        for item in value:
+            example_values(item, path + "[]", wanted, seen)
+
+
+@pytest.mark.parametrize("kind", sorted(REGISTRY["kinds"]))
+def test_every_variant_of_a_body_has_a_valid_example(kind: str) -> None:
+    file = REGISTRY["kinds"][kind]["body"]
+    wanted: dict = {}
+    variant_values(file, json.loads((CONTRACT / "schemas" / file).read_text(encoding="utf-8")), "", wanted)
+    seen: dict = {}
+    for path in (EXAMPLES / "valid" / kind).glob("*.json"):
+        example_values(json.loads(path.read_text(encoding="utf-8"))["body"], "", wanted, seen)
+    missing = {place: sorted(values - seen.get(place, set())) for place, values in wanted.items() if values - seen.get(place, set())}
+    assert not missing, missing
 
 
 def test_every_kind_and_reply_has_a_valid_example() -> None:
@@ -473,7 +634,8 @@ def test_state_reports_are_verified_when_read_not_kept() -> None:
 @pytest.mark.parametrize("operation", ["join", "renew"])
 def test_asyncapi_installation_subjects_match_the_authority_subscription(operation: str) -> None:
     document = json.loads((CONTRACT / "generated/asyncapi.json").read_text())
-    assert document["channels"][f"host_{operation}"]["address"] == f"ua.v1._install.{{sender}}.svc.host.{operation}"
+    channel_id = EXPORT.channel_name(REGISTRY["kinds"][f"host.{operation}"]["address"])
+    assert document["channels"][channel_id]["address"] == f"ua.v1._install.{{sender}}.svc.host.{operation}"
     authority = json.loads((CONTRACT / "generated/permissions/installation_authority.json").read_text())
     assert f"ua.v1._install.*.svc.host.{operation}" in authority["subscribe"]
 
@@ -664,11 +826,6 @@ def test_valid_examples_are_accepted(path: Path) -> None:
     if not newer_minor:
         validator("frame.schema.json").validate(document)
         validator(body_schema_file(document["kind"])).validate(document["body"])
-        entry = REGISTRY["kinds"].get(document["kind"])
-        if entry is not None and entry["class"] == "request_reply":
-            fields = {**document["body"], "message_id": document["message_id"], "agent": document["audience"]["id"]}
-            expected_key = re.sub(r"<([^>]+)>", lambda match: str(fields[match[1]]), entry["idempotency"])
-            assert document["idempotency_key"] == expected_key
     verified = fixtures.verify(data, document)
     assert verified.frame.kind == path.parent.name
     assert verified.replay_key.message_id == document["message_id"]
@@ -681,8 +838,7 @@ def test_valid_examples_are_accepted(path: Path) -> None:
     else:
         assert dumped == document["body"], "the body did not survive a round trip"
         assert models.Frame.model_validate(document).model_dump(mode="json", by_alias=True) == document
-    if document["kind"] == "task.request":
-        assert document["idempotency_key"] == task_request_key(document)
+    assert document["idempotency_key"] == registry_key(document)
 
 
 @pytest.mark.parametrize("path", invalid_examples(), ids=lambda path: path.stem)
@@ -715,17 +871,30 @@ def test_neighbouring_checks_each_have_a_two_defect_example() -> None:
     assert {(first, second) for first, second in zip(order, order[1:])} <= covered
 
 
+def receiver_only(case: dict) -> bool:
+    """A schema cannot recompute a key from other fields or apply a body rule: those refusals are the receiver's alone.
+
+    README, "Idempotency keys" and "What bodies carry".
+    """
+
+    kind = json.loads(case["frame_text"])["kind"]
+    rules = REGISTRY["kinds"].get(kind, {}).get("body_rules", [])
+    places = {rule.get("unique") or rule.get("requires") or rule["any_of"][0].rsplit("/", 1)[0] for rule in rules}
+    return case["at"] == "/idempotency_key" or case["at"] in places
+
+
 def schema_checked(path: Path) -> bool:
     """Whether the schemas refuse an invalid example too.
 
     Every malformed frame and invalid body named by its place, except what only a receiver
-    can check: dates that do not exist and new-key proofs that do not verify (README,
-    "Canonical form and signatures" and "Application key rotation").
+    can check: dates that do not exist, new-key proofs that do not verify, keys that are not
+    the ones their parts give, and body rules (README, "Canonical form and signatures",
+    "Application key rotation", "Idempotency keys" and "What bodies carry").
     """
 
     case = json.loads(path.read_text(encoding="utf-8"))
     return (case["refusal"] in ("malformed", "invalid_body") and bool(case["at"])
-            and path.stem != "impossible-date" and not path.stem.startswith("rotation-proof-"))
+            and path.stem != "impossible-date" and not path.stem.startswith("rotation-proof-") and not receiver_only(case))
 
 
 @pytest.mark.parametrize("path", [path for path in invalid_examples() if schema_checked(path)], ids=lambda path: path.stem)
@@ -966,8 +1135,14 @@ def test_stop_key_preserves_id_boundaries_and_accepts_maximum_ids() -> None:
     frame = signed_example()
     frame["body"].update(task_id="a" * 128, stop_id="b" * 128)
     frame["idempotency_key"] = idempotency_key("task.stop", frame["body"]["task_id"], frame["body"]["stop_id"])
-    assert len(frame["idempotency_key"]) <= 256
+    assert len(frame["idempotency_key"]) <= 128
     fixtures.verify(fixtures.resign(frame), frame)
+
+
+def test_keys_stay_within_128_characters_for_maximum_ids_and_the_longest_kind() -> None:
+    longest = max([*REGISTRY["kinds"], *(f"{name}.reply" for name in REGISTRY["kinds"])], key=len)
+    assert len(idempotency_key(longest, "a" * 128, 2**53 - 1, None)) <= 128
+    assert len(idempotency_key("k" * 80 + ".a.b", "x")) == 128
 
 
 @pytest.mark.parametrize(("mutation", "code"), [

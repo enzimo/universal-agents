@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "ledger.fact",
   "message_id": "01928f3a-7b2c-7122-8000-000000000122",
-  "idempotency_key": "ledger_fact:fact_2",
+  "idempotency_key": "ledger.fact:IF-F_UbK6wyT6yGI616ef5SEV0kKopXnwipMsSUaGos",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -33,5 +33,5 @@
     }
   },
   "body_digest": "Ccej2ifHqgYRbP-_jz9Tk_4o8AWiOALcWXhAYoDQjys",
-  "signature": "vzC17DGX7vfTLJc_O660xf25chz2dNcfr6VGEZTACNhn3b-iPcziH6ZoJL6BpxaeWQItTsfpMwlR5CriyC_sBA"
+  "signature": "USL-PkyNdVehax63L5gtXJIm-sxnzfrYtq4VZqv35puEvwi9mwY-5_SGqCE84WVG2Siws4ey6xg_YoUcw5DxDg"
 }

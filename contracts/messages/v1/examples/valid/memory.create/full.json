@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "memory.create",
   "message_id": "01928f3a-7b2c-744f-8000-00000000044f",
-  "idempotency_key": "memory.create:request_id_1",
+  "idempotency_key": "memory.create:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -54,5 +54,5 @@
     "expires": "2026-10-22T04:30:00.000Z"
   },
   "body_digest": "narRjnx2G-vl7W7ihz5xftbSGjstHXrIXXJ_venVCiU",
-  "signature": "0yKjqYH7tBIRj50oPf9RMmyb1KTgJkSueBYmjCeSsrPuoQKpxuOseM39nx1AtdiGb7l01haKlc24x-RcsDRuBw"
+  "signature": "34JTJmW7fUGGYpzcf7fNNm48Md-gwCvcKhbj9Kiqqv-zFO-BkCjre2wvyFu4WP96LxHad5jbZnxlsse73-DmDA"
 }

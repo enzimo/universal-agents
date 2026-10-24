@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.answer",
   "message_id": "01928f3a-7b2c-710a-8000-00000000010a",
-  "idempotency_key": "question_answer:q_2",
+  "idempotency_key": "task.answer:p9ImreC3pIzCBkIwDmPm-qjSHwkKAZU_GEq5foF1XE0",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -46,16 +46,18 @@
       "choice": "use_this_change",
       "values_digest": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
       "issuer": {
+        "installation": "install_example",
         "team": "team_example",
         "runtime": "team-services-1",
+        "membership_epoch": 2,
         "key_id": "test-services-key-1"
       },
       "issued_at": "2026-10-22T04:20:00.000Z",
       "expires_at": "2026-10-22T05:20:00.000Z",
       "algorithm": "ed25519",
-      "signature": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA"
+      "signature": "26GL8IXYZRn0AqT1Wo0OpAZ0HE6jOo-sFTZfQxxwIKwkRPy6x-ylgjw3ttgAd8YnkCo0tBjxFJ7o3eZrUB89BA"
     }
   },
-  "body_digest": "EjRBMrUiPVoO0lUaxBaYkN5ZgngE9xoU9r9XerTjbRM",
-  "signature": "LOAPjl7Qana2E004flUQ5QFJ8VZdoKPDSZ3cGzT1V723ybd2eUh8ZSYRf5qezEdhu2SLrERFD3-kOH7Huy_SAg"
+  "body_digest": "O2w3l-FDRkF8dwF94jJBCs5QBgiQJm-LEEK1RPStGlg",
+  "signature": "OAHZQoxqkVRYQj7L-VQbl59lBgSUTelKIHI-ltuk6GRoFTPTaojJtkbK1AbG6LY21snjBzl5YMqwb3CHThHjDg"
 }

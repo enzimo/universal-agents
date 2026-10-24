@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.revert",
   "message_id": "01928f3a-7b2c-7476-8000-000000000476",
-  "idempotency_key": "knowledge.revert:request_id_1",
+  "idempotency_key": "knowledge.revert:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -52,5 +52,5 @@
     "reason": "Restore the last reviewed instructions."
   },
   "body_digest": "Kxzel9UrMsn5kirq4C1k48JnHyU7DS8ayJau6c3lf40",
-  "signature": "J9Yah3f0cA9NL3hGx84nhjj7vinvtI8OS4iBnq1j9pe_aecuE9zUJimznd9dvkul-zBJXIXZKjtIF5Qk_BNvCw"
+  "signature": "ytW1JBW1AQNbtRmrAAxeOGxe9qEJI0r4XW-vcc73spiTvfTj0JKLFgxOuvHM9cDWRjrYnOZG_jY29IzyJ81yDw"
 }

@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.unfreeze.reply",
   "message_id": "01928f3a-7b2c-7493-8000-000000000493",
-  "idempotency_key": "knowledge.unfreeze:request_id_1:reply",
+  "idempotency_key": "knowledge.unfreeze.reply:ZVl1Y6mOgWvHh8oXl6tbzQ6zJUw-PR9HeRjShA6IXmg",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -28,5 +28,5 @@
   },
   "causation_id": "01928f3a-7b2c-7491-8000-000000000491",
   "body_digest": "kjF9c_l0diFRNuvYGjQmkStmu5fcSEld8Fzu2xnpRcU",
-  "signature": "K92CithKX8ayeHnci4qAavJezkyWtT0GPnfC-S8pir3k3eB9hfKsdho1LvkTtE4UY--ei5raC8SEqtZYJz8EDA"
+  "signature": "YodE49fDJcnBfqJv_-5QhvKD5a3fFO_cicYHvtlJSi4lEFOk5GedjyLA1Q6aBgEFhzGxYWpV4eL-wQx4uZ0OCA"
 }

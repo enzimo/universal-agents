@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.pause",
   "message_id": "01928f3a-7b2c-7431-8000-000000000431",
-  "idempotency_key": "schedules.pause:request_id_1",
+  "idempotency_key": "schedules.pause:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -50,5 +50,5 @@
     "paused_until": "2026-10-22T04:30:00.000Z"
   },
   "body_digest": "wLCxWI2WYn3PCLcOboe-uZtNS5-Elfvuei-XTpNVJpo",
-  "signature": "jFq4wugMRiGHuUdIEm6lgMu9nFt7L0WYsISctZO6-g13S4pPBbTTXopgOp6W326YUwar8sAnaU6oXynWD134BQ"
+  "signature": "UspAl3Ad1V89h-tQCO--Otopt8f6zpQApDVuYdGe4Mt8GfNpNY9ZJ_IwOICMaWm2ikfS-9hPqpmI7a0vv3UJCw"
 }

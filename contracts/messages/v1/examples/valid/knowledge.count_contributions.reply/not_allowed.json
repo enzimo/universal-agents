@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.count_contributions.reply",
   "message_id": "01928f3a-7b2c-747e-8000-00000000047e",
-  "idempotency_key": "knowledge.count_contributions:01928f3a-7b2c-747c-8000-00000000047c:reply",
+  "idempotency_key": "knowledge.count_contributions.reply:NNVUSHUIPbTbLCqD9i6Eb1mUtFp0sGZpiv8OSNbIXAQ",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -28,5 +28,5 @@
   },
   "causation_id": "01928f3a-7b2c-747c-8000-00000000047c",
   "body_digest": "ndygni9OJ0mKj0moIMNE8d_WpJsDHbcv-NSrk03DUfg",
-  "signature": "dm11JMVe_YjZZLQnUB17CSxrpBnDRys6ly2XoTnMFYKqrzou6_0TGAxxeDi2QdGElHPK0RGhZJ3UxANe9WTzBg"
+  "signature": "9trutUBy52X-EWqwd4JXc1PPiYXKS_MjmhiChu1NwW4PhQssNfF78T5my6drVzOzW16MM0wCJn5n-PjSGZDlCQ"
 }
