@@ -12,17 +12,19 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, ValidationError as SchemaError, validators
 from pydantic import ValidationError
-from referencing import Registry, Resource
+from referencing import Registry
 from referencing.jsonschema import DRAFT202012
 
+from custom_messages.enums import ChangeRefusal
 from custom_messages.wire import canonical, frame as wire_frame, kinds, models
 from custom_messages.wire.canonical import CanonicalJsonError
 from custom_messages.wire.frame import (
@@ -57,18 +59,41 @@ KEYS = json.loads((EXAMPLES / "keys.json").read_text(encoding="utf-8"))["keys"]
 
 
 def schema_registry() -> Registry:
+    """Every contract schema, as draft 2020-12 resources.
+
+    ``$schema`` is dropped so that jsonschema keeps the contract's validator
+    (``ContractValidator``) when it follows a ``$ref``; with the key present it
+    switches back to the stock draft 2020-12 validator.
+    """
+
     resources = []
     for path in (CONTRACT / "schemas").rglob("*.schema.json"):
         schema = json.loads(path.read_text(encoding="utf-8"))
-        resources.append((schema["$id"], Resource.from_contents(schema)))
+        assert schema.pop("$schema") == "https://json-schema.org/draft/2020-12/schema"
+        resources.append((schema["$id"], DRAFT202012.create_resource(schema)))
     return Registry().with_resources(resources)
 
 
 SCHEMAS = schema_registry()
 
 
+def _end_anchored_pattern(validator, pattern, instance, schema):
+    """``pattern`` as the README defines it: ``$`` is the end of the value.
+
+    Python's ``re`` also lets ``$`` match before a final newline, so the plain
+    jsonschema validator would accept ``"x\n"`` where every other engine refuses it.
+    The subset checker guarantees the pattern ends with its only ``$``.
+    """
+
+    if validator.is_type(instance, "string") and not re.search(pattern[:-1] + r"\Z", instance):
+        yield SchemaError(f"{instance!r} does not match {pattern!r}")
+
+
+ContractValidator = validators.extend(Draft202012Validator, {"pattern": _end_anchored_pattern})
+
+
 def validator(schema_file: str) -> Draft202012Validator:
-    return Draft202012Validator({"$ref": SCHEMA_BASE + schema_file}, registry=SCHEMAS)
+    return ContractValidator({"$ref": SCHEMA_BASE + schema_file}, registry=SCHEMAS)
 
 
 def body_schema_file(kind: str) -> str:
@@ -111,24 +136,114 @@ def test_generated_files_are_current() -> None:
     assert EXPORT.stale(EXPORT.render()) == []
 
 
+def closed(**properties) -> dict:
+    return {"type": "object", "properties": properties, "required": [], "additionalProperties": False}
+
+
 @pytest.mark.parametrize(
     ("schema", "problem"),
     [
         ({"type": "object", "properties": {"a": {"type": "string"}}}, "additionalProperties false"),
         ({"type": "number", "minimum": 0, "maximum": 1}, "outside the subset"),
+        ({"type": ["string", "integer"]}, "outside the subset"),
         ({"type": "integer", "minimum": 0}, "within"),
         ({"type": "integer", "minimum": 0, "maximum": 2**53}, "within"),
-        ({"type": "string", "pattern": "^(?=a)a$"}, "not portable"),
-        ({"type": "string", "pattern": "a+"}, "anchored"),
         ({"type": "string", "format": "uuid"}, "outside the subset"),
         ({"type": "array", "items": {"type": "string"}, "uniqueItems": True}, "outside the subset"),
+        ({"type": "array"}, "items"),
+        ({"maxLength": 3}, "needs type string"),
         ({"$ref": "https://example.com/x.json"}, "local"),
-        ({"oneOf": [{"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": False}]}, "const"),
+        ({"oneOf": [closed(a={"type": "string"})]}, "const"),
+        ({"oneOf": [closed(kind={"const": "a"}), closed(kind={"const": "b"})]}, "requires"),
+        # Constraints the generated models would drop.
+        ({"$ref": "#/$defs/x", "type": "string", "maxLength": 3}, "beside \\$ref"),
+        ({"type": "string", "enum": ["a", "bb"], "maxLength": 1}, "beside enum"),
+        ({"type": "integer", "enum": [1, 5], "maximum": 3}, "beside enum"),
+        ({"type": "string", "enum": ["a", 1]}, "type string"),
+        ({"const": None}, "never null"),
+        ({**closed(p={"type": "string"}), "required": ["p", "q"]}, "does not define"),
+        # A property named like a keyword is still a schema.
+        (closed(properties={"type": "string", "pattern": "^(?=a)a$"}), "not portable"),
+        (closed(**{"$defs": {"type": "string", "format": "uuid"}}), "outside the subset"),
     ],
 )
 def test_the_schema_subset_refuses_what_other_implementations_read_differently(schema, problem) -> None:
     with pytest.raises(EXPORT.ContractError, match=problem):
         EXPORT.check_subset("test.schema.json", schema, "")
+
+
+@pytest.mark.parametrize("pattern", [
+    "a+", "^a", "^a|b$", "^(?=a)a$", "^(?i)a$", "^(?P<n>a)$", "^(a)\\1$", "^\\d+$", "^\\w+$", "^\\s$",
+    "^.+$", "^[[:alpha:]]$", "^a++$", "^\\Aa$", "^a\\b$", "^\\p{L}$", "^[a$", "^a$b$",
+])
+def test_patterns_that_engines_read_differently_are_refused(pattern: str) -> None:
+    assert EXPORT.pattern_problem(pattern), pattern
+
+
+@pytest.mark.parametrize("pattern", [
+    "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$", "^1\\.(0|[1-9][0-9]{0,3})-pre$", "^(?:a|b)$", "^[a$^.-]+$", "^a{1,3}?$",
+])
+def test_portable_patterns_are_allowed(pattern: str) -> None:
+    assert EXPORT.pattern_problem(pattern) is None
+
+
+def test_every_schema_pattern_refuses_a_trailing_newline_in_models_and_schemas() -> None:
+    frame = signed_example()
+    frame["body"]["task_id"] += "\n"
+    assert not validator(body_schema_file("task.stop")).is_valid(frame["body"])
+    with pytest.raises(ValidationError):
+        kinds.KINDS["task.stop"].body_model.validate_python(frame["body"])
+
+
+def test_two_kinds_with_one_generated_name_are_refused() -> None:
+    registry = EXPORT.load_yaml("registry.yaml")
+    for kind in ("audit.log_entry", "audit_log.entry"):
+        registry["kinds"][kind] = dict(registry["kinds"]["skills.changed"], address=f"evt.{kind.replace('.', '_')}")
+    with pytest.raises(EXPORT.ContractError, match="same model names"):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+def test_two_schemas_with_one_generated_name_are_refused() -> None:
+    schemas = {"a.schema.json": {"$defs": {"note_text": {"type": "string", "maxLength": 1}}},
+               "b.schema.json": {"$defs": {"note-text": {"type": "string", "maxLength": 9}}}}
+    writer = EXPORT.ModelWriter(schemas)
+    writer.named("a.schema.json", "/$defs/note_text")
+    with pytest.raises(EXPORT.ContractError, match="already uses"):
+        writer.named("b.schema.json", "/$defs/note-text")
+
+
+@pytest.mark.parametrize(("name", "problem"), [
+    ("agent~{team}_{agent}", "separate the ids"),
+    ("agent_{team}~{agent}", "fixed word"),
+    ("agent{team}~{agent}", "fixed word"),
+    ("agent~{team}", "exactly the filter's placeholders"),
+    ("agent.{team}~{agent}", "consumer names cannot hold"),
+])
+def test_consumer_names_that_different_ids_could_share_are_refused(name: str, problem: str) -> None:
+    transport = copy.deepcopy(TRANSPORT)
+    transport["consumers"]["agent_inbox"]["name"] = name
+    with pytest.raises(EXPORT.ContractError, match=problem):
+        EXPORT.check_consumer_names(transport)
+
+
+def test_consumer_name_prefixes_cannot_begin_each_other() -> None:
+    transport = copy.deepcopy(TRANSPORT)
+    transport["consumers"]["pool"]["name"] = "agent~x~{team}~{pool}"
+    with pytest.raises(EXPORT.ContractError, match="begins another prefix"):
+        EXPORT.check_consumer_names(transport)
+
+
+def test_check_mode_compares_bytes_so_rewritten_line_endings_are_stale(tmp_path: Path) -> None:
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    (generated / "a.json").write_bytes(b"{}\r\n")
+    (generated / "stray.json").write_bytes(b"{}\n")
+    problems = EXPORT.stale({generated / "a.json": "{}\n"}, generated)
+    assert problems == [str(generated / "a.json"), f"{generated / 'stray.json'} (not generated)"]
+
+
+def test_change_refusals_are_the_stores_refusal_codes() -> None:
+    assert kinds.CHANGE_REFUSALS == tuple(refusal.value for refusal in ChangeRefusal)
 
 
 TRANSPORT = json.loads((CONTRACT / "generated" / "transport.json").read_text(encoding="utf-8"))
@@ -171,19 +286,30 @@ def test_every_kind_has_a_model_and_every_model_a_kind() -> None:
     assert kinds.VERIFICATION_REFUSALS == tuple(item["code"] for item in REGISTRY["verification_refusals"])
 
 
-def test_permissions_publish_only_under_the_senders_own_id() -> None:
+def test_permissions_name_exact_identities_and_publish_only_under_the_senders_own_id() -> None:
     folder = CONTRACT / "generated" / "permissions"
+    consumer_names = {consumer["name"] for consumer in TRANSPORT["consumers"].values()}
     for role in REGISTRY["host_roles"]:
         document = json.loads((folder / f"{role}.json").read_text(encoding="utf-8"))
         for subject in document["publish"]:
-            assert subject.startswith(("ua.v1.{team}.{self}.", "_INBOX.", "$JS.API.CONSUMER.", "$JS.ACK.")), (role, subject)
             if subject.startswith("$JS."):
-                assert "*" not in subject
-                assert "agent_{team}_{agent}" in subject
-        assert "_INBOX.{self}.>" in document["subscribe"]
-        for name, entry in REGISTRY["kinds"].items():
+                stream_and_name = re.fullmatch(r"\$JS\.(?:API\.CONSUMER\.(?:INFO|MSG\.NEXT)\.|ACK\.)UA1_WORK\.([^.]+)(\.>)?", subject)
+                assert stream_and_name and stream_and_name.group(1) in consumer_names, (role, subject)
+                assert (stream_and_name.group(2) is not None) == subject.startswith("$JS.ACK."), (role, subject)
+            else:
+                assert subject.startswith("ua.v1.{team}.{self}."), (role, subject)
+        assert document["subscribe"][0] == "_INBOX.{self}.>"
+        for subject in document["subscribe"][1:]:
+            assert subject.startswith("ua.v1.{team}.*.") and "*" not in subject.removeprefix("ua.v1.{team}.*."), subject
+        receives_requests = False
+        for entry in REGISTRY["kinds"].values():
             if role in entry["senders"]:
-                assert "ua.v1.{team}.{self}." + EXPORT.subject_pattern(entry["address"]) in document["publish"]
+                assert "ua.v1.{team}.{self}." + EXPORT.send_pattern(entry["address"]) in document["publish"]
+            if role in entry["receivers"] and entry["class"] != "durable":
+                assert "ua.v1.{team}.*." + entry["address"] in document["subscribe"]
+            receives_requests |= role in entry["receivers"] and entry["class"] == "request_reply"
+        expires = f"{TRANSPORT['classes']['request_reply']['max_expiry_seconds']}s"
+        assert document.get("allow_responses") == ({"max": 1, "expires": expires} if receives_requests else None)
 
 
 # -- canonical form ---------------------------------------------------------------------------------

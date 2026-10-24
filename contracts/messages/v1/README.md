@@ -44,16 +44,31 @@ refuses anything else.
   `description`, `type`, `enum`, `const`, `properties`, `required`,
   `additionalProperties: false`, `items`, `minItems`, `maxItems`,
   `minLength`, `maxLength`, `pattern`, `minimum`, `maximum`, `oneOf`, `examples`.
-- **Objects** list every property and set `additionalProperties: false`.
+- **Objects** list every property, set `additionalProperties: false`, and require only
+  properties they define.
+- **Type-specific keywords** (`pattern`, `minLength`, `minimum`, `items` and the others)
+  appear only beside the `type` they apply to. Beside `$ref`, `const` or `enum` only
+  `type` and annotations (`title`, `description`, `examples`) may appear. Generated models
+  would otherwise drop the extra constraint and accept what the schema refuses.
 - **Omission** differs from null. A property outside `required` may be absent,
   but its value must satisfy its schema when present. No typed property accepts
-  null. Generated models use Pydantic's `MISSING` value so omitted fields also
-  remain absent when serialized. The runtime requires Pydantic 2.14.1 or later.
+  null, and no `const` or `enum` holds null. Generated models use Pydantic's `MISSING`
+  value so omitted fields also remain absent when serialized. The runtime requires
+  Pydantic 2.14.1 or later.
 - **Numbers** are integers only, within ±(2^53 - 1). Decimals travel as strings.
 - **Patterns** use only syntax that every common regular-expression engine reads the same
-  way, including Python's `re`, Pydantic's validator and ECMAScript: no lookaround, no
-  backreferences and no possessive quantifiers, anchored with `^` and `$`.
-- **Alternatives** (`oneOf`) are objects told apart by a `const` property.
+  way, including Python's `re`, Pydantic's validator and ECMAScript: literal characters,
+  character classes (without nested `[`), escaped punctuation, groups and `(?:`,
+  alternatives inside a group, and quantifiers. They start with `^` and end with `$`, and
+  `$` means the end of the value. Shorthand classes (`\d`, `\w`, `\s`), an unescaped `.`,
+  other group forms (lookaround, named groups, inline flags), backreferences, word
+  boundaries and possessive quantifiers are refused. Python's `re` also lets `$` match
+  before a final newline, so a Python validator must refuse a value that ends with one
+  (the tests replace a final `$` with `\Z`).
+- **Alternatives** (`oneOf`) are objects told apart by a `const` property that every
+  alternative requires.
+- **Generated names** must be unique: two kinds, definitions or nested objects that would
+  produce one Python class name are refused.
 
 ## Canonical form and signatures
 
@@ -84,13 +99,22 @@ the frame signature still authenticates the issuer. Receivers compare the signed
 subject to the arrival subject for both paths. AsyncAPI describes complete frames
 and references replies through their inbox channel's message definitions.
 
-The topology owner creates pull consumers. Generated permission templates give
-receivers only the corresponding consumer-info, next-message and acknowledgement
-subjects. Before installing permissions, trusted membership code must expand
-`{team}`, `{self}` and each assigned `{agent}`, `{pool}` or `{edge}` to exact
-identities, unioning entries when a host runs several agents. These identity
-placeholders must never become wildcards. Clients use `_INBOX.<runtime>` as their
-inbox prefix. Workers cannot create or delete consumers, read streams, fetch from other
+The topology owner creates pull consumers. Consumer names join ids with `~`, which ids
+cannot contain, so different teams and agents never share a consumer; NATS would silently
+change the first consumer's filter. Generated permission templates
+(`generated/permissions/<role>.json`) give each host role:
+- **publish:** its kinds under its own id, `ua.v1.{team}.{self}.<address>`, to any
+  receiver of its team; and for durable work it receives, only the consumer-info,
+  next-message and acknowledgement subjects of its own consumers;
+- **subscribe:** its own inbox, `_INBOX.{self}.>`, and the request and event subjects of
+  the agents it runs;
+- **allow_responses:** for roles that answer requests, one answer per request within the
+  request class's expiry, instead of any grant on other runtimes' inboxes.
+
+Before installing permissions, trusted membership code fills `{team}` with each team the
+host serves, `{self}` with its runtime id, and repeats each subject for every `{agent}`,
+`{pool}` or `{edge}` the host serves. These identity placeholders must never become
+wildcards. Clients use `_INBOX.<runtime>` as their inbox prefix. Workers cannot create or delete consumers, read streams, fetch from other
 consumers or acknowledge other consumers' work. The live conformance tests prove both
 allowed and refused operations.
 
@@ -125,10 +149,12 @@ file. It uses public fixture signing keys and no operator credentials.
   `server.minimum_version`.
 - **Settings:** the broker, stream and consumers are created from `transport.yaml`, and
   the test checks that the server reports the same values back.
-- **What it proves:** real publish, pull, acknowledgement and signed inbox replies; and
-  refusals of other consumers' fetches and acknowledgements, consumer creation and
-  deletion, stream reads, publishing under another runtime's id, and subscribing to
-  another runtime's inbox or to stream subjects.
+- **What it proves:** real publish, pull, acknowledgement and signed inbox replies;
+  separate consumers for ids that an `_` separator would have merged; and refusals of
+  other consumers' fetches and acknowledgements, consumer creation and deletion, stream
+  reads, publishing under another runtime's id, subscribing to another runtime's inbox,
+  to stream subjects or to another agent's requests, and writing into another runtime's
+  inbox except to answer a request once.
 
 A team `config.yaml` or `debug.env` cannot supply this isolated authorization fixture.
 

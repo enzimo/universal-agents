@@ -46,7 +46,7 @@
       "filter": "ua.v1.{team}.*.work.agent.{agent}",
       "max_deliveries": 20,
       "mode": "pull",
-      "name": "agent_{team}_{agent}",
+      "name": "agent~{team}~{agent}",
       "stream": "UA1_WORK"
     },
     "edge": {
@@ -55,7 +55,7 @@
       "filter": "ua.v1.{team}.*.work.edge.{edge}",
       "max_deliveries": 20,
       "mode": "pull",
-      "name": "edge_{team}_{edge}",
+      "name": "edge~{team}~{edge}",
       "stream": "UA1_WORK"
     },
     "pool": {
@@ -64,7 +64,7 @@
       "filter": "ua.v1.{team}.*.work.pool.{pool}",
       "max_deliveries": 20,
       "mode": "pull",
-      "name": "pool_{team}_{pool}",
+      "name": "pool~{team}~{pool}",
       "stream": "UA1_WORK"
     },
     "team_services": {
@@ -73,7 +73,7 @@
       "filter": "ua.v1.{team}.*.work.team",
       "max_deliveries": 20,
       "mode": "pull",
-      "name": "team_{team}",
+      "name": "team~{team}",
       "stream": "UA1_WORK"
     }
   },

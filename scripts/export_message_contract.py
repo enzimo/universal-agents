@@ -33,6 +33,11 @@ import yaml
 from jsonschema import Draft202012Validator
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.contract_schema_export import canonical_json_text as json_text  # noqa: E402
+
 CONTRACT = REPO_ROOT / "contracts" / "messages" / "v1"
 SCHEMAS = CONTRACT / "schemas"
 GENERATED = CONTRACT / "generated"
@@ -60,18 +65,33 @@ ALLOWED_KEYWORDS = {
     "maxLength", "pattern", "minimum", "maximum", "oneOf", "examples",
 }
 ALLOWED_TYPES = {"object", "string", "integer", "boolean", "array"}
+# Keywords that check a value only of one type. Generated models apply them only
+# there, so anywhere else they would be dropped silently.
+TYPED_KEYWORDS = {
+    "minLength": "string", "maxLength": "string", "pattern": "string",
+    "minimum": "integer", "maximum": "integer",
+    "items": "array", "minItems": "array", "maxItems": "array",
+    "properties": "object", "required": "object", "additionalProperties": "object",
+}
+# Keywords that change no validation; only these may stand beside $ref, const or
+# enum, whose generated models ignore every other keyword.
+ANNOTATIONS = {"title", "description", "examples"}
 MAX_SAFE_INTEGER = 2**53 - 1
-UNPORTABLE_PATTERN = re.compile(r"\(\?[=!<>:]|\\[1-9]|[*+?}]\+|\\[AZzbBpP]")
+# Escaped characters that every common engine reads as the character itself.
+PORTABLE_ESCAPES = set(".-\\[](){}*+?|^$/")
+# Characters an id may hold (common.schema.json token_id). Consumer names join ids
+# with a character outside this set.
+ID_CHARACTER = re.compile(r"[A-Za-z0-9_-]")
+# Address placeholders that name the receiver. A sender may address any receiver in
+# its team; a receiver reads only its own, so subscriptions and consumer grants keep
+# them as placeholders for membership code to fill per assigned id.
+RECEIVER_PLACEHOLDERS = ("agent", "pool", "edge")
 # The frame's body is the one open object: its kind's schema checks it.
 OPEN_OBJECTS = {("frame.schema.json", "/properties/body")}
 
 
 class ContractError(ValueError):
     pass
-
-
-def json_text(payload: Any) -> str:
-    return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
 def load_yaml(name: str) -> dict[str, Any]:
@@ -96,55 +116,141 @@ def load_schemas() -> dict[str, dict[str, Any]]:
     return schemas
 
 
-def check_subset(name: str, node: Any, pointer: str) -> None:
-    """Refuse anything outside the documented schema subset."""
+def pattern_problem(pattern: str) -> str | None:
+    """Why ``pattern`` could match differently in Python, ECMAScript or Pydantic's engine, if it could.
 
-    if isinstance(node, list):
-        for index, item in enumerate(node):
-            check_subset(name, item, f"{pointer}/{index}")
-        return
+    Allowed: literal characters, character classes, escaped punctuation, groups,
+    ``(?:``, alternatives inside a group, and quantifiers. ``$`` means the end of
+    the value; Python's ``re`` also matches it before a final newline, which the
+    README tells Python validators to refuse.
+    """
+
+    if len(pattern) < 2 or not (pattern.startswith("^") and pattern.endswith("$")) or pattern.endswith("\\$"):
+        return "anchor the whole pattern with ^ and $"
+    body, depth, in_class, index = pattern[1:-1], 0, False, 0
+    while index < len(body):
+        character, following = body[index], body[index + 1:index + 2]
+        if character == "\\":
+            if following not in PORTABLE_ESCAPES:
+                return f"\\{following} reads differently between engines; list the characters instead"
+            index += 2
+            continue
+        if in_class:
+            if character == "[":
+                return "a [ inside a character class, such as [[:alpha:]], reads differently between engines"
+            in_class = character != "]"
+        elif character == "[":
+            in_class = True
+        elif character == "(":
+            if following == "?" and body[index + 2:index + 3] != ":":
+                return "group extensions other than (?: differ between engines"
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        elif character == "|" and depth == 0:
+            return "group top-level alternatives, or ^ and $ apply to only one of them"
+        elif character == ".":
+            return "an unescaped . matches different characters in different engines"
+        elif character in "^$":
+            return "anchors belong only at the two ends"
+        elif character in "*+?}" and following == "+":
+            return "possessive quantifiers are not portable"
+        index += 1
+    return "a character class is not closed" if in_class else None
+
+
+def _of_type(value: Any, kind: str) -> bool:
+    if kind == "string":
+        return isinstance(value, str)
+    if kind == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    return kind == "boolean" and isinstance(value, bool)
+
+
+def _check_values(where: str, node: dict[str, Any], kind: Any) -> None:
+    """``const`` and ``enum`` hold scalars of the stated type, with only annotations beside them."""
+
+    for word in ("const", "enum"):
+        if word not in node:
+            continue
+        values = [node["const"]] if word == "const" else node["enum"]
+        if any(value is None or isinstance(value, (dict, list, float)) for value in values):
+            raise ContractError(f"{where}: {word} values are strings, integers or booleans, never null")
+        beside = set(node) - ANNOTATIONS - {word, "type"}
+        if beside:
+            raise ContractError(f"{where}: generated models would drop {sorted(beside)} beside {word}")
+        if kind is not None and not all(_of_type(value, kind) for value in values):
+            raise ContractError(f"{where}: {word} values must have type {kind}")
+
+
+def check_subset(name: str, node: Any, pointer: str) -> None:
+    """Refuse anything outside the documented schema subset.
+
+    The walk follows keywords, so a property or definition named like a keyword
+    (``properties``, ``$defs``) is still a schema and still checked. Every rule
+    here keeps the generated models exactly as strict as the schema.
+    """
+
+    where = f"{name}{pointer}"
     if not isinstance(node, dict):
-        return
+        raise ContractError(f"{where}: a schema must be an object")
     unknown = set(node) - ALLOWED_KEYWORDS
-    if unknown and not pointer.endswith(("/properties", "/$defs")):
-        raise ContractError(f"{name}{pointer}: keywords outside the subset: {sorted(unknown)}")
-    if pointer.endswith(("/properties", "/$defs")):
-        for key, child in node.items():
-            check_subset(name, child, f"{pointer}/{key}")
-        return
-    if "type" in node and node["type"] not in ALLOWED_TYPES:
-        raise ContractError(f"{name}{pointer}: type {node['type']!r} is outside the subset")
-    if node.get("type") == "object" and (name, pointer) not in OPEN_OBJECTS:
+    if unknown:
+        raise ContractError(f"{where}: keywords outside the subset: {sorted(unknown)}")
+    kind = node.get("type")
+    if kind is not None and (not isinstance(kind, str) or kind not in ALLOWED_TYPES):
+        raise ContractError(f"{where}: type {kind!r} is outside the subset")
+    for word, expected in TYPED_KEYWORDS.items():
+        if word in node and kind != expected:
+            raise ContractError(f"{where}: {word} needs type {expected}")
+    if "$ref" in node:
+        if "://" in node["$ref"]:
+            raise ContractError(f"{where}: $ref must be local to the contract")
+        if set(node) - ANNOTATIONS - {"$ref"}:
+            raise ContractError(f"{where}: generated models would drop {sorted(set(node) - ANNOTATIONS - {'$ref'})} beside $ref")
+    _check_values(where, node, kind)
+    if kind == "object" and (name, pointer) not in OPEN_OBJECTS:
         if node.get("additionalProperties") is not False or "properties" not in node:
-            raise ContractError(f"{name}{pointer}: objects list their properties and set additionalProperties false")
-    if node.get("type") == "integer":
+            raise ContractError(f"{where}: objects list their properties and set additionalProperties false")
+    if "additionalProperties" in node and node["additionalProperties"] is not False:
+        raise ContractError(f"{where}: additionalProperties may only be false")
+    missing = set(node.get("required", [])) - set(node.get("properties", {}))
+    if missing:
+        raise ContractError(f"{where}: required names properties the object does not define: {sorted(missing)}")
+    if kind == "integer" and "const" not in node and "enum" not in node:
         for bound in ("minimum", "maximum"):
             if bound not in node or abs(node[bound]) > MAX_SAFE_INTEGER:
-                raise ContractError(f"{name}{pointer}: integers state {bound} within ±(2^53 - 1)")
+                raise ContractError(f"{where}: integers state {bound} within ±(2^53 - 1)")
+    if kind == "array" and "items" not in node:
+        raise ContractError(f"{where}: arrays state their items")
     if "pattern" in node:
-        pattern = node["pattern"]
-        if not (pattern.startswith("^") and pattern.endswith("$")) or UNPORTABLE_PATTERN.search(pattern):
-            raise ContractError(f"{name}{pointer}: pattern {pattern!r} is anchored badly or not portable")
-    if "$ref" in node and "://" in node["$ref"]:
-        raise ContractError(f"{name}{pointer}: $ref must be local to the contract")
+        problem = pattern_problem(node["pattern"])
+        if problem:
+            raise ContractError(f"{where}: pattern {node['pattern']!r} is not portable: {problem}")
     if "oneOf" in node:
         discriminator(name, pointer, node)
-    for key, child in node.items():
-        if key in {"properties", "$defs", "items", "oneOf"}:
-            check_subset(name, child, f"{pointer}/{key}")
+    for word in ("properties", "$defs"):
+        for key, child in node.get(word, {}).items():
+            check_subset(name, child, f"{pointer}/{word}/{key}")
+    if "items" in node:
+        check_subset(name, node["items"], f"{pointer}/items")
+    for index, variant in enumerate(node.get("oneOf", [])):
+        check_subset(name, variant, f"{pointer}/oneOf/{index}")
 
 
 def discriminator(name: str, pointer: str, node: dict[str, Any]) -> str:
     """The property whose ``const`` tells the alternatives of a ``oneOf`` apart."""
 
     variants = node["oneOf"]
-    common = None
+    common: set[str] | None = None
     for variant in variants:
         consts = {key for key, value in variant.get("properties", {}).items() if "const" in value}
         common = consts if common is None else common & consts
     if not common or len(common) != 1:
         raise ContractError(f"{name}{pointer}: oneOf alternatives need one shared const property")
     key = next(iter(common))
+    if not all(key in variant.get("required", []) for variant in variants):
+        raise ContractError(f"{name}{pointer}: every oneOf alternative requires its {key!r} property")
     values = [variant["properties"][key]["const"] for variant in variants]
     if len(set(values)) != len(values):
         raise ContractError(f"{name}{pointer}: oneOf const values must differ")
@@ -191,6 +297,43 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         if not any(address_matches(entry["address"], template, name)
                    for template in class_addresses(transport, entry["class"])):
             raise ContractError(f"{where}: address {entry['address']!r} fits no {entry['class']} address")
+        if not set(re.findall(r"\{([a-z_]+)\}", entry["address"])) <= set(RECEIVER_PLACEHOLDERS):
+            raise ContractError(f"{where}: an address's only placeholders name its receiver")
+    names: dict[str, str] = {}
+    for name in registry["kinds"]:
+        # Generated model and adapter names come from the kind name; two kinds
+        # with one name would silently share the second kind's schema.
+        other = names.setdefault(class_name(name), name)
+        if other != name:
+            raise ContractError(f"registry.yaml: kinds {other} and {name} generate the same model names")
+
+
+def check_consumer_names(transport: dict[str, Any]) -> None:
+    """Different ids must never produce one consumer name.
+
+    NATS silently updates an existing consumer's filter when a consumer with the
+    same name is created, so one team could take another's work. Each name starts
+    with a fixed word that ends in a character ids cannot contain, separates its
+    ids the same way, and uses exactly its filter's placeholders.
+    """
+
+    prefixes = []
+    for key, consumer in transport["consumers"].items():
+        where = f"transport.yaml consumers.{key}"
+        parts = re.split(r"(\{[a-z_]+\})", consumer["name"])
+        literals, placeholders = parts[::2], parts[1::2]
+        if sorted(placeholders) != sorted(re.findall(r"\{[a-z_]+\}", consumer["filter"])):
+            raise ContractError(f"{where}: the name must use exactly the filter's placeholders")
+        if not literals[0] or ID_CHARACTER.fullmatch(literals[0][-1]):
+            raise ContractError(f"{where}: start the name with a fixed word ending in a character ids cannot contain")
+        if any(all(ID_CHARACTER.fullmatch(character) for character in literal) for literal in literals[1:-1]):
+            raise ContractError(f"{where}: separate the ids with a character they cannot contain")
+        if re.search(r"[\s.*>/\\]", consumer["name"]):
+            raise ContractError(f"{where}: NATS consumer names cannot hold whitespace, ., *, >, / or \\")
+        prefixes.append(literals[0])
+    for prefix in prefixes:
+        if any(other != prefix and other.startswith(prefix) for other in prefixes):
+            raise ContractError(f"transport.yaml: consumer name prefix {prefix!r} begins another prefix")
 
 
 def check_transport(transport: dict[str, Any]) -> None:
@@ -227,16 +370,18 @@ def address_matches(address: str, template: str, kind: str) -> bool:
 
 # -- generated JSON ------------------------------------------------------------------------------
 
-def subject_pattern(address: str) -> str:
-    return re.sub(r"\{[a-z_]+\}", "*", address)
+def send_pattern(address: str) -> str:
+    """The subjects a sender may publish an address to: any receiver of its team."""
+
+    return re.sub(r"\{(" + "|".join(RECEIVER_PLACEHOLDERS) + r")\}", "*", address)
 
 
 def consumer_permissions(entry: dict[str, Any], transport: dict[str, Any]) -> set[str]:
     """Pull, inspect and acknowledge only the consumers for this delivery address.
 
-    The membership issuer expands agent/pool/edge bindings to the host's assigned
-    identities. These are placeholders, never NATS wildcards. Topology creation
-    stays with the trusted topology owner, not receiving workers.
+    Consumer names keep their {team} and receiver placeholders; membership code
+    fills them with the host's own team and each id it serves, never with
+    wildcards. Creating consumers stays with the topology owner.
     """
 
     expected_filter = transport["subject_prefix"].replace("{sender}", "*") + "." + entry["address"]
@@ -255,23 +400,38 @@ def consumer_permissions(entry: dict[str, Any], transport: dict[str, Any]) -> se
 
 
 def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Per host role: subjects it may publish (only under its own id) and subscribe to."""
+    """Per host role: the NATS permissions it gets, as templates.
 
-    prefix = "ua.v1.{team}.{self}."
+    {team} is each team the host serves and {self} its runtime id. {agent},
+    {pool} and {edge} are each id the host serves: membership code repeats a
+    subject once per id and never turns one into a wildcard, so a host receives
+    only its own agents' requests and work. A host publishes only under its own
+    id. A receiver of requests answers each one once, within the class's
+    expiry, through NATS allow_responses; it holds no grant on other runtimes'
+    inboxes.
+    """
+
+    sender_prefix = transport["subject_prefix"].replace("{sender}", "{self}") + "."
+    receiver_prefix = transport["subject_prefix"].replace("{sender}", "*") + "."
+    reply_window = transport["classes"]["request_reply"]["max_expiry_seconds"]
     result = {}
     for role in registry["host_roles"]:
         publish, subscribe = set(), {f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"}
-        for name, entry in registry["kinds"].items():
-            address = subject_pattern(entry["address"])
+        answers_requests = False
+        for entry in registry["kinds"].values():
             if role in entry["senders"]:
-                publish.add(prefix + address)
-            if role in entry["receivers"] and entry["class"] != "durable":
-                subscribe.add("ua.v1.{team}.*." + address)
-            if role in entry["receivers"] and entry["class"] == "durable":
+                publish.add(sender_prefix + send_pattern(entry["address"]))
+            if role not in entry["receivers"]:
+                continue
+            if entry["class"] == "durable":
                 publish.update(consumer_permissions(entry, transport))
-            if role in entry["receivers"] and entry["class"] == "request_reply":
-                publish.add("_INBOX.*.>")
-        result[role] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
+            else:
+                subscribe.add(receiver_prefix + entry["address"])
+            answers_requests = answers_requests or entry["class"] == "request_reply"
+        document: dict[str, Any] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
+        if answers_requests:
+            document["allow_responses"] = {"max": 1, "expires": f"{reply_window}s"}
+        result[role] = document
     return result
 
 
@@ -353,6 +513,14 @@ class ModelWriter:
         self.schemas = schemas
         self.blocks: list[str] = []
         self.names: dict[tuple[str, str], str] = {}
+        self.defined: set[str] = {"WireModel"}
+
+    def define(self, name: str, where: str) -> None:
+        """Claim a generated name; a second schema with the same name would silently replace the first."""
+
+        if name in self.defined:
+            raise ContractError(f"{where}: generates the name {name}, which another schema already uses")
+        self.defined.add(name)
 
     def resolve(self, current: str, ref: str) -> tuple[str, str]:
         file, _, fragment = ref.partition("#")
@@ -371,6 +539,8 @@ class ModelWriter:
         node: Any = self.schemas[file]
         for part in [p for p in pointer.split("/") if p]:
             node = node[part]
+        if not isinstance(node, dict):
+            raise ContractError(f"{file}#{pointer}: a reference must name a schema object")
         return node
 
     def type_of(self, file: str, schema: dict[str, Any], hint: str) -> str:
@@ -415,10 +585,12 @@ class ModelWriter:
         if file == "common.schema.json" and fragment == "/$defs/timestamp":
             rendered = f"Annotated[{rendered}, AfterValidator(validate_timestamp)]"
         if rendered != name:
+            self.define(name, f"{file}#{fragment}")
             self.blocks.append(f"{name} = {rendered}\n")
         return name
 
     def model(self, file: str, schema: dict[str, Any], name: str) -> str:
+        self.define(name, file)
         required = set(schema.get("required", []))
         lines = [f"class {name}(WireModel):"]
         if schema.get("description"):
@@ -546,6 +718,7 @@ def render() -> dict[Path, str]:
     if registry["max_frame_bytes"] != transport["limits"]["max_frame_bytes"]:
         raise ContractError("registry.yaml and transport.yaml disagree on the frame size limit")
     check_transport(transport)
+    check_consumer_names(transport)
     check_registry(registry, transport, topologies, schemas)
     files: dict[Path, str] = {
         GENERATED / "registry.json": json_text(registry),
@@ -565,16 +738,21 @@ def render() -> dict[Path, str]:
     return files
 
 
-def stale(files: dict[Path, str]) -> list[str]:
-    problems = [path.relative_to(REPO_ROOT).as_posix() for path, text in files.items()
-                if not path.is_file() or path.read_text(encoding="utf-8") != text]
-    written = set(files)
-    for path in sorted(GENERATED.rglob("*")):
-        if path.is_file() and path not in written:
-            problems.append(f"{path.relative_to(REPO_ROOT).as_posix()} (not generated)")
-    for path in (WIRE / "models.py", WIRE / "kinds.py"):
-        if path not in written:
-            problems.append(path.relative_to(REPO_ROOT).as_posix())
+def stale(files: dict[Path, str], generated: Path = GENERATED) -> list[str]:
+    """Generated files that differ from what the sources produce, byte for byte, and stray files.
+
+    Bytes, not text: reading text would turn CRLF line endings back into LF, so a
+    rewritten file would pass while its digest no longer matched the manifest.
+    """
+
+    def shown(path: Path) -> str:
+        return path.relative_to(REPO_ROOT).as_posix() if path.is_relative_to(REPO_ROOT) else str(path)
+
+    problems = [shown(path) for path, text in files.items()
+                if not path.is_file() or path.read_bytes() != text.encode("utf-8")]
+    for path in sorted(generated.rglob("*")):
+        if path.is_file() and path not in files:
+            problems.append(f"{shown(path)} (not generated)")
     return problems
 
 
@@ -596,7 +774,7 @@ def main() -> int:
             path.unlink()
     for path, text in files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        path.write_bytes(text.encode("utf-8"))
     return 0
 
 

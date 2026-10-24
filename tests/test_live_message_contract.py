@@ -66,8 +66,11 @@ def permissions(user: str) -> dict:
     host = HOSTS[user]
     document = json.loads((CONTRACT / "generated/permissions" / f"{host['role']}.json").read_text())
     bindings = {"team": [TEAM], "self": [host["runtime"]], "agent": host["agents"]}
-    return {action: sorted({subject for template in document[action] for subject in expand(template, bindings)})
-            for action in ("publish", "subscribe")}
+    granted = {action: sorted({subject for template in document[action] for subject in expand(template, bindings)})
+               for action in ("publish", "subscribe")}
+    if "allow_responses" in document:
+        granted["allow_responses"] = document["allow_responses"]
+    return granted
 
 
 def consumer_name(template: str, **ids: str) -> str:
@@ -314,6 +317,50 @@ async def test_workers_cannot_manage_streams_speak_for_others_or_read_others_tra
         ):
             await worker.subscribe_refused(subject)
         assert worker.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_a_host_gets_only_its_own_agents_requests_and_answers_only_requests(isolated_broker) -> None:
+    async with AsyncExitStack() as stack:
+        lead = await connect(stack, isolated_broker, "lead")
+        worker = await connect(stack, isolated_broker, "worker")
+        await worker.subscribe_refused("ua.v1.team_example.*.ctl.agent.researcher-3.pause")
+        await worker.subscribe_refused("ua.v1.team_example.*.ctl.agent.*.pause")
+        # Nobody else may receive researcher-3's control requests, so the lead learns at once.
+        with pytest.raises(nats.errors.NoRespondersError):
+            await lead.nc.request("ua.v1.team_example.lead-host-1.ctl.agent.researcher-3.pause", b"{}", timeout=2)
+        # The worker writes into the lead's inbox only to answer a request it received.
+        await worker.publish_refused("_INBOX.lead-host-1.unsolicited")
+
+        async def answer(message):
+            await worker.nc.publish(message.reply, b"answer")
+            await worker.nc.publish(message.reply, b"second answer")
+
+        await subscribe_ready(worker, "ua.v1.team_example.*.ctl.agent.researcher-2.pause", answer)
+        response = await lead.nc.request("ua.v1.team_example.lead-host-1.ctl.agent.researcher-2.pause", b"{}", timeout=2)
+        assert response.data == b"answer"
+        await worker.refused(response.subject)  # allow_responses permits one answer per request
+        assert worker.errors.empty() and lead.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_ids_that_once_shared_a_consumer_name_get_separate_consumers(isolated_broker) -> None:
+    """team_example/researcher-2 and team/example_researcher-2 joined with _ named one consumer."""
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        js = admin.nc.jetstream()
+        await js.add_stream(config=stream_config("UA1_WORK"))
+        pairs = [("team_example", "researcher-2"), ("team", "example_researcher-2")]
+        spec = TRANSPORT["consumers"]["agent_inbox"]
+        for team, agent in pairs:
+            await js.add_consumer("UA1_WORK", config=ConsumerConfig(
+                durable_name=spec["name"].format(team=team, agent=agent),
+                filter_subject=spec["filter"].format(team=team, agent=agent), ack_policy=AckPolicy.EXPLICIT,
+            ))
+        for team, agent in pairs:
+            info = await js.consumer_info("UA1_WORK", spec["name"].format(team=team, agent=agent))
+            assert info.config.filter_subject == spec["filter"].format(team=team, agent=agent)
 
 
 @pytest.mark.asyncio
