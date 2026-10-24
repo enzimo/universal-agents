@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.result",
   "message_id": "01928f3a-7b2c-7105-8000-000000000105",
-  "idempotency_key": "task_result:task_sub_2:1",
+  "idempotency_key": "task.result:fBi0AaCKd8i9dW3symocXrORXFsbqtv5I11Lmzbgek4",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -40,5 +40,5 @@
     }
   },
   "body_digest": "PI8nLmFmC4U9etvamq9Y_g8dVq-atfTM_FsSmrjDdDo",
-  "signature": "95AVyuSMa5K3FD1GIcOXnqtVnmExb1prNZGb99C299UOkth0IFFEKSabGLHZOR4z2t61FZjn_l_fzIgTo69pAg"
+  "signature": "fOdi0lmsJyuo4CzSyNQe76Zv_91i2MOWouF4-5Sm8XcYOOmL08PlPNYODd9WxovuQssCxA8w2Ig4R9v4OkvsDw"
 }

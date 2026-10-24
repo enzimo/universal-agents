@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "task.handback",
   "message_id": "01928f3a-7b2c-7110-8000-000000000110",
-  "idempotency_key": "handback_0123abcd",
+  "idempotency_key": "task.handback:jviywYtFDFKoVpJV5ZMskS9TKgqa0mXHpNiU70TzwgA",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -94,5 +94,5 @@
     }
   },
   "body_digest": "796sdRwOEqQysTrV2-AFuedY7SI07LEmRn-WzmYXKhw",
-  "signature": "hkUj9XkGh7dTvrpv2dYDVzTz8iGlOrMMUNunKsdw0gvIfLHkgU-GGJJ-hOdruNbJuZFPcau1N57te9gQ2EkzBg"
+  "signature": "KZvc04Fktj7Zi8tWd2qWEpb2iQnoh23owlwedT2kG4X1ZIbq10ZonIUBIgDEM64KBmuQ-nsEQzs9iUP4llz0AA"
 }

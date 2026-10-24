@@ -42,10 +42,10 @@ RecordId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9._:@-
 MessageId = Annotated[str, StringConstraints(pattern='^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')]
 
 
-IdempotencyKey = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$')]
+IdempotencyKey = Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+:[A-Za-z0-9_-]{43}$', max_length=128)]
 
 
-Kind = Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$', max_length=96)]
+Kind = Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$', max_length=84)]
 
 
 Timestamp = Annotated[Annotated[str, StringConstraints(pattern='^(19[7-9][0-9]|[2-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$')], AfterValidator(validate_timestamp)]

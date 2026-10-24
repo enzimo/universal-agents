@@ -50,8 +50,8 @@ from custom_messages.wire.values import parse_timestamp
 
 __all__ = [
     "FrameRefused", "Receiver", "ReplayKey", "ReplayLookup", "VerifiedAuthority", "VerifiedFrame",
-    "b64url", "b64url_decode", "body_digest", "body_model", "format_timestamp", "frame_digest",
-    "idempotency_key", "sign_authority_token", "sign_frame", "signing_bytes", "verify_frame",
+    "b64url", "b64url_decode", "body_digest", "body_model", "expected_idempotency_key", "format_timestamp",
+    "frame_digest", "idempotency_key", "sign_authority_token", "sign_frame", "signing_bytes", "verify_frame",
 ]
 
 REPLY_SUFFIX = ".reply"
@@ -64,15 +64,48 @@ HEADER_KIND, HEADER_ID, HEADER_MSG_ID = "UA-Kind", "UA-Id", "Nats-Msg-Id"
 DURABLE = "durable"
 
 
-def idempotency_key(kind: str, *parts: str) -> str:
-    """A bounded key for a tuple of ids; JSON preserves their boundaries and order.
+def idempotency_key(kind: str, *parts: str | int | None) -> str:
+    """A bounded key for a tuple of values; JSON preserves their boundaries and order.
 
-    ``kind`` is a registry kind, and each part is a schema-validated record id.
-    Even a maximum-length kind and tuple produce at most 140 characters.
+    ``kind`` is a registry kind (at most 84 characters), and each part is a value
+    the registry's ``idempotency`` list names, ``None`` where an optional field is
+    absent. The key is at most 128 characters, whatever the ids' lengths
+    (README, "Idempotency keys").
     """
 
     digest = hashlib.sha256(canonical_bytes(list(parts))).digest()
     return f"{kind}:{b64url(digest)}"
+
+
+def _pointed(document: Mapping[str, Any], pointer: str) -> Any:
+    """The value a JSON pointer names, or None when a step is absent."""
+
+    value: Any = document
+    for step in pointer[1:].split("/"):
+        if not isinstance(value, Mapping) or step not in value:
+            return None
+        value = value[step]
+    return value
+
+
+def expected_idempotency_key(raw: Mapping[str, Any], spec: KindSpec, is_reply: bool,
+                             answering: Optional[Frame]) -> str:
+    """The key a frame of this kind must carry (README, "Idempotency keys").
+
+    A request/reply operation's reply derives its key from the request's key. A
+    durable copy (registry ``copy_to``) adds its audience target as a last part, so
+    the broker, which drops repeats of one key across the whole stream, keeps both
+    the original and the copy.
+    """
+
+    if is_reply:
+        assert answering is not None  # _verify_issuer refused replies without their request
+        return idempotency_key(f"{spec.name}{REPLY_SUFFIX}", answering.idempotency_key)
+    parts = [_pointed(raw, pointer) for pointer in spec.idempotency]
+    target = raw["audience"]["target"]
+    if target in spec.copies:
+        parts.append(target)
+    return idempotency_key(spec.name, *parts)
 
 
 def signing_bytes(frame: Mapping[str, Any]) -> bytes:
@@ -471,6 +504,9 @@ def verify_frame(
     except ValidationError as error:
         raise FrameRefused("invalid_body", str(error).splitlines()[0],
                            at=pointer(error.errors()[0], shape, prefix="/body")) from error
+    if frame.idempotency_key != expected_idempotency_key(raw, spec, is_reply, answering):
+        raise FrameRefused("invalid_body", "the idempotency key is not the one the kind's key parts give",
+                           at="/idempotency_key")
     authority = _verify_authority(raw, frame, spec, is_reply, trust)
     return VerifiedFrame(frame=frame, body=body, certificate=certificate, session=session, authority=authority,
                          replay_key=replay_key, frame_digest=digest, raw=raw)

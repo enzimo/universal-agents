@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "access.resolved",
   "message_id": "01928f3a-7b2c-7117-8000-000000000117",
-  "idempotency_key": "access_res:areq_1",
+  "idempotency_key": "access.resolved:InBR8teOQa-eLt-nw7csN21bPFCkz3X8mMqGgN4I1HA",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -53,5 +53,5 @@
     "keep_hours": 24
   },
   "body_digest": "oHt_L1bJy8ZC7f8ffhNdPXw1rEUMwD4zGzTl7M7wGRk",
-  "signature": "5B2W6QuEv-K6hexBB2YnpmD-AduzGbVBGJ5a5QU1FyFyYqLynrPU8YaEvqBf5EYC3XnCHkZyDx3cRtsGcG1nDw"
+  "signature": "oz2qZ9iDqPlSVRPqPBWgjz24OgBGQ-QmR_DnrkCZmaehQExd-Vse8jbQd8zlWMXIl_nWfTFkQHF2whRN_rA2Aw"
 }

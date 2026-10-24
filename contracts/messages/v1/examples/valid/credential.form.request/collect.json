@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "credential.form.request",
   "message_id": "01928f3a-7b2c-711c-8000-00000000011c",
-  "idempotency_key": "credential_form:form_1",
+  "idempotency_key": "credential.form.request:Mz4Ldx3wlgFm_ySqDkrOk_ZaJb7_7iJE91y0siAoIbY",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -81,5 +81,5 @@
     }
   },
   "body_digest": "WmhCbXkKb-9DSjBfgQ5yLPPmrIGAmApW-uieckuJSLs",
-  "signature": "IF_IXfU8reC2IuFOmiPyiRIEDxq0kwWBLFuV47XNDPkW9t_En45qjCpRVzSV_3oueUAgg5RVE7Kj2mhU8mojDA"
+  "signature": "SLYJIvY9fNUZJUCqgect-ftdTKrv7UqJMYglwV_pqBnpm1U_gx3snTUaLAGedAzPqTwdq31QBbLPWi8iTThyCw"
 }

@@ -42,15 +42,16 @@
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "idempotency_key": {
-      "description": "The sender's key for one logical send. The same key always means the same message.",
+      "description": "The sender's key for one logical send: the kind, a colon, and the unpadded base64url SHA-256 of the RFC 8785 array of the values the registry names (README, \"Idempotency keys\"). The same key always means the same message.",
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$"
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+:[A-Za-z0-9_-]{43}$"
     },
     "kind": {
-      "description": "A message kind or operation name: lower-case words joined by dots.",
+      "description": "A message kind or operation name: lower-case words joined by dots. At most 84 characters, so an idempotency key (the kind, a colon and 43 digest characters) stays within 128.",
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
-      "maxLength": 96
+      "maxLength": 84
     },
     "timestamp": {
       "description": "A UTC time from 1970 to 9999 with exactly three fractional digits. Receivers also refuse dates that do not exist, such as 30 February.",

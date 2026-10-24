@@ -2,16 +2,21 @@
 #
 # Each entry states, for one kind:
 #   class          durable | request_reply | event   (transport.yaml describes each class)
-#   address        the subject after ua.v1.<audience team>.<sender slot>. ; {agent}, {pool} and
-#                  {edge} are the audience id, and the address decides the audience target:
-#                  agent, pool, edge, team_services (work.team, svc.team.*) or team (evt.*)
+#   address        the subject after ua.v1.<audience team>.<sender slot>. , or a list of them, each
+#                  delivering to a different audience target; {agent}, {pool} and {edge} are the
+#                  audience id, and the address decides the audience target: agent, pool, edge,
+#                  team_services (work.team, svc.team.*) or team (evt.*)
+#   copy_to        durable only: addresses that also get a copy of each frame (README, "Durable
+#                  copies"); the roles serving the copy's target receive it
 #   body           the body schema, under schemas/
 #   reply          request/reply only: the reply body schema and the error codes it may carry
 #   senders        host roles that may publish it; receivers check them against the issuer's certificate
-#   receivers      host roles that may receive it (and so send its reply)
+#   receivers      host roles that may receive it at its own addresses (and so send its reply)
 #   expiry_seconds how long after issue a receiver still accepts it (at most its class's max_expiry_seconds)
 #   authority      none | optional | required: whether the frame carries an authority token
-#   idempotency    how the sender derives the idempotency key
+#   idempotency    JSON pointers into the frame whose values make the idempotency key:
+#                  <kind>:<unpadded base64url SHA-256 of the RFC 8785 array of the values>
+#                  (README, "Idempotency keys")
 #   admission      execution_slot (needs a free slot), accepted_while_paused, priority
 #   routing        requester | holder | team | person | named | broadcast
 #   topology_edge  up | down | person | sideways | out | none  (team-topologies.yaml)
@@ -69,7 +74,7 @@ verification_refusals:
   - code: unknown_kind
     meaning: the kind is not in this registry
   - code: invalid_body
-    meaning: the body breaks the kind's schema
+    meaning: the body breaks the kind's schema, or the idempotency key is not the one the kind's key parts give
   - code: bad_authority
     meaning: the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names another team than the issuer's, was not valid when the frame was issued, lasts longer than authority_token_max_seconds, or is bound to another root task or command than the one the receiver holds
   - code: access_denied
@@ -148,7 +153,7 @@ kinds:
     receivers: [lead_host, worker_host]
     expiry_seconds: 86400
     authority: optional
-    idempotency: "task.stop:<base64url(sha256(RFC8785([task_id, stop_id])))>"
+    idempotency: [/body/task_id, /body/stop_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: holder
     topology_edge: down
@@ -168,7 +173,7 @@ kinds:
     receivers: [lead_host, worker_host]
     expiry_seconds: 30
     authority: none
-    idempotency: "agent_pause:<agent>:<request_id>"
+    idempotency: [/audience/id, /body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: named
     topology_edge: down
@@ -185,7 +190,7 @@ kinds:
     receivers: [lead_host, worker_host]
     expiry_seconds: 300
     authority: none
-    idempotency: "skills_changed:<change_id>"
+    idempotency: [/body/change_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: broadcast
     topology_edge: none
@@ -201,12 +206,10 @@ kinds:
     copy_to: [work.team]
     body: bodies/task.request.schema.json
     senders: [gateway, lead_host, scheduler, edge_adapter]
-    receivers: [lead_host, worker_host, edge_adapter, team_services]
+    receivers: [lead_host, worker_host]
     expiry_seconds: 604800
     authority: optional
-    # A returned task keeps its task id but gets a new dispatch frame. Retries
-    # of that dispatch reuse the saved frame, including its message id.
-    idempotency: task_request:<task_id>:<message_id>
+    idempotency: [/body/task_id, /message_id]
     admission: {execution_slot: true, accepted_while_paused: false, priority: normal}
     routing: named
     topology_edge: down
@@ -221,10 +224,10 @@ kinds:
     copy_to: [work.team]
     body: bodies/task.result.schema.json
     senders: [worker_host, lead_host, edge_adapter]
-    receivers: [lead_host, gateway, edge_adapter, team_services]
+    receivers: [lead_host, gateway, edge_adapter]
     expiry_seconds: 604800
     authority: none
-    idempotency: task_result:<task_id>:<custody_token>
+    idempotency: [/body/task_id, /body/custody_token, /body/sequence]
     admission: {execution_slot: true, accepted_while_paused: false, priority: high}
     routing: requester
     topology_edge: up
@@ -250,7 +253,7 @@ kinds:
     receivers: [lead_host, gateway, edge_adapter]
     expiry_seconds: 604800
     authority: none
-    idempotency: task_question:<question_id>
+    idempotency: [/body/question_id]
     admission: {execution_slot: true, accepted_while_paused: false, priority: normal}
     routing: requester
     topology_edge: up
@@ -267,7 +270,7 @@ kinds:
     receivers: [lead_host, worker_host]
     expiry_seconds: 604800
     authority: optional
-    idempotency: question_answer:<question_id>
+    idempotency: [/body/question_id]
     admission: {execution_slot: true, accepted_while_paused: false, priority: high}
     routing: named
     topology_edge: down
@@ -279,12 +282,13 @@ kinds:
     description: Where a task stands, from its holder to its requester.
     class: durable
     address: work.agent.{agent}
+    copy_to: [work.team]
     body: bodies/task.progress.schema.json
     senders: [worker_host, lead_host, edge_adapter]
     receivers: [lead_host]
     expiry_seconds: 86400
     authority: none
-    idempotency: task_progress:<task_id>:<sequence>
+    idempotency: [/body/task_id, /body/custody_token, /body/sequence]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: requester
     topology_edge: up
@@ -301,7 +305,7 @@ kinds:
     receivers: [worker_host, lead_host]
     expiry_seconds: 86400
     authority: optional
-    idempotency: task_steer:<task_id>:<steer_id>
+    idempotency: [/body/task_id, /body/steer_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: holder
     topology_edge: down
@@ -315,12 +319,13 @@ kinds:
     description: A held holder's account of where its task stopped.
     class: durable
     address: work.agent.{agent}
+    copy_to: [work.team]
     body: bodies/task.account.schema.json
     senders: [worker_host, lead_host]
     receivers: [lead_host]
     expiry_seconds: 86400
     authority: none
-    idempotency: task_account:<task_id>:<steer_id>:<stage>
+    idempotency: [/body/task_id, /body/steer_id, /body/stage/type]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: requester
     topology_edge: up
@@ -335,10 +340,10 @@ kinds:
     copy_to: [work.team]
     body: bodies/task.claimed.schema.json
     senders: [worker_host, lead_host, edge_adapter]
-    receivers: [lead_host, team_services]
+    receivers: [lead_host]
     expiry_seconds: 86400
     authority: none
-    idempotency: task_claimed:<claim_id>
+    idempotency: [/body/claim_id]
     admission: {execution_slot: false, accepted_while_paused: false, priority: normal}
     routing: requester
     topology_edge: up
@@ -353,10 +358,10 @@ kinds:
     copy_to: [work.team]
     body: bodies/task.handback.schema.json
     senders: [worker_host, lead_host]
-    receivers: [lead_host, team_services]
+    receivers: [lead_host]
     expiry_seconds: 604800
     authority: none
-    idempotency: handback_<sha256>
+    idempotency: [/body/handback_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: requester
     topology_edge: up
@@ -373,7 +378,7 @@ kinds:
     receivers: [lead_host]
     expiry_seconds: 604800
     authority: none
-    idempotency: task_report:<report_id>
+    idempotency: [/body/report_id]
     admission: {execution_slot: false, accepted_while_paused: false, priority: high}
     routing: requester
     topology_edge: up
@@ -390,7 +395,7 @@ kinds:
     receivers: [worker_host, lead_host]
     expiry_seconds: 604800
     authority: none
-    idempotency: custody_moved:<task_id>:<custody_token>
+    idempotency: [/body/task_id, /body/custody_token]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: named
     topology_edge: none
@@ -407,7 +412,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 604800
     authority: optional
-    idempotency: access_request:<request_id>
+    idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
     topology_edge: none
@@ -424,7 +429,7 @@ kinds:
     receivers: [worker_host, lead_host]
     expiry_seconds: 604800
     authority: none
-    idempotency: access_decision:<request_id>:<state>
+    idempotency: [/body/request_id, /body/status/state]
     admission: {execution_slot: false, accepted_while_paused: false, priority: high}
     routing: named
     topology_edge: none
@@ -450,7 +455,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 604800
     authority: required
-    idempotency: access_res:<request_id>
+    idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
     topology_edge: none
@@ -467,7 +472,7 @@ kinds:
     receivers: [gateway]
     expiry_seconds: 604800
     authority: optional
-    idempotency: notify:<notice_id>
+    idempotency: [/body/notice_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: person
     topology_edge: person
@@ -484,7 +489,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 604800
     authority: none
-    idempotency: "<receipt_id>"
+    idempotency: [/body/receipt_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
     topology_edge: none
@@ -501,7 +506,7 @@ kinds:
     receivers: [lead_host, worker_host, team_services, gateway, edge_adapter]
     expiry_seconds: 86400
     authority: none
-    idempotency: refused:<message_id>
+    idempotency: [/body/refused_message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: sender
     topology_edge: none
@@ -518,7 +523,7 @@ kinds:
     receivers: [gateway]
     expiry_seconds: 604800
     authority: required
-    idempotency: credential_form:<form_id>
+    idempotency: [/body/form_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: person
     topology_edge: person
@@ -535,7 +540,7 @@ kinds:
     receivers: [lead_host]
     expiry_seconds: 604800
     authority: none
-    idempotency: secure_result:credential_form:<form_id>
+    idempotency: [/body/form_id]
     admission: {execution_slot: true, accepted_while_paused: false, priority: normal}
     routing: requester
     topology_edge: person
@@ -552,7 +557,7 @@ kinds:
     receivers: [gateway]
     expiry_seconds: 604800
     authority: required
-    idempotency: "<setup_request_id>"
+    idempotency: [/body/setup_request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: person
     topology_edge: person
@@ -569,7 +574,7 @@ kinds:
     receivers: [lead_host]
     expiry_seconds: 604800
     authority: none
-    idempotency: secure_result:tool_setup:<setup_request_id>
+    idempotency: [/body/setup_request_id]
     admission: {execution_slot: true, accepted_while_paused: false, priority: normal}
     routing: requester
     topology_edge: person
@@ -586,7 +591,7 @@ kinds:
     receivers: [lead_host, worker_host]
     expiry_seconds: 604800
     authority: none
-    idempotency: ledger_fact:<fact_id>
+    idempotency: [/body/fact_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: named
     topology_edge: none
@@ -603,7 +608,7 @@ kinds:
     receivers: [lead_host, worker_host]
     expiry_seconds: 604800
     authority: none
-    idempotency: question_closed:<question_id>
+    idempotency: [/body/question_id]
     admission: {execution_slot: true, accepted_while_paused: false, priority: high}
     routing: named
     topology_edge: down

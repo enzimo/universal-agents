@@ -44,6 +44,7 @@ STORAGE = {"file": StorageType.FILE, "memory": StorageType.MEMORY}
 HOSTS = {
     "lead": {"role": "lead_host", "runtime": "lead-host-1", "agents": ["lead"], "pools": [], "edges": []},
     "worker": {"role": "worker_host", "runtime": "worker-host-1", "agents": ["researcher-2"], "pools": ["researcher"], "edges": []},
+    "services": {"role": "team_services", "runtime": "team-services-1", "agents": [], "pools": [], "edges": []},
 }
 
 
@@ -363,8 +364,9 @@ async def test_ids_that_once_shared_a_consumer_name_get_separate_consumers(isola
 async def test_a_reassigned_task_is_delivered_again_and_its_retry_is_deduplicated(isolated_broker) -> None:
     """A handback cannot lose its replacement dispatch to the first dispatch's duplicate record.
 
-    Nats-Msg-Id is the idempotency key, task_request:<task_id>:<message_id>, so a new
-    dispatch of the same task gets through and a retry of that dispatch does not.
+    Nats-Msg-Id is the idempotency key, made from the task id and the dispatch's
+    message id, so a new dispatch of the same task gets through and a retry of that
+    dispatch does not.
     """
 
     async with AsyncExitStack() as stack:
@@ -394,6 +396,41 @@ async def test_a_reassigned_task_is_delivered_again_and_its_retry_is_deduplicate
         await received.ack_sync(timeout=2)
         assert (await js.stream_info("UA1_WORK")).state.messages == 0
         assert lead.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_a_result_and_its_team_services_copy_both_arrive_and_retries_of_each_are_dropped(isolated_broker) -> None:
+    """The stream drops repeats of one Nats-Msg-Id across all subjects, so a copy carries its own key.
+
+    The worker publishes its result to the lead and the copy to the team services
+    with its own generated grants; each reader pulls with its own grants.
+    """
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        worker = await connect(stack, isolated_broker, "worker")
+        lead = await connect(stack, isolated_broker, "lead")
+        services = await connect(stack, isolated_broker, "services")
+        await create_topology(admin, ["lead"])
+        await admin.nc.jetstream().add_consumer("UA1_WORK", config=consumer_config("team_services"))
+        original = fixtures.example_frame("task.result", "completed")
+        copy_frame = fixtures.example_frame("task.result", "copy-to-team-services")
+
+        async def publish(frame: dict):
+            return await worker.nc.jetstream().publish(frame["subject"], json.dumps(frame).encode(), headers=headers(frame))
+
+        sent = [await publish(original), await publish(copy_frame)]
+        retries = [await publish(original), await publish(copy_frame)]
+        assert not any(ack.duplicate for ack in sent) and all(ack.duplicate for ack in retries)
+        for client, consumer, frame in ((lead, consumer_name("agent_inbox", agent="lead"), original),
+                                        (services, consumer_name("team_services"), copy_frame)):
+            inbox = await client.nc.jetstream().pull_subscribe_bind(stream="UA1_WORK", consumer=consumer)
+            received, = await inbox.fetch(1, timeout=2)
+            verified = fixtures.verify(received.data, frame, arrived(frame, received))
+            assert verified.frame.audience.target == frame["audience"]["target"]
+            await received.ack_sync(timeout=2)
+        assert (await admin.nc.jetstream().stream_info("UA1_WORK")).state.messages == 0
+        assert worker.errors.empty() and lead.errors.empty() and services.errors.empty()
 
 
 @pytest.mark.asyncio

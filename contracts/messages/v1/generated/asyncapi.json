@@ -306,6 +306,22 @@
         }
       }
     },
+    "task_account_1": {
+      "address": "ua.v1.{team}.{sender}.work.team",
+      "messages": {
+        "task_account": {
+          "$ref": "#/components/messages/task_account"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
     "task_answer": {
       "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
       "messages": {
@@ -406,6 +422,22 @@
         "agent": {
           "description": "The agent subject token."
         },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "task_progress_1": {
+      "address": "ua.v1.{team}.{sender}.work.team",
+      "messages": {
+        "task_progress": {
+          "$ref": "#/components/messages/task_progress"
+        }
+      },
+      "parameters": {
         "sender": {
           "description": "The sender subject token."
         },
@@ -1365,6 +1397,12 @@
         "$ref": "#/channels/task_account"
       }
     },
+    "receive_task_account_1": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_account_1"
+      }
+    },
     "receive_task_answer": {
       "action": "receive",
       "channel": {
@@ -1399,6 +1437,12 @@
       "action": "receive",
       "channel": {
         "$ref": "#/channels/task_progress"
+      }
+    },
+    "receive_task_progress_1": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/task_progress_1"
       }
     },
     "receive_task_question": {
@@ -1585,6 +1629,12 @@
         "$ref": "#/channels/task_account"
       }
     },
+    "send_task_account_1": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_account_1"
+      }
+    },
     "send_task_answer": {
       "action": "send",
       "channel": {
@@ -1619,6 +1669,12 @@
       "action": "send",
       "channel": {
         "$ref": "#/channels/task_progress"
+      }
+    },
+    "send_task_progress_1": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/task_progress_1"
       }
     },
     "send_task_question": {

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import importlib.util
 import json
 import re
@@ -19,6 +20,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+import rfc8785
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from jsonschema import Draft202012Validator, ValidationError as SchemaError, validators
 from pydantic import ValidationError
@@ -113,11 +115,30 @@ def invalid_examples() -> list[Path]:
     return sorted((EXAMPLES / "invalid").glob("*.json"))
 
 
-def task_request_key(frame: dict) -> str:
-    """Resolve the registry's frame and body placeholders for a dispatch."""
+def pointed(document: dict, pointer: str):
+    value = document
+    for step in pointer[1:].split("/"):
+        if not isinstance(value, dict) or step not in value:
+            return None
+        value = value[step]
+    return value
 
-    rule = REGISTRY["kinds"]["task.request"]["idempotency"]
-    return rule.replace("<task_id>", frame["body"]["task_id"]).replace("<message_id>", frame["message_id"])
+
+def registry_key(frame: dict) -> str:
+    """The README's key rule, written out here: the kind, a colon, and the digest of the listed values.
+
+    A reply's single part is its request's key; a copy adds its audience target.
+    """
+
+    kind = frame["kind"]
+    if kind.endswith(".reply"):
+        parts = [fixtures.answered_request(frame).idempotency_key]
+    else:
+        entry = REGISTRY["kinds"][kind]
+        parts = [pointed(frame, pointer) for pointer in entry["idempotency"]]
+        if frame["audience"]["target"] in {EXPORT.audience_target(address) for address in entry.get("copy_to", [])}:
+            parts.append(frame["audience"]["target"])
+    return f"{kind}:{b64url(hashlib.sha256(rfc8785.dumps(parts)).digest())}"
 
 
 def invalid_case(path: Path) -> tuple[dict, bytes]:
@@ -292,6 +313,8 @@ def test_every_kind_has_a_model_and_every_model_a_kind() -> None:
         assert spec.reply_errors == tuple(entry.get("reply", {}).get("errors", ()))
         addresses = {EXPORT.audience_target(address): address for address in EXPORT.entry_addresses(entry)}
         assert (spec.delivery_class, spec.addresses, spec.expiry_seconds) == (entry["class"], addresses, entry["expiry_seconds"])
+        copies = tuple(EXPORT.audience_target(address) for address in entry.get("copy_to", []))
+        assert (spec.copies, spec.idempotency) == (copies, tuple(entry["idempotency"]))
     assert kinds.VERIFICATION_REFUSALS == tuple(item["code"] for item in REGISTRY["verification_refusals"])
 
 
@@ -358,7 +381,34 @@ def test_reassignment_preserves_the_task_but_changes_the_dispatch_key() -> None:
     original = fixtures.example_frame("task.request", "to-pool")
     replacement = fixtures.example_frame("task.request", "reassignment")
     assert replacement["body"]["task_id"] == original["body"]["task_id"]
-    assert task_request_key(replacement) != task_request_key(original)
+    assert replacement["idempotency_key"] != original["idempotency_key"]
+
+
+def test_a_copy_and_its_original_carry_different_keys_and_the_copy_has_no_receiver_rules() -> None:
+    """The broker drops repeats of one Nats-Msg-Id across the whole stream (README, "Durable copies")."""
+
+    original = fixtures.example_frame("task.result", "completed")
+    copy_frame = fixtures.example_frame("task.result", "copy-to-team-services")
+    assert copy_frame["body"] == original["body"] and copy_frame["audience"]["target"] == "team_services"
+    assert copy_frame["idempotency_key"] != original["idempotency_key"]
+    fixtures.verify(json.dumps(copy_frame).encode(), copy_frame)
+    assert "team_services" not in kinds.KINDS["task.result"].receivers
+    assert kinds.KINDS["task.result"].copies == ("team_services",)
+
+
+@pytest.mark.parametrize(("change", "problem"), [
+    ({"idempotency": ["/body/no_such_field"]}, "names no string or integer field"),
+    ({"idempotency": ["/body/assumptions"]}, "names no string or integer field"),
+    ({"idempotency": "task_result:<task_id>"}, "lists the JSON pointers"),
+    ({"copy_to": ["work.agent.{agent}"]}, "two of its addresses deliver to one audience target"),
+    ({"copy_to": ["work.pool.{pool}"]}, "copies go only to"),
+    ({"receivers": ["lead_host", "gateway", "edge_adapter", "scheduler"]}, "serve none of its addresses"),
+])
+def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change: dict, problem: str) -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["kinds"]["task.result"].update(change)
+    with pytest.raises(EXPORT.ContractError, match=problem):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
 
 
 def test_every_kind_and_reply_has_a_valid_example() -> None:
@@ -465,8 +515,7 @@ def test_valid_examples_are_accepted(path: Path) -> None:
     else:
         assert dumped == document["body"], "the body did not survive a round trip"
         assert models.Frame.model_validate(document).model_dump(mode="json", by_alias=True) == document
-    if document["kind"] == "task.request":
-        assert document["idempotency_key"] == task_request_key(document)
+    assert document["idempotency_key"] == registry_key(document)
 
 
 @pytest.mark.parametrize("path", invalid_examples(), ids=lambda path: path.stem)
@@ -499,8 +548,10 @@ def test_neighbouring_checks_each_have_a_two_defect_example() -> None:
     assert {(first, second) for first, second in zip(order, order[1:])} <= covered
 
 
-@pytest.mark.parametrize("path", [p for p in invalid_examples() if json.loads(p.read_text())["refusal"] == "invalid_body"],
-                         ids=lambda path: path.stem)
+# A schema cannot recompute a key from other fields, so key refusals (at /idempotency_key)
+# are the receiver's alone (README, "Idempotency keys").
+@pytest.mark.parametrize("path", [p for p in invalid_examples() if json.loads(p.read_text())["refusal"] == "invalid_body"
+                                  and json.loads(p.read_text())["at"] != "/idempotency_key"], ids=lambda path: path.stem)
 def test_invalid_bodies_fail_their_schema_where_named(path: Path) -> None:
     case = json.loads(path.read_text(encoding="utf-8"))
     document = json.loads(case["frame_text"])
@@ -783,8 +834,14 @@ def test_stop_key_preserves_id_boundaries_and_accepts_maximum_ids() -> None:
     frame = signed_example()
     frame["body"].update(task_id="a" * 128, stop_id="b" * 128)
     frame["idempotency_key"] = idempotency_key("task.stop", frame["body"]["task_id"], frame["body"]["stop_id"])
-    assert len(frame["idempotency_key"]) <= 256
+    assert len(frame["idempotency_key"]) <= 128
     fixtures.verify(fixtures.resign(frame), frame)
+
+
+def test_keys_stay_within_128_characters_for_maximum_ids_and_the_longest_kind() -> None:
+    longest = max([*REGISTRY["kinds"], *(f"{name}.reply" for name in REGISTRY["kinds"])], key=len)
+    assert len(idempotency_key(longest, "a" * 128, 2**53 - 1, None)) <= 128
+    assert len(idempotency_key("k" * 80 + ".a.b", "x")) == 128
 
 
 @pytest.mark.parametrize(("mutation", "code"), [

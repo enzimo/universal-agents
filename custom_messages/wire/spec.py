@@ -35,6 +35,10 @@ class KindSpec:
     # Audience target -> the address that delivers to it: the kind's own addresses
     # and its copies (registry copy_to). Each address delivers to one target.
     addresses: dict[str, str]
+    # The audience targets that get a copy of each frame (README, "Durable copies").
+    copies: tuple[str, ...]
+    # JSON pointers into the frame whose values make the idempotency key.
+    idempotency: tuple[str, ...]
     body_model: TypeAdapter[Any]
     reply_model: Optional[TypeAdapter[Any]]
     reply_errors: tuple[str, ...]

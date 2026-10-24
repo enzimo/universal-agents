@@ -46,7 +46,10 @@
       "class": "durable",
       "description": "What became of an access request, sent to the waiting task.",
       "expiry_seconds": 604800,
-      "idempotency": "access_decision:<request_id>:<state>",
+      "idempotency": [
+        "/body/request_id",
+        "/body/status/state"
+      ],
       "ledger": "access_wait_closed",
       "receivers": [
         "worker_host",
@@ -83,7 +86,9 @@
       "class": "durable",
       "description": "A task asks the team services for access; no model decides it.",
       "expiry_seconds": 604800,
-      "idempotency": "access_request:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "access_wait_open",
       "receivers": [
         "team_services"
@@ -109,7 +114,9 @@
       "class": "durable",
       "description": "A person's decision on an access request, from the gateway to the team services.",
       "expiry_seconds": 604800,
-      "idempotency": "access_res:<request_id>",
+      "idempotency": [
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -134,7 +141,10 @@
       "class": "request_reply",
       "description": "Pause one agent at its next safe point; it keeps its queued work.",
       "expiry_seconds": 30,
-      "idempotency": "agent_pause:<agent>:<request_id>",
+      "idempotency": [
+        "/audience/id",
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "lead_host",
@@ -167,7 +177,9 @@
       "class": "durable",
       "description": "Ask the gateway to collect, set up or delete a credential through a secure form.",
       "expiry_seconds": 604800,
-      "idempotency": "credential_form:<form_id>",
+      "idempotency": [
+        "/body/form_id"
+      ],
       "ledger": "form_wait_open",
       "receivers": [
         "gateway"
@@ -192,7 +204,9 @@
       "class": "durable",
       "description": "What became of a credential form.",
       "expiry_seconds": 604800,
-      "idempotency": "secure_result:credential_form:<form_id>",
+      "idempotency": [
+        "/body/form_id"
+      ],
       "ledger": "form_wait_closed",
       "receivers": [
         "lead_host"
@@ -217,7 +231,10 @@
       "class": "durable",
       "description": "Tells a former holder that its task moved; later results are kept as late work.",
       "expiry_seconds": 604800,
-      "idempotency": "custody_moved:<task_id>:<custody_token>",
+      "idempotency": [
+        "/body/task_id",
+        "/body/custody_token"
+      ],
       "ledger": "custody_lost",
       "receivers": [
         "worker_host",
@@ -243,7 +260,9 @@
       "class": "durable",
       "description": "The gateway delivered an answer or notice to a person.",
       "expiry_seconds": 604800,
-      "idempotency": "<receipt_id>",
+      "idempotency": [
+        "/body/receipt_id"
+      ],
       "ledger": "none",
       "receivers": [
         "team_services"
@@ -272,7 +291,9 @@
       "class": "durable",
       "description": "A receiver refused a message; sent back to its sender.",
       "expiry_seconds": 86400,
-      "idempotency": "refused:<message_id>",
+      "idempotency": [
+        "/body/refused_message_id"
+      ],
       "ledger": "send_refused",
       "receivers": [
         "lead_host",
@@ -305,7 +326,9 @@
       "class": "durable",
       "description": "A fact for an agent's work ledger from the team services.",
       "expiry_seconds": 604800,
-      "idempotency": "ledger_fact:<fact_id>",
+      "idempotency": [
+        "/body/fact_id"
+      ],
       "ledger": "fact_recorded",
       "receivers": [
         "lead_host",
@@ -331,7 +354,9 @@
       "class": "durable",
       "description": "A notice for a person, delivered by the gateway.",
       "expiry_seconds": 604800,
-      "idempotency": "notify:<notice_id>",
+      "idempotency": [
+        "/body/notice_id"
+      ],
       "ledger": "person_notified",
       "receivers": [
         "gateway"
@@ -358,7 +383,9 @@
       "class": "durable",
       "description": "A question ended without an answer.",
       "expiry_seconds": 604800,
-      "idempotency": "question_closed:<question_id>",
+      "idempotency": [
+        "/body/question_id"
+      ],
       "ledger": "question_closed",
       "receivers": [
         "lead_host",
@@ -386,7 +413,9 @@
       "class": "event",
       "description": "Hint that a managed skill was installed or removed. Receivers verify the stored receipt before they refresh.",
       "expiry_seconds": 300,
-      "idempotency": "skills_changed:<change_id>",
+      "idempotency": [
+        "/body/change_id"
+      ],
       "ledger": "none",
       "receivers": [
         "lead_host",
@@ -410,9 +439,16 @@
       "authority": "none",
       "body": "bodies/task.account.schema.json",
       "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
       "description": "A held holder's account of where its task stopped.",
       "expiry_seconds": 86400,
-      "idempotency": "task_account:<task_id>:<steer_id>:<stage>",
+      "idempotency": [
+        "/body/task_id",
+        "/body/steer_id",
+        "/body/stage/type"
+      ],
       "ledger": "hold_account",
       "receivers": [
         "lead_host"
@@ -438,7 +474,9 @@
       "class": "durable",
       "description": "The answer to one question.",
       "expiry_seconds": 604800,
-      "idempotency": "question_answer:<question_id>",
+      "idempotency": [
+        "/body/question_id"
+      ],
       "ledger": "question_answered",
       "receivers": [
         "lead_host",
@@ -470,11 +508,12 @@
       ],
       "description": "A holder took a task.",
       "expiry_seconds": 86400,
-      "idempotency": "task_claimed:<claim_id>",
+      "idempotency": [
+        "/body/claim_id"
+      ],
       "ledger": "standin_holder",
       "receivers": [
-        "lead_host",
-        "team_services"
+        "lead_host"
       ],
       "rendering": "none",
       "routing": "requester",
@@ -501,11 +540,12 @@
       ],
       "description": "A holder that lost its lease returns a task.",
       "expiry_seconds": 604800,
-      "idempotency": "handback_<sha256>",
+      "idempotency": [
+        "/body/handback_id"
+      ],
       "ledger": "standin_returned",
       "receivers": [
-        "lead_host",
-        "team_services"
+        "lead_host"
       ],
       "rendering": "summary",
       "routing": "requester",
@@ -526,9 +566,16 @@
       "authority": "none",
       "body": "bodies/task.progress.schema.json",
       "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
       "description": "Where a task stands, from its holder to its requester.",
       "expiry_seconds": 86400,
-      "idempotency": "task_progress:<task_id>:<sequence>",
+      "idempotency": [
+        "/body/task_id",
+        "/body/custody_token",
+        "/body/sequence"
+      ],
       "ledger": "standin_progress",
       "receivers": [
         "lead_host"
@@ -558,7 +605,9 @@
       "class": "durable",
       "description": "A question from a task's holder to the one who can answer it.",
       "expiry_seconds": 604800,
-      "idempotency": "task_question:<question_id>",
+      "idempotency": [
+        "/body/question_id"
+      ],
       "ledger": "question_open",
       "receivers": [
         "lead_host",
@@ -587,7 +636,9 @@
       "class": "durable",
       "description": "A report from a holder to its requester; the lead decides whether a person sees it.",
       "expiry_seconds": 604800,
-      "idempotency": "task_report:<report_id>",
+      "idempotency": [
+        "/body/report_id"
+      ],
       "ledger": "report_received",
       "receivers": [
         "lead_host"
@@ -619,13 +670,14 @@
       ],
       "description": "Give a task to an agent or a pool.",
       "expiry_seconds": 604800,
-      "idempotency": "task_request:<task_id>:<message_id>",
+      "idempotency": [
+        "/body/task_id",
+        "/message_id"
+      ],
       "ledger": "task_held",
       "receivers": [
         "lead_host",
-        "worker_host",
-        "edge_adapter",
-        "team_services"
+        "worker_host"
       ],
       "rendering": "full",
       "routing": "named",
@@ -656,13 +708,16 @@
       ],
       "description": "The final answer of a task, sent by its holder.",
       "expiry_seconds": 604800,
-      "idempotency": "task_result:<task_id>:<custody_token>",
+      "idempotency": [
+        "/body/task_id",
+        "/body/custody_token",
+        "/body/sequence"
+      ],
       "ledger": "delegated_resolved",
       "receivers": [
         "lead_host",
         "gateway",
-        "edge_adapter",
-        "team_services"
+        "edge_adapter"
       ],
       "rendering": "full",
       "routing": "requester",
@@ -697,7 +752,10 @@
       "class": "durable",
       "description": "Steering for the holder of one named task.",
       "expiry_seconds": 86400,
-      "idempotency": "task_steer:<task_id>:<steer_id>",
+      "idempotency": [
+        "/body/task_id",
+        "/body/steer_id"
+      ],
       "ledger": "steering_received",
       "receivers": [
         "worker_host",
@@ -731,7 +789,10 @@
       "class": "durable",
       "description": "Stop one task. Sent only to the task's current holder.",
       "expiry_seconds": 86400,
-      "idempotency": "task.stop:<base64url(sha256(RFC8785([task_id, stop_id])))>",
+      "idempotency": [
+        "/body/task_id",
+        "/body/stop_id"
+      ],
       "ledger": "task_stopped",
       "receivers": [
         "lead_host",
@@ -758,7 +819,9 @@
       "class": "durable",
       "description": "Ask the gateway to have a person or administrator set a tool up.",
       "expiry_seconds": 604800,
-      "idempotency": "<setup_request_id>",
+      "idempotency": [
+        "/body/setup_request_id"
+      ],
       "ledger": "setup_wait_open",
       "receivers": [
         "gateway"
@@ -783,7 +846,9 @@
       "class": "durable",
       "description": "What became of a tool setup.",
       "expiry_seconds": 604800,
-      "idempotency": "secure_result:tool_setup:<setup_request_id>",
+      "idempotency": [
+        "/body/setup_request_id"
+      ],
       "ledger": "setup_wait_closed",
       "receivers": [
         "lead_host"
@@ -922,7 +987,7 @@
     },
     {
       "code": "invalid_body",
-      "meaning": "the body breaks the kind's schema"
+      "meaning": "the body breaks the kind's schema, or the idempotency key is not the one the kind's key parts give"
     },
     {
       "code": "bad_authority",
