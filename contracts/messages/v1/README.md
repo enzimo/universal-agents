@@ -303,7 +303,8 @@ Each file in `examples/invalid/` describes one refusal:
 - `signing`: `after` (the default) signs again after the changes, `before` keeps the
   base's signature, `stale_digest` signs again but keeps the base's body digest;
   `signed_by` signs with another key; `token_signing: before` keeps the authority token's
-  signature; `after_signing` respells a value with the same bytes;
+  signature; `proof_signing: before` keeps a renewal's new-key proof; `after_signing`
+  respells a value with the same bytes;
 - `text_changes` and `pad_to_bytes`: edits to the serialized text;
 - `context`: `receiver` fields, `now`, `arrived_on`, `headers`, `replay` (`digest` held
   for the frame's key), `trust` (`add` and `remove`, relative to `examples/trust/`),

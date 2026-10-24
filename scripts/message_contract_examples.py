@@ -41,7 +41,7 @@ STATES = EXAMPLES / "state"
 RENEW_KIND, KEY_ROTATION = "host.renew", "application_key_rotation"
 # Fields of an invalid example; frame_text is the one this module writes.
 INVALID_FIELDS = {"description", "refusal", "also", "at", "base", "changes", "signing", "signed_by", "token_signing",
-                  "after_signing", "text_changes", "pad_to_bytes", "context", "frame_text"}
+                  "proof_signing", "after_signing", "text_changes", "pad_to_bytes", "context", "frame_text"}
 INVALID_STATE_FIELDS = {"description", "refusal", "at", "base", "changes", "signing", "context", "document_text"}
 SIGNING_MODES = {"after", "before", "stale_digest"}
 BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
@@ -131,12 +131,12 @@ class Signer:
         return token
 
     def frame(self, frame: dict[str, Any], *, key_id: str | None = None, digest: str | None = None,
-              sign_token: bool = True) -> dict[str, Any]:
-        """Sign a frame: its authority token first, then the body digest, then the frame."""
+              sign_token: bool = True, sign_proof: bool = True) -> dict[str, Any]:
+        """Sign a frame: a renewal's new-key proof and its authority token first, then the body digest, then the frame."""
 
         frame = dict(frame)
         frame["body"] = self.sign_nested_records(self.fill_public_keys(frame["body"]))
-        if frame["kind"] == RENEW_KIND and KEY_ROTATION in frame["body"]:
+        if frame["kind"] == RENEW_KIND and KEY_ROTATION in frame["body"] and sign_proof:
             frame = self.rotation_proof(frame)
         if "authority" in frame and sign_token:
             frame["authority"] = self.token(frame["authority"])
@@ -237,7 +237,8 @@ def invalid_frame_text(case: dict[str, Any], frames: dict[str, dict[str, Any]], 
     if mode != "before":
         frame = signer.frame(frame, key_id=case.get("signed_by"),
                              digest=frame["body_digest"] if mode == "stale_digest" else None,
-                             sign_token=case.get("token_signing", "after") == "after")
+                             sign_token=case.get("token_signing", "after") == "after",
+                             sign_proof=case.get("proof_signing", "after") == "after")
     for change in case.get("after_signing", []):
         parent, last = _parent(frame, change["respell"])
         parent[last] = _respell(parent[last])
