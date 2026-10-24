@@ -1,6 +1,6 @@
 {
   "allow_responses": {
-    "expires": "30s",
+    "expires": "38s",
     "max": 1
   },
   "publish": [

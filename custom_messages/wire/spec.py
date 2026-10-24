@@ -33,6 +33,7 @@ class KindSpec:
     name: str
     delivery_class: str
     address: str
+    audience_target: str
     body_model: TypeAdapter[Any]
     reply_model: Optional[TypeAdapter[Any]]
     reply_errors: tuple[str, ...]
@@ -53,3 +54,16 @@ class KindSpec:
 
     def prune(self, body: Any) -> Any:
         return prune(body, self.body_shape)
+
+
+@dataclass(frozen=True)
+class StateSpec:
+    """A signed key-value record: its bucket and key form, who signs and stores it, and its body model."""
+
+    name: str
+    bucket: str
+    key: str
+    signer: str
+    signer_roles: tuple[str, ...]
+    writers: tuple[str, ...]
+    body_model: TypeAdapter[Any]

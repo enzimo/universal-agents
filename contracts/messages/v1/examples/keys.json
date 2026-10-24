@@ -1,17 +1,47 @@
 {
-  "description": "Test keys for the examples. The seeds are public test data; never use them for anything else.",
+  "description": "Test keys for the examples and vectors. The seeds are public test data; never use them for anything else. holder is the runtime that signs with the key, or authority for an installation's authority key.",
   "keys": {
+    "test-authority-key-1": {
+      "seed": "gYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6A",
+      "public_key": "AgvUJ0RrcjQk2A0srTUro982SdDvj6rgyn6yVEOUGyk",
+      "installation": "install_example",
+      "holder": "authority"
+    },
     "test-lead-key-1": {
       "seed": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
       "public_key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
-      "team": "team_example",
-      "runtime": "lead-host-1"
+      "installation": "install_example",
+      "holder": "lead-host-1"
     },
     "test-worker-key-1": {
       "seed": "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A",
       "public_key": "5_FioQvsVZr-oZXk3OhLaVaNXSywlj60RsBoXisX8vA",
-      "team": "team_example",
-      "runtime": "worker-host-1"
+      "installation": "install_example",
+      "holder": "worker-host-1"
+    },
+    "test-gateway-key-1": {
+      "seed": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2A",
+      "public_key": "rcFAEfgtHFbZVqpPnXPYhYNhpgYEhSXg0Ixjjcdd2Mc",
+      "installation": "install_example",
+      "holder": "gateway-1"
+    },
+    "test-services-key-1": {
+      "seed": "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1-f4A",
+      "public_key": "iC0Oo7KGTnpYfz5pjOpEWZmDEuZV4F-l6LURnYuqyM0",
+      "installation": "install_example",
+      "holder": "team-services-1"
+    },
+    "test-peer-authority-key-1": {
+      "seed": "oaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2-v8A",
+      "public_key": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE",
+      "installation": "install_peer",
+      "holder": "authority"
+    },
+    "test-peer-lead-key-1": {
+      "seed": "wcLDxMXGx8jJysvMzc7P0NHS09TV1tfY2drb3N3e3-A",
+      "public_key": "dSnEVtk40rj-kPpsz5FtNGdwpkvLt7UyO2h6zeIM0Aw",
+      "installation": "install_peer",
+      "holder": "peer-lead-host-1"
     }
   }
 }

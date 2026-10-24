@@ -212,7 +212,8 @@ reading its credentials. It checks durable fetch/acknowledgement and signed
 request/reply delivery, including refused access to other consumers. The NATS CI
 job sets `LIVE_TEST_NATS_SERVER`, so a missing server fails there instead of
 skipping. Regenerate the contract sources with
-`python scripts/export_message_contract.py`, then run its `--check` mode. See
+`python scripts/export_message_contract.py`, which also signs the examples, trust
+records and vectors, then run its `--check` mode. See
 `contracts/messages/v1/README.md` for the language-neutral validation and
 signing rules.
 

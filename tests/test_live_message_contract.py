@@ -24,22 +24,19 @@ import socket
 import subprocess
 import time
 from contextlib import AsyncExitStack
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
 import nats
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from nats.js.api import AckPolicy, ConsumerConfig, RetentionPolicy, StorageType, StreamConfig
 
-from custom_messages.wire.frame import Receiver, TrustedKey, b64url_decode, sign_frame, verify_frame
+from custom_messages.wire.kinds import KINDS
+from tests import message_contract_support as fixtures
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 CONTRACT = Path(__file__).resolve().parents[1] / "contracts/messages/v1"
-KEYS = json.loads((CONTRACT / "examples/keys.json").read_text())["keys"]
 TRANSPORT = json.loads((CONTRACT / "generated/transport.json").read_text())
-NOW = datetime(2026, 10, 22, 4, 30, 1, tzinfo=timezone.utc)
 TEAM = "team_example"
 RETENTION = {"workqueue": RetentionPolicy.WORK_QUEUE, "limits": RetentionPolicy.LIMITS}
 STORAGE = {"file": StorageType.FILE, "memory": StorageType.MEMORY}
@@ -107,20 +104,20 @@ def consumer_config(template: str, **ids: str) -> ConsumerConfig:
     )
 
 
-def example(kind: str, name: str = "basic") -> dict:
-    return json.loads((CONTRACT / "examples/valid" / kind / f"{name}.json").read_text())
+def headers(frame: dict) -> dict[str, str]:
+    """The NATS header copies a sender sets (README, "NATS headers")."""
+
+    copies = {"UA-Kind": frame["kind"], "UA-Id": frame["message_id"]}
+    spec = KINDS.get(frame["kind"])
+    if spec is not None and spec.delivery_class == "durable":
+        copies["Nats-Msg-Id"] = frame["idempotency_key"]
+    return copies
 
 
-def signed(frame: dict) -> bytes:
-    key = Ed25519PrivateKey.from_private_bytes(b64url_decode(KEYS[frame["issuer"]["key_id"]]["seed"]))
-    return json.dumps(sign_frame(frame, key)).encode()
+def arrived(frame: dict, message) -> dict:
+    """The verification context of a frame as NATS delivered it."""
 
-
-def trusted_keys() -> dict[str, TrustedKey]:
-    return {key_id: TrustedKey(
-        Ed25519PrivateKey.from_private_bytes(b64url_decode(spec["seed"])).public_key(),
-        spec["team"], spec["runtime"],
-    ) for key_id, spec in KEYS.items()}
+    return {"arrived_on": message.subject, "headers": message.headers or {}}
 
 
 def server_version(executable: str) -> tuple[int, ...]:
@@ -270,14 +267,13 @@ async def test_generated_grants_allow_pull_ack_and_refuse_other_consumers(isolat
         await create_topology(admin, ["researcher-2", "researcher-3"])
         own, other = consumer_name("agent_inbox", agent="researcher-2"), consumer_name("agent_inbox", agent="researcher-3")
 
-        frame = example("task.stop")
-        await lead.nc.jetstream().publish(frame["subject"], signed(frame))
+        frame = fixtures.example_frame("task.stop")
+        await lead.nc.jetstream().publish(frame["subject"], json.dumps(frame).encode(), headers=headers(frame))
         worker_js = worker.nc.jetstream()
         await worker_js.consumer_info("UA1_WORK", own)
         subscription = await worker_js.pull_subscribe_bind(stream="UA1_WORK", consumer=own)
         delivered, = await subscription.fetch(1, timeout=2)
-        checked = verify_frame(delivered.data, keys=trusted_keys(), arrived_on=delivered.subject,
-                               receiver=Receiver(**frame["audience"]), now=NOW)
+        checked = fixtures.verify(delivered.data, frame, arrived(frame, delivered))
         assert checked.body.task_id == frame["body"]["task_id"]
         await delivered.ack_sync(timeout=2)
         info = await admin.nc.jetstream().consumer_info("UA1_WORK", own)
@@ -368,19 +364,18 @@ async def test_signed_request_reply_uses_the_real_nats_inbox(isolated_broker) ->
     async with AsyncExitStack() as stack:
         lead = await connect(stack, isolated_broker, "lead")
         worker = await connect(stack, isolated_broker, "worker")
-        request = example("agent.pause")
+        request = fixtures.example_frame("agent.pause")
 
         async def respond(message):
-            verified = verify_frame(message.data, keys=trusted_keys(), arrived_on=message.subject,
-                                    receiver=Receiver(**request["audience"]), now=NOW)
-            reply = example("agent.pause.reply", "paused")
+            verified = fixtures.verify(message.data, request, arrived(request, message))
+            reply = fixtures.example_frame("agent.pause.reply", "paused")
             reply.update(subject=message.reply, causation_id=verified.frame.message_id)
-            await worker.nc.publish(message.reply, signed(reply))
+            await worker.nc.publish(message.reply, fixtures.resign(reply), headers=headers(reply))
 
         await subscribe_ready(worker, request["subject"], respond)
-        response = await lead.nc.request(request["subject"], signed(request), timeout=2)
-        verified = verify_frame(response.data, keys=trusted_keys(), arrived_on=response.subject,
-                                receiver=Receiver("team_example", "agent", "lead", "lead-host-1"), now=NOW)
-        assert verified.frame.causation_id == request["message_id"]
+        response = await lead.nc.request(request["subject"], json.dumps(request).encode(), timeout=2, headers=headers(request))
+        answer = json.loads(response.data)
+        verified = fixtures.verify(response.data, answer, arrived(answer, response))
+        assert verified.frame.causation_id == request["message_id"] and verified.frame.issuer.agent == "researcher-2"
         assert verified.body.outcome == "ok" and verified.body.state == "paused"
         assert worker.errors.empty() and lead.errors.empty()

@@ -3,7 +3,9 @@
 Frames are signed over the RFC 8785 canonical form of the JSON as received. Before
 that form is computed, input is held to the protocol's stricter rules: one JSON
 object per document, no repeated keys, and integers only, within the range that
-the canonical form represents exactly (±(2^53 - 1)).
+the canonical form represents exactly (±(2^53 - 1)). A number written with a
+fraction or exponent part is refused even when its value is whole (``1.0``,
+``1e3``), so every implementation decides by the number's text.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ def _object_without_repeated_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any
 
 
 def _refuse_float(text: str) -> float:
-    raise CanonicalJsonError(f"non-integer number {text}")
+    raise CanonicalJsonError(f"number with a fraction or exponent part: {text}")
 
 
 def _refuse_constant(text: str) -> float:
@@ -86,7 +88,7 @@ def check_values(value: Any, *, at: str = "", depth: int = 0) -> None:
             raise CanonicalJsonError(f"integer outside ±(2^53 - 1) at {at or '/'}")
         return
     if isinstance(value, float):
-        raise CanonicalJsonError(f"non-integer number at {at or '/'}")
+        raise CanonicalJsonError(f"number with a fraction or exponent part at {at or '/'}")
     if isinstance(value, list):
         if depth >= MAX_NESTING_DEPTH:
             raise CanonicalJsonError(f"nesting exceeds {MAX_NESTING_DEPTH} containers")
@@ -105,11 +107,14 @@ def check_values(value: Any, *, at: str = "", depth: int = 0) -> None:
     raise CanonicalJsonError(f"unsupported value of type {type(value).__name__} at {at or '/'}")
 
 
-def parse(document: bytes | str) -> dict[str, Any]:
-    """Parse one protocol document, refusing repeated keys, non-integers and non-objects."""
+def parse(document: bytes | bytearray | memoryview | str) -> dict[str, Any]:
+    """Parse one protocol document, refusing repeated keys, fractions, exponents and non-objects.
+
+    A leading byte-order mark is not JSON and is refused like any other stray character.
+    """
 
     try:
-        text = document.decode("utf-8") if isinstance(document, bytes) else document
+        text = document if isinstance(document, str) else bytes(document).decode("utf-8")
         _check_nesting(text)
         value = json.loads(
             text,

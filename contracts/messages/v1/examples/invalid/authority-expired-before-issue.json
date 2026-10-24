@@ -1,0 +1,14 @@
+{
+  "description": "The token expired before the frame was issued.",
+  "refusal": "bad_authority",
+  "at": "/authority/expires_at",
+  "base": "task.stop/for-person.json",
+  "changes": [
+    {
+      "set": "/authority/expires_at",
+      "to": "2026-10-22T04:29:30.000Z"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.stop\", \"message_id\": \"01928f3a-7b2c-7004-8000-000000000004\", \"idempotency_key\": \"task.stop:_HWvLKp0FruRbmcSpynfGaVTLXXA5i-hmwUXf15LzHY\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.lead-host-1.work.agent.researcher-2\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7010-8000-000000000010\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"root_task\", \"id\": \"task_root_7f\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-22T04:29:30.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"OU9wkPqMJDcIF4u_e1zQOYndMVnBq_S_Zd1iyzEMQ-IgP5_qReThh3S2MLfS_TaXj9WdG3lo-ZZdnKPrLsUGDA\"}, \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_7f3a\", \"stop_id\": \"stop_2\", \"reason\": \"The person asked to stop this task.\", \"cascade_to_subtasks\": true}, \"body_digest\": \"wnqyQzN29TdExEaICPbIxLgQBUJwJjBof2Ejelckevw\", \"signature\": \"ljcB3JlYJ-LApt0qPZI9s7sh-8Qbm3T8sRUcLUZq86ZPTWwI3RA1jlLwfhRw_y3tlf9SMbRcTeVmlxFyyXwbBw\"}"
+}

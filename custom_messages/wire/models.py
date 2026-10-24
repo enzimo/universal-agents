@@ -18,6 +18,9 @@ class WireModel(BaseModel):
 TokenId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')]
 
 
+InstallationId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,61}$')]
+
+
 TeamId = TokenId
 
 
@@ -28,6 +31,9 @@ AgentId = TokenId
 
 
 AgentType = TokenId
+
+
+SessionId = TokenId
 
 
 RecordId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$')]
@@ -42,7 +48,7 @@ IdempotencyKey = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-
 Kind = Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$', max_length=96)]
 
 
-Timestamp = Annotated[Annotated[str, StringConstraints(pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$')], AfterValidator(validate_timestamp)]
+Timestamp = Annotated[Annotated[str, StringConstraints(pattern='^(19[7-9][0-9]|[2-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$')], AfterValidator(validate_timestamp)]
 
 
 Epoch = Annotated[int, Field(ge=0, le=9007199254740991)]
@@ -79,30 +85,42 @@ class BlobRef(WireModel):
 
 
 class Issuer(WireModel):
-    "Who signed the frame: the host, and the agent session it signed for."
+    "Who signed the frame: the host, by its certificate, and the agent session it signed for. Receivers look the certificate and the session up in their trust store; nothing here is trusted until those records confirm it."
 
+    installation: InstallationId
     team: TeamId
     runtime: RuntimeId
     agent: Union[AgentId, MISSING] = Field(default=MISSING)
-    session: Union[TokenId, MISSING] = Field(default=MISSING)
+    session: Union[SessionId, MISSING] = Field(default=MISSING)
     membership_epoch: Epoch
     revocation_epoch: Epoch
     key_id: KeyId
 
 
 class Audience(WireModel):
-    "Who the frame is for. Agents are named by id, never by the host that runs them."
+    "Who the frame is for. Agents are named by id, never by the host that runs them. Broadcast events name their whole team (target team, id the team id); team services also use the team id."
 
+    installation: InstallationId
     team: TeamId
-    target: Literal['agent', 'pool', 'team_services', 'edge', 'installation_service']
+    target: Literal['agent', 'pool', 'team_services', 'team', 'edge', 'installation_service']
     id: TokenId
     runtime: Union[RuntimeId, MISSING] = Field(default=MISSING)
 
 
 class AuthorityTokenIssuer(WireModel):
-    team: TeamId
+    "The gateway or scheduler host that signed the token, by its certificate."
+
+    installation: InstallationId
     runtime: RuntimeId
+    membership_epoch: Epoch
     key_id: KeyId
+
+
+class AuthorityTokenAudience(WireModel):
+    "The team the person asked; only that team presents the token. Its installation is the issuer's."
+
+    installation: InstallationId
+    team: TeamId
 
 
 class AuthorityTokenBoundTo(WireModel):
@@ -111,12 +129,12 @@ class AuthorityTokenBoundTo(WireModel):
 
 
 class AuthorityToken(WireModel):
-    "Proof that work acts for a person, issued by the gateway or the scheduler and bound to one root task or one command. It is copied unchanged down a delegation tree."
+    "Proof that work acts for a person, issued by a gateway or scheduler host and bound to one root task or one command. It names the team the person asked (its audience), and only that team presents it, copied unchanged down a delegation tree. The signature covers the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/authority-token/v1 and a newline."
 
     token_id: MessageId
     issuer: AuthorityTokenIssuer
+    audience: AuthorityTokenAudience
     person: PersonRef
-    team: TeamId
     bound_to: AuthorityTokenBoundTo
     issued_at: Timestamp
     expires_at: Timestamp
@@ -124,8 +142,55 @@ class AuthorityToken(WireModel):
     signature: Ed25519Signature
 
 
+HostRole = Literal['gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler']
+
+
+AgentRole = Literal['lead', 'worker']
+
+
+ProtocolLabel = Annotated[str, StringConstraints(pattern='^1\\.(0|[1-9][0-9]{0,3})-pre$')]
+
+
+NatsUserKey = Annotated[str, StringConstraints(pattern='^U[A-Z2-7]{55}$')]
+
+
+class ApplicationKey(WireModel):
+    "A host's or authority's Ed25519 signing key and the id that frames and records name it by."
+
+    key_id: KeyId
+    public_key: Ed25519PublicKey
+
+
+class Software(WireModel):
+    name: Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_-]{0,63}$')]
+    version: Annotated[str, StringConstraints(pattern='^[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,6}([-+][0-9A-Za-z.-]{1,32})?$')]
+
+
+StateKey = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,64}(\\.[A-Za-z0-9_-]{1,64}){0,3}$')]
+
+
+class StateWriterAuthority(WireModel):
+    type: Literal['authority']
+    installation: InstallationId
+    key_id: KeyId
+
+
+class StateWriterHost(WireModel):
+    type: Literal['host']
+    installation: InstallationId
+    runtime: RuntimeId
+    membership_epoch: Epoch
+    key_id: KeyId
+
+
+StateWriter = Annotated[Union[StateWriterAuthority, StateWriterHost], Field(discriminator='type')]
+
+
+StateSequence = Annotated[int, Field(ge=1, le=9007199254740991)]
+
+
 class Frame(WireModel):
-    "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The body is checked against the schema its kind names in the registry."
+    "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The issuer's host certificate and agent session are looked up in the receiver's trust store. The body is checked against the schema its kind names in the registry."
 
     protocol: Annotated[str, StringConstraints(pattern='^1\\.(0|[1-9][0-9]{0,3})-pre$')]
     kind: Kind
@@ -143,6 +208,88 @@ class Frame(WireModel):
     body_digest: Sha256Digest
     body: dict[str, Any]
     signature: Ed25519Signature
+
+
+class State(WireModel):
+    "Every key-value record is one state record, signed with Ed25519 over the domain prefix universal-agents/state-record/v1 and a newline, then the RFC 8785 canonical JSON of the record without its signature. The registry names, per record, who signs it and the schema its body follows. Readers verify every record they use; where it is stored adds no trust."
+
+    record: Literal['agent_session', 'agreement', 'certificate', 'revocations']
+    key: StateKey
+    writer: StateWriter
+    sequence: StateSequence
+    issued_at: Timestamp
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+    algorithm: Literal['ed25519']
+    body_digest: Sha256Digest
+    body: dict[str, Any]
+    signature: Ed25519Signature
+
+
+class AgentSessionState(WireModel):
+    "Issued by the team services when they start or move an agent: this agent, of this type and team role, runs on this host from started_at until ends_at. The team services renew a running session before ends_at and rewrite it with the actual end when the agent stops or moves. A frame that names an agent must fall inside one of its sessions on the signing host."
+
+    session: SessionId
+    installation: InstallationId
+    team: TeamId
+    agent: AgentId
+    agent_type: AgentType
+    agent_role: AgentRole
+    runtime: RuntimeId
+    placement_revision: Annotated[int, Field(ge=1, le=9007199254740991)]
+    started_at: Timestamp
+    ends_at: Timestamp
+
+
+class AgreementState(WireModel):
+    "Recorded by this installation's authority: another installation's authority keys, which of this installation's teams it may send to, and which durable kinds. Frames, certificates and sessions from that installation are checked against these keys and limits only."
+
+    agreement_id: RecordId
+    installation: InstallationId
+    peer: InstallationId
+    authority_keys: Annotated[list[ApplicationKey], Field(min_length=1, max_length=4)]
+    teams: Annotated[list[TeamId], Field(min_length=1, max_length=64)]
+    kinds: Annotated[list[Kind], Field(min_length=1, max_length=256)]
+    issued_at: Timestamp
+    expires_at: Timestamp
+
+
+class CertificateState(WireModel):
+    "Issued by an installation's authority: which key a host signs with, for which teams, roles and agent types, and from when to when. A receiver checks a frame with the certificate that was valid when the frame was issued, unless any revocation lists it."
+
+    certificate_id: RecordId
+    installation: InstallationId
+    runtime: RuntimeId
+    teams: Annotated[list[TeamId], Field(min_length=1, max_length=64)]
+    roles: Annotated[list[HostRole], Field(min_length=1, max_length=7)]
+    membership_epoch: Annotated[int, Field(ge=1, le=9007199254740991)]
+    revocation_epoch: Epoch
+    application_key: ApplicationKey
+    nats_public_key: NatsUserKey
+    agent_types: Annotated[list[AgentType], Field(max_length=256)]
+    session_limit: Annotated[int, Field(ge=0, le=100000)]
+    protocol: ProtocolLabel
+    deployment: Literal['local', 'operator_managed', 'third_party']
+    profile_sha256: Sha256Digest
+    software: Union[Software, MISSING] = Field(default=MISSING)
+    issued_at: Timestamp
+    expires_at: Timestamp
+    replaces: Union[RecordId, MISSING] = Field(default=MISSING)
+
+
+class RevocationsStateEntriesItem(WireModel):
+    certificate_id: RecordId
+    runtime: RuntimeId
+    membership_epoch: Epoch
+    revoked_at: Timestamp
+    reason: Literal['compromised', 'decommissioned', 'quarantined']
+
+
+class RevocationsState(WireModel):
+    "An installation's revoked host certificates. A listed certificate stops every frame and record that relies on it and was not already admitted, whenever that frame or record says it was issued."
+
+    installation: InstallationId
+    revocation_epoch: Annotated[int, Field(ge=1, le=9007199254740991)]
+    entries: Annotated[list[RevocationsStateEntriesItem], Field(max_length=2000)]
 
 
 class AgentPauseBody(WireModel):
@@ -188,3 +335,7 @@ AgentPauseBodyAdapter = TypeAdapter(AgentPauseBody)
 AgentPauseReplyAdapter = TypeAdapter(Annotated[Union[AgentPauseReplyOk, AgentPauseReplyError], Field(discriminator='outcome')])
 SkillsChangedBodyAdapter = TypeAdapter(Annotated[Union[SkillsChangedBodyInstall, SkillsChangedBodyUninstall], Field(discriminator='operation')])
 TaskStopBodyAdapter = TypeAdapter(TaskStopBody)
+AgentSessionStateAdapter = TypeAdapter(AgentSessionState)
+AgreementStateAdapter = TypeAdapter(AgreementState)
+CertificateStateAdapter = TypeAdapter(CertificateState)
+RevocationsStateAdapter = TypeAdapter(RevocationsState)

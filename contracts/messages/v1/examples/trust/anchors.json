@@ -1,0 +1,10 @@
+{
+  "description": "The receiving installation's authority keys: what every receiver of the examples starts from.",
+  "installation": "install_example",
+  "authority_keys": [
+    {
+      "key_id": "test-authority-key-1",
+      "public_key": "AgvUJ0RrcjQk2A0srTUro982SdDvj6rgyn6yVEOUGyk"
+    }
+  ]
+}

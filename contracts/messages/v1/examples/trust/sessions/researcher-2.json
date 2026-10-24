@@ -1,0 +1,28 @@
+{
+  "record": "agent_session",
+  "key": "session.install_example.team_example.s-researcher-2-1",
+  "writer": {
+    "type": "host",
+    "installation": "install_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "key_id": "test-services-key-1"
+  },
+  "sequence": 1,
+  "issued_at": "2026-10-22T04:00:00.000Z",
+  "body": {
+    "session": "s-researcher-2-1",
+    "installation": "install_example",
+    "team": "team_example",
+    "agent": "researcher-2",
+    "agent_type": "researcher",
+    "agent_role": "worker",
+    "runtime": "worker-host-1",
+    "placement_revision": 12,
+    "started_at": "2026-10-22T04:00:00.000Z",
+    "ends_at": "2026-10-23T04:00:00.000Z"
+  },
+  "algorithm": "ed25519",
+  "body_digest": "JXNgkItumI6a-XeKkRaG9AwCSzwpLNIug6mgBoJ70Zg",
+  "signature": "NM1o-K6sQE_WKUhTDDmk6iefyS95t4ojc6fqHRMMbCIgqt12oefpayKziJiVDOxk3T03s6AQXYm7AW_jFwntBA"
+}

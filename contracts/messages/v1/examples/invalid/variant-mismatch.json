@@ -2,6 +2,13 @@
   "description": "An install names an uninstall change id.",
   "refusal": "invalid_body",
   "at": "/body/change_id",
+  "base": "skills.changed/install.json",
+  "changes": [
+    {
+      "set": "/body/change_id",
+      "to": "skill_uninstall_0123456789ab"
+    }
+  ],
   "context": {},
-  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"skills.changed\", \"message_id\": \"01928f3a-7b2c-7004-8000-000000000004\", \"idempotency_key\": \"skills_changed:skill_install_0123456789ab\", \"issuer\": {\"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.lead-host-1.evt.skills_changed\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:35:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"operation\": \"install\", \"change_id\": \"skill_uninstall_0123456789ab\", \"skill_name\": \"report-writer\", \"installed_tree_sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}, \"body_digest\": \"Mz6_IR_TYEPjZS52fOFAO8uxe7Ie4Rk1Mad-1Ka2ud8\", \"signature\": \"JgqVZt0598t8fqLvipVxOxdCch-nnYQcYqbenEBYV-ILgNJzUNfD0EKFnA2UqLJij-joE8X4fG24ihhpkgC9Cw\"}"
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"skills.changed\", \"message_id\": \"01928f3a-7b2c-7004-8000-000000000004\", \"idempotency_key\": \"skills_changed:skill_install_0123456789ab\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.lead-host-1.evt.skills_changed\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:35:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"operation\": \"install\", \"change_id\": \"skill_uninstall_0123456789ab\", \"skill_name\": \"report-writer\", \"installed_tree_sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}, \"body_digest\": \"Mz6_IR_TYEPjZS52fOFAO8uxe7Ie4Rk1Mad-1Ka2ud8\", \"signature\": \"6dZbGqnUjAemXfMlQAJltoAo-XcGtEQThwURve0GdIqI5rHgsa7E_dsUqhcbvyQleq9jlO2XIDYZQJmZFnQ5Cw\"}"
 }

@@ -3,23 +3,31 @@
 from __future__ import annotations
 
 from custom_messages.wire import models
-from custom_messages.wire.spec import KindSpec
+from custom_messages.wire.spec import KindSpec, StateSpec
 
 PROTOCOL = '1.0-pre'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
+STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
+AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'
+AUTHORITY_TOKEN_MAX_SECONDS = 604800
 MAX_FRAME_BYTES = 262144
 MAX_NESTING_DEPTH = 64
+CLOCK_SKEW_SECONDS = 8
+SUBJECT_PREFIX = 'ua.v1.{team}.{sender}'
+PEER_SENDER_SLOT = 'x-{installation}'
 REPLY_INBOX_PREFIX = '_INBOX.{runtime}'
-VERIFICATION_REFUSALS = ('too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'access_denied')
+BETWEEN_INSTALLATIONS = frozenset(['durable'])
+VERIFICATION_REFUSALS = ('too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_issuer', 'wrong_sender', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'bad_authority', 'access_denied')
 CHANGE_REFUSALS = ('changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy')
 HOST_ROLES = ('gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler')
-FRAME_SHAPE = {'properties': {'protocol': None, 'kind': None, 'message_id': None, 'idempotency_key': None, 'issuer': {'properties': {'team': None, 'runtime': None, 'agent': None, 'session': None, 'membership_epoch': None, 'revocation_epoch': None, 'key_id': None}}, 'audience': {'properties': {'team': None, 'target': None, 'id': None, 'runtime': None}}, 'subject': None, 'causation_id': None, 'issued_at': None, 'not_before': None, 'expires_at': None, 'authority': {'properties': {'token_id': None, 'issuer': {'properties': {'team': None, 'runtime': None, 'key_id': None}}, 'person': None, 'team': None, 'bound_to': {'properties': {'type': None, 'id': None}}, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'signature': None}}, 'algorithm': None, 'body_digest': None, 'body': None, 'signature': None}}
+FRAME_SHAPE = {'properties': {'protocol': None, 'kind': None, 'message_id': None, 'idempotency_key': None, 'issuer': {'properties': {'installation': None, 'team': None, 'runtime': None, 'agent': None, 'session': None, 'membership_epoch': None, 'revocation_epoch': None, 'key_id': None}}, 'audience': {'properties': {'installation': None, 'team': None, 'target': None, 'id': None, 'runtime': None}}, 'subject': None, 'causation_id': None, 'issued_at': None, 'not_before': None, 'expires_at': None, 'authority': {'properties': {'token_id': None, 'issuer': {'properties': {'installation': None, 'runtime': None, 'membership_epoch': None, 'key_id': None}}, 'audience': {'properties': {'installation': None, 'team': None}}, 'person': None, 'bound_to': {'properties': {'type': None, 'id': None}}, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'signature': None}}, 'algorithm': None, 'body_digest': None, 'body': None, 'signature': None}}
 
 KINDS: dict[str, KindSpec] = {
     'agent.pause': KindSpec(
         name='agent.pause',
         delivery_class='request_reply',
         address='ctl.agent.{agent}.pause',
+        audience_target='agent',
         body_model=models.AgentPauseBodyAdapter,
         reply_model=models.AgentPauseReplyAdapter,
         reply_errors=('agent_exiting',),
@@ -42,6 +50,7 @@ KINDS: dict[str, KindSpec] = {
         name='skills.changed',
         delivery_class='event',
         address='evt.skills_changed',
+        audience_target='team',
         body_model=models.SkillsChangedBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -64,6 +73,7 @@ KINDS: dict[str, KindSpec] = {
         name='task.stop',
         delivery_class='durable',
         address='work.agent.{agent}',
+        audience_target='agent',
         body_model=models.TaskStopBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -82,4 +92,11 @@ KINDS: dict[str, KindSpec] = {
         body_shape={'properties': {'task_id': None, 'stop_id': None, 'reason': None, 'cascade_to_subtasks': None}},
         reply_shape=None,
     ),
+}
+
+STATE_RECORDS: dict[str, StateSpec] = {
+    'agent_session': StateSpec(name='agent_session', bucket='UA1_CERTS', key='session.<installation>.<team>.<session>', signer='host', signer_roles=('team_services',), writers=('team_services', 'edge_adapter'), body_model=models.AgentSessionStateAdapter),
+    'agreement': StateSpec(name='agreement', bucket='UA1_CERTS', key='agreement.<peer>', signer='authority', signer_roles=(), writers=('installation_authority',), body_model=models.AgreementStateAdapter),
+    'certificate': StateSpec(name='certificate', bucket='UA1_CERTS', key='host.<installation>.<runtime>.<membership_epoch>', signer='authority', signer_roles=(), writers=('installation_authority', 'edge_adapter'), body_model=models.CertificateStateAdapter),
+    'revocations': StateSpec(name='revocations', bucket='UA1_CERTS', key='revocations.<installation>', signer='authority', signer_roles=(), writers=('installation_authority', 'edge_adapter'), body_model=models.RevocationsStateAdapter),
 }
