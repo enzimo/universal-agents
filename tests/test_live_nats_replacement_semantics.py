@@ -38,6 +38,7 @@ from custom_transport.base import (
 )
 from custom_transport.nats_adapter import NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
+from tests.live_nats_support import flush_fully
 from live_nats_client import nats_transport_config_from_env, resolve_live_transport_settings
 from config_loader import CONFIG_SCHEMA_VERSION
 from id_generation import new_id, new_id_suffix
@@ -268,8 +269,10 @@ async def _wait_no_delivery(
 
 
 async def _flush(adapter: NatsTransportAdapter) -> None:
+    """Wait until the server holds the subscriptions made on ``adapter`` so far."""
+
     if adapter._nc is not None:
-        await adapter._nc.flush()
+        await flush_fully(adapter._nc)
 
 
 async def test_live_redelivery_moves_unacked_pool_work_to_another_worker() -> None:

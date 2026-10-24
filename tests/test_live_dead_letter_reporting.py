@@ -121,10 +121,18 @@ def _notices(lead):
 
 
 async def _reports_settled(adapter) -> bool:
-    await adapter._nc.flush()
-    return await _consumer_settled(
-        adapter._js, adapter.mapper.dead_letter_stream_name(),
-        adapter.mapper.durable_name(WATCH_CONSUMER_ROUTE),
+    """Whether the watch acknowledged every report it read.
+
+    Reports are acknowledged without waiting for the server, which updates the
+    consumer's counts on its own schedule, so this waits as the other checks do.
+    """
+
+    return await _wait_until(
+        lambda: _consumer_settled(
+            adapter._js, adapter.mapper.dead_letter_stream_name(),
+            adapter.mapper.durable_name(WATCH_CONSUMER_ROUTE),
+        ),
+        timeout=5,
     )
 
 
