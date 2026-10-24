@@ -3,21 +3,30 @@
 from __future__ import annotations
 
 from custom_messages.wire import models
-from custom_messages.wire.spec import KindSpec
+from custom_messages.wire.spec import KindSpec, StateSpec
 
 PROTOCOL = '1.0-pre'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
+STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
+AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'
+AUTHORITY_TOKEN_MAX_SECONDS = 604800
 MAX_FRAME_BYTES = 262144
-VERIFICATION_REFUSALS = ('too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'access_denied')
+MAX_NESTING_DEPTH = 64
+CLOCK_SKEW_SECONDS = 8
+SUBJECT_PREFIX = 'ua.v1.{team}.{sender}'
+PEER_SENDER_SLOT = 'x-{installation}'
+REPLY_INBOX_PREFIX = '_INBOX.{runtime}'
+BETWEEN_INSTALLATIONS = frozenset(['durable'])
+VERIFICATION_REFUSALS = ('too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_issuer', 'wrong_sender', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'bad_authority', 'access_denied')
 CHANGE_REFUSALS = ('changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy')
 HOST_ROLES = ('gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler')
-FRAME_SHAPE = {'properties': {'protocol': None, 'kind': None, 'message_id': None, 'idempotency_key': None, 'issuer': {'properties': {'team': None, 'runtime': None, 'agent': None, 'session': None, 'membership_epoch': None, 'revocation_epoch': None, 'key_id': None}}, 'audience': {'properties': {'team': None, 'target': None, 'id': None, 'runtime': None}}, 'subject': None, 'causation_id': None, 'issued_at': None, 'not_before': None, 'expires_at': None, 'authority': {'properties': {'token_id': None, 'issuer': {'properties': {'team': None, 'runtime': None, 'key_id': None}}, 'person': None, 'team': None, 'bound_to': {'properties': {'type': None, 'id': None}}, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'signature': None}}, 'algorithm': None, 'body_digest': None, 'body': None, 'signature': None}}
+FRAME_SHAPE = {'properties': {'protocol': None, 'kind': None, 'message_id': None, 'idempotency_key': None, 'issuer': {'properties': {'installation': None, 'team': None, 'runtime': None, 'agent': None, 'session': None, 'membership_epoch': None, 'revocation_epoch': None, 'key_id': None}}, 'audience': {'properties': {'installation': None, 'team': None, 'target': None, 'id': None, 'runtime': None}}, 'subject': None, 'causation_id': None, 'issued_at': None, 'not_before': None, 'expires_at': None, 'authority': {'properties': {'token_id': None, 'issuer': {'properties': {'installation': None, 'runtime': None, 'membership_epoch': None, 'key_id': None}}, 'audience': {'properties': {'installation': None, 'team': None}}, 'person': None, 'bound_to': {'properties': {'type': None, 'id': None}}, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'signature': None}}, 'algorithm': None, 'body_digest': None, 'body': None, 'signature': None}}
 
 KINDS: dict[str, KindSpec] = {
     'access.decision': KindSpec(
         name='access.decision',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.AccessDecisionBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -39,7 +48,7 @@ KINDS: dict[str, KindSpec] = {
     'access.request': KindSpec(
         name='access.request',
         delivery_class='durable',
-        addresses=('work.team',),
+        addresses={'team_services': 'work.team'},
         body_model=models.AccessRequestBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -61,7 +70,7 @@ KINDS: dict[str, KindSpec] = {
     'access.resolved': KindSpec(
         name='access.resolved',
         delivery_class='durable',
-        addresses=('work.team',),
+        addresses={'team_services': 'work.team'},
         body_model=models.AccessResolvedBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -83,7 +92,7 @@ KINDS: dict[str, KindSpec] = {
     'agent.pause': KindSpec(
         name='agent.pause',
         delivery_class='request_reply',
-        addresses=('ctl.agent.{agent}.pause',),
+        addresses={'agent': 'ctl.agent.{agent}.pause'},
         body_model=models.AgentPauseBodyAdapter,
         reply_model=models.AgentPauseReplyAdapter,
         reply_errors=('agent_exiting',),
@@ -105,7 +114,7 @@ KINDS: dict[str, KindSpec] = {
     'credential.form.request': KindSpec(
         name='credential.form.request',
         delivery_class='durable',
-        addresses=('work.edge.{edge}',),
+        addresses={'edge': 'work.edge.{edge}'},
         body_model=models.CredentialFormRequestBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -127,7 +136,7 @@ KINDS: dict[str, KindSpec] = {
     'credential.form.result': KindSpec(
         name='credential.form.result',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.CredentialFormResultBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -149,7 +158,7 @@ KINDS: dict[str, KindSpec] = {
     'custody.moved': KindSpec(
         name='custody.moved',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.CustodyMovedBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -171,7 +180,7 @@ KINDS: dict[str, KindSpec] = {
     'delivery.receipt': KindSpec(
         name='delivery.receipt',
         delivery_class='durable',
-        addresses=('work.team',),
+        addresses={'team_services': 'work.team'},
         body_model=models.DeliveryReceiptBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -193,7 +202,7 @@ KINDS: dict[str, KindSpec] = {
     'delivery.refused': KindSpec(
         name='delivery.refused',
         delivery_class='durable',
-        addresses=('work.agent.{agent}', 'work.edge.{edge}', 'work.team'),
+        addresses={'agent': 'work.agent.{agent}', 'edge': 'work.edge.{edge}', 'team_services': 'work.team'},
         body_model=models.DeliveryRefusedBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -215,7 +224,7 @@ KINDS: dict[str, KindSpec] = {
     'ledger.fact': KindSpec(
         name='ledger.fact',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.LedgerFactBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -237,7 +246,7 @@ KINDS: dict[str, KindSpec] = {
     'person.notify': KindSpec(
         name='person.notify',
         delivery_class='durable',
-        addresses=('work.edge.{edge}',),
+        addresses={'edge': 'work.edge.{edge}'},
         body_model=models.PersonNotifyBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -259,7 +268,7 @@ KINDS: dict[str, KindSpec] = {
     'question.closed': KindSpec(
         name='question.closed',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.QuestionClosedBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -281,7 +290,7 @@ KINDS: dict[str, KindSpec] = {
     'skills.changed': KindSpec(
         name='skills.changed',
         delivery_class='event',
-        addresses=('evt.skills_changed',),
+        addresses={'team': 'evt.skills_changed'},
         body_model=models.SkillsChangedBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -303,7 +312,7 @@ KINDS: dict[str, KindSpec] = {
     'task.account': KindSpec(
         name='task.account',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.TaskAccountBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -325,7 +334,7 @@ KINDS: dict[str, KindSpec] = {
     'task.answer': KindSpec(
         name='task.answer',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.TaskAnswerBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -347,7 +356,7 @@ KINDS: dict[str, KindSpec] = {
     'task.claimed': KindSpec(
         name='task.claimed',
         delivery_class='durable',
-        addresses=('work.agent.{agent}', 'work.team'),
+        addresses={'agent': 'work.agent.{agent}', 'team_services': 'work.team'},
         body_model=models.TaskClaimedBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -369,7 +378,7 @@ KINDS: dict[str, KindSpec] = {
     'task.handback': KindSpec(
         name='task.handback',
         delivery_class='durable',
-        addresses=('work.agent.{agent}', 'work.team'),
+        addresses={'agent': 'work.agent.{agent}', 'team_services': 'work.team'},
         body_model=models.TaskHandbackBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -391,7 +400,7 @@ KINDS: dict[str, KindSpec] = {
     'task.progress': KindSpec(
         name='task.progress',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.TaskProgressBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -413,7 +422,7 @@ KINDS: dict[str, KindSpec] = {
     'task.question': KindSpec(
         name='task.question',
         delivery_class='durable',
-        addresses=('work.agent.{agent}', 'work.edge.{edge}'),
+        addresses={'agent': 'work.agent.{agent}', 'edge': 'work.edge.{edge}'},
         body_model=models.TaskQuestionBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -435,7 +444,7 @@ KINDS: dict[str, KindSpec] = {
     'task.report': KindSpec(
         name='task.report',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.TaskReportBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -457,7 +466,7 @@ KINDS: dict[str, KindSpec] = {
     'task.request': KindSpec(
         name='task.request',
         delivery_class='durable',
-        addresses=('work.agent.{agent}', 'work.pool.{pool}', 'work.team'),
+        addresses={'agent': 'work.agent.{agent}', 'pool': 'work.pool.{pool}', 'team_services': 'work.team'},
         body_model=models.TaskRequestBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -479,7 +488,7 @@ KINDS: dict[str, KindSpec] = {
     'task.result': KindSpec(
         name='task.result',
         delivery_class='durable',
-        addresses=('work.agent.{agent}', 'work.edge.{edge}', 'work.team'),
+        addresses={'agent': 'work.agent.{agent}', 'edge': 'work.edge.{edge}', 'team_services': 'work.team'},
         body_model=models.TaskResultBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -501,7 +510,7 @@ KINDS: dict[str, KindSpec] = {
     'task.steer': KindSpec(
         name='task.steer',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.TaskSteerBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -523,7 +532,7 @@ KINDS: dict[str, KindSpec] = {
     'task.stop': KindSpec(
         name='task.stop',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.TaskStopBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -545,7 +554,7 @@ KINDS: dict[str, KindSpec] = {
     'tool.setup.request': KindSpec(
         name='tool.setup.request',
         delivery_class='durable',
-        addresses=('work.edge.{edge}',),
+        addresses={'edge': 'work.edge.{edge}'},
         body_model=models.ToolSetupRequestBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -567,7 +576,7 @@ KINDS: dict[str, KindSpec] = {
     'tool.setup.result': KindSpec(
         name='tool.setup.result',
         delivery_class='durable',
-        addresses=('work.agent.{agent}',),
+        addresses={'agent': 'work.agent.{agent}'},
         body_model=models.ToolSetupResultBodyAdapter,
         reply_model=None,
         reply_errors=(),
@@ -586,4 +595,11 @@ KINDS: dict[str, KindSpec] = {
         body_shape={'properties': {'setup_request_id': None, 'task_id': None, 'status': None, 'tool_id': None, 'setup': {'one_of': 'type', 'variants': {'sign_in': {'properties': {'type': None, 'owner': None}}, 'account_link': {'properties': {'type': None, 'owner': None}}, 'team_sign_in_app': {'properties': {'type': None, 'owner': None}}, 'external_step': {'properties': {'type': None, 'owner': None, 'step_id': None}}}}, 'source': None, 'attempt': None, 'account_label': None, 'needs_administrator': None, 'reason_code': None, 'message': None, 'link_id': None, 'broker_session_id': None}},
         reply_shape=None,
     ),
+}
+
+STATE_RECORDS: dict[str, StateSpec] = {
+    'agent_session': StateSpec(name='agent_session', bucket='UA1_CERTS', key='session.<installation>.<team>.<session>', signer='host', signer_roles=('team_services',), writers=('team_services', 'edge_adapter'), body_model=models.AgentSessionStateAdapter),
+    'agreement': StateSpec(name='agreement', bucket='UA1_CERTS', key='agreement.<peer>', signer='authority', signer_roles=(), writers=('installation_authority',), body_model=models.AgreementStateAdapter),
+    'certificate': StateSpec(name='certificate', bucket='UA1_CERTS', key='host.<installation>.<runtime>.<membership_epoch>', signer='authority', signer_roles=(), writers=('installation_authority', 'edge_adapter'), body_model=models.CertificateStateAdapter),
+    'revocations': StateSpec(name='revocations', bucket='UA1_CERTS', key='revocations.<installation>', signer='authority', signer_roles=(), writers=('installation_authority', 'edge_adapter'), body_model=models.RevocationsStateAdapter),
 }

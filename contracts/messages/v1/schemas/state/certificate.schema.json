@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/state/certificate.schema.json",
+  "title": "Host membership certificate",
+  "description": "Issued by an installation's authority: which key a host signs with, for which teams, roles and agent types, and from when to when. A receiver checks a frame with the certificate that was valid when the frame was issued, unless any revocation lists it.",
+  "type": "object",
+  "properties": {
+    "certificate_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "installation": {
+      "$ref": "../common.schema.json#/$defs/installation_id"
+    },
+    "runtime": {
+      "$ref": "../common.schema.json#/$defs/runtime_id"
+    },
+    "teams": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/team_id"
+      },
+      "minItems": 1,
+      "maxItems": 64
+    },
+    "roles": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/host_role"
+      },
+      "minItems": 1,
+      "maxItems": 7
+    },
+    "membership_epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "revocation_epoch": {
+      "$ref": "../common.schema.json#/$defs/epoch"
+    },
+    "application_key": {
+      "$ref": "../common.schema.json#/$defs/application_key"
+    },
+    "nats_public_key": {
+      "$ref": "../common.schema.json#/$defs/nats_user_key"
+    },
+    "agent_types": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/agent_type"
+      },
+      "maxItems": 256
+    },
+    "session_limit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "protocol": {
+      "$ref": "../common.schema.json#/$defs/protocol_label"
+    },
+    "deployment": {
+      "type": "string",
+      "enum": [
+        "local",
+        "operator_managed",
+        "third_party"
+      ]
+    },
+    "profile_sha256": {
+      "$ref": "../common.schema.json#/$defs/sha256_digest"
+    },
+    "software": {
+      "$ref": "../common.schema.json#/$defs/software"
+    },
+    "issued_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "expires_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "replaces": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    }
+  },
+  "required": [
+    "certificate_id",
+    "installation",
+    "runtime",
+    "teams",
+    "roles",
+    "membership_epoch",
+    "revocation_epoch",
+    "application_key",
+    "nats_public_key",
+    "agent_types",
+    "session_limit",
+    "protocol",
+    "deployment",
+    "profile_sha256",
+    "issued_at",
+    "expires_at"
+  ],
+  "additionalProperties": false
+}

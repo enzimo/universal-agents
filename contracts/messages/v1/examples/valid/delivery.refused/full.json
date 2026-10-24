@@ -4,14 +4,17 @@
   "message_id": "01928f3a-7b2c-711b-8000-00000000011b",
   "idempotency_key": "refused:01928f3a-7b2c-7ccc-8000-00000000cccc",
   "issuer": {
+    "installation": "install_example",
     "team": "team_example",
     "runtime": "worker-host-1",
     "agent": "researcher-2",
+    "session": "s-researcher-2-1",
     "membership_epoch": 3,
     "revocation_epoch": 1,
     "key_id": "test-worker-key-1"
   },
   "audience": {
+    "installation": "install_example",
     "team": "team_example",
     "target": "agent",
     "id": "lead"
@@ -28,5 +31,5 @@
     "current_custody_token": 4
   },
   "body_digest": "6Ztf-Ttm-VTiYgOmCX5qQzubxV-DPiFg6XbRhxz3NqU",
-  "signature": "5jaI0ZBFu_6qD1ogi2JT5oYHbETz8_1hHmjDZ4S5zksU_QHG9CJIUagckp1lse-5bK7tz5GGUxwfVVNxg0VUCQ"
+  "signature": "8LSIOOlAZl87uA36F-RTgt4AZJqDzyld3ZBezXS6xi3CRm5m1hVWbyCL8TVBYWRXPmKl_Mb95sCvB97L30ZZCA"
 }

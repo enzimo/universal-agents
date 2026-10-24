@@ -1,0 +1,44 @@
+{
+  "record": "certificate",
+  "key": "host.install_example.gateway-1.1",
+  "writer": {
+    "type": "authority",
+    "installation": "install_example",
+    "key_id": "test-authority-key-1"
+  },
+  "sequence": 1,
+  "issued_at": "2026-10-22T00:00:00.000Z",
+  "expires_at": "2026-11-21T00:00:00.000Z",
+  "body": {
+    "certificate_id": "cert_gateway_1",
+    "installation": "install_example",
+    "runtime": "gateway-1",
+    "teams": [
+      "team_example"
+    ],
+    "roles": [
+      "gateway"
+    ],
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "application_key": {
+      "key_id": "test-gateway-key-1",
+      "public_key": "rcFAEfgtHFbZVqpPnXPYhYNhpgYEhSXg0Ixjjcdd2Mc"
+    },
+    "nats_public_key": "UGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG",
+    "agent_types": [],
+    "session_limit": 0,
+    "protocol": "1.0-pre",
+    "deployment": "local",
+    "profile_sha256": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo",
+    "software": {
+      "name": "universal-agents",
+      "version": "0.10.0"
+    },
+    "issued_at": "2026-10-22T00:00:00.000Z",
+    "expires_at": "2026-11-21T00:00:00.000Z"
+  },
+  "algorithm": "ed25519",
+  "body_digest": "0aqmPilQ7KoNTcyiTEDr9O6dxzsvyZLBkAUlrcug9Wo",
+  "signature": "z2eEaSYErMdSK4P-DPfs2XmoEWq3WPthSrLyjKMpS8goKYiJT51LmPjzRPeBEIxN737FISP6EnPqYl4wcVCXCA"
+}

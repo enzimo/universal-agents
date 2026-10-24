@@ -4,6 +4,7 @@
     "major": 1,
     "minors": "any; a newer minor's unknown optional fields are ignored"
   },
+  "authority_token_domain": "universal-agents/authority-token/v1",
   "kinds": [
     "access.decision",
     "access.request",
@@ -33,5 +34,12 @@
     "tool.setup.result"
   ],
   "protocol": "1.0-pre",
-  "signing_domain": "universal-agents/message-frame/v1"
+  "signing_domain": "universal-agents/message-frame/v1",
+  "state_records": [
+    "agent_session",
+    "agreement",
+    "certificate",
+    "revocations"
+  ],
+  "state_signing_domain": "universal-agents/state-record/v1"
 }

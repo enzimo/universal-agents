@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
+from pydantic import MISSING, AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
+
+from custom_messages.wire.values import validate_timestamp
 
 
 class WireModel(BaseModel):
@@ -14,6 +16,9 @@ class WireModel(BaseModel):
 
 
 TokenId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')]
+
+
+InstallationId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,61}$')]
 
 
 TeamId = TokenId
@@ -28,6 +33,9 @@ AgentId = TokenId
 AgentType = TokenId
 
 
+SessionId = TokenId
+
+
 RecordId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$')]
 
 
@@ -40,7 +48,7 @@ IdempotencyKey = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-
 Kind = Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$', max_length=96)]
 
 
-Timestamp = Annotated[str, StringConstraints(pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$')]
+Timestamp = Annotated[Annotated[str, StringConstraints(pattern='^(19[7-9][0-9]|[2-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$')], AfterValidator(validate_timestamp)]
 
 
 Epoch = Annotated[int, Field(ge=0, le=9007199254740991)]
@@ -73,34 +81,46 @@ class BlobRef(WireModel):
     sha256: Sha256Digest
     size: Count
     media_type: Annotated[str, StringConstraints(pattern='^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$')]
-    name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=255)]] = Field(default=None)
+    name: Union[Annotated[str, StringConstraints(min_length=1, max_length=255)], MISSING] = Field(default=MISSING)
 
 
 class Issuer(WireModel):
-    "Who signed the frame: the host, and the agent session it signed for."
+    "Who signed the frame: the host, by its certificate, and the agent session it signed for. Receivers look the certificate and the session up in their trust store; nothing here is trusted until those records confirm it."
 
+    installation: InstallationId
     team: TeamId
     runtime: RuntimeId
-    agent: Optional[AgentId] = Field(default=None)
-    session: Optional[TokenId] = Field(default=None)
+    agent: Union[AgentId, MISSING] = Field(default=MISSING)
+    session: Union[SessionId, MISSING] = Field(default=MISSING)
     membership_epoch: Epoch
     revocation_epoch: Epoch
     key_id: KeyId
 
 
 class Audience(WireModel):
-    "Who the frame is for. Agents are named by id, never by the host that runs them."
+    "Who the frame is for. Agents are named by id, never by the host that runs them. Broadcast events name their whole team (target team, id the team id); team services also use the team id."
 
+    installation: InstallationId
     team: TeamId
-    target: Literal['agent', 'pool', 'team_services', 'edge', 'installation_service']
+    target: Literal['agent', 'pool', 'team_services', 'team', 'edge', 'installation_service']
     id: TokenId
-    runtime: Optional[RuntimeId] = Field(default=None)
+    runtime: Union[RuntimeId, MISSING] = Field(default=MISSING)
 
 
 class AuthorityTokenIssuer(WireModel):
-    team: TeamId
+    "The gateway or scheduler host that signed the token, by its certificate."
+
+    installation: InstallationId
     runtime: RuntimeId
+    membership_epoch: Epoch
     key_id: KeyId
+
+
+class AuthorityTokenAudience(WireModel):
+    "The team the person asked; only that team presents the token. Its installation is the issuer's."
+
+    installation: InstallationId
+    team: TeamId
 
 
 class AuthorityTokenBoundTo(WireModel):
@@ -109,17 +129,64 @@ class AuthorityTokenBoundTo(WireModel):
 
 
 class AuthorityToken(WireModel):
-    "Proof that work acts for a person, issued by the gateway or the scheduler and bound to one root task or one command. It is copied unchanged down a delegation tree."
+    "Proof that work acts for a person, issued by a gateway or scheduler host and bound to one root task or one command. It names the team the person asked (its audience), and only that team presents it, copied unchanged down a delegation tree. The signature covers the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/authority-token/v1 and a newline."
 
     token_id: MessageId
     issuer: AuthorityTokenIssuer
+    audience: AuthorityTokenAudience
     person: PersonRef
-    team: TeamId
     bound_to: AuthorityTokenBoundTo
     issued_at: Timestamp
     expires_at: Timestamp
     algorithm: Literal['ed25519']
     signature: Ed25519Signature
+
+
+HostRole = Literal['gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler']
+
+
+AgentRole = Literal['lead', 'worker']
+
+
+ProtocolLabel = Annotated[str, StringConstraints(pattern='^1\\.(0|[1-9][0-9]{0,3})-pre$')]
+
+
+NatsUserKey = Annotated[str, StringConstraints(pattern='^U[A-Z2-7]{55}$')]
+
+
+class ApplicationKey(WireModel):
+    "A host's or authority's Ed25519 signing key and the id that frames and records name it by."
+
+    key_id: KeyId
+    public_key: Ed25519PublicKey
+
+
+class Software(WireModel):
+    name: Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_-]{0,63}$')]
+    version: Annotated[str, StringConstraints(pattern='^[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,6}([-+][0-9A-Za-z.-]{1,32})?$')]
+
+
+StateKey = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,64}(\\.[A-Za-z0-9_-]{1,64}){0,3}$')]
+
+
+class StateWriterAuthority(WireModel):
+    type: Literal['authority']
+    installation: InstallationId
+    key_id: KeyId
+
+
+class StateWriterHost(WireModel):
+    type: Literal['host']
+    installation: InstallationId
+    runtime: RuntimeId
+    membership_epoch: Epoch
+    key_id: KeyId
+
+
+StateWriter = Annotated[Union[StateWriterAuthority, StateWriterHost], Field(discriminator='type')]
+
+
+StateSequence = Annotated[int, Field(ge=1, le=9007199254740991)]
 
 
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=500)]
@@ -152,58 +219,58 @@ class Attachment(WireModel):
     attachment_id: RecordId
     blob: BlobRef
     kind: Literal['image', 'document', 'audio', 'video', 'other']
-    caption: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    caption: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
 
 
 class RepliedMessage(WireModel):
     "The message the person replied to."
 
     author: Literal['assistant', 'requester', 'other']
-    author_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=128)]] = Field(default=None)
+    author_name: Union[Annotated[str, StringConstraints(min_length=1, max_length=128)], MISSING] = Field(default=MISSING)
     text: Annotated[str, StringConstraints(min_length=1, max_length=16000)]
     shortened: bool
-    quoted_text: Optional[Annotated[str, StringConstraints(min_length=1, max_length=16000)]] = Field(default=None)
-    sent_at: Optional[Timestamp] = Field(default=None)
+    quoted_text: Union[Annotated[str, StringConstraints(min_length=1, max_length=16000)], MISSING] = Field(default=MISSING)
+    sent_at: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class FailureProviderLimited(WireModel):
     category: Literal['provider_limited']
     provider: Annotated[str, StringConstraints(min_length=1, max_length=120)]
     model_id: Annotated[str, StringConstraints(min_length=1, max_length=240)]
-    status_code: Optional[Annotated[int, Field(ge=100, le=599)]] = Field(default=None)
+    status_code: Union[Annotated[int, Field(ge=100, le=599)], MISSING] = Field(default=MISSING)
     attempts: Count
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class FailureWorkerLost(WireModel):
     category: Literal['worker_lost']
     attempts: Count
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class FailureAdmissionRefused(WireModel):
     category: Literal['admission_refused']
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class FailureBudgetExhausted(WireModel):
     category: Literal['budget_exhausted']
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class FailureDeadlineReached(WireModel):
     category: Literal['deadline_reached']
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class FailureNotAllowed(WireModel):
     category: Literal['not_allowed']
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class FailureError(WireModel):
     category: Literal['error']
-    message: Optional[NoteText] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 Failure = Annotated[Union[FailureProviderLimited, FailureWorkerLost, FailureAdmissionRefused, FailureBudgetExhausted, FailureDeadlineReached, FailureNotAllowed, FailureError], Field(discriminator='category')]
@@ -212,7 +279,7 @@ Failure = Annotated[Union[FailureProviderLimited, FailureWorkerLost, FailureAdmi
 class QuestionChoice(WireModel):
     choice_id: Annotated[str, StringConstraints(pattern='^[a-z0-9_-]{1,64}$')]
     label: Annotated[str, StringConstraints(min_length=1, max_length=200)]
-    description: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    description: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
     recommended: bool
 
 
@@ -221,7 +288,7 @@ class Assumption(WireModel):
 
     assumption_id: RecordId
     text: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
-    affects: Optional[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=200)]], Field(max_length=20)]] = Field(default=None)
+    affects: Union[Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=200)]], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class HeldAction(WireModel):
@@ -280,26 +347,26 @@ class WorkContext(WireModel):
 
     origin: Literal['person_request', 'delegation', 'schedule_run', 'system_work', 'other_team', 'outside_agent']
     root_task_id: RecordId
-    parent_task_id: Optional[RecordId] = Field(default=None)
-    conversation_id: Optional[RecordId] = Field(default=None)
-    follows_task_id: Optional[RecordId] = Field(default=None)
-    objective_id: Optional[RecordId] = Field(default=None)
-    schedule_id: Optional[RecordId] = Field(default=None)
-    time_zone: Optional[TimeZone] = Field(default=None)
-    delivery_ref: Optional[DeliveryRef] = Field(default=None)
-    started_on_purpose: Optional[bool] = Field(default=None)
+    parent_task_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    conversation_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    follows_task_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    schedule_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    time_zone: Union[TimeZone, MISSING] = Field(default=MISSING)
+    delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
+    started_on_purpose: Union[bool, MISSING] = Field(default=MISSING)
     topology: Literal['hub_and_spoke', 'same_type_peers', 'all_peers', 'nested']
-    intent: Optional[WorkContextIntent] = Field(default=None)
-    root_request: Optional[BlobRef] = Field(default=None)
-    deadline: Optional[WorkContextDeadline] = Field(default=None)
-    expected_offline_until: Optional[Timestamp] = Field(default=None)
-    decisions_ahead: Optional[Annotated[list[DecisionAhead], Field(max_length=8)]] = Field(default=None)
+    intent: Union[WorkContextIntent, MISSING] = Field(default=MISSING)
+    root_request: Union[BlobRef, MISSING] = Field(default=MISSING)
+    deadline: Union[WorkContextDeadline, MISSING] = Field(default=MISSING)
+    expected_offline_until: Union[Timestamp, MISSING] = Field(default=MISSING)
+    decisions_ahead: Union[Annotated[list[DecisionAhead], Field(max_length=8)], MISSING] = Field(default=MISSING)
 
 
 class LedgerSnapshotDelegationsItem(WireModel):
     task_id: RecordId
     number: Count
-    holder: Optional[AgentId] = Field(default=None)
+    holder: Union[AgentId, MISSING] = Field(default=MISSING)
     state: Literal['open', 'standin', 'resolved', 'late_work']
 
 
@@ -319,9 +386,9 @@ class LedgerSnapshotCounters(WireModel):
 class LedgerSnapshot(WireModel):
     "A task's open work, carried by a handback so its new holder keeps the same labels."
 
-    plan: Optional[BlobRef] = Field(default=None)
-    checkpoint: Optional[BlobRef] = Field(default=None)
-    history_summary: Optional[Annotated[str, StringConstraints(min_length=1, max_length=4000)]] = Field(default=None)
+    plan: Union[BlobRef, MISSING] = Field(default=MISSING)
+    checkpoint: Union[BlobRef, MISSING] = Field(default=MISSING)
+    history_summary: Union[Annotated[str, StringConstraints(min_length=1, max_length=4000)], MISSING] = Field(default=MISSING)
     delegations: Annotated[list[LedgerSnapshotDelegationsItem], Field(max_length=200)]
     questions: Annotated[list[LedgerSnapshotQuestionsItem], Field(max_length=50)]
     assumptions: Annotated[list[Assumption], Field(max_length=50)]
@@ -330,7 +397,7 @@ class LedgerSnapshot(WireModel):
 
 
 class Frame(WireModel):
-    "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The body is checked against the schema its kind names in the registry."
+    "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The issuer's host certificate and agent session are looked up in the receiver's trust store. The body is checked against the schema its kind names in the registry."
 
     protocol: Annotated[str, StringConstraints(pattern='^1\\.(0|[1-9][0-9]{0,3})-pre$')]
     kind: Kind
@@ -338,16 +405,98 @@ class Frame(WireModel):
     idempotency_key: IdempotencyKey
     issuer: Issuer
     audience: Audience
-    subject: Annotated[str, StringConstraints(pattern='^ua\\.v1\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+$', max_length=512)]
-    causation_id: Optional[MessageId] = Field(default=None)
+    subject: Annotated[str, StringConstraints(pattern='^(ua\\.v1\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+|_INBOX\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}\\.[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*)$', max_length=512)]
+    causation_id: Union[MessageId, MISSING] = Field(default=MISSING)
     issued_at: Timestamp
-    not_before: Optional[Timestamp] = Field(default=None)
+    not_before: Union[Timestamp, MISSING] = Field(default=MISSING)
     expires_at: Timestamp
-    authority: Optional[AuthorityToken] = Field(default=None)
+    authority: Union[AuthorityToken, MISSING] = Field(default=MISSING)
     algorithm: Literal['ed25519']
     body_digest: Sha256Digest
     body: dict[str, Any]
     signature: Ed25519Signature
+
+
+class State(WireModel):
+    "Every key-value record is one state record, signed with Ed25519 over the domain prefix universal-agents/state-record/v1 and a newline, then the RFC 8785 canonical JSON of the record without its signature. The registry names, per record, who signs it and the schema its body follows. Readers verify every record they use; where it is stored adds no trust."
+
+    record: Literal['agent_session', 'agreement', 'certificate', 'revocations']
+    key: StateKey
+    writer: StateWriter
+    sequence: StateSequence
+    issued_at: Timestamp
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+    algorithm: Literal['ed25519']
+    body_digest: Sha256Digest
+    body: dict[str, Any]
+    signature: Ed25519Signature
+
+
+class AgentSessionState(WireModel):
+    "Issued by the team services when they start or move an agent: this agent, of this type and team role, runs on this host from started_at until ends_at. The team services renew a running session before ends_at and rewrite it with the actual end when the agent stops or moves. A frame that names an agent must fall inside one of its sessions on the signing host."
+
+    session: SessionId
+    installation: InstallationId
+    team: TeamId
+    agent: AgentId
+    agent_type: AgentType
+    agent_role: AgentRole
+    runtime: RuntimeId
+    placement_revision: Annotated[int, Field(ge=1, le=9007199254740991)]
+    started_at: Timestamp
+    ends_at: Timestamp
+
+
+class AgreementState(WireModel):
+    "Recorded by this installation's authority: another installation's authority keys, which of this installation's teams it may send to, and which durable kinds. Frames, certificates and sessions from that installation are checked against these keys and limits only."
+
+    agreement_id: RecordId
+    installation: InstallationId
+    peer: InstallationId
+    authority_keys: Annotated[list[ApplicationKey], Field(min_length=1, max_length=4)]
+    teams: Annotated[list[TeamId], Field(min_length=1, max_length=64)]
+    kinds: Annotated[list[Kind], Field(min_length=1, max_length=256)]
+    issued_at: Timestamp
+    expires_at: Timestamp
+
+
+class CertificateState(WireModel):
+    "Issued by an installation's authority: which key a host signs with, for which teams, roles and agent types, and from when to when. A receiver checks a frame with the certificate that was valid when the frame was issued, unless any revocation lists it."
+
+    certificate_id: RecordId
+    installation: InstallationId
+    runtime: RuntimeId
+    teams: Annotated[list[TeamId], Field(min_length=1, max_length=64)]
+    roles: Annotated[list[HostRole], Field(min_length=1, max_length=7)]
+    membership_epoch: Annotated[int, Field(ge=1, le=9007199254740991)]
+    revocation_epoch: Epoch
+    application_key: ApplicationKey
+    nats_public_key: NatsUserKey
+    agent_types: Annotated[list[AgentType], Field(max_length=256)]
+    session_limit: Annotated[int, Field(ge=0, le=100000)]
+    protocol: ProtocolLabel
+    deployment: Literal['local', 'operator_managed', 'third_party']
+    profile_sha256: Sha256Digest
+    software: Union[Software, MISSING] = Field(default=MISSING)
+    issued_at: Timestamp
+    expires_at: Timestamp
+    replaces: Union[RecordId, MISSING] = Field(default=MISSING)
+
+
+class RevocationsStateEntriesItem(WireModel):
+    certificate_id: RecordId
+    runtime: RuntimeId
+    membership_epoch: Epoch
+    revoked_at: Timestamp
+    reason: Literal['compromised', 'decommissioned', 'quarantined']
+
+
+class RevocationsState(WireModel):
+    "An installation's revoked host certificates. A listed certificate stops every frame and record that relies on it and was not already admitted, whenever that frame or record says it was issued."
+
+    installation: InstallationId
+    revocation_epoch: Annotated[int, Field(ge=1, le=9007199254740991)]
+    entries: Annotated[list[RevocationsStateEntriesItem], Field(max_length=2000)]
 
 
 class AccessDecisionBodyStatusHandedDown(WireModel):
@@ -365,12 +514,12 @@ class AccessDecisionBodyStatusGranted(WireModel):
     state: Literal['granted']
     level: Literal['read', 'write', 'full']
     lifetime: Literal['one_time', 'task', 'until', 'until_revoked']
-    expires_at: Optional[Timestamp] = Field(default=None)
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class AccessDecisionBodyStatusDenied(WireModel):
     state: Literal['denied']
-    note: Optional[NoteText] = Field(default=None)
+    note: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class AccessDecisionBodyStatusWithdrawn(WireModel):
@@ -401,9 +550,9 @@ class AccessRequestBodyWhatAccess(WireModel):
     target: AccessTarget
     level: Literal['read', 'write', 'full']
     lifetime: Literal['one_time', 'task', 'until', 'until_revoked']
-    hours: Optional[Annotated[int, Field(ge=1, le=2160)]] = Field(default=None)
+    hours: Union[Annotated[int, Field(ge=1, le=2160)], MISSING] = Field(default=MISSING)
     hand_on: bool
-    action_digest: Optional[Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$')]] = Field(default=None)
+    action_digest: Union[Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$')], MISSING] = Field(default=MISSING)
 
 
 class AccessRequestBodyWhatChange(WireModel):
@@ -427,14 +576,14 @@ class AccessResolvedBody(WireModel):
 
     request_id: RecordId
     choice: Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny']
-    note: Optional[NoteText] = Field(default=None)
-    kept_item_ids: Optional[Annotated[list[RecordId], Field(max_length=80)]] = Field(default=None)
-    keep_hours: Optional[Annotated[int, Field(ge=1, le=2160)]] = Field(default=None)
+    note: Union[NoteText, MISSING] = Field(default=MISSING)
+    kept_item_ids: Union[Annotated[list[RecordId], Field(max_length=80)], MISSING] = Field(default=MISSING)
+    keep_hours: Union[Annotated[int, Field(ge=1, le=2160)], MISSING] = Field(default=MISSING)
 
 
 class AgentPauseBody(WireModel):
     request_id: RecordId
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class AgentPauseReplyOk(WireModel):
@@ -445,14 +594,14 @@ class AgentPauseReplyOk(WireModel):
 class AgentPauseReplyError(WireModel):
     outcome: Literal['error']
     code: Literal['agent_exiting']
-    message: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    message: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
 
 
 class CredentialFormRequestBodyFlowCollectFieldsItemForm(WireModel):
     input_control: Literal['text', 'password', 'textarea', 'file']
-    autocomplete: Optional[Annotated[str, StringConstraints(min_length=1, max_length=64)]] = Field(default=None)
-    accept: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    help_text: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    autocomplete: Union[Annotated[str, StringConstraints(min_length=1, max_length=64)], MISSING] = Field(default=MISSING)
+    accept: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    help_text: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
 
 
 class CredentialFormRequestBodyFlowCollectFieldsItem(WireModel):
@@ -461,30 +610,30 @@ class CredentialFormRequestBodyFlowCollectFieldsItem(WireModel):
     kind: Literal['username', 'email', 'password', 'token', 'api_key', 'custom']
     visibility: Literal['metadata_visible', 'secret']
     value_source: Literal['user_input', 'agent_supplied_metadata', 'user_or_agent_supplied_metadata', 'store_generated_secret']
-    value: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
-    generation_policy: Optional[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]] = Field(default=None)
-    label: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    description: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
-    placeholder: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    form: Optional[CredentialFormRequestBodyFlowCollectFieldsItemForm] = Field(default=None)
+    value: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
+    generation_policy: Union[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')], MISSING] = Field(default=MISSING)
+    label: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    description: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
+    placeholder: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    form: Union[CredentialFormRequestBodyFlowCollectFieldsItemForm, MISSING] = Field(default=MISSING)
 
 
 class CredentialFormRequestBodyFlowCollect(WireModel):
     type: Literal['collect']
     service_name: Annotated[str, StringConstraints(min_length=1, max_length=200)]
     credential_key: CredentialKey
-    display_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    display_name: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
     purpose: NoteText
     store_target: Annotated[str, StringConstraints(min_length=1, max_length=200)]
-    signup_url: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = Field(default=None)
+    signup_url: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
     fields: Annotated[list[CredentialFormRequestBodyFlowCollectFieldsItem], Field(min_length=1, max_length=20)]
 
 
 class CredentialFormRequestBodyFlowManualSignupFieldsItemForm(WireModel):
     input_control: Literal['text', 'password', 'textarea', 'file']
-    autocomplete: Optional[Annotated[str, StringConstraints(min_length=1, max_length=64)]] = Field(default=None)
-    accept: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    help_text: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    autocomplete: Union[Annotated[str, StringConstraints(min_length=1, max_length=64)], MISSING] = Field(default=MISSING)
+    accept: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    help_text: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
 
 
 class CredentialFormRequestBodyFlowManualSignupFieldsItem(WireModel):
@@ -493,33 +642,33 @@ class CredentialFormRequestBodyFlowManualSignupFieldsItem(WireModel):
     kind: Literal['username', 'email', 'password', 'token', 'api_key', 'custom']
     visibility: Literal['metadata_visible', 'secret']
     value_source: Literal['user_input', 'agent_supplied_metadata', 'user_or_agent_supplied_metadata', 'store_generated_secret']
-    value: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
-    generation_policy: Optional[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]] = Field(default=None)
-    label: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    description: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
-    placeholder: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    form: Optional[CredentialFormRequestBodyFlowManualSignupFieldsItemForm] = Field(default=None)
+    value: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
+    generation_policy: Union[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')], MISSING] = Field(default=MISSING)
+    label: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    description: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
+    placeholder: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    form: Union[CredentialFormRequestBodyFlowManualSignupFieldsItemForm, MISSING] = Field(default=MISSING)
 
 
 class CredentialFormRequestBodyFlowManualSignup(WireModel):
     type: Literal['manual_signup']
     service_name: Annotated[str, StringConstraints(min_length=1, max_length=200)]
     credential_key: CredentialKey
-    display_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    display_name: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
     purpose: NoteText
     store_target: Annotated[str, StringConstraints(min_length=1, max_length=200)]
     signup_url: Annotated[str, StringConstraints(min_length=1, max_length=2000)]
     fields: Annotated[list[CredentialFormRequestBodyFlowManualSignupFieldsItem], Field(min_length=1, max_length=20)]
-    automation_steps: Optional[Annotated[list[ShortText], Field(max_length=20)]] = Field(default=None)
+    automation_steps: Union[Annotated[list[ShortText], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class CredentialFormRequestBodyFlowDelete(WireModel):
     type: Literal['delete']
     credential_key: CredentialKey
     service_name: Annotated[str, StringConstraints(min_length=1, max_length=200)]
-    source: Optional[Annotated[str, StringConstraints(min_length=1, max_length=120)]] = Field(default=None)
-    source_item_id: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    source_item_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    source: Union[Annotated[str, StringConstraints(min_length=1, max_length=120)], MISSING] = Field(default=MISSING)
+    source_item_id: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    source_item_name: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
 
 
 class CredentialFormRequestBody(WireModel):
@@ -527,7 +676,7 @@ class CredentialFormRequestBody(WireModel):
 
     form_id: RecordId
     task_id: RecordId
-    delivery_ref: Optional[DeliveryRef] = Field(default=None)
+    delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
     continue_task: bool
     user_approved: bool
     flow: Annotated[Union[CredentialFormRequestBodyFlowCollect, CredentialFormRequestBodyFlowManualSignup, CredentialFormRequestBodyFlowDelete], Field(discriminator='type')]
@@ -539,12 +688,12 @@ class CredentialFormResultBodyCredentialFieldsItem(WireModel):
     visibility: Literal['metadata_visible', 'secret']
     value_source: Literal['user_input', 'agent_supplied_metadata', 'user_or_agent_supplied_metadata', 'store_generated_secret']
     secret: bool
-    value: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    value: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
 
 
 class CredentialFormResultBodyCredential(WireModel):
     fields: Annotated[list[CredentialFormResultBodyCredentialFieldsItem], Field(max_length=20)]
-    purpose: Optional[NoteText] = Field(default=None)
+    purpose: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class CredentialFormResultBody(WireModel):
@@ -556,12 +705,12 @@ class CredentialFormResultBody(WireModel):
     continue_task: bool
     credential_key: CredentialKey
     service_name: Annotated[str, StringConstraints(min_length=1, max_length=200)]
-    display_name: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
-    broker_session_id: Optional[RecordId] = Field(default=None)
+    display_name: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
+    broker_session_id: Union[RecordId, MISSING] = Field(default=MISSING)
     flow: Literal['collect', 'manual_signup', 'delete']
-    message: Optional[NoteText] = Field(default=None)
-    error: Optional[NoteText] = Field(default=None)
-    credential: Optional[CredentialFormResultBodyCredential] = Field(default=None)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
+    error: Union[NoteText, MISSING] = Field(default=MISSING)
+    credential: Union[CredentialFormResultBodyCredential, MISSING] = Field(default=MISSING)
 
 
 class CustodyMovedBody(WireModel):
@@ -579,7 +728,7 @@ class DeliveryReceiptBody(WireModel):
     delivered_message_id: MessageId
     task_id: RecordId
     conversation_id: RecordId
-    schedule_id: Optional[RecordId] = Field(default=None)
+    schedule_id: Union[RecordId, MISSING] = Field(default=MISSING)
     via: Literal['immediate', 'digest']
 
 
@@ -588,9 +737,9 @@ class DeliveryRefusedBody(WireModel):
 
     refused_message_id: MessageId
     refused_kind: Kind
-    task_id: Optional[RecordId] = Field(default=None)
+    task_id: Union[RecordId, MISSING] = Field(default=MISSING)
     reason: Literal['edge_not_allowed', 'not_holder', 'stale_custody', 'task_unknown', 'task_closed']
-    current_custody_token: Optional[CustodyToken] = Field(default=None)
+    current_custody_token: Union[CustodyToken, MISSING] = Field(default=MISSING)
 
 
 class LedgerFactBodyFactCustodyConfirmed(WireModel):
@@ -636,9 +785,9 @@ class LedgerFactBodyFactSteeringSeen(WireModel):
 class LedgerFactBodyFactWait(WireModel):
     type: Literal['wait']
     kind: Literal['change_conflict', 'other_request_form']
-    case_id: Optional[RecordId] = Field(default=None)
+    case_id: Union[RecordId, MISSING] = Field(default=MISSING)
     state: Literal['open', 'resolved']
-    until: Optional[Timestamp] = Field(default=None)
+    until: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class LedgerFactBodyFactHoldTimedOut(WireModel):
@@ -663,7 +812,7 @@ class LedgerFactBody(WireModel):
     "A fact for an agent's work ledger from the team services."
 
     fact_id: RecordId
-    task_id: Optional[RecordId] = Field(default=None)
+    task_id: Union[RecordId, MISSING] = Field(default=MISSING)
     fact: Annotated[Union[LedgerFactBodyFactCustodyConfirmed, LedgerFactBodyFactAccessRequested, LedgerFactBodyFactAccessDecided, LedgerFactBodyFactDecisionAheadUsed, LedgerFactBodyFactColleagueExchange, LedgerFactBodyFactSteeringSeen, LedgerFactBodyFactWait, LedgerFactBodyFactHoldTimedOut, LedgerFactBodyFactLateWork, LedgerFactBodyFactIntentChanged], Field(discriminator='type')]
 
 
@@ -680,20 +829,20 @@ class PersonNotifyBodyReasonCode(WireModel):
 class PersonNotifyBodyAttachmentsItem(WireModel):
     blob: BlobRef
     kind: Literal['auto', 'image', 'document', 'audio', 'video']
-    caption: Optional[Annotated[str, StringConstraints(min_length=1, max_length=1000)]] = Field(default=None)
+    caption: Union[Annotated[str, StringConstraints(min_length=1, max_length=1000)], MISSING] = Field(default=MISSING)
 
 
 class PersonNotifyBody(WireModel):
     "A notice for a person, delivered by the gateway."
 
     notice_id: RecordId
-    delivery_ref: Optional[DeliveryRef] = Field(default=None)
-    task_id: Optional[RecordId] = Field(default=None)
-    conversation_id: Optional[RecordId] = Field(default=None)
+    delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
+    task_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    conversation_id: Union[RecordId, MISSING] = Field(default=MISSING)
     text: LongText
     urgency: Literal['normal', 'urgent']
     reason: Annotated[Union[PersonNotifyBodyReasonAgent, PersonNotifyBodyReasonCode], Field(discriminator='source')]
-    attachments: Optional[Annotated[list[PersonNotifyBodyAttachmentsItem], Field(max_length=10)]] = Field(default=None)
+    attachments: Union[Annotated[list[PersonNotifyBodyAttachmentsItem], Field(max_length=10)], MISSING] = Field(default=MISSING)
 
 
 class QuestionClosedBody(WireModel):
@@ -720,8 +869,8 @@ class SkillsChangedBodyUninstall(WireModel):
 
 class TaskAccountBodyStageImmediate(WireModel):
     type: Literal['immediate']
-    current_step: Optional[ShortText] = Field(default=None)
-    checkpoint: Optional[BlobRef] = Field(default=None)
+    current_step: Union[ShortText, MISSING] = Field(default=MISSING)
+    checkpoint: Union[BlobRef, MISSING] = Field(default=MISSING)
     tools_in_progress: Annotated[list[ToolId], Field(max_length=20)]
     held_actions: Annotated[list[HeldAction], Field(max_length=50)]
     assumptions: Annotated[list[Assumption], Field(max_length=20)]
@@ -751,12 +900,12 @@ class TaskAnswerBody(WireModel):
 
     question_id: RecordId
     task_id: RecordId
-    text: Optional[LongText] = Field(default=None)
-    selected_choice_ids: Optional[Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z0-9_-]{1,64}$')]], Field(max_length=20)]] = Field(default=None)
-    decision: Optional[Literal['resume', 'partial', 'cancel', 'retry', 'retry_in_5_minutes', 'retry_in_10_minutes']] = Field(default=None)
-    replied_message: Optional[RepliedMessage] = Field(default=None)
-    passed_on: Optional[TaskAnswerBodyPassedOn] = Field(default=None)
-    decision_token: Optional[DecisionToken] = Field(default=None)
+    text: Union[LongText, MISSING] = Field(default=MISSING)
+    selected_choice_ids: Union[Annotated[list[Annotated[str, StringConstraints(pattern='^[a-z0-9_-]{1,64}$')]], Field(max_length=20)], MISSING] = Field(default=MISSING)
+    decision: Union[Literal['resume', 'partial', 'cancel', 'retry', 'retry_in_5_minutes', 'retry_in_10_minutes'], MISSING] = Field(default=MISSING)
+    replied_message: Union[RepliedMessage, MISSING] = Field(default=MISSING)
+    passed_on: Union[TaskAnswerBodyPassedOn, MISSING] = Field(default=MISSING)
+    decision_token: Union[DecisionToken, MISSING] = Field(default=MISSING)
 
 
 class TaskClaimedBody(WireModel):
@@ -764,7 +913,7 @@ class TaskClaimedBody(WireModel):
 
     claim_id: RecordId
     task_id: RecordId
-    parent_task_id: Optional[RecordId] = Field(default=None)
+    parent_task_id: Union[RecordId, MISSING] = Field(default=MISSING)
     recovered: bool
 
 
@@ -775,11 +924,11 @@ class TaskHandbackBody(WireModel):
     task_id: RecordId
     disposition: Literal['not_started', 'interrupted']
     launch_id: RecordId
-    interrupted_at: Optional[Timestamp] = Field(default=None)
+    interrupted_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     reason: ShortText
-    scheduler_errors: Optional[Annotated[list[ShortText], Field(max_length=10)]] = Field(default=None)
+    scheduler_errors: Union[Annotated[list[ShortText], Field(max_length=10)], MISSING] = Field(default=MISSING)
     actions: Annotated[list[HeldAction], Field(max_length=50)]
-    ledger: Optional[LedgerSnapshot] = Field(default=None)
+    ledger: Union[LedgerSnapshot, MISSING] = Field(default=MISSING)
 
 
 class TaskProgressBody(WireModel):
@@ -790,16 +939,16 @@ class TaskProgressBody(WireModel):
     custody_token: CustodyToken
     status: ShortText
     state: Literal['working', 'waiting', 'blocked', 'holding']
-    checkpoint: Optional[BlobRef] = Field(default=None)
-    assumptions: Optional[Annotated[list[Assumption], Field(max_length=20)]] = Field(default=None)
-    held_actions: Optional[Annotated[list[HeldAction], Field(max_length=50)]] = Field(default=None)
-    expected_finish: Optional[Timestamp] = Field(default=None)
-    steering_seen: Optional[RecordId] = Field(default=None)
+    checkpoint: Union[BlobRef, MISSING] = Field(default=MISSING)
+    assumptions: Union[Annotated[list[Assumption], Field(max_length=20)], MISSING] = Field(default=MISSING)
+    held_actions: Union[Annotated[list[HeldAction], Field(max_length=50)], MISSING] = Field(default=MISSING)
+    expected_finish: Union[Timestamp, MISSING] = Field(default=MISSING)
+    steering_seen: Union[RecordId, MISSING] = Field(default=MISSING)
 
 
 class TaskQuestionBodyPurposeInput(WireModel):
     type: Literal['input']
-    choice_mode: Optional[Literal['single', 'multiple']] = Field(default=None)
+    choice_mode: Union[Literal['single', 'multiple'], MISSING] = Field(default=MISSING)
     choices: Annotated[list[QuestionChoice], Field(max_length=20)]
     allow_free_text: bool
 
@@ -818,13 +967,13 @@ class TaskQuestionBodyPurposeScopeProposedChangesItem(WireModel):
 class TaskQuestionBodyPurposeScope(WireModel):
     type: Literal['scope']
     proposal: NoteText
-    proposed_changes: Optional[Annotated[list[TaskQuestionBodyPurposeScopeProposedChangesItem], Field(max_length=20)]] = Field(default=None)
+    proposed_changes: Union[Annotated[list[TaskQuestionBodyPurposeScopeProposedChangesItem], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class TaskQuestionBodyPurposeBudget(WireModel):
     type: Literal['budget']
     asked: Literal['time', 'budget']
-    until: Optional[Timestamp] = Field(default=None)
+    until: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class TaskQuestionBodyPurposeCoordination(WireModel):
@@ -857,7 +1006,7 @@ class TaskQuestionBodyPurposeRuntimePause(WireModel):
 
 class TaskQuestionBodyPurposeRecoveryCheckpoint(WireModel):
     type: Literal['recovery_checkpoint']
-    choices: Optional[Annotated[list[QuestionChoice], Field(max_length=20)]] = Field(default=None)
+    choices: Union[Annotated[list[QuestionChoice], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class TaskQuestionBody(WireModel):
@@ -868,9 +1017,9 @@ class TaskQuestionBody(WireModel):
     sequence: Count
     text: LongText
     can_answer: Literal['lead', 'person']
-    relays_question_id: Optional[RecordId] = Field(default=None)
-    deadline: Optional[Timestamp] = Field(default=None)
-    assumption: Optional[Assumption] = Field(default=None)
+    relays_question_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    deadline: Union[Timestamp, MISSING] = Field(default=MISSING)
+    assumption: Union[Assumption, MISSING] = Field(default=MISSING)
     purpose: Annotated[Union[TaskQuestionBodyPurposeInput, TaskQuestionBodyPurposeSetup, TaskQuestionBodyPurposeScope, TaskQuestionBodyPurposeBudget, TaskQuestionBodyPurposeCoordination, TaskQuestionBodyPurposeHelp, TaskQuestionBodyPurposeOutsideHelp, TaskQuestionBodyPurposeChangeConflict, TaskQuestionBodyPurposeRuntimePause, TaskQuestionBodyPurposeRecoveryCheckpoint], Field(discriminator='type')]
 
 
@@ -885,7 +1034,7 @@ class TaskReportBodyKindLessons(WireModel):
 class TaskReportBodyKindWorkerResult(WireModel):
     type: Literal['worker_result']
     text: LongText
-    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+    attachments: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class TaskReportBodyKindRecordChanged(WireModel):
@@ -913,13 +1062,13 @@ class TaskReportBody(WireModel):
 
 
 class TaskRequestBodyReassignment(WireModel):
-    handback_id: Optional[RecordId] = Field(default=None)
+    handback_id: Union[RecordId, MISSING] = Field(default=MISSING)
     prior_holder: AgentId
     prior_disposition: Literal['not_started', 'interrupted']
     interruption_count: Count
-    interrupted_at: Optional[Timestamp] = Field(default=None)
+    interrupted_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     actions: Annotated[list[HeldAction], Field(max_length=50)]
-    checkpoint: Optional[BlobRef] = Field(default=None)
+    checkpoint: Union[BlobRef, MISSING] = Field(default=MISSING)
 
 
 class TaskRequestBody(WireModel):
@@ -928,9 +1077,9 @@ class TaskRequestBody(WireModel):
     task_id: RecordId
     work: WorkContext
     instructions: LongText
-    replied_message: Optional[RepliedMessage] = Field(default=None)
-    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
-    reassignment: Optional[TaskRequestBodyReassignment] = Field(default=None)
+    replied_message: Union[RepliedMessage, MISSING] = Field(default=MISSING)
+    attachments: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
+    reassignment: Union[TaskRequestBodyReassignment, MISSING] = Field(default=MISSING)
 
 
 class TaskResultBodyOutcomeCompletedAnswerText(WireModel):
@@ -941,13 +1090,13 @@ class TaskResultBodyOutcomeCompletedAnswerText(WireModel):
 class TaskResultBodyOutcomeCompletedAnswerFromSubtask(WireModel):
     form: Literal['from_subtask']
     from_task_id: RecordId
-    note: Optional[NoteText] = Field(default=None)
+    note: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class TaskResultBodyOutcomeCompleted(WireModel):
     state: Literal['completed']
     answer: Annotated[Union[TaskResultBodyOutcomeCompletedAnswerText, TaskResultBodyOutcomeCompletedAnswerFromSubtask], Field(discriminator='form')]
-    artifacts: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+    artifacts: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class TaskResultBodyOutcomePartialAnswerText(WireModel):
@@ -958,14 +1107,14 @@ class TaskResultBodyOutcomePartialAnswerText(WireModel):
 class TaskResultBodyOutcomePartialAnswerFromSubtask(WireModel):
     form: Literal['from_subtask']
     from_task_id: RecordId
-    note: Optional[NoteText] = Field(default=None)
+    note: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class TaskResultBodyOutcomePartial(WireModel):
     state: Literal['partial']
     answer: Annotated[Union[TaskResultBodyOutcomePartialAnswerText, TaskResultBodyOutcomePartialAnswerFromSubtask], Field(discriminator='form')]
     missing: NoteText
-    artifacts: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
+    artifacts: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
 
 class TaskResultBodyOutcomeFailed(WireModel):
@@ -981,7 +1130,7 @@ class TaskResultBodyOutcomeCancelled(WireModel):
 class TaskResultBodyOutcomePaused(WireModel):
     state: Literal['paused']
     trigger: Literal['tool_call_budget_exceeded', 'context_budget_exceeded', 'delegated_subtask_timeout', 'specialist_runtime_budget_pause', 'provider_overloaded']
-    detail: Optional[NoteText] = Field(default=None)
+    detail: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class TaskResultBodyOutcomeYielded(WireModel):
@@ -992,7 +1141,7 @@ class TaskResultBodyOutcomeYielded(WireModel):
 class TaskResultBodyOutcomeRejected(WireModel):
     state: Literal['rejected']
     reason: Literal['queue_full', 'not_allowed']
-    detail: Optional[NoteText] = Field(default=None)
+    detail: Union[NoteText, MISSING] = Field(default=MISSING)
 
 
 class TaskResultBody(WireModel):
@@ -1001,10 +1150,10 @@ class TaskResultBody(WireModel):
     task_id: RecordId
     sequence: Count
     custody_token: CustodyToken
-    intent_version: Optional[Count] = Field(default=None)
-    steering_seen: Optional[RecordId] = Field(default=None)
-    assumptions: Optional[Annotated[list[Assumption], Field(max_length=20)]] = Field(default=None)
-    summary: Optional[ShortText] = Field(default=None)
+    intent_version: Union[Count, MISSING] = Field(default=MISSING)
+    steering_seen: Union[RecordId, MISSING] = Field(default=MISSING)
+    assumptions: Union[Annotated[list[Assumption], Field(max_length=20)], MISSING] = Field(default=MISSING)
+    summary: Union[ShortText, MISSING] = Field(default=MISSING)
     outcome: Annotated[Union[TaskResultBodyOutcomeCompleted, TaskResultBodyOutcomePartial, TaskResultBodyOutcomeFailed, TaskResultBodyOutcomeCancelled, TaskResultBodyOutcomePaused, TaskResultBodyOutcomeYielded, TaskResultBodyOutcomeRejected], Field(discriminator='state')]
 
 
@@ -1016,8 +1165,8 @@ class TaskSteerBodyActionGuidance(WireModel):
     type: Literal['guidance']
     source: Literal['lead', 'person_as_is', 'person_after_timeout']
     text: LongText
-    attachments: Optional[Annotated[list[Attachment], Field(max_length=20)]] = Field(default=None)
-    replied_message: Optional[RepliedMessage] = Field(default=None)
+    attachments: Union[Annotated[list[Attachment], Field(max_length=20)], MISSING] = Field(default=MISSING)
+    replied_message: Union[RepliedMessage, MISSING] = Field(default=MISSING)
 
 
 class TaskSteerBodyActionRelease(WireModel):
@@ -1029,7 +1178,7 @@ class TaskSteerBody(WireModel):
 
     task_id: RecordId
     steer_id: RecordId
-    person_steering_id: Optional[RecordId] = Field(default=None)
+    person_steering_id: Union[RecordId, MISSING] = Field(default=MISSING)
     action: Annotated[Union[TaskSteerBodyActionHold, TaskSteerBodyActionGuidance, TaskSteerBodyActionRelease], Field(discriminator='type')]
 
 
@@ -1038,7 +1187,7 @@ class TaskStopBody(WireModel):
 
     task_id: RecordId
     stop_id: RecordId
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=500)]] = Field(default=None)
+    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
     cascade_to_subtasks: bool
 
 
@@ -1068,7 +1217,7 @@ class ToolSetupRequestBody(WireModel):
 
     setup_request_id: RecordId
     task_id: RecordId
-    delivery_ref: Optional[DeliveryRef] = Field(default=None)
+    delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
     tool_id: ToolId
     reason: NoteText
     setup: Annotated[Union[ToolSetupRequestBodySetupSignIn, ToolSetupRequestBodySetupAccountLink, ToolSetupRequestBodySetupTeamSignInApp, ToolSetupRequestBodySetupExternalStep], Field(discriminator='type')]
@@ -1105,12 +1254,12 @@ class ToolSetupResultBody(WireModel):
     setup: Annotated[Union[ToolSetupResultBodySetupSignIn, ToolSetupResultBodySetupAccountLink, ToolSetupResultBodySetupTeamSignInApp, ToolSetupResultBodySetupExternalStep], Field(discriminator='type')]
     source: Literal['task_request', 'person_action']
     attempt: Annotated[int, Field(ge=0, le=3)]
-    account_label: Optional[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(default=None)
+    account_label: Union[Annotated[str, StringConstraints(min_length=1, max_length=200)], MISSING] = Field(default=MISSING)
     needs_administrator: bool
-    reason_code: Optional[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')]] = Field(default=None)
-    message: Optional[NoteText] = Field(default=None)
-    link_id: Optional[RecordId] = Field(default=None)
-    broker_session_id: Optional[RecordId] = Field(default=None)
+    reason_code: Union[Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,63}$')], MISSING] = Field(default=MISSING)
+    message: Union[NoteText, MISSING] = Field(default=MISSING)
+    link_id: Union[RecordId, MISSING] = Field(default=MISSING)
+    broker_session_id: Union[RecordId, MISSING] = Field(default=MISSING)
 
 
 AccessDecisionBodyAdapter = TypeAdapter(AccessDecisionBody)
@@ -1140,3 +1289,7 @@ TaskSteerBodyAdapter = TypeAdapter(TaskSteerBody)
 TaskStopBodyAdapter = TypeAdapter(TaskStopBody)
 ToolSetupRequestBodyAdapter = TypeAdapter(ToolSetupRequestBody)
 ToolSetupResultBodyAdapter = TypeAdapter(ToolSetupResultBody)
+AgentSessionStateAdapter = TypeAdapter(AgentSessionState)
+AgreementStateAdapter = TypeAdapter(AgreementState)
+CertificateStateAdapter = TypeAdapter(CertificateState)
+RevocationsStateAdapter = TypeAdapter(RevocationsState)

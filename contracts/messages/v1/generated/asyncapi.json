@@ -7,6 +7,17 @@
         "access_decision": {
           "$ref": "#/components/messages/access_decision"
         }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "access_request": {
@@ -14,6 +25,14 @@
       "messages": {
         "access_request": {
           "$ref": "#/components/messages/access_request"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -23,6 +42,14 @@
         "access_resolved": {
           "$ref": "#/components/messages/access_resolved"
         }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "agent_pause": {
@@ -30,6 +57,33 @@
       "messages": {
         "agent_pause": {
           "$ref": "#/components/messages/agent_pause"
+        }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "agent_pause_reply": {
+      "address": "_INBOX.{runtime}.{inbox}",
+      "messages": {
+        "agent_pause_reply": {
+          "$ref": "#/components/messages/agent_pause_reply"
+        }
+      },
+      "parameters": {
+        "inbox": {
+          "description": "The inbox subject token."
+        },
+        "runtime": {
+          "description": "The runtime subject token."
         }
       }
     },
@@ -39,6 +93,17 @@
         "credential_form_request": {
           "$ref": "#/components/messages/credential_form_request"
         }
+      },
+      "parameters": {
+        "edge": {
+          "description": "The edge subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "credential_form_result": {
@@ -46,6 +111,17 @@
       "messages": {
         "credential_form_result": {
           "$ref": "#/components/messages/credential_form_result"
+        }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -55,6 +131,17 @@
         "custody_moved": {
           "$ref": "#/components/messages/custody_moved"
         }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "delivery_receipt": {
@@ -62,6 +149,14 @@
       "messages": {
         "delivery_receipt": {
           "$ref": "#/components/messages/delivery_receipt"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -71,6 +166,17 @@
         "delivery_refused": {
           "$ref": "#/components/messages/delivery_refused"
         }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "delivery_refused_1": {
@@ -78,6 +184,17 @@
       "messages": {
         "delivery_refused": {
           "$ref": "#/components/messages/delivery_refused"
+        }
+      },
+      "parameters": {
+        "edge": {
+          "description": "The edge subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -87,6 +204,14 @@
         "delivery_refused": {
           "$ref": "#/components/messages/delivery_refused"
         }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "ledger_fact": {
@@ -94,6 +219,17 @@
       "messages": {
         "ledger_fact": {
           "$ref": "#/components/messages/ledger_fact"
+        }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -103,6 +239,17 @@
         "person_notify": {
           "$ref": "#/components/messages/person_notify"
         }
+      },
+      "parameters": {
+        "edge": {
+          "description": "The edge subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "question_closed": {
@@ -110,6 +257,17 @@
       "messages": {
         "question_closed": {
           "$ref": "#/components/messages/question_closed"
+        }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -119,6 +277,14 @@
         "skills_changed": {
           "$ref": "#/components/messages/skills_changed"
         }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "task_account": {
@@ -126,6 +292,17 @@
       "messages": {
         "task_account": {
           "$ref": "#/components/messages/task_account"
+        }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -135,6 +312,17 @@
         "task_answer": {
           "$ref": "#/components/messages/task_answer"
         }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "task_claimed": {
@@ -142,6 +330,17 @@
       "messages": {
         "task_claimed": {
           "$ref": "#/components/messages/task_claimed"
+        }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -151,6 +350,14 @@
         "task_claimed": {
           "$ref": "#/components/messages/task_claimed"
         }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "task_handback": {
@@ -158,6 +365,17 @@
       "messages": {
         "task_handback": {
           "$ref": "#/components/messages/task_handback"
+        }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -167,6 +385,14 @@
         "task_handback": {
           "$ref": "#/components/messages/task_handback"
         }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "task_progress": {
@@ -174,6 +400,17 @@
       "messages": {
         "task_progress": {
           "$ref": "#/components/messages/task_progress"
+        }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -183,6 +420,17 @@
         "task_question": {
           "$ref": "#/components/messages/task_question"
         }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "task_question_1": {
@@ -190,6 +438,17 @@
       "messages": {
         "task_question": {
           "$ref": "#/components/messages/task_question"
+        }
+      },
+      "parameters": {
+        "edge": {
+          "description": "The edge subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -199,6 +458,17 @@
         "task_report": {
           "$ref": "#/components/messages/task_report"
         }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "task_request": {
@@ -206,6 +476,17 @@
       "messages": {
         "task_request": {
           "$ref": "#/components/messages/task_request"
+        }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -215,6 +496,17 @@
         "task_request": {
           "$ref": "#/components/messages/task_request"
         }
+      },
+      "parameters": {
+        "pool": {
+          "description": "The pool subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "task_request_2": {
@@ -222,6 +514,14 @@
       "messages": {
         "task_request": {
           "$ref": "#/components/messages/task_request"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -231,6 +531,17 @@
         "task_result": {
           "$ref": "#/components/messages/task_result"
         }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "task_result_1": {
@@ -238,6 +549,17 @@
       "messages": {
         "task_result": {
           "$ref": "#/components/messages/task_result"
+        }
+      },
+      "parameters": {
+        "edge": {
+          "description": "The edge subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -247,6 +569,14 @@
         "task_result": {
           "$ref": "#/components/messages/task_result"
         }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "task_steer": {
@@ -254,6 +584,17 @@
       "messages": {
         "task_steer": {
           "$ref": "#/components/messages/task_steer"
+        }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -263,6 +604,17 @@
         "task_stop": {
           "$ref": "#/components/messages/task_stop"
         }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     },
     "tool_setup_request": {
@@ -270,6 +622,17 @@
       "messages": {
         "tool_setup_request": {
           "$ref": "#/components/messages/tool_setup_request"
+        }
+      },
+      "parameters": {
+        "edge": {
+          "description": "The edge subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
         }
       }
     },
@@ -279,6 +642,17 @@
         "tool_setup_result": {
           "$ref": "#/components/messages/tool_setup_result"
         }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
       }
     }
   },
@@ -287,188 +661,593 @@
       "access_decision": {
         "name": "access.decision",
         "payload": {
-          "$ref": "../schemas/bodies/access.decision.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/access.decision.schema.json"
+                },
+                "kind": {
+                  "const": "access.decision"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "What became of an access request, sent to the waiting task."
       },
       "access_request": {
         "name": "access.request",
         "payload": {
-          "$ref": "../schemas/bodies/access.request.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/access.request.schema.json"
+                },
+                "kind": {
+                  "const": "access.request"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "A task asks the team services for access; no model decides it."
       },
       "access_resolved": {
         "name": "access.resolved",
         "payload": {
-          "$ref": "../schemas/bodies/access.resolved.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/access.resolved.schema.json"
+                },
+                "kind": {
+                  "const": "access.resolved"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "A person's decision on an access request, from the gateway to the team services."
       },
       "agent_pause": {
         "name": "agent.pause",
         "payload": {
-          "$ref": "../schemas/bodies/agent.pause.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/agent.pause.schema.json"
+                },
+                "kind": {
+                  "const": "agent.pause"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "Pause one agent at its next safe point; it keeps its queued work."
       },
       "agent_pause_reply": {
         "name": "agent.pause.reply",
         "payload": {
-          "$ref": "../schemas/bodies/agent.pause.reply.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/agent.pause.reply.schema.json"
+                },
+                "kind": {
+                  "const": "agent.pause.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
         }
       },
       "credential_form_request": {
         "name": "credential.form.request",
         "payload": {
-          "$ref": "../schemas/bodies/credential.form.request.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/credential.form.request.schema.json"
+                },
+                "kind": {
+                  "const": "credential.form.request"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "Ask the gateway to collect, set up or delete a credential through a secure form."
       },
       "credential_form_result": {
         "name": "credential.form.result",
         "payload": {
-          "$ref": "../schemas/bodies/credential.form.result.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/credential.form.result.schema.json"
+                },
+                "kind": {
+                  "const": "credential.form.result"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "What became of a credential form."
       },
       "custody_moved": {
         "name": "custody.moved",
         "payload": {
-          "$ref": "../schemas/bodies/custody.moved.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/custody.moved.schema.json"
+                },
+                "kind": {
+                  "const": "custody.moved"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "Tells a former holder that its task moved; later results are kept as late work."
       },
       "delivery_receipt": {
         "name": "delivery.receipt",
         "payload": {
-          "$ref": "../schemas/bodies/delivery.receipt.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/delivery.receipt.schema.json"
+                },
+                "kind": {
+                  "const": "delivery.receipt"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "The gateway delivered an answer or notice to a person."
       },
       "delivery_refused": {
         "name": "delivery.refused",
         "payload": {
-          "$ref": "../schemas/bodies/delivery.refused.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/delivery.refused.schema.json"
+                },
+                "kind": {
+                  "const": "delivery.refused"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "A receiver refused a message; sent back to its sender."
       },
       "ledger_fact": {
         "name": "ledger.fact",
         "payload": {
-          "$ref": "../schemas/bodies/ledger.fact.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/ledger.fact.schema.json"
+                },
+                "kind": {
+                  "const": "ledger.fact"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "A fact for an agent's work ledger from the team services."
       },
       "person_notify": {
         "name": "person.notify",
         "payload": {
-          "$ref": "../schemas/bodies/person.notify.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/person.notify.schema.json"
+                },
+                "kind": {
+                  "const": "person.notify"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "A notice for a person, delivered by the gateway."
       },
       "question_closed": {
         "name": "question.closed",
         "payload": {
-          "$ref": "../schemas/bodies/question.closed.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/question.closed.schema.json"
+                },
+                "kind": {
+                  "const": "question.closed"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "A question ended without an answer."
       },
       "skills_changed": {
         "name": "skills.changed",
         "payload": {
-          "$ref": "../schemas/bodies/skills.changed.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/skills.changed.schema.json"
+                },
+                "kind": {
+                  "const": "skills.changed"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "Hint that a managed skill was installed or removed. Receivers verify the stored receipt before they refresh."
       },
       "task_account": {
         "name": "task.account",
         "payload": {
-          "$ref": "../schemas/bodies/task.account.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/task.account.schema.json"
+                },
+                "kind": {
+                  "const": "task.account"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "A held holder's account of where its task stopped."
       },
       "task_answer": {
         "name": "task.answer",
         "payload": {
-          "$ref": "../schemas/bodies/task.answer.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/task.answer.schema.json"
+                },
+                "kind": {
+                  "const": "task.answer"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "The answer to one question."
       },
       "task_claimed": {
         "name": "task.claimed",
         "payload": {
-          "$ref": "../schemas/bodies/task.claimed.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/task.claimed.schema.json"
+                },
+                "kind": {
+                  "const": "task.claimed"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "A holder took a task."
       },
       "task_handback": {
         "name": "task.handback",
         "payload": {
-          "$ref": "../schemas/bodies/task.handback.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/task.handback.schema.json"
+                },
+                "kind": {
+                  "const": "task.handback"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "A holder that lost its lease returns a task."
       },
       "task_progress": {
         "name": "task.progress",
         "payload": {
-          "$ref": "../schemas/bodies/task.progress.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/task.progress.schema.json"
+                },
+                "kind": {
+                  "const": "task.progress"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "Where a task stands, from its holder to its requester."
       },
       "task_question": {
         "name": "task.question",
         "payload": {
-          "$ref": "../schemas/bodies/task.question.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/task.question.schema.json"
+                },
+                "kind": {
+                  "const": "task.question"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "A question from a task's holder to the one who can answer it."
       },
       "task_report": {
         "name": "task.report",
         "payload": {
-          "$ref": "../schemas/bodies/task.report.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/task.report.schema.json"
+                },
+                "kind": {
+                  "const": "task.report"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "A report from a holder to its requester; the lead decides whether a person sees it."
       },
       "task_request": {
         "name": "task.request",
         "payload": {
-          "$ref": "../schemas/bodies/task.request.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/task.request.schema.json"
+                },
+                "kind": {
+                  "const": "task.request"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "Give a task to an agent or a pool."
       },
       "task_result": {
         "name": "task.result",
         "payload": {
-          "$ref": "../schemas/bodies/task.result.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/task.result.schema.json"
+                },
+                "kind": {
+                  "const": "task.result"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "The final answer of a task, sent by its holder."
       },
       "task_steer": {
         "name": "task.steer",
         "payload": {
-          "$ref": "../schemas/bodies/task.steer.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/task.steer.schema.json"
+                },
+                "kind": {
+                  "const": "task.steer"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "Steering for the holder of one named task."
       },
       "task_stop": {
         "name": "task.stop",
         "payload": {
-          "$ref": "../schemas/bodies/task.stop.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/task.stop.schema.json"
+                },
+                "kind": {
+                  "const": "task.stop"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "Stop one task. Sent only to the task's current holder."
       },
       "tool_setup_request": {
         "name": "tool.setup.request",
         "payload": {
-          "$ref": "../schemas/bodies/tool.setup.request.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/tool.setup.request.schema.json"
+                },
+                "kind": {
+                  "const": "tool.setup.request"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "Ask the gateway to have a person or administrator set a tool up."
       },
       "tool_setup_result": {
         "name": "tool.setup.result",
         "payload": {
-          "$ref": "../schemas/bodies/tool.setup.result.schema.json"
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/tool.setup.result.schema.json"
+                },
+                "kind": {
+                  "const": "tool.setup.result"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "summary": "What became of a tool setup."
       }
@@ -502,6 +1281,16 @@
       "action": "receive",
       "channel": {
         "$ref": "#/channels/agent_pause"
+      },
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/agent_pause_reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/agent_pause_reply/messages/agent_pause_reply"
+          }
+        ]
       }
     },
     "receive_credential_form_request": {
@@ -714,9 +1503,12 @@
         "$ref": "#/channels/agent_pause"
       },
       "reply": {
+        "channel": {
+          "$ref": "#/channels/agent_pause_reply"
+        },
         "messages": [
           {
-            "$ref": "#/components/messages/agent_pause_reply"
+            "$ref": "#/channels/agent_pause_reply/messages/agent_pause_reply"
           }
         ]
       }
