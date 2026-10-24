@@ -1,21 +1,12 @@
 name: Test Profiles
 
+# CI runs only for published release candidates (vX.Y.Z-rc.N tags) and when
+# started by hand. Pull requests and branch pushes start no CI; run the
+# relevant tests locally before pushing (docs/LOCAL_CI.md, "When CI runs").
 on:
-  pull_request:
-    paths-ignore:
-      - '**/*.md'
-      - 'docker-compose-setup.html'
-      - 'user_docs/**'
-      - 'mkdocs.yml'
   push:
-    branches:
-      - main
-      - 'release/**'
-    paths-ignore:
-      - '**/*.md'
-      - 'docker-compose-setup.html'
-      - 'user_docs/**'
-      - 'mkdocs.yml'
+    tags:
+      - 'v*.*.*-rc.*'
   workflow_dispatch:
 
 permissions:

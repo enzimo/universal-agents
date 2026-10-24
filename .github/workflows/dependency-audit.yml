@@ -1,33 +1,13 @@
 name: Dependency Audit
 
+# CI runs only for published release candidates (vX.Y.Z-rc.N tags) and when
+# started by hand. Pull requests and branch pushes start no CI; run the
+# relevant tests locally before pushing (docs/LOCAL_CI.md, "When CI runs").
 on:
-  pull_request:
-    paths:
-      - 'requirements*.txt'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust/**'
-      - '**/package.json'
-      - '**/package-lock.json'
-      - '.github/workflows/dependency-audit.yml'
-      - '.github/runner/**'
   push:
-    branches:
-      - main
-      - 'release/**'
-    paths:
-      - 'requirements*.txt'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust/**'
-      - '**/package.json'
-      - '**/package-lock.json'
-      - '.github/workflows/dependency-audit.yml'
-      - '.github/runner/**'
-
+    tags:
+      - 'v*.*.*-rc.*'
   workflow_dispatch:
-  schedule:
-    - cron: '0 6 * * 1'
 
 permissions:
   contents: read

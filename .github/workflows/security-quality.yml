@@ -1,21 +1,13 @@
 name: Security Quality
 
+# CI runs only for published release candidates (vX.Y.Z-rc.N tags) and when
+# started by hand. Pull requests and branch pushes start no CI; run the
+# relevant tests locally before pushing (docs/LOCAL_CI.md, "When CI runs").
 on:
-  pull_request:
-    paths-ignore:
-      - '**/*.md'
-      - 'docker-compose-setup.html'
-      - 'user_docs/**'
-      - 'mkdocs.yml'
   push:
-    branches:
-      - main
-      - 'release/**'
-    paths-ignore:
-      - '**/*.md'
-      - 'docker-compose-setup.html'
-      - 'user_docs/**'
-      - 'mkdocs.yml'
+    tags:
+      - 'v*.*.*-rc.*'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -217,9 +209,8 @@ jobs:
             tests/test_tool_security_policy.py
       - name: Cognitive complexity advisory for changed functions
         continue-on-error: true
-        env:
-          COMPLEXITY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: python scripts/report_cognitive_complexity.py "${COMPLEXITY_BASE_SHA}"
+        # A release candidate is compared with main: everything it would release.
+        run: python scripts/report_cognitive_complexity.py origin/main
       - name: Rust source integrity and quality
         run: |
           python scripts/check_vendored_rust.py
