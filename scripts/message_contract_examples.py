@@ -138,7 +138,7 @@ class Signer:
         if kind.endswith(".reply") and kind.removesuffix(".reply") in self.kinds:
             request = self.requests.get(frame.get("causation_id", ""))
             if request is None:
-                return frame["idempotency_key"]  # a reply without its request is refused before its key matters
+                return str(frame["idempotency_key"])  # a reply without its request is refused before its key matters
             parts = [request["idempotency_key"]]
         elif kind in self.kinds:
             entry = self.kinds[kind]
@@ -147,7 +147,7 @@ class Signer:
             if frame["audience"]["target"] in copies:
                 parts.append(frame["audience"]["target"])
         else:
-            return frame["idempotency_key"]
+            return str(frame["idempotency_key"])
         digest = hashlib.sha256(rfc8785.dumps(parts)).digest()
         return f"{kind}:{b64url(digest)}"
 
