@@ -837,7 +837,8 @@ def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: 
     try:
         issued = trust.issued_certificate(document)
     except FrameRefused as refused:
-        raise FrameRefused("invalid_body", refused.detail, at=ISSUED_CERTIFICATE_AT + refused.at) from refused
+        raise FrameRefused("invalid_body", refused.detail, at=ISSUED_CERTIFICATE_AT + refused.at,
+                           known_at=ISSUED_CERTIFICATE_AT + refused.known_at) from refused
 
     def refuse(field_name: str, detail: str) -> FrameRefused:
         return FrameRefused("invalid_body", detail, at=f"{ISSUED_CERTIFICATE_AT}/body/{field_name}")

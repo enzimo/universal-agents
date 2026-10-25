@@ -626,14 +626,14 @@ Hosts, agents, placements and the team view are key-value records, not messages.
 - issue and expiry times;
 - the body, its digest and an Ed25519 signature over the domain prefix `universal-agents/state-record/v1` and a newline, followed by the RFC 8785 canonical JSON of the document without its signature.
 
-The registry's `state_records` section names each record's bucket, key form, signer, the roles whose certificates may sign it (`signer_roles`), the roles that may store it (`writers`), and its body schema. The trust records of "Who sent it" use the same format and are kept by the trust store (`TrustStore.add`). The records here report state, are used as soon as they are read, like requests, and are verified on every read (`TrustStore.verify(data, now=..., held=...)`):
+The registry's `state_records` section names each record's bucket, key form, signer, the roles whose certificates may sign it (`signer_roles`), the roles that may store it (`writers`), and its body schema. The trust records of "Who sent it" use the same format and are kept by the trust store (`TrustStore.add`). The records here report state, are used as soon as they are read, like requests, and are verified on every read (`TrustStore.verify(data, record=..., now=..., held=...)`):
 - **Writer.** The record is signed by its writer's host certificate, valid when the record was written, not revoked, and with one of the record's `signer_roles`. Only hosts of the reader's own installation write state reports (`wrong_issuer`): agreements carry durable work only, and a peer's host keeps its own state in its own installation.
 - **Epochs.** The writer's certificate meets the reader's minimum epochs (`epoch_too_old`).
 - **Time.** A record that has expired, or is dated ahead of the reader's clock by more than the clock tolerance, is refused (`expired`, `not_yet_valid`). A record of a bucket with a per-key lifetime (`ttl_seconds`: host liveness, 60 seconds) states an expiry within it (`invalid_body`), so a copy kept elsewhere is never read as current.
 - **Sequence.** The reader passes the sequence and digest of the record it holds for the key, if any. An older sequence, or other content under the same sequence, is refused (`replayed`), so a reader that holds a newer record never reads an older one written back to the bucket. A reader that holds nothing, after a restart for example, takes the newest record it reads: host liveness records expire within a minute, but agent, placement and team-view records do not expire, so a reader that must not go back keeps the highest sequence it has seen across restarts.
 
 A reader refuses a state report with the first failing check, in the registry's order:
-1. `too_large`, `malformed` (the document's form);
+1. `too_large`, `malformed` (the document's form, and a record of another type than the one read: `TrustStore.verify` takes the record type its bucket holds);
 2. `wrong_issuer` when the writer's type is not the record's signer (it decides where the key comes from), then `unknown_key`;
 3. `bad_signature`, `bad_digest`, `revoked`, `epoch_too_old`;
 4. `wrong_issuer` for the writer's roles or installation, then `wrong_team` for the record's team, read from the key or the body as received;

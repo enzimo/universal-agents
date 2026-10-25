@@ -251,7 +251,7 @@ class TrustStore:
 
     # -- adding records ---------------------------------------------------------------------------
 
-    def verify(self, data: bytes | bytearray | memoryview, *, now: datetime,
+    def verify(self, data: bytes | bytearray | memoryview, *, record: str, now: datetime,
                held: Optional[tuple[int, str]] = None) -> VerifiedRecord:
         """Verify one state report (host liveness, agent state, placement, team view) as a reader reads it.
 
@@ -269,7 +269,9 @@ class TrustStore:
 
         if now.tzinfo is None:
             raise ValueError("now must name its time zone")
-        return self._checked(self._parsed(data), reading=(now, held))
+        if record in TRUST_RECORDS or record not in STATE_RECORDS:
+            raise ValueError(f"verify reads state reports; {record} records are kept with add")
+        return self._checked(self._parsed(data), reading=(record, now, held))
 
     @staticmethod
     def _parsed(data: bytes | bytearray | memoryview) -> dict[str, Any]:
@@ -293,12 +295,14 @@ class TrustStore:
         record = self._checked(raw)
         return self._certificate(record.document, record.body)
 
-    def _checked(self, raw: Mapping[str, Any], reading: Optional[tuple[datetime, Optional[tuple[int, str]]]] = None
-                 ) -> VerifiedRecord:
+    def _checked(self, raw: Mapping[str, Any],
+                 reading: Optional[tuple[str, datetime, Optional[tuple[int, str]]]] = None) -> VerifiedRecord:
         """Check a parsed record in the registry's refusal order (README, "State records").
 
-        ``reading`` is the reader's clock and held record for a state report (``verify``),
-        or None for a trust record (``add``). A record from a newer minor loses the
+        ``reading`` is the record type the reader reads, its clock and its held record for
+        a state report (``verify``), or None for a trust record (``add``). A record of
+        another type than the one read is refused as ``malformed``: whoever can write to
+        a bucket chooses what it holds. A record from a newer minor loses the
         unknown optional fields this version does not know before strict validation; its
         signature still covers them (README, "Versions").
         """
@@ -310,10 +314,11 @@ class TrustStore:
             raise refused_by("malformed", error) from error
         spec = STATE_RECORDS[document.record]
         report = document.record not in TRUST_RECORDS
-        if report and reading is None:
-            raise ValueError(f"{document.record} records report state; verify them when read instead")
-        if not report and reading is not None:
-            raise ValueError(f"{document.record} records vouch for keys and agents; keep them with add instead")
+        if reading is not None and document.record != reading[0]:
+            raise FrameRefused("malformed", f"a {reading[0]} record was read, not a {document.record} record", at="/record")
+        if reading is None and report:
+            raise FrameRefused("malformed", f"{document.record} records report state; readers verify them, the trust store "
+                               "keeps only trust records", at="/record")
         issued_at = parse_timestamp(document.issued_at)
         public_key, signer = self._signer(document, spec, issued_at)
         try:
@@ -332,7 +337,7 @@ class TrustStore:
         if report:
             assert signer is not None and reading is not None
             self._check_report_scope(raw, document, signer)
-            self._check_report_time(document, digest, *reading)
+            self._check_report_time(document, digest, *reading[1:])
         try:
             body = spec.body_model.validate_python(prune(raw["body"], spec.body_shape) if newer else raw["body"])
         except ValidationError as error:

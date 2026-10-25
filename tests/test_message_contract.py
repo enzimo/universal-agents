@@ -924,13 +924,19 @@ def test_team_view_key_must_name_its_body_entry() -> None:
 
 
 def test_state_reports_are_verified_when_read_not_kept() -> None:
-    with pytest.raises(ValueError, match="verify them when read"):
-        fixtures.trust_store().add((STATE_EXAMPLES / "valid" / "agent" / "lead-busy.json").read_bytes())
-    with pytest.raises(ValueError, match="keep them with add"):
-        fixtures.verify_state((EXAMPLES / "trust" / "certificates" / "lead-host-1.json").read_bytes())
+    """Whoever writes to a bucket chooses what it holds, so another record type is refused, not trusted."""
+
+    agent = (STATE_EXAMPLES / "valid" / "agent" / "lead-busy.json").read_bytes()
+    certificate = (EXAMPLES / "trust" / "certificates" / "lead-host-1.json").read_bytes()
+    for read in (lambda: fixtures.trust_store().add(agent), lambda: fixtures.verify_state(certificate, record="placement"),
+                 lambda: fixtures.verify_state(agent, record="placement")):
+        with pytest.raises(FrameRefused) as refused:
+            read()
+        assert (refused.value.code, refused.value.at) == ("malformed", "/record")
+    with pytest.raises(ValueError, match="kept with add"):
+        fixtures.verify_state(certificate)
     with pytest.raises(ValueError, match="time zone"):
-        fixtures.trust_store().verify((STATE_EXAMPLES / "valid" / "agent" / "lead-busy.json").read_bytes(),
-                                      now=fixtures.NOW.replace(tzinfo=None))
+        fixtures.trust_store().verify(agent, record="agent", now=fixtures.NOW.replace(tzinfo=None))
 
 
 def test_a_newer_minors_record_loses_unknown_optional_fields_and_the_same_minors_is_refused() -> None:
@@ -990,6 +996,12 @@ def test_a_notice_names_a_refusal_up_to_the_last_field_the_schema_knows() -> Non
     frame[name] = 1
     refused = refusal(fixtures.resign(frame), frame)
     assert (refused.code, refused.known_at) == ("malformed", "")
+    # A newer minor's reply whose certificate, labelled with this minor, holds a field it does not know.
+    reply = fixtures.example_frame("host.join.reply", "ok")
+    reply["protocol"] = "1.1-pre"
+    reply["body"]["certificate"][name] = 1
+    refused = refusal(fixtures.resign(reply), reply)
+    assert (refused.code, refused.at, refused.known_at) == ("invalid_body", f"/body/certificate/{name}", "/body/certificate")
     notice = fixtures.example_frame("dlq.notice", "bad-signature")["body"]
     assert validator("bodies/dlq.notice.schema.json").is_valid(dict(notice, pointer="/body"))
     assert not validator("bodies/dlq.notice.schema.json").is_valid(dict(notice, pointer="/body/Dear Bob, my password"))

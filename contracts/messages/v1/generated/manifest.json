@@ -1,6 +1,6 @@
 {
   "files": {
-    "contracts/messages/v1/README.md": "a2ed9b4edeb39d65fbae7b74c6cea643def6c8cde3f0975dadee1c5243e571b5",
+    "contracts/messages/v1/README.md": "01d404a20dba55d5ea53d0c7032f0a4724737074bbdc619b6be24191c40c9068",
     "contracts/messages/v1/examples/invalid/access-request-token-on-a-command.json": "45c09aa4dad7c72401ffd76b7dfd582b3ba8608b75fdeffb548be7197be4b7f3",
     "contracts/messages/v1/examples/invalid/access-until-without-hours.json": "ff280196b6c0e78cb759f65ca9d41a88d589d3e92431452e6df0c04df9348c9f",
     "contracts/messages/v1/examples/invalid/access-withdraw-without-request-id.json": "913ae59b2c70f2ebee832e56406f80293e0d67c1e251c87f2b3047d12ccdd3c6",

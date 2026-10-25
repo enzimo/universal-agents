@@ -137,11 +137,14 @@ def verify(data: bytes, frame: Mapping[str, Any], context: Optional[Mapping[str,
     )
 
 
-def verify_state(data: bytes, context: Optional[Mapping[str, Any]] = None, *, trust: Optional[TrustStore] = None) -> VerifiedRecord:
+def verify_state(data: bytes, context: Optional[Mapping[str, Any]] = None, *, trust: Optional[TrustStore] = None,
+                 record: Optional[str] = None) -> VerifiedRecord:
     """Read a state report as a reader does, with the defaults a state example's context overrides.
 
-    The context may add or remove trust records, set minimum epochs, replace the time
-    (``now``) and name the record the reader holds for the key (``held``: sequence and digest).
+    ``record`` is the record type the reader reads; by default the one the document
+    names. The context may add or remove trust records, set minimum epochs, replace the
+    time (``now``) and name the record the reader holds for the key (``held``: sequence
+    and digest).
     """
 
     context = context or {}
@@ -151,7 +154,8 @@ def verify_state(data: bytes, context: Optional[Mapping[str, Any]] = None, *, tr
         trust.require_epochs(minimum["installation"], minimum.get("runtime"),
                              membership=minimum.get("membership", 0), revocation=minimum.get("revocation", 0))
     held = context.get("held")
-    return trust.verify(data, now=parse_timestamp(context["now"]) if "now" in context else NOW,
+    return trust.verify(data, record=record or json.loads(data)["record"],
+                        now=parse_timestamp(context["now"]) if "now" in context else NOW,
                         held=(held["sequence"], held["digest"]) if held else None)
 
 
