@@ -25,7 +25,7 @@
     "outcome": "not_allowed"
   },
   "causation_id": "01928f3a-7b2c-7704-8000-000000000704",
-  "idempotency_key": "host.renew.reply:nzXRDioPCgpHuf2xF28YbRwZKXgxAd1p-FFp_tp1Vgc",
+  "idempotency_key": "host.renew.reply:bTqTsJTPsYOjxfmJ-SqfRU-DHTgE_J_PBhQ2o4Wi6iI",
   "body_digest": "zUCzi6cAt69NAU6l6u3v6oLQIjBvLNhKm-SHXe9HWzk",
-  "signature": "2tSnC-sVvj8il3oc0JI1Saqxj4whcny1NZEkz27sU3QuGfz07y4w8IkVbegXZinQSAR6TRAA0tj2uRhmReOwCg"
+  "signature": "EgYrJ0ANXZiVTiF6hHSJJESQrv3Z5setjc6Bx8WqrlQIJDakGxZMYtECkTeS5LA2aJAQYUwPQhjuSXfnfGHpAA"
 }

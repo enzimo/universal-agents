@@ -234,7 +234,7 @@ authority (`state_records` in the registry, `schemas/state/`):
 
 | Record | Signed by | Says |
 | --- | --- | --- |
-| authority keys | (given to every host when it joins) | which keys are this installation's authority |
+| authority keys | (in the bootstrap bundle every host starts from) | which keys are this installation's authority |
 | `certificate` | the installation's authority | host H of installation X signs with key K for teams T, with roles R and agent types A, between two times, at membership and revocation epochs |
 | `revocations` | the installation's authority | these certificates are revoked |
 | `agent_session` | a team services host of the agent's team | agent G, of type and team role, runs on host H from one time to another |
@@ -267,21 +267,30 @@ frame it checks, in the registry's order:
 
 1. **Certificate (`unknown_key`):** the trust store holds a certificate for the issuer's
    installation, runtime and membership epoch that names the issuer's key id and was
-   valid when the frame was issued. Another installation needs an agreement.
+   valid when the frame was issued. A certificate that another one `replaces` counts as
+   valid only until `certificate_overlap_seconds` after its replacement was issued.
+   Another installation needs an agreement.
 2. **Signature and digest** with that certificate's key.
 3. **Revocation (`revoked`):** neither the certificate nor the one that signed the
    frame's agent session is revoked, whenever it was revoked and whatever issue time
    the frame gives: a revoked key still stops queued work, because the sender chooses that time.
-4. **Epochs (`epoch_too_old`):** the certificate's epochs meet the receiver's minimum
-   for that runtime and installation. The frame's own epochs only name the certificate.
-5. **Issuer (`wrong_issuer`):** the frame's revocation epoch and team match the
-   certificate. A frame that names an agent names its session too, and the session must
-   place that agent, of a type the certificate allows, on the signing runtime when the
-   frame was issued. A reply must answer the request the receiver sent, from the team
-   and agent that request was for.
+4. **Epochs (`epoch_too_old`):** for request/reply messages and events, the certificate's
+   epochs meet the receiver's minimum for that runtime and installation. Queued work
+   (durable and dead-letter frames) is judged by the certificate valid when it was issued
+   and skips this step ("Trust over time"). The frame's own epochs only name the
+   certificate.
+5. **Issuer (`wrong_issuer`):** the frame's revocation epoch matches the certificate, and
+   its team is one the certificate serves; installation operations and their replies name
+   the installation scope `_install` instead, and no agent. A frame that names an agent
+   names its session too, and the session must place that agent, of a type the
+   certificate allows, on the signing runtime when the frame was issued. A reply must
+   answer the request the receiver sent, from the team and agent that request was for. A
+   renewal's body names the certificate that signs it.
 6. **Sender (`wrong_sender`):** one of the certificate's roles may send the kind to its
    audience's address (for a reply, receive its request; a kind's `senders_by_address`
-   narrows some addresses), and another installation's frame stays within its agreement.
+   narrows some addresses). A frame from the receiver's own installation is addressed to
+   its issuer's team: reaching another team needs a later agreement between teams. Another
+   installation's frame stays within its agreement.
    Contact with outside agents goes through the lead, in both directions. A frame whose
    sole sending role is `edge_adapter`, which speaks for outside agents, reaches only the
    lead's inbox or the team services: the receiving host states its agent's role
@@ -492,7 +501,8 @@ Each file in `examples/invalid/` describes one refusal:
 - `signing`: `after` (the default) signs again after the changes, `before` keeps the
   base's signature, `stale_digest` signs again but keeps the base's body digest;
   `signed_by` signs with another key; `token_signing: before` keeps the authority token's
-  signature; `after_signing` respells a value with the same bytes;
+  signature; `record_signing: before` keeps the signature of a state record the body
+  carries (a reply's certificate); `after_signing` respells a value with the same bytes;
 - `text_changes` and `pad_to_bytes`: edits to the serialized text;
 - `context`: `receiver` fields, `now`, `arrived_on`, `headers`, `replay` (`digest` held
   for the frame's key), `trust` (`add` and `remove`, relative to `examples/trust/`),
@@ -520,7 +530,9 @@ file. It uses public fixture signing keys and no operator credentials.
 - **What it proves:** real publish, pull, acknowledgement and signed inbox replies; a
   result and its team-services copy both stored and pulled by their own readers; a
   scheduled run delivered to a worker pool and its result to the person's gateway route;
-  an outside agent's adapter refused when it publishes into a worker pool;
+  an outside agent's adapter refused when it publishes into a worker pool; a new host
+  that holds only the pre-join permissions joining and checking the authority's reply
+  from its bootstrap records;
   separate consumers for ids that an `_` separator would have merged; and refusals of
   other consumers' fetches and acknowledgements, consumer creation and deletion, stream
   reads, publishing under another runtime's id, subscribing to another runtime's inbox,
@@ -535,19 +547,49 @@ A queued message can wait days, for example while a host is cut off.
 - **Certificate at issue time.** Receivers verify every frame and state record with the writer's certificate that was valid when it was issued, even if that certificate has expired since.
 - **Revocation.** A certificate on the installation's revocations record refuses all of its frames and records, whenever it was revoked.
 - **Epochs.** The receiver's minimum membership and revocation epochs apply to certificate-authenticated request/reply messages and events only. Queued work is never refused for an old epoch. Joining proves key possession without a certificate, so a join's epoch zero is accepted on retries after the key becomes known; revocation still refuses the key.
+- **Renewed certificates.** Every renewal, with or without a new key, gets a certificate at a higher membership epoch that names the old one in `replaces`. The old certificate stays in `UA1_CERTS` for queued work, but signs new frames only until `certificate_overlap_seconds` (5 minutes) after its replacement was issued (authorization plan 12.5). A receiver that wants the old epoch gone for requests and events sooner raises its minimum epoch.
 - **Expiry.** Each delivery class has an expiry in `transport.yaml`. Receivers keep their replay record at least as long as the longest expiry.
 
 ## Installation traffic
 
-Joining an installation and renewing a certificate use addresses under `ua.v1._install.<sender>`, and their frames name the scope `_install` instead of a team.
-- **Joining.** A new host has no certificate yet. It signs `host.join` with the key the request presents; the registry marks this as `verification: proof_of_possession`, and it applies to that one operation only. The presented key is checked on every join, including retries after the authority knows its key id. A key id the receiver's trust store already knows must still present the same public key, and a revoked one stops the join. A join speaks only for its own host, in the `_install` scope, and names no agent.
-- **Afterwards.** The authority returns a signed membership certificate (`certificate-document.schema.json`) and a connection credential. Success replies require the certificate record type and its body schema; another state record is not a certificate. Receivers also verify the nested certificate's signature against their trusted installation authority. Later requests are verified as usual.
+Joining an installation and renewing a certificate use addresses under `ua.v1._install.<sender>`. Their frames name the scope `_install` (`transport.yaml` `installation_scope`) as both the issuer's and the audience's team, and never an agent.
+
+**Starting a host.** A new host starts from a bootstrap bundle that an administrator, or the local installation itself, gives it (authorization plan 12.2). The bundle holds:
+- the installation's authority keys;
+- the certificates of the installation authority's hosts, and the installation's revocations record, so the host can check the authority's replies before it has a certificate of its own;
+- the NATS credential of the pre-join permission set, `generated/permissions/joining_host.json`. With it the host can publish its own join request and read its own reply inbox, and nothing else.
+
+**Joining.** A new host has no certificate yet. It signs `host.join` with the key the request presents; the registry marks this as `verification: proof_of_possession`, and it applies to that one operation only. A receiver checks:
+- the join comes from the receiver's own installation and names, as its issuer's key, the key its body presents, which is not an authority key (`unknown_key`);
+- a key id the trust store already knows keeps its public key (`unknown_key`), and a revoked one stops the join (`revoked`);
+- the issuer names `_install`, no agent, epoch zero and a runtime id that does not start with `x-` or `_`, and the body asks for that runtime in that installation (`wrong_issuer`);
+- the body asks only for roles among the kind's senders, never the installation authority's (`wrong_sender`).
+
+A join is not answered with a fresh challenge from the authority, as the authorization plan's enrollment endpoint is (12.3, 12.4). A join frame lasts 30 seconds, the receiver's replay record refuses other content under its message id, and its retry key names the runtime, key and join id. A copied join can therefore only repeat the same request within its lifetime, and the certificate it gets back is useless without the private key.
+
+**What the authority decides.** An administrator approves the key's fingerprint, or the installation approves a local process automatically; until then the reply is `pending`. A join for a runtime that already holds an unexpired certificate under another key is a lost-key recovery: an administrator approves it again (plan 12.5), and the new certificate gets a higher membership epoch and `replaces` the old one. A join's certificate grants at most the teams, roles, agent types and sessions it asked for.
+
+**Renewing.** A host renews with `host.renew`, signed by the certificate it renews; the body names that certificate and its membership epoch. Every renewed certificate has a higher membership epoch than the one it replaces and names it in `replaces` ("Trust over time"). A host whose reply was lost retries with the same renewal id while the old certificate still signs, or reads its new certificate from `UA1_CERTS`.
+
+**Replies.** A success reply carries the signed certificate (`certificate-document.schema.json`), which only an authority key writes, and a connection credential. The receiver verifies the certificate and refuses the reply as `invalid_body` at `/body/certificate/...` when:
+- it does not verify against the installation's own authority keys, or its record's `expires_at` differs from its body's;
+- it is for another installation or another runtime than the host that asked;
+- a join's certificate names another application or NATS key than the join presented, or grants more teams, roles, agent types or sessions than it asked for;
+- a renewal's certificate does not replace the certificate that signed the renewal, does not have a higher membership epoch, or names another key than the rotated one (or, without a rotation, the kept one), or another NATS key than the new one asked for (or the kept one).
+
+The host then keeps the certificate with `TrustStore.add`. Later requests are verified as usual.
+
+**Identifiers.** `profile_sha256` identifies the runtime profile the host asks for: the subjects, agent types and limits an administrator reviews before approving (authorization plan 12.3). The enrollment service that phase 2 adds defines that profile's document; the certificate states the profile granted.
 
 ### Application key rotation
 
 `host.renew` optionally carries `application_key_rotation`, an object with both `key`
 (an application key) and `proof` (an Ed25519 signature). Omitting the object keeps
-the application key.
+the application key. The new key needs a key id the installation does not use yet: not
+the host's current key id, another host's, or an authority key's (`invalid_body` at
+`/body/application_key_rotation/key/key_id`). The one exception is a retry after a lost
+reply: the key id of the certificate that already replaced the signing one, with the same
+public key. The renewed certificate has a higher membership epoch, like every renewal.
 
 The new private key signs these bytes:
 

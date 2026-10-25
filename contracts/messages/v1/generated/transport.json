@@ -112,6 +112,7 @@
       "stream": "UA1_WORK"
     }
   },
+  "installation_scope": "_install",
   "key_value": {
     "UA1_AGENTS": {
       "description": "one record per agent (availability, busy, idle, paused, exiting), written only on change",

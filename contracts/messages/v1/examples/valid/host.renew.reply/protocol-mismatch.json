@@ -27,7 +27,7 @@
     "install": "Install Universal Agents 0.10.0 or later, which runs protocol 1.0-pre."
   },
   "causation_id": "01928f3a-7b2c-7704-8000-000000000704",
-  "idempotency_key": "host.renew.reply:nzXRDioPCgpHuf2xF28YbRwZKXgxAd1p-FFp_tp1Vgc",
+  "idempotency_key": "host.renew.reply:bTqTsJTPsYOjxfmJ-SqfRU-DHTgE_J_PBhQ2o4Wi6iI",
   "body_digest": "IAa4ncHP2G_oK6FeKSsOJBulp5xAYhEdfsmWIKiS2NY",
-  "signature": "h8zkK2nw3uS9WKNnfa8c3iz-FLyYzW__F5b9Z2mq9Ofa7mCY3LxZkzgK_FhwFf4R1Z2hIJ0ySD1PTYp4oEjbAw"
+  "signature": "Jl_cmfNjCenhG5rbOKrsYEMEPJ1c5Bvi-VMV4CcwzFVkYznrrdYrfmTZtV8WDMBUnxhLsajfxRRO-TwzeHp5BQ"
 }

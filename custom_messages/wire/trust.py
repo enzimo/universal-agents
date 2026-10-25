@@ -19,12 +19,18 @@ is ignored; the same sequence with other content is refused as ``replayed``.
 Lookups return only verified records. Revocation is checked when a
 frame is verified, so a revocation that arrives later still stops every frame that
 was not yet admitted.
+
+A renewed certificate (a renewal or a key rotation) has a higher membership epoch
+than the one it ``replaces``, so both stay in the store and queued frames still find
+the certificate valid when they were issued. The replaced certificate signs new
+frames only until ``CERTIFICATE_OVERLAP_SECONDS`` after its replacement was issued
+(authorization plan 12.5).
 """
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Iterable, Mapping, Optional
 
@@ -36,6 +42,7 @@ from custom_messages.wire.canonical import CanonicalJsonError, parse
 from custom_messages.wire.encoding import b64url, b64url_decode, body_digest, signed_bytes
 from custom_messages.wire.kinds import (
     BETWEEN_INSTALLATIONS,
+    CERTIFICATE_OVERLAP_SECONDS,
     CLOCK_SKEW_SECONDS,
     KINDS,
     MAX_FRAME_BYTES,
@@ -48,8 +55,12 @@ from custom_messages.wire.spec import StateSpec
 from custom_messages.wire.values import parse_timestamp
 
 SKEW = timedelta(seconds=CLOCK_SKEW_SECONDS)
+OVERLAP = timedelta(seconds=CERTIFICATE_OVERLAP_SECONDS)
 # Runtime ids that would read as another installation's sender slot or a system id.
 RESERVED_RUNTIME_PREFIXES = ("x-", "_")
+# Where each trust record's body says when it ends; the record's own expiry, when it
+# has one, must say the same, so the record has one validity window.
+BODY_END = {"certificate": "expires_at", "agent_session": "ends_at", "agreement": "expires_at"}
 # Record names (registry state_records). The first four vouch for keys and agents and are
 # kept by the trust store; the others report state and are verified when read.
 CERTIFICATE, REVOCATIONS, AGENT_SESSION, AGREEMENT = "certificate", "revocations", "agent_session", "agreement"
@@ -102,11 +113,17 @@ class HostCertificate:
     revocation_epoch: int
     key_id: str
     public_key: Ed25519PublicKey
+    nats_public_key: str
     issued_at: datetime
     expires_at: datetime
+    replaces: Optional[str] = None
+    # When a certificate replacing this one was issued; it then signs new frames for
+    # OVERLAP more (differences, not sums, so times near year 9999 cannot overflow).
+    replaced_at: Optional[datetime] = None
 
     def valid_at(self, moment: datetime) -> bool:
-        return within(self.issued_at, self.expires_at, moment)
+        return within(self.issued_at, self.expires_at, moment) and (
+            self.replaced_at is None or moment - self.replaced_at < OVERLAP + SKEW)
 
 
 @dataclass(frozen=True)
@@ -173,11 +190,18 @@ class TrustStore:
         self._sessions: dict[tuple[str, str, str], AgentSession] = {}
         self._agreements: dict[str, Agreement] = {}
         self._minimums: dict[tuple[str, Optional[str]], tuple[int, int]] = {}
+        # (installation, runtime, replaced certificate id) -> when the earliest replacement was issued.
+        self._replacements: dict[tuple[str, str, str], datetime] = {}
 
     # -- lookups ---------------------------------------------------------------------------------
 
     def host_certificate(self, installation: str, runtime: str, membership_epoch: int) -> Optional[HostCertificate]:
-        return self._certificates.get((installation, runtime, membership_epoch))
+        certificate = self._certificates.get((installation, runtime, membership_epoch))
+        return None if certificate is None else self._with_replacement(certificate)
+
+    def _with_replacement(self, certificate: HostCertificate) -> HostCertificate:
+        replaced_at = self._replacements.get((certificate.installation, certificate.runtime, certificate.certificate_id))
+        return certificate if replaced_at is None else replace(certificate, replaced_at=replaced_at)
 
     def agent_session(self, installation: str, team: str, session: str) -> Optional[AgentSession]:
         return self._sessions.get((installation, team, session))
@@ -188,8 +212,16 @@ class TrustStore:
     def certificates_with_key(self, installation: str, key_id: str) -> list[HostCertificate]:
         """Every held certificate of the installation that names this key id."""
 
-        return [certificate for certificate in self._certificates.values()
+        return [self._with_replacement(certificate) for certificate in self._certificates.values()
                 if certificate.installation == installation and certificate.key_id == key_id]
+
+    def names_authority_key(self, installation: str, key_id: str) -> bool:
+        """Whether ``key_id`` is one of the installation's authority keys: this one's own, or a peer's from its agreement."""
+
+        if installation == self.installation:
+            return key_id in self._anchors
+        agreement = self._agreements.get(installation)
+        return agreement is not None and key_id in agreement.authority_keys
 
     def revoked(self, installation: str, certificate_id: str) -> bool:
         revocations = self._revocations.get(installation)
@@ -221,10 +253,29 @@ class TrustStore:
             raise FrameRefused("too_large", f"{len(data)} bytes")
         try:
             raw = parse(data)
+        except CanonicalJsonError as error:
+            raise FrameRefused("malformed", str(error).splitlines()[0]) from error
+        return self._checked(raw)
+
+    def issued_certificate(self, raw: Mapping[str, Any]) -> HostCertificate:
+        """Verify a certificate record carried in a join or renewal reply, without keeping it.
+
+        ``raw`` is the record's JSON object as received inside the frame, which its
+        signature covers. The receiver keeps it afterwards with ``add``.
+        """
+
+        record = self._checked(raw)
+        if record.document.record != CERTIFICATE:
+            raise FrameRefused("invalid_body", "a join or renewal returns a certificate record", at="/record")
+        return self._certificate(record.document, record.body)
+
+    def _checked(self, raw: Mapping[str, Any]) -> VerifiedRecord:
+        """A parsed record's form, signer, signature, digest and record rules (``verify`` without parsing)."""
+
+        try:
             document = State.model_validate(raw)
-        except (CanonicalJsonError, ValidationError) as error:
-            at = pointer(error.errors()[0]) if isinstance(error, ValidationError) else ""
-            raise FrameRefused("malformed", str(error).splitlines()[0], at=at) from error
+        except ValidationError as error:
+            raise FrameRefused("malformed", str(error).splitlines()[0], at=pointer(error.errors()[0])) from error
         spec = STATE_RECORDS[document.record]
         issued_at = parse_timestamp(document.issued_at)
         public_key, signer = self._signer(document, spec, issued_at)
@@ -246,6 +297,9 @@ class TrustStore:
                                at=pointer(error.errors()[0], prefix="/body")) from error
         if document.expires_at is not MISSING and parse_timestamp(document.expires_at) <= issued_at:
             raise FrameRefused("invalid_body", "a record cannot expire before it is written", at="/expires_at")
+        end = BODY_END.get(document.record)
+        if end is not None and document.expires_at is not MISSING and document.expires_at != getattr(body, end):
+            raise FrameRefused("invalid_body", f"the record expires when its body's {end} says", at="/expires_at")
         if document.record not in TRUST_RECORDS:
             self._check_state_report(document, body, signer)
         return VerifiedRecord(document=document, body=body, signer=signer,
@@ -331,7 +385,9 @@ class TrustStore:
         else:
             self._expect_key(document, f"{body.team}.{body.agent}")
 
-    def _keep_certificate(self, document: State, body: Any, _signer: Optional[HostCertificate]) -> None:
+    def _certificate(self, document: State, body: Any) -> HostCertificate:
+        """The certificate a verified certificate record states, after its own rules."""
+
         self._same_installation(document, body.installation)
         if body.runtime.startswith(RESERVED_RUNTIME_PREFIXES):
             raise FrameRefused("invalid_body", "runtime ids starting with x- or _ are reserved", at="/body/runtime")
@@ -339,14 +395,33 @@ class TrustStore:
         issued_at, expires_at = parse_timestamp(body.issued_at), parse_timestamp(body.expires_at)
         if expires_at <= issued_at:
             raise FrameRefused("invalid_body", "a certificate must end after it starts", at="/body/expires_at")
-        self._certificates[(body.installation, body.runtime, body.membership_epoch)] = HostCertificate(
+        return HostCertificate(
             certificate_id=body.certificate_id, installation=body.installation, runtime=body.runtime,
             teams=frozenset(body.teams), roles=frozenset(body.roles), agent_types=frozenset(body.agent_types),
             membership_epoch=body.membership_epoch, revocation_epoch=body.revocation_epoch,
             key_id=body.application_key.key_id,
             public_key=Ed25519PublicKey.from_public_bytes(b64url_decode(body.application_key.public_key)),
-            issued_at=issued_at, expires_at=expires_at,
+            nats_public_key=body.nats_public_key, issued_at=issued_at, expires_at=expires_at,
+            replaces=None if body.replaces is MISSING else body.replaces,
         )
+
+    def _keep_certificate(self, document: State, body: Any, _signer: Optional[HostCertificate]) -> None:
+        certificate = self._certificate(document, body)
+        held = [other for other in self._certificates.values()
+                if (other.installation, other.runtime) == (certificate.installation, certificate.runtime)]
+        # A renewal keeps the old certificate for queued work, so it needs its own key
+        # (host.<installation>.<runtime>.<membership_epoch>): its epoch is higher.
+        for other in held:
+            replaced, replacing = ((other, certificate) if certificate.replaces == other.certificate_id
+                                   else (certificate, other) if other.replaces == certificate.certificate_id else (None, None))
+            if replaced is not None and replacing is not None and replacing.membership_epoch <= replaced.membership_epoch:
+                raise FrameRefused("invalid_body", "a renewed certificate has a higher membership epoch than the one it replaces",
+                                   at="/body/membership_epoch")
+        if certificate.replaces is not None:
+            slot = (certificate.installation, certificate.runtime, certificate.replaces)
+            earlier = self._replacements.get(slot)
+            self._replacements[slot] = certificate.issued_at if earlier is None else min(earlier, certificate.issued_at)
+        self._certificates[(certificate.installation, certificate.runtime, certificate.membership_epoch)] = certificate
 
     def _keep_revocations(self, document: State, body: Any, _signer: Optional[HostCertificate]) -> None:
         self._same_installation(document, body.installation)

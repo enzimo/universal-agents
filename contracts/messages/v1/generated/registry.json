@@ -1,6 +1,7 @@
 {
   "authority_token_domain": "universal-agents/authority-token/v1",
   "authority_token_max_seconds": 604800,
+  "certificate_overlap_seconds": 300,
   "change_refusals": [
     {
       "code": "changed_since_read",
@@ -1075,6 +1076,8 @@
       "description": "A new host asks to join the installation; the frame is signed with the key it presents.",
       "expiry_seconds": 30,
       "idempotency": [
+        "/issuer/runtime",
+        "/issuer/key_id",
         "/body/join_id"
       ],
       "ledger": "none",
@@ -1117,6 +1120,7 @@
       "description": "A host renews its certificate and connection credential, or rotates its keys.",
       "expiry_seconds": 30,
       "idempotency": [
+        "/issuer/runtime",
         "/body/renew_id"
       ],
       "ledger": "none",
@@ -5776,7 +5780,7 @@
     },
     {
       "code": "unknown_key",
-      "meaning": "the trust store holds no certificate for the issuer's installation, runtime and membership epoch that names the issuer's key id and was valid when the frame was issued, or the installation is neither the receiver's nor one it has an agreement with; a join (verification proof_of_possession) must instead name the key it presents in its body, and a key id the trust store already knows must keep its public key"
+      "meaning": "the trust store holds no certificate for the issuer's installation, runtime and membership epoch that names the issuer's key id and was valid when the frame was issued (a certificate another one replaces is valid only until certificate_overlap_seconds after its replacement was issued), or the installation is neither the receiver's nor one it has an agreement with; a join (verification proof_of_possession) must instead come from the receiver's own installation and name the key it presents in its body, which is not an authority key, and a key id the trust store already knows must keep its public key"
     },
     {
       "code": "bad_signature",
@@ -5796,11 +5800,11 @@
     },
     {
       "code": "wrong_issuer",
-      "meaning": "the issuer's revocation epoch or team disagrees with its certificate; or it names an agent without a session, or a session that does not place that agent, of a type the certificate allows, on the signing runtime when the frame was issued; or a reply does not come from the agent and team the request was for"
+      "meaning": "the issuer's revocation epoch or team disagrees with its certificate (installation operations and their replies name the installation scope as their team and no agent, and other kinds a team of the certificate); or it names an agent without a session, or a session that does not place that agent, of a type the certificate allows, on the signing runtime when the frame was issued; or a reply does not come from the agent and team the request was for; or a join names an epoch other than zero, a reserved runtime id (x- or _), an agent, or a body runtime or installation other than its issuer's; or a renewal's body names another certificate or membership epoch than the certificate that signs it"
     },
     {
       "code": "wrong_sender",
-      "meaning": "none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request); or the frame comes from another installation with a kind, class or destination team its agreement does not allow; or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)"
+      "meaning": "none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request), or a join asks for a role that is not among the kind's senders; or a frame from the receiver's own installation is addressed to another team than its issuer's; or the frame comes from another installation with a kind, class or destination team its agreement does not allow; or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)"
     },
     {
       "code": "wrong_team",
@@ -5832,7 +5836,7 @@
     },
     {
       "code": "invalid_body",
-      "meaning": "the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give"
+      "meaning": "the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give; or a renewal's key rotation names a key id the installation already uses or a proof that does not verify; or the certificate in a join or renewal reply does not verify against the receiver's authority keys or does not certify the host that asked (README, \"Installation traffic\")"
     },
     {
       "code": "bad_authority",

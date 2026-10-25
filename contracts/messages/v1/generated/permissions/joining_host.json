@@ -1,0 +1,9 @@
+{
+  "publish": [
+    "ua.v1._install.{self}.svc.host.join"
+  ],
+  "role": "joining_host",
+  "subscribe": [
+    "_INBOX.{self}.>"
+  ]
+}

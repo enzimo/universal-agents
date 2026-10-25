@@ -19,7 +19,6 @@ the same id is refused as ``replayed``.
 from __future__ import annotations
 
 import hashlib
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping, Optional
@@ -37,6 +36,8 @@ from custom_messages.wire.kinds import (
     DECISION_TOKEN_DOMAIN,
     BETWEEN_INSTALLATIONS,
     FRAME_SHAPE,
+    INSTALLATION_ADDRESS_PREFIX,
+    INSTALLATION_SCOPE,
     KINDS,
     MAX_FRAME_BYTES,
     PEER_SENDER_SLOT,
@@ -49,7 +50,7 @@ from custom_messages.wire.kinds import (
 from custom_messages.wire.models import AuthorityToken, Frame
 from custom_messages.wire.refusals import FrameRefused, pointer
 from custom_messages.wire.spec import KindSpec, prune
-from custom_messages.wire.trust import SKEW, AgentSession, HostCertificate, TrustStore, within
+from custom_messages.wire.trust import RESERVED_RUNTIME_PREFIXES, SKEW, AgentSession, HostCertificate, TrustStore, within
 from custom_messages.wire.values import parse_timestamp
 
 __all__ = [
@@ -84,16 +85,16 @@ DURABLE = "durable"
 # Classes whose frames wait in a stream: judged by the certificate valid when they
 # were issued, so the receiver's minimum epochs do not apply to them.
 QUEUED_CLASSES = frozenset({"durable", "dead_letter"})
-# Installation-wide traffic (joining, renewing) names this scope instead of a team, and
-# its addresses (_install.{sender}.svc.<operation>) sit under ua.v1._install.<sender>.
-INSTALLATION_SCOPE = "_install"
-INSTALLATION_ADDRESS = "_install.{sender}."
+# Subjects start with this root, then the team token (transport.yaml subject_prefix).
+# Installation-wide traffic (joining, renewing) names INSTALLATION_SCOPE as its team, and
+# its addresses (_install.{sender}.svc.<operation>) follow the root directly.
+SUBJECT_ROOT = SUBJECT_PREFIX.split("{team}", 1)[0]
 # A join is signed by the key it presents, since its host has no certificate yet.
 PROOF_OF_POSSESSION = "proof_of_possession"
 _HOST_RENEW = "host.renew"
 _KEY_ROTATION = "application_key_rotation"
-# An address placeholder the audience does not fill (a dead-letter copy id): one subject token.
-_TOKEN = "[A-Za-z0-9_-]+"
+# Where a join or renewal reply carries the certificate the authority issued.
+ISSUED_CERTIFICATE_AT = "/body/certificate"
 
 
 def idempotency_key(kind: str, *parts: str | int | None) -> str:
@@ -356,6 +357,8 @@ def _presented_key(raw: Mapping[str, Any], frame: Frame, trust: TrustStore) -> E
     presented = raw["body"].get("application_key")
     if not isinstance(presented, dict) or presented.get("key_id") != issuer.key_id:
         raise FrameRefused("unknown_key", "a join names the key it presents", at="/issuer/key_id")
+    if trust.names_authority_key(issuer.installation, issuer.key_id):
+        raise FrameRefused("unknown_key", "an authority key id is not a host's key", at="/issuer/key_id")
     try:
         public_key = Ed25519PublicKey.from_public_bytes(b64url_decode(str(presented.get("public_key", ""))))
     except ValueError as error:
@@ -374,14 +377,41 @@ def _verify_signature(raw: Mapping[str, Any], frame: Frame, public_key: Ed25519P
         raise FrameRefused("bad_signature", at="/signature") from error
 
 
-def _verify_join(frame: Frame, trust: TrustStore) -> None:
-    """A join speaks for its host only, in the installation scope, and its known key must not be revoked."""
+def _verify_join(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, trust: TrustStore) -> None:
+    """A join speaks for its own new host only (README, "Installation traffic").
 
+    Its known key must not be revoked. It names the installation scope, no agent, epoch
+    zero and an unreserved runtime id; its body asks for that runtime in that
+    installation, and only for roles a joining host may hold (the kind's senders, which
+    the receiver cannot check against a certificate the host does not have yet).
+    """
+
+    issuer = frame.issuer
     if any(trust.revoked(certificate.installation, certificate.certificate_id)
-           for certificate in trust.certificates_with_key(frame.issuer.installation, frame.issuer.key_id)):
+           for certificate in trust.certificates_with_key(issuer.installation, issuer.key_id)):
         raise FrameRefused("revoked", "the presented key's certificate is revoked", at="/issuer/key_id")
-    if frame.issuer.team != INSTALLATION_SCOPE or frame.issuer.agent is not MISSING or frame.issuer.session is not MISSING:
-        raise FrameRefused("wrong_issuer", "a join speaks for its host in the installation scope", at="/issuer/team")
+    if issuer.team != INSTALLATION_SCOPE:
+        raise FrameRefused("wrong_issuer", "a join names the installation scope", at="/issuer/team")
+    if issuer.agent is not MISSING or issuer.session is not MISSING:
+        raise FrameRefused("wrong_issuer", "a join speaks for its host, not an agent", at="/issuer/agent")
+    for field_name in ("membership_epoch", "revocation_epoch"):
+        if getattr(issuer, field_name) != 0:
+            raise FrameRefused("wrong_issuer", "a host joins at epoch zero", at=f"/issuer/{field_name}")
+    if issuer.runtime.startswith(RESERVED_RUNTIME_PREFIXES):
+        raise FrameRefused("wrong_issuer", "runtime ids starting with x- or _ are reserved", at="/issuer/runtime")
+    body = raw["body"]
+    for field_name in ("runtime", "installation"):
+        if body.get(field_name) != getattr(issuer, field_name):
+            raise FrameRefused("wrong_issuer", f"a join asks for its own {field_name}", at=f"/body/{field_name}")
+    roles = body.get("roles")
+    if isinstance(roles, list) and not all(isinstance(role, str) and role in spec.senders for role in roles):
+        raise FrameRefused("wrong_sender", f"a joining host asks only for {', '.join(spec.senders)} roles", at="/body/roles")
+
+
+def _installation_operation(spec: Optional[KindSpec]) -> bool:
+    """Whether the kind is installation-wide (joining, renewing): its address sits in the installation scope."""
+
+    return spec is not None and any(address.startswith(INSTALLATION_ADDRESS_PREFIX) for address in spec.addresses.values())
 
 
 def _session(frame: Frame, trust: TrustStore) -> Optional[AgentSession]:
@@ -411,14 +441,24 @@ def _verify_epochs(certificate: HostCertificate, spec: Optional[KindSpec], trust
                            at="/issuer/revocation_epoch")
 
 
-def _verify_issuer(frame: Frame, certificate: HostCertificate, session: Optional[AgentSession], issued_at: datetime,
-                   is_reply: bool, answering: Optional[Frame]) -> None:
-    """The frame's issuer fields agree with its certificate and session; a reply comes from the agent asked."""
+def _verify_issuer(frame: Frame, spec: Optional[KindSpec], certificate: HostCertificate, session: Optional[AgentSession],
+                   issued_at: datetime, is_reply: bool, answering: Optional[Frame]) -> None:
+    """The frame's issuer fields agree with its certificate and session; a reply comes from the agent asked.
+
+    Installation operations and their replies speak for a host in the installation
+    scope; every other kind names a team the certificate serves (team ids never start
+    with ``_``, so no certificate serves the installation scope).
+    """
 
     issuer = frame.issuer
     if issuer.revocation_epoch != certificate.revocation_epoch:
         raise FrameRefused("wrong_issuer", "the revocation epoch differs from the certificate's", at="/issuer/revocation_epoch")
-    if issuer.team != INSTALLATION_SCOPE and issuer.team not in certificate.teams:
+    if _installation_operation(spec):
+        if issuer.team != INSTALLATION_SCOPE:
+            raise FrameRefused("wrong_issuer", "an installation operation names the installation scope", at="/issuer/team")
+        if issuer.agent is not MISSING or issuer.session is not MISSING:
+            raise FrameRefused("wrong_issuer", "an installation operation speaks for its host, not an agent", at="/issuer/agent")
+    elif issuer.team not in certificate.teams:
         raise FrameRefused("wrong_issuer", "the certificate does not serve the issuer's team", at="/issuer/team")
     if (issuer.agent is MISSING) != (issuer.session is MISSING):
         raise FrameRefused("wrong_issuer", "a frame names an agent and its session together", at="/issuer/session")
@@ -445,6 +485,17 @@ def _verify_issuer(frame: Frame, certificate: HostCertificate, session: Optional
         raise FrameRefused("wrong_issuer", "the reply comes from another agent than the one asked", at="/issuer/agent")
 
 
+def _verify_renewal(raw: Mapping[str, Any], frame: Frame, certificate: HostCertificate) -> None:
+    """A renewal renews the certificate that signs it: its body names that certificate and epoch."""
+
+    if frame.kind != _HOST_RENEW:
+        return
+    for field_name, value in (("certificate_id", certificate.certificate_id), ("membership_epoch", certificate.membership_epoch)):
+        named = raw["body"].get(field_name)
+        if type(named) is not type(value) or named != value:
+            raise FrameRefused("wrong_issuer", "a renewal names the certificate that signs it", at=f"/body/{field_name}")
+
+
 def _verify_sender(frame: Frame, certificate: HostCertificate, session: Optional[AgentSession], spec: Optional[KindSpec],
                    is_reply: bool, trust: TrustStore, issued_at: datetime, receiver: Receiver) -> None:
     if spec is None:
@@ -456,6 +507,10 @@ def _verify_sender(frame: Frame, certificate: HostCertificate, session: Optional
         raise FrameRefused("wrong_sender", f"{frame.kind} to a {target} comes only from {', '.join(allowed)} hosts", at="/kind")
     _verify_outside_boundary(frame, roles, session, receiver)
     if frame.issuer.installation == trust.installation:
+        # Within an installation a host speaks inside the team it names; reaching
+        # another team is a later agreement (message contract plan, phase 6).
+        if frame.audience.team != frame.issuer.team:
+            raise FrameRefused("wrong_sender", "a frame stays within its issuer's team", at="/audience/team")
         return
     agreement = trust.agreement(frame.issuer.installation)
     assert agreement is not None  # _issuer_certificate refused installations without one
@@ -497,7 +552,22 @@ def _verify_audience(frame: Frame, receiver: Receiver) -> None:
         raise FrameRefused("wrong_audience", "the frame names another receiving host", at="/audience/runtime")
 
 
-def _verify_subject(frame: Frame, spec: Optional[KindSpec], is_reply: bool, arrived_on: str,
+def _expected_subject(address: str, team: str, audience_id: str, slot: str, body: Mapping[str, Any]) -> str:
+    """The subject a kind's address gives for this audience and sender slot.
+
+    ``{agent}``, ``{pool}`` and ``{edge}`` are the audience id and ``{copy}`` the body's
+    copy_id. An installation address names its scope and sender itself; other
+    addresses follow ``ua.v1.<audience team>.<sender slot>.``.
+    """
+
+    filled = address.format(agent=audience_id, pool=audience_id, edge=audience_id, sender=slot,
+                            copy=str(body.get("copy_id")))
+    if address.startswith(INSTALLATION_ADDRESS_PREFIX):
+        return SUBJECT_ROOT + filled
+    return SUBJECT_PREFIX.format(team=team, sender=slot) + "." + filled
+
+
+def _verify_subject(raw: Mapping[str, Any], frame: Frame, spec: Optional[KindSpec], is_reply: bool, arrived_on: str,
                     headers: Optional[Mapping[str, str]]) -> None:
     audience, issuer = frame.audience, frame.issuer
     if is_reply:
@@ -517,14 +587,7 @@ def _verify_subject(frame: Frame, spec: Optional[KindSpec], is_reply: bool, arri
                                    at="/audience/target")
             if audience.target in TEAM_WIDE_TARGETS and audience.id != audience.team:
                 raise FrameRefused("subject_mismatch", "a team-wide audience names its team", at="/audience/id")
-            installation_wide = address.startswith(INSTALLATION_ADDRESS)
-            if installation_wide != (audience.team == INSTALLATION_SCOPE):
-                raise FrameRefused("subject_mismatch", "installation operations, and only they, use the installation scope",
-                                   at="/audience/team")
-            tail = address.removeprefix(INSTALLATION_ADDRESS).format(agent=audience.id, pool=audience.id, edge=audience.id,
-                                                                     copy="{copy}")
-            expected = re.escape(prefix + tail).replace(re.escape("{copy}"), _TOKEN)
-            if not re.fullmatch(expected, frame.subject):
+            if frame.subject != _expected_subject(address, audience.team, audience.id, slot, raw["body"]):
                 raise FrameRefused("subject_mismatch", "the address must match the kind and audience", at="/subject")
     if arrived_on != frame.subject:
         raise FrameRefused("subject_mismatch", "the frame arrived on another subject", at="/subject")
@@ -563,14 +626,31 @@ def _verify_time(frame: Frame, spec: Optional[KindSpec], now: datetime, issued_a
         raise FrameRefused("not_yet_valid", at="/not_before")
 
 
-def _verify_renew_key_proof(raw: Mapping[str, Any]) -> None:
-    """A renewal that rotates keys proves possession of the new key over the whole renewal."""
+def _verify_renew_key_proof(raw: Mapping[str, Any], certificate: Optional[HostCertificate], trust: TrustStore) -> None:
+    """A renewal that rotates keys names a new key id and proves possession of that key over the whole renewal.
+
+    The key id is new to the installation: not the signing certificate's, not another
+    host's, not an authority key. The one exception is a retry after a lost reply: the
+    certificate that already replaced the signing one, with the same public key.
+    """
 
     if raw["kind"] != _HOST_RENEW or _KEY_ROTATION not in raw["body"]:
         return
     rotation = raw["body"][_KEY_ROTATION]
     if not isinstance(rotation, dict):
         raise FrameRefused("invalid_body", "application_key_rotation holds a key and a proof", at=f"/body/{_KEY_ROTATION}")
+    assert certificate is not None  # a renewal is signed by the certificate it renews
+    key = rotation.get("key")
+    if isinstance(key, dict) and isinstance(key.get("key_id"), str):
+        key_id = key["key_id"]
+        used = trust.certificates_with_key(certificate.installation, key_id)
+        retried = [other for other in used
+                   if other.replaces == certificate.certificate_id and other.runtime == certificate.runtime
+                   and b64url(other.public_key.public_bytes_raw()) == key.get("public_key")]
+        if (key_id == certificate.key_id or trust.names_authority_key(certificate.installation, key_id)
+                or (used and not retried)):
+            raise FrameRefused("invalid_body", "a rotation names a key id the installation does not use yet",
+                               at=f"/body/{_KEY_ROTATION}/key/key_id")
     try:
         public_key = Ed25519PublicKey.from_public_bytes(b64url_decode(rotation["key"]["public_key"]))
         public_key.verify(b64url_decode(rotation["proof"]), renew_key_proof_bytes(raw))
@@ -749,6 +829,67 @@ def _verify_decision_token(raw: Mapping[str, Any], frame: Frame, trust: TrustSto
     _verify_token_signature_and_time(signed, certificate, parse_timestamp(frame.issued_at))
 
 
+def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: TrustStore) -> None:
+    """The certificate a join or renewal reply carries (README, "Installation traffic").
+
+    It verifies against this installation's authority keys and certifies the host that
+    asked: its runtime, and the key and NATS key it presented or kept. A join's
+    certificate grants at most the teams, roles, agent types and sessions it asked
+    for. A renewal's has a higher membership epoch than the certificate it replaces.
+    """
+
+    document = _pointed(raw, ISSUED_CERTIFICATE_AT)
+    if not isinstance(document, Mapping):
+        return  # only success replies carry one, and their schema requires it
+    try:
+        issued = trust.issued_certificate(document)
+    except FrameRefused as refused:
+        raise FrameRefused("invalid_body", refused.detail, at=ISSUED_CERTIFICATE_AT + refused.at) from refused
+
+    def refuse(field_name: str, detail: str) -> FrameRefused:
+        return FrameRefused("invalid_body", detail, at=f"{ISSUED_CERTIFICATE_AT}/body/{field_name}")
+
+    asked = answering.body
+    if issued.installation != trust.installation:
+        raise refuse("installation", "the certificate belongs to another installation")
+    if issued.runtime != answering.issuer.runtime:
+        raise refuse("runtime", "the certificate is for another host than the one that asked")
+    if answering.kind == _HOST_RENEW:
+        _verify_renewed_certificate(issued, answering, asked, trust, refuse)
+        return
+    key = asked.get("application_key") or {}
+    if (issued.key_id, b64url(issued.public_key.public_bytes_raw())) != (key.get("key_id"), key.get("public_key")):
+        raise refuse("application_key", "the certificate names another key than the join presented")
+    if issued.nats_public_key != asked.get("nats_public_key"):
+        raise refuse("nats_public_key", "the certificate names another NATS key than the join presented")
+    for field_name in ("teams", "roles", "agent_types"):
+        if not getattr(issued, field_name) <= set(asked.get(field_name) or ()):
+            raise refuse(field_name, f"the certificate grants {field_name} the join did not ask for")
+    if document["body"]["session_limit"] > asked.get("session_limit", 0):
+        raise refuse("session_limit", "the certificate allows more sessions than the join asked for")
+
+
+def _verify_renewed_certificate(issued: HostCertificate, answering: Frame, asked: Mapping[str, Any], trust: TrustStore,
+                                refuse: Callable[[str, str], FrameRefused]) -> None:
+    """A renewal's certificate replaces the one that signed the renewal, at a higher epoch, with the rotated or kept keys."""
+
+    renewing = answering.issuer
+    current = trust.host_certificate(renewing.installation, renewing.runtime, renewing.membership_epoch)
+    if current is None:
+        raise refuse("replaces", "the receiver does not hold the certificate this one renews")
+    if issued.replaces != current.certificate_id:
+        raise refuse("replaces", "the certificate does not replace the one that signed the renewal")
+    if issued.membership_epoch <= current.membership_epoch:
+        raise refuse("membership_epoch", "a renewed certificate has a higher membership epoch")
+    rotation = asked.get(_KEY_ROTATION)
+    key_id, public_key = ((rotation["key"]["key_id"], rotation["key"]["public_key"]) if rotation is not None
+                          else (current.key_id, b64url(current.public_key.public_bytes_raw())))
+    if (issued.key_id, b64url(issued.public_key.public_bytes_raw())) != (key_id, public_key):
+        raise refuse("application_key", "the certificate names another key than the renewal kept or rotated to")
+    if issued.nats_public_key != asked.get("new_nats_public_key", current.nats_public_key):
+        raise refuse("nats_public_key", "the certificate names another NATS key than the renewal kept or asked for")
+
+
 def verify_frame(
     data: bytes | bytearray | memoryview,
     *,
@@ -791,15 +932,18 @@ def verify_frame(
     if body_digest(raw["body"]) != frame.body_digest:
         raise FrameRefused("bad_digest", at="/body_digest")
     if certificate is None:
-        _verify_join(frame, trust)
+        assert spec is not None  # only a known kind proves possession
+        _verify_join(raw, frame, spec, trust)
     else:
         session = _session(frame, trust)
         _verify_revocation(certificate, session, trust)
         _verify_epochs(certificate, spec, trust)
-        _verify_issuer(frame, certificate, session, issued_at, is_reply, answering)
+        _verify_issuer(frame, spec, certificate, session, issued_at, is_reply, answering)
+        if not is_reply:
+            _verify_renewal(raw, frame, certificate)
         _verify_sender(frame, certificate, session, spec, is_reply, trust, issued_at, receiver)
     _verify_audience(frame, receiver)
-    _verify_subject(frame, spec, is_reply, arrived_on, headers)
+    _verify_subject(raw, frame, spec, is_reply, arrived_on, headers)
     _verify_time(frame, spec, now, issued_at)
     replay_key = ReplayKey(frame.issuer.installation, frame.issuer.runtime, frame.issuer.membership_epoch, frame.message_id)
     digest = frame_digest(raw)
@@ -820,8 +964,11 @@ def verify_frame(
         raise FrameRefused("invalid_body", "the idempotency key is not the one the kind's key parts give",
                            at="/idempotency_key")
     authority = _verify_authority(raw, frame, spec, is_reply, trust, certificate)
-    _verify_renew_key_proof(raw)
-    if not is_reply:
+    if is_reply and _installation_operation(spec):
+        assert answering is not None  # _verify_issuer refused replies without their request
+        _verify_issued_certificate(raw, answering, trust)
+    else:
+        _verify_renew_key_proof(raw, certificate, trust)
         _verify_decision_token(raw, frame, trust)
     return VerifiedFrame(frame=frame, body=body, certificate=certificate, session=session, authority=authority,
                          replay_key=replay_key, frame_digest=digest, raw=raw)

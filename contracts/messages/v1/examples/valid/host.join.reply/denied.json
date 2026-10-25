@@ -27,7 +27,7 @@
     "message": "An administrator denied this host."
   },
   "causation_id": "01928f3a-7b2c-7701-8000-000000000701",
-  "idempotency_key": "host.join.reply:PYjK7an0R1r9B27ETn7hCqhjdGBTHyhv-B8tugEdiRE",
+  "idempotency_key": "host.join.reply:BY8cG8hVYmaZQH9Ij28B17jA44N6_5FnXKYg_WLfqJY",
   "body_digest": "ZMGMdX59RZi_L3RwITXLg8at0HRKlRU8CIUHAq_EeR0",
-  "signature": "EjPNxDL751N12KTWfGQCDHpm-VIdTHz2xlIN1BS2BV9XFz6EVNaKQ6I4Kdcd1daxa-nmhM5-yJ-e5JgHqGlNDw"
+  "signature": "LTSj6CIGIZG8OAYShMtsW2_UrV-ht1dUXS3cZhdNq-MNVSsjOaePIbRZ4Jae42DVmTkZ1AOcD2Pt7GyPxA35Bg"
 }

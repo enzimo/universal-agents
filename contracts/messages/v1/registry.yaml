@@ -4,8 +4,11 @@
 #   class          durable | request_reply | event   (transport.yaml describes each class)
 #   address        the subject after ua.v1.<audience team>.<sender slot>. , or a list of them, each
 #                  delivering to a different audience target; {agent}, {pool} and {edge} are the
-#                  audience id, and the address decides the audience target: agent, pool, edge,
-#                  team_services (work.team, svc.team.*) or team (evt.*)
+#                  audience id, {copy} is the body's copy_id, and the address decides the audience
+#                  target: agent, pool, edge, team_services (work.team, svc.team.*, dlq.*) or team
+#                  (evt.*). An installation operation's address, _install.{sender}.svc.<operation>,
+#                  follows ua.v1. directly: its frames name transport.yaml's installation_scope as
+#                  the issuer's and the audience's team, and {sender} is the issuer's runtime
 #   copy_to        durable only: addresses that also get a copy of each frame (README, "Durable
 #                  copies"); the roles serving the copy's target receive it
 #   body           the body schema, under schemas/
@@ -61,6 +64,7 @@ max_frame_bytes: 262144
 max_nesting_depth: 64
 authority_token_max_seconds: 604800   # today's signed person context lasts at most 7 days
 command_token_max_seconds: 300        # a token bound to one command lasts minutes (plan, section 8)
+certificate_overlap_seconds: 300      # a replaced certificate still signs new frames this long after its replacement is issued (authorization plan 12.5)
 
 # Refusals a receiver gives before any handler runs, in the order it checks them.
 # "The issuer's certificate" is the host certificate the receiver's trust store holds
@@ -71,7 +75,7 @@ verification_refusals:
   - code: malformed
     meaning: the frame is not one JSON object, repeats a key, holds a number with a fraction or exponent part, or breaks the frame schema
   - code: unknown_key
-    meaning: the trust store holds no certificate for the issuer's installation, runtime and membership epoch that names the issuer's key id and was valid when the frame was issued, or the installation is neither the receiver's nor one it has an agreement with; a join (verification proof_of_possession) must instead name the key it presents in its body, and a key id the trust store already knows must keep its public key
+    meaning: the trust store holds no certificate for the issuer's installation, runtime and membership epoch that names the issuer's key id and was valid when the frame was issued (a certificate another one replaces is valid only until certificate_overlap_seconds after its replacement was issued), or the installation is neither the receiver's nor one it has an agreement with; a join (verification proof_of_possession) must instead come from the receiver's own installation and name the key it presents in its body, which is not an authority key, and a key id the trust store already knows must keep its public key
   - code: bad_signature
     meaning: the signature is not the one unpadded base64url spelling of a signature that verifies over the canonical frame with the certificate's key
   - code: bad_digest
@@ -81,9 +85,9 @@ verification_refusals:
   - code: epoch_too_old
     meaning: the issuer's certificate has a membership or revocation epoch below the receiver's minimum for that runtime or installation (request/reply and events only; queued work is judged by the certificate valid when it was issued, and a join by the key it presents)
   - code: wrong_issuer
-    meaning: the issuer's revocation epoch or team disagrees with its certificate; or it names an agent without a session, or a session that does not place that agent, of a type the certificate allows, on the signing runtime when the frame was issued; or a reply does not come from the agent and team the request was for
+    meaning: the issuer's revocation epoch or team disagrees with its certificate (installation operations and their replies name the installation scope as their team and no agent, and other kinds a team of the certificate); or it names an agent without a session, or a session that does not place that agent, of a type the certificate allows, on the signing runtime when the frame was issued; or a reply does not come from the agent and team the request was for; or a join names an epoch other than zero, a reserved runtime id (x- or _), an agent, or a body runtime or installation other than its issuer's; or a renewal's body names another certificate or membership epoch than the certificate that signs it
   - code: wrong_sender
-    meaning: none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request); or the frame comes from another installation with a kind, class or destination team its agreement does not allow; or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)
+    meaning: none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request), or a join asks for a role that is not among the kind's senders; or a frame from the receiver's own installation is addressed to another team than its issuer's; or the frame comes from another installation with a kind, class or destination team its agreement does not allow; or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)
   - code: wrong_team
     meaning: the frame is for another installation or team
   - code: wrong_audience
@@ -99,7 +103,7 @@ verification_refusals:
   - code: unknown_kind
     meaning: the kind is not in this registry
   - code: invalid_body
-    meaning: the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give
+    meaning: the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give; or a renewal's key rotation names a key id the installation already uses or a proof that does not verify; or the certificate in a join or renewal reply does not verify against the receiver's authority keys or does not certify the host that asked (README, "Installation traffic")
   - code: bad_authority
     meaning: the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds; or a change-conflict decision token in the body is not signed by a team-services certificate of the frame's installation and team, or was not valid when the frame was issued
   - code: access_denied
@@ -2781,7 +2785,7 @@ kinds:
     receivers: [installation_authority]
     expiry_seconds: 30
     authority: none
-    idempotency: [/body/join_id]
+    idempotency: [/issuer/runtime, /issuer/key_id, /body/join_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: named
     topology_edge: none
@@ -2802,7 +2806,7 @@ kinds:
     receivers: [installation_authority]
     expiry_seconds: 30
     authority: none
-    idempotency: [/body/renew_id]
+    idempotency: [/issuer/runtime, /body/renew_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: named
     topology_edge: none

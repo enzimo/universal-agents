@@ -1,0 +1,17 @@
+{
+  "description": "A key rotation names the worker host's key id, with a proof by that key.",
+  "refusal": "invalid_body",
+  "at": "/body/application_key_rotation/key/key_id",
+  "base": "host.renew/rotate.json",
+  "changes": [
+    {
+      "set": "/body/application_key_rotation/key",
+      "to": {
+        "key_id": "test-worker-key-1",
+        "public_key": ""
+      }
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"host.renew\", \"message_id\": \"01928f3a-7b2c-7708-8000-000000000708\", \"idempotency_key\": \"host.renew:QPPtX4Jr0fA1-evdxTAh65RCbgMMAIZAm9ThFOqFmHE\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"_install\", \"runtime\": \"lead-host-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"_install\", \"target\": \"installation_service\", \"id\": \"authority\"}, \"subject\": \"ua.v1._install.lead-host-1.svc.host.renew\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"renew_id\": \"renew_rotate_1\", \"certificate_id\": \"cert_lead_host_1\", \"membership_epoch\": 3, \"profile_sha256\": \"CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo\", \"software\": {\"name\": \"universal-agents\", \"version\": \"0.9.8\"}, \"application_key_rotation\": {\"key\": {\"key_id\": \"test-worker-key-1\", \"public_key\": \"5_FioQvsVZr-oZXk3OhLaVaNXSywlj60RsBoXisX8vA\"}, \"proof\": \"sGEie6nRocM6lCC0TNjUszUy8WC40gWqy33H9XAy-SO1gSfBBjVBAttmxylKA29mUGAcf9yah0RmdOXbN64fDQ\"}}, \"body_digest\": \"CYVOctnr9LxvPgBDB36gyHHz4sTsyp6vXEkQE5IjF_E\", \"signature\": \"EZvwV8hLvC_c3IldQr7Il3EHW2AXT3gTG7xvSxWMzFQdLX7sDsbmTF3CCcZ73YDyeRMmSC1qnHp3pF4Nl2W1CA\"}"
+}

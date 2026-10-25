@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/host.join.reply.schema.json",
   "title": "host.join.reply body",
-  "description": "A new host asks to join the installation; the frame is signed with the key it presents.",
+  "description": "The installation authority's answer to a join: the host's signed certificate and connection credential, a pending review, or why it was refused.",
   "oneOf": [
     {
       "type": "object",

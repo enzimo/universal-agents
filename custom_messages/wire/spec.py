@@ -98,4 +98,7 @@ class StateSpec:
     signer: str
     signer_roles: tuple[str, ...]
     writers: tuple[str, ...]
+    # The bucket's per-key lifetime (registry ttl_seconds): a record of this kind must
+    # expire within it, so an old copy is never read as current. None when records last.
+    ttl_seconds: Optional[int]
     body_model: TypeAdapter[Any]

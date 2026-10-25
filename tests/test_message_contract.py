@@ -895,6 +895,7 @@ def join_frame(key_id: str = "test-lead-key-1", public_key_of: str | None = None
     document["body"]["runtime"] = "lead-host-1"
     document["body"]["application_key"] = {"key_id": key_id,
                                            "public_key": fixtures.KEYS[public_key_of or key_id]["public_key"]}
+    document["idempotency_key"] = registry_key(document)
     return document
 
 
@@ -958,7 +959,7 @@ def test_renewal_rotation_signing_vector() -> None:
 
 @pytest.mark.parametrize(("location", "field", "value", "code"), [
     ("body", "renew_id", "changed", "invalid_body"),
-    ("body", "certificate_id", "changed", "invalid_body"),
+    ("body", "certificate_id", "changed", "wrong_issuer"),  # a renewal names the certificate that signs it
     ("body", "profile_sha256", "A" * 43, "invalid_body"),
     ("issuer", "revocation_epoch", 2, "wrong_issuer"),
     ("audience", "id", "another_authority", "invalid_body"),
@@ -1009,6 +1010,81 @@ def test_rotation_cannot_be_null() -> None:
     document["body"]["application_key_rotation"] = None
     assert list(validator("bodies/host.renew.schema.json").iter_errors(document["body"]))
     assert refusal(fixtures.resign(document), document).code == "invalid_body"
+
+
+def test_a_host_that_has_not_joined_may_only_ask_to_join_and_read_its_inbox() -> None:
+    joining = role_permissions(EXPORT.JOINING)
+    assert joining == {"role": EXPORT.JOINING, "publish": ["ua.v1._install.{self}.svc.host.join"],
+                       "subscribe": ["_INBOX.{self}.>"]}
+    assert EXPORT.JOINING not in REGISTRY["host_roles"]
+
+
+def renewed_lead_certificate(*, issued_at: str = "2026-10-22T04:30:00.000Z", epoch: int = 4,
+                             key_id: str = "test-lead-key-2") -> bytes:
+    """The certificate the rotation example's reply carries, issued at ``issued_at``."""
+
+    document = copy.deepcopy(fixtures.example_frame("host.renew.reply", "ok")["body"]["certificate"])
+    document["key"] = f"host.install_example.lead-host-1.{epoch}"
+    document["body"].update(membership_epoch=epoch, issued_at=issued_at,
+                            application_key={"key_id": key_id, "public_key": fixtures.KEYS[key_id]["public_key"]})
+    document["issued_at"] = issued_at
+    document["sequence"] = 2  # a newer record than any held under the same key
+    return json.dumps(sign_state(document, fixtures.private_key(document["writer"]["key_id"]))).encode()
+
+
+def test_a_replaced_certificate_signs_new_frames_only_during_the_overlap() -> None:
+    """Authorization plan 12.5: in-flight frames from the old key are accepted until a short deadline."""
+
+    store = fixtures.trust_store(extra_documents=[renewed_lead_certificate(issued_at="2026-10-22T04:20:00.000Z")])
+    pause = fixtures.example_frame("agent.pause")
+    assert parse_timestamp(pause["issued_at"]) - parse_timestamp("2026-10-22T04:20:00.000Z") > timedelta(
+        seconds=kinds.CERTIFICATE_OVERLAP_SECONDS) + SKEW
+    refused = refusal(json.dumps(pause).encode(), pause, trust=store)
+    assert (refused.code, refused.at) == ("unknown_key", "/issued_at")
+    # Within the overlap the old key still signs new frames.
+    store = fixtures.trust_store(extra_documents=[renewed_lead_certificate(issued_at="2026-10-22T04:28:00.000Z")])
+    fixtures.verify(json.dumps(pause).encode(), pause, trust=store)
+    # Queued work issued before the replacement is still judged by the old certificate.
+    stop = signed_example()
+    store = fixtures.trust_store(extra_documents=[renewed_lead_certificate(issued_at="2026-10-22T04:35:00.000Z")])
+    fixtures.verify(json.dumps(stop).encode(), stop, {"now": "2026-10-22T05:00:00.000Z"}, trust=store)
+
+
+@pytest.mark.parametrize("epoch", [3, 2])
+def test_a_renewed_certificate_needs_a_higher_epoch(epoch: int) -> None:
+    """At the same epoch it would overwrite the certificate queued work still needs (host.<installation>.<runtime>.<epoch>)."""
+
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.trust_store(extra_documents=[renewed_lead_certificate(epoch=epoch)])
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/membership_epoch")
+
+
+def test_a_renewed_certificate_needs_a_higher_epoch_when_it_arrives_first() -> None:
+    store = fixtures.trust_store(remove=["certificates/lead-host-1.json"])
+    store.add(renewed_lead_certificate(epoch=2))
+    with pytest.raises(FrameRefused) as refused:
+        store.add((EXAMPLES / "trust/certificates/lead-host-1.json").read_bytes())
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/membership_epoch")
+
+
+def test_a_rotation_retried_after_a_lost_reply_is_accepted_once_its_certificate_is_known() -> None:
+    document = fixtures.example_frame("host.renew", "rotate")
+    fixtures.verify(json.dumps(document).encode(), document, trust=fixtures.trust_store(extra_documents=[renewed_lead_certificate()]))
+    # The same key id with another public key is not a retry.
+    document["body"]["application_key_rotation"]["key"]["public_key"] = fixtures.KEYS["test-gateway-key-1"]["public_key"]
+    refused = refusal(fixtures.resign(document), document, trust=fixtures.trust_store(extra_documents=[renewed_lead_certificate()]))
+    assert (refused.code, refused.at) == ("invalid_body", "/body/application_key_rotation/key/key_id")
+
+
+def test_a_new_host_verifies_its_join_reply_from_the_bootstrap_records_alone() -> None:
+    """The bootstrap bundle: the authority keys, the authority hosts' certificates and the revocations (README)."""
+
+    bootstrap = fixtures.trust_store(remove=[name for name in fixtures.default_records()
+                                             if name not in {"certificates/authority-1.json", "revocations/install_example.json"}])
+    reply = fixtures.example_frame("host.join.reply", "ok")
+    verified = fixtures.verify(json.dumps(reply).encode(), reply, trust=bootstrap)
+    bootstrap.add(json.dumps(verified.raw["body"]["certificate"]).encode())
+    assert bootstrap.host_certificate("install_example", "new-host-1", 1) is not None
 
 
 @pytest.mark.parametrize("operation", ["join", "renew"])
@@ -1154,16 +1230,33 @@ def test_neighbouring_checks_each_have_a_two_defect_example() -> None:
     assert {(first, second) for first, second in zip(order, order[1:])} <= covered
 
 
-def receiver_only(case: dict) -> bool:
-    """A schema cannot recompute a key from other fields or apply a body rule: those refusals are the receiver's alone.
+# Body fields a receiver checks against its trust store or the request a reply answers:
+# a reply's certificate (its signature, single validity window and what it certifies)
+# and a key rotation's new key id and proof (README, "Installation traffic").
+RECEIVER_CHECKED = re.compile(r"/body/certificate/(signature|expires_at|body/[a-z_]+)|/body/application_key_rotation/(key/key_id|proof)")
 
-    README, "Idempotency keys" and "What bodies carry".
+
+def receiver_only(case: dict) -> bool:
+    """Refusals a schema cannot give: they recompute a key, apply a body rule, or compare the body with records.
+
+    README, "Idempotency keys", "What bodies carry" and "Installation traffic".
     """
 
     kind = json.loads(case["frame_text"])["kind"]
     rules = REGISTRY["kinds"].get(kind, {}).get("body_rules", [])
     places = {rule.get("unique") or rule.get("requires") or rule["any_of"][0].rsplit("/", 1)[0] for rule in rules}
-    return case["at"] == "/idempotency_key" or case["at"] in places
+    return case["at"] == "/idempotency_key" or case["at"] in places or RECEIVER_CHECKED.fullmatch(case["at"]) is not None
+
+
+@pytest.mark.parametrize("path", [p for p in invalid_examples() if RECEIVER_CHECKED.fullmatch(json.loads(p.read_text())["at"])],
+                         ids=lambda path: path.stem)
+def test_refusals_that_compare_the_body_with_records_pass_the_schema(path: Path) -> None:
+    """Only a receiver gives these, so the shared examples are its tests; a schema accepts the body."""
+
+    case = json.loads(path.read_text(encoding="utf-8"))
+    document = json.loads(case["frame_text"])
+    assert case["refusal"] == "invalid_body"
+    assert not list(validator(body_schema_file(document["kind"])).iter_errors(document["body"]))
 
 
 @pytest.mark.parametrize("path", [p for p in invalid_examples() if json.loads(p.read_text())["refusal"] == "invalid_body"

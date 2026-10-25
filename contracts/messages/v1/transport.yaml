@@ -10,6 +10,10 @@
 subject_prefix: ua.v1.{team}.{sender}
 reply_inbox_prefix: _INBOX.{runtime}
 peer_sender_slot: x-{installation}
+# Installation-wide traffic (joining, renewing a certificate) names this scope where other
+# frames name a team: as the issuer's and the audience's team, and as the subject's team
+# token (ua.v1._install.<sender>.svc.<operation>). Team ids cannot start with _.
+installation_scope: _install
 
 # Which host roles serve each audience target. A role receives a kind's address, and
 # gets its subscription or consumer grants, only when it is one of the kind's receivers

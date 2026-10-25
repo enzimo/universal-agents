@@ -91,10 +91,9 @@ ID_CHARACTER = re.compile(r"[A-Za-z0-9_-]")
 # its team; a receiver reads only its own, so subscriptions and consumer grants keep
 # them as placeholders for membership code to fill per assigned id.
 RECEIVER_PLACEHOLDERS = ("agent", "pool", "edge")
-# Other address placeholders: a dead-letter copy id (one subject token the sender
-# chooses), and the sender of an installation address (_install.{sender}.svc.<op>).
+# Other address placeholders: a dead-letter copy id (the body's copy_id), and the
+# sender of an installation address (<installation scope>.{sender}.svc.<op>).
 COPY_PLACEHOLDER, SENDER_PLACEHOLDER = "copy", "sender"
-INSTALLATION_ADDRESS = "_install.{sender}."
 # Hosts that send frames for agents; a kind no agent sends is not a topology check.
 AGENT_HOSTS = {"lead_host", "worker_host"}
 # Audience targets that get durable copies, and the roles that read them there: the
@@ -103,6 +102,9 @@ AGENT_HOSTS = {"lead_host", "worker_host"}
 COPY_READERS = {"team_services": ["team_services"]}
 # The token type bound to one command; its binding always names the command id (`at`).
 COMMAND_BINDING = "command"
+# The permission set of a host that has not joined yet (it holds no role): it only sends
+# its own join request and reads its own reply inbox (README, "Installation traffic").
+JOINING = "joining_host"
 # A kind (with ".reply") within 84 characters keeps its idempotency key, the kind,
 # a colon and 43 digest characters, within the 128 that common.schema.json allows.
 MAX_KIND_LENGTH = 84
@@ -136,6 +138,15 @@ def load_yaml(name: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ContractError(f"{name} must hold a mapping")
     return data
+
+
+# Names transport.yaml defines once: the scope installation-wide traffic names instead
+# of a team, and the subject root before the team token (ua.v1.). Every installation
+# address and subject this script builds follows them.
+_NAMES = load_yaml("transport.yaml")
+INSTALLATION_SCOPE = str(_NAMES["installation_scope"])
+INSTALLATION_ADDRESS = INSTALLATION_SCOPE + ".{" + SENDER_PLACEHOLDER + "}."
+SUBJECT_ROOT = str(_NAMES["subject_prefix"]).split("{team}", 1)[0]
 
 
 def load_schemas() -> dict[str, dict[str, Any]]:
@@ -300,6 +311,9 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
     check_shared_lists(registry, transport, topologies, schemas)
     if not 0 < registry["command_token_max_seconds"] <= registry["authority_token_max_seconds"]:
         raise ContractError("registry.yaml: command_token_max_seconds is positive and within authority_token_max_seconds")
+    overlap = registry["certificate_overlap_seconds"]
+    if not isinstance(overlap, int) or not 0 < overlap <= 3600:
+        raise ContractError("registry.yaml: certificate_overlap_seconds is a short positive deadline, at most an hour")
     check_name_lists(registry)
     edges = set(EDGES) - {"none"}
     if set(topologies["edges"]) != edges:
@@ -362,8 +376,10 @@ def check_entry_fields(where: str, name: str, entry: dict[str, Any], registry: d
     check_authority_binding(where, entry, schemas)
     if entry.get("verification", "standard") not in VERIFICATION:
         raise ContractError(f"{where}: verification must be one of {sorted(VERIFICATION)}")
-    if entry.get("verification") == "proof_of_possession" and entry["class"] != "request_reply":
-        raise ContractError(f"{where}: only an installation request proves possession of its own key")
+    if entry.get("verification") == "proof_of_possession" and (
+            entry["class"] != "request_reply" or entry["authority"] != "none"
+            or not all(address.startswith(INSTALLATION_ADDRESS) for address in own_addresses(entry))):
+        raise ContractError(f"{where}: only an installation request without an authority token proves possession of its own key")
 
 
 def check_routing_rules(where: str, entry: dict[str, Any]) -> None:
@@ -523,11 +539,14 @@ def own_addresses(entry: dict[str, Any]) -> list[str]:
 
 
 def full_subject(address: str, owner: str) -> str:
-    """The NATS subject of an address: team addresses sit under ua.v1.<team>.<sender>, installation ones under ua.v1._install."""
+    """The NATS subject of an address: team addresses sit under ua.v1.<team>.<sender>, installation ones under ua.v1.
 
-    if address.startswith("_install."):
-        return "ua.v1." + address.replace("{sender}", owner)
-    return f"ua.v1.{{team}}.{owner}." + address
+    An installation address already names its scope and sender (_install.{sender}.svc.<op>).
+    """
+
+    if address.startswith(INSTALLATION_ADDRESS):
+        return SUBJECT_ROOT + address.replace("{" + SENDER_PLACEHOLDER + "}", owner)
+    return f"{SUBJECT_ROOT}{{team}}.{owner}." + address
 
 
 def entry_addresses(entry: dict[str, Any]) -> list[str]:
@@ -854,6 +873,11 @@ def check_shared_lists(registry: dict[str, Any], transport: dict[str, Any], topo
         raise ContractError("transport.yaml audience_targets name host roles only")
     if set(common["agent_role"]["enum"]) != set(topologies["agent_roles"]):
         raise ContractError("common.schema.json agent_role must list team-topologies.yaml agent_roles")
+    if not common["scope_id"]["pattern"].startswith(f"^({re.escape(INSTALLATION_SCOPE)}|"):
+        raise ContractError("common.schema.json scope_id must allow transport.yaml installation_scope")
+    for spec in transport["classes"].values():
+        if not all(address.startswith(INSTALLATION_ADDRESS) for address in spec.get("installation_addresses", [])):
+            raise ContractError(f"transport.yaml: installation addresses start with {INSTALLATION_ADDRESS}")
 
 
 def check_name_lists(registry: dict[str, Any]) -> None:
@@ -878,7 +902,7 @@ def audience_target(address: str) -> str:
         return "team_services"
     if address.startswith("dlq."):
         return "team_services"
-    if address.startswith("_install."):
+    if address.startswith(INSTALLATION_ADDRESS):
         return "installation_service"
     raise ContractError(f"address {address!r} names no audience target")
 
@@ -1025,6 +1049,12 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
         if answers_requests:
             document["allow_responses"] = {"max": 1, "expires": f"{reply_window}s"}
         result[role] = document
+    if JOINING in result:
+        raise ContractError(f"registry.yaml: {JOINING} is the permission set of hosts that hold no role yet")
+    joins = [address for entry in registry["kinds"].values() if entry.get("verification") == "proof_of_possession"
+             for address in own_addresses(entry)]
+    result[JOINING] = {"role": JOINING, "publish": sorted(full_subject(send_pattern(address), "{self}") for address in joins),
+                       "subscribe": [f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"]}
     return result
 
 
@@ -1356,7 +1386,8 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
     state_specs = [
         f"    {name!r}: StateSpec(name={name!r}, bucket={entry['bucket']!r}, key={entry['key']!r}, "
         f"signer={entry['signer']!r}, signer_roles={tuple(entry.get('signer_roles', ()))!r}, "
-        f"writers={tuple(entry['writers'])!r}, body_model=models.{class_name(name)}StateAdapter),"
+        f"writers={tuple(entry['writers'])!r}, ttl_seconds={entry.get('ttl_seconds')!r}, "
+        f"body_model=models.{class_name(name)}StateAdapter),"
         for name, entry, _body in states
     ]
     between = sorted(name for name, spec in transport["classes"].items() if spec["between_installations"])
@@ -1372,12 +1403,15 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"RENEW_KEY_PROOF_DOMAIN = {registry['renew_key_proof_domain']!r}\n"
         f"AUTHORITY_TOKEN_MAX_SECONDS = {registry['authority_token_max_seconds']!r}\n"
         f"COMMAND_TOKEN_MAX_SECONDS = {registry['command_token_max_seconds']!r}\n"
+        f"CERTIFICATE_OVERLAP_SECONDS = {registry['certificate_overlap_seconds']!r}\n"
         f"MAX_FRAME_BYTES = {registry['max_frame_bytes']!r}\n"
         f"MAX_NESTING_DEPTH = {registry['max_nesting_depth']!r}\n"
         f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
         f"SUBJECT_PREFIX = {transport['subject_prefix']!r}\n"
         f"PEER_SENDER_SLOT = {transport['peer_sender_slot']!r}\n"
         f"REPLY_INBOX_PREFIX = {transport['reply_inbox_prefix']!r}\n"
+        f"INSTALLATION_SCOPE = {INSTALLATION_SCOPE!r}\n"
+        f"INSTALLATION_ADDRESS_PREFIX = {INSTALLATION_ADDRESS!r}\n"
         f"BETWEEN_INSTALLATIONS = frozenset({between!r})\n"
         f"VERIFICATION_REFUSALS = {tuple(item['code'] for item in registry['verification_refusals'])!r}\n"
         f"CHANGE_REFUSALS = {tuple(item['code'] for item in registry['change_refusals'])!r}\n"
