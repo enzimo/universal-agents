@@ -1,5 +1,6 @@
 {
   "record": "agent_session",
+  "protocol": "1.0-pre",
   "key": "session.install_example.team_example.s-lead-1",
   "writer": {
     "type": "host",
@@ -24,5 +25,5 @@
   },
   "algorithm": "ed25519",
   "body_digest": "DLV6FJxuFv-6qnssu92GA0UC6wCaI4fpEI2LLun3Vr4",
-  "signature": "O0_ucI__Ado5buzrcj3dBhdehBDyR8HS8HJnUReJ94DveyJjkCB-ak-CL1ihTygqVQMrdWQfDLl0x41vKfKoCg"
+  "signature": "Kr0wh-gRO5RJMKBI5nT1KkNYHE3cI8JKBMTWLRvR06ckAetCNamlXQOpMm4eXspjj3eg4TKxRSj3K8SeQS8YAw"
 }

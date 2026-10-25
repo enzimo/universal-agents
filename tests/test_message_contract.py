@@ -918,6 +918,25 @@ def test_state_reports_are_verified_when_read_not_kept() -> None:
                                       now=fixtures.NOW.replace(tzinfo=None))
 
 
+def test_a_newer_minors_record_loses_unknown_optional_fields_and_the_same_minors_is_refused() -> None:
+    """README, "Versions": records follow the frames' rule, so a certificate can gain optional fields within protocol 1."""
+
+    document = state_example("agent/lead-busy.json")
+    document["future_note"] = "an envelope field this version does not know"
+    document["body"]["future_detail"] = "a body field this version does not know"
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(document))
+    assert refused.value.code == "malformed"
+    document["protocol"] = "1.1-pre"
+    verified = fixtures.verify_state(signed_state(document))
+    assert not hasattr(verified.body, "future_detail") and verified.body.agent == "lead"
+    del document["future_note"]
+    document["protocol"] = kinds.PROTOCOL
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(document))
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/future_detail")
+
+
 def test_a_reader_accepts_the_record_it_holds_and_newer_ones_only() -> None:
     """A placement's signed sequence is its fencing token: a copy written back to the bucket is never newer."""
 
@@ -1389,7 +1408,7 @@ def certificate_record(runtime: str, *, roles: tuple[str, ...], epoch: int = 1,
         "deployment": "local", "profile_sha256": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo",
         "issued_at": issued_at, "expires_at": expires_at,
     }
-    document = {"record": "certificate", "key": f"host.{installation}.{runtime}.{epoch}",
+    document = {"record": "certificate", "protocol": kinds.PROTOCOL, "key": f"host.{installation}.{runtime}.{epoch}",
                 "writer": {"type": "authority", "installation": installation, "key_id": authority},
                 "sequence": 1, "issued_at": issued_at, "body": body}
     return json.dumps(sign_state(document, fixtures.private_key(authority))).encode()

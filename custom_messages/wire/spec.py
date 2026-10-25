@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, NamedTuple, Optional
+from typing import Any, Mapping, NamedTuple, Optional
 
 from pydantic import TypeAdapter
 
@@ -26,6 +26,23 @@ def prune(value: Any, shape: Any) -> Any:
     if "items" in shape and isinstance(value, list):
         return [prune(item, shape["items"]) for item in value]
     return value
+
+
+def protocol_minor(label: str) -> int:
+    return int(label.split(".", 1)[1].split("-", 1)[0])
+
+
+def newer_minor(document: Mapping[str, Any], protocol: str) -> bool:
+    """Whether a frame or state record states a newer minor of ``protocol``'s major than ``protocol`` itself.
+
+    Its unknown optional fields are then dropped before strict validation (README, "Versions").
+    """
+
+    label = document.get("protocol")
+    try:
+        return isinstance(label, str) and label.startswith("1.") and protocol_minor(label) > protocol_minor(protocol)
+    except ValueError:
+        return False
 
 
 class TokenBinding(NamedTuple):
@@ -102,3 +119,5 @@ class StateSpec:
     # expire within it, so an old copy is never read as current. None when records last.
     ttl_seconds: Optional[int]
     body_model: TypeAdapter[Any]
+    # What a newer minor's record body may hold that this version knows (see prune).
+    body_shape: Any

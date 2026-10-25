@@ -1,5 +1,6 @@
 {
   "record": "agent",
+  "protocol": "1.0-pre",
   "key": "team_example.lead",
   "writer": {
     "type": "host",
@@ -21,5 +22,5 @@
   },
   "algorithm": "ed25519",
   "body_digest": "VV93gFoPmHei-4IBdjEAth19XWv_vIcmQyYp0Zi1zyg",
-  "signature": "vLcheQdzRnHpFDTDXs7-s8zlTZreZtoncMf1Rp0l6K_uVtfwGM8QSA99VeGqiaeYwlit8ZrQTCX-6TgHAdATAw"
+  "signature": "ii-8Tlhgm6eh2LkovclnDtfsuUEBHjElcaQyEVi88KkltsDUgIjphnNH1mDHB4q_wVyspf_H5K5dQnfJ2xQOBg"
 }

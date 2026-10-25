@@ -26,6 +26,7 @@
     "outcome": "ok",
     "certificate": {
       "record": "certificate",
+      "protocol": "1.0-pre",
       "key": "host.install_example.lead-host-1.4",
       "writer": {
         "type": "authority",
@@ -69,7 +70,7 @@
       },
       "algorithm": "ed25519",
       "body_digest": "SQuMxr498InsJPC7v6kRhbjdhjGN3SzWDpRVtApgQBg",
-      "signature": "WNNcldDxg7u9rmAAHF936XZtOxUw9gXmX7v0W26Xc0sXRp6hMQKCDUwMUYNg5PK5BYUoPacejmUqiEr2_ptAAQ"
+      "signature": "1pCrPkAQKRkWnjNVhl2Jk3ppJSm9duO5PGsWzkDpdTXv4eIoGtPquq54A2CsgGKgw5HssYtgR4DJDqdgKVN6Cw"
     },
     "connection": {
       "type": "nats_user_jwt",
@@ -78,6 +79,6 @@
     }
   },
   "causation_id": "01928f3a-7b2c-7708-8000-000000000708",
-  "body_digest": "VRi_rXFh5NeKQ6u6k0w9FwfHdKeYLRhe_dGLc3clZR4",
-  "signature": "77WL1ljgfSrOysi1NOk8eDSsuTn7IB28-MtzD6XGtaClfLQ6K_gtybJXjjplsE59JQRn0UCyaCJeVGBpUCAzAg"
+  "body_digest": "r8thx4NNqzhT6fJbsGB_LuYb6GJ029nCeNGl8W6edPQ",
+  "signature": "3TKEVfMORmcujXb6RI2zlZOiCZo7xIs8tujwYU88zxGgRjMlE8vYzBIXisSbEfgr-akxt1qHifRATW-OAE2aAw"
 }

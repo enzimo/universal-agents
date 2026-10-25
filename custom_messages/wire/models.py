@@ -572,6 +572,7 @@ class State(WireModel):
     "Every key-value record is one state record, signed with Ed25519 over the domain prefix universal-agents/state-record/v1 and a newline, then the RFC 8785 canonical JSON of the record without its signature. The registry names, per record, who signs it and the schema its body follows. Readers verify every record they use; where it is stored adds no trust."
 
     record: Literal['agent', 'agent_session', 'agreement', 'certificate', 'host', 'placement', 'revocations', 'team_view']
+    protocol: ProtocolLabel
     key: StateKey
     writer: StateWriter
     sequence: StateSequence
@@ -1833,6 +1834,7 @@ class CertificateDocument(WireModel):
     "The signed state document returned by host.join and host.renew. Its record is certificate, its writer an authority key of the installation, and its body a membership certificate. Receivers verify its signature with that authority key and check that it certifies the host that asked (README, \"Installation traffic\")."
 
     record: Literal['certificate']
+    protocol: ProtocolLabel
     key: StateKey
     writer: CertificateDocumentWriter
     sequence: StateSequence

@@ -1,5 +1,6 @@
 {
   "record": "team_view",
+  "protocol": "1.0-pre",
   "key": "team_example.task.t1",
   "writer": {
     "type": "host",
@@ -24,5 +25,5 @@
   },
   "algorithm": "ed25519",
   "body_digest": "syyHCObaHAaLn7hi7CelQ9E9EyDBi7RVMAvOu6m84v8",
-  "signature": "p06UXf0MJG5NcxGsE5A3Jnk9jndtHIpMRA0CGKIwQM0PN6L2yZonbFbeM1Pdkn2PHwrwo9JCNHofqtOdItDEDQ"
+  "signature": "xWQaz4l7POPiMztwcoQTB6-JxeBYb21VkwDt7tPdrM-E8nh-EQFJYqcr7dGMDUrDTzA0EHfAv6vW-hvgVhBKBQ"
 }

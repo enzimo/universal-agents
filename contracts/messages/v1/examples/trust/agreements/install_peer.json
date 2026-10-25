@@ -1,5 +1,6 @@
 {
   "record": "agreement",
+  "protocol": "1.0-pre",
   "key": "agreement.install_peer",
   "writer": {
     "type": "authority",
@@ -29,5 +30,5 @@
   },
   "algorithm": "ed25519",
   "body_digest": "0ke5JK0A0O0u1drd4BV05qUad89aeD2DSBYsI9b8iWw",
-  "signature": "2urontquMpNP3SP85QGaEq8uW2vijmGC5nOJrtMglwsKx53mH-QGcSdUeYogBWHEGQmZMShUHm8-uJO1ooa_Cw"
+  "signature": "sUn6VG93RUfHuTHUGF39oyEKZsjfC38ejStB8kMHfUouZtlInn1grtAIL55qixxLtdx5fckMKrOyQAUdAGRVBA"
 }

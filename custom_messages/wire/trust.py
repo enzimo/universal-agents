@@ -50,12 +50,14 @@ from custom_messages.wire.kinds import (
     CLOCK_SKEW_SECONDS,
     KINDS,
     MAX_FRAME_BYTES,
+    PROTOCOL,
     STATE_RECORDS,
+    STATE_SHAPE,
     STATE_SIGNING_DOMAIN,
 )
 from custom_messages.wire.models import State, StateWriterAuthority, StateWriterHost
 from custom_messages.wire.refusals import FrameRefused, pointer
-from custom_messages.wire.spec import StateSpec
+from custom_messages.wire.spec import StateSpec, newer_minor, prune
 from custom_messages.wire.values import parse_timestamp
 
 SKEW = timedelta(seconds=CLOCK_SKEW_SECONDS)
@@ -311,10 +313,15 @@ class TrustStore:
         return self._certificate(record.document, record.body)
 
     def _checked(self, raw: Mapping[str, Any]) -> VerifiedRecord:
-        """A parsed record's form, signer, signature, digest and record rules (``verify`` without parsing)."""
+        """A parsed record's form, signer, signature, digest and record rules (``verify`` without parsing).
 
+        A record from a newer minor loses the unknown optional fields this version does
+        not know before strict validation; its signature still covers them (README, "Versions").
+        """
+
+        newer = newer_minor(raw, PROTOCOL)
         try:
-            document = State.model_validate(raw)
+            document = State.model_validate(prune(raw, STATE_SHAPE) if newer else raw)
         except ValidationError as error:
             raise FrameRefused("malformed", str(error).splitlines()[0], at=pointer(error.errors()[0])) from error
         spec = STATE_RECORDS[document.record]
@@ -332,7 +339,7 @@ class TrustStore:
                 and self.revoked(signer.installation, signer.certificate_id)):
             raise FrameRefused("revoked", "the writer's certificate is revoked", at="/writer/key_id")
         try:
-            body = spec.body_model.validate_python(raw["body"])
+            body = spec.body_model.validate_python(prune(raw["body"], spec.body_shape) if newer else raw["body"])
         except ValidationError as error:
             raise FrameRefused("invalid_body", str(error).splitlines()[0],
                                at=pointer(error.errors()[0], prefix="/body")) from error

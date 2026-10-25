@@ -8,6 +8,10 @@
     "record": {
       "const": "certificate"
     },
+    "protocol": {
+      "description": "The writer's protocol label. A reader at an older minor drops a newer minor's unknown optional fields, as for frames (README, \"Versions\").",
+      "$ref": "common.schema.json#/$defs/protocol_label"
+    },
     "key": {
       "$ref": "common.schema.json#/$defs/state_key"
     },
@@ -56,6 +60,7 @@
   },
   "required": [
     "record",
+    "protocol",
     "key",
     "writer",
     "sequence",

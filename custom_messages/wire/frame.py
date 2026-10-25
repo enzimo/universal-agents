@@ -49,7 +49,7 @@ from custom_messages.wire.kinds import (
 )
 from custom_messages.wire.models import AuthorityToken, Frame
 from custom_messages.wire.refusals import FrameRefused, pointer
-from custom_messages.wire.spec import KindSpec, prune
+from custom_messages.wire.spec import KindSpec, newer_minor, prune
 from custom_messages.wire.trust import RESERVED_RUNTIME_PREFIXES, SKEW, AgentSession, HostCertificate, TrustStore, within
 from custom_messages.wire.values import parse_timestamp
 
@@ -279,16 +279,8 @@ class VerifiedFrame:
     raw: dict[str, Any] = field(repr=False)
 
 
-def protocol_minor(label: str) -> int:
-    return int(label.split(".", 1)[1].split("-", 1)[0])
-
-
 def _newer_minor(raw: Mapping[str, Any]) -> bool:
-    label = raw.get("protocol")
-    try:
-        return isinstance(label, str) and label.startswith("1.") and protocol_minor(label) > protocol_minor(PROTOCOL)
-    except ValueError:
-        return False
+    return newer_minor(raw, PROTOCOL)
 
 
 def _kind_spec(kind: str) -> tuple[Optional[KindSpec], bool]:

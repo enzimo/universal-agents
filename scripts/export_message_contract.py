@@ -1399,7 +1399,8 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"    {name!r}: StateSpec(name={name!r}, bucket={entry['bucket']!r}, key={entry['key']!r}, "
         f"signer={entry['signer']!r}, signer_roles={tuple(entry.get('signer_roles', ()))!r}, "
         f"writers={tuple(entry['writers'])!r}, ttl_seconds={entry.get('ttl_seconds')!r}, "
-        f"body_model=models.{class_name(name)}StateAdapter),"
+        f"body_model=models.{class_name(name)}StateAdapter, "
+        f"body_shape={shape(writer, entry['body'], schemas[entry['body']])!r}),"
         for name, entry, _body in states
     ]
     between = sorted(name for name, spec in transport["classes"].items() if spec["between_installations"])
@@ -1431,7 +1432,8 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"RETRY_OUTCOMES = frozenset({sorted(registry['retry_outcomes'])!r})\n"
         f"HOST_ROLES = {tuple(registry['host_roles'])!r}\n"
         f"TOPOLOGIES = { {name: {role: tuple(edges) for role, edges in spec['allowed_edges'].items()} for name, spec in topologies['topologies'].items()}!r}\n"
-        f"FRAME_SHAPE = {shape(writer, 'frame.schema.json', schemas['frame.schema.json'])!r}\n\n"
+        f"FRAME_SHAPE = {shape(writer, 'frame.schema.json', schemas['frame.schema.json'])!r}\n"
+        f"STATE_SHAPE = {shape(writer, registry['state_schema'], schemas[registry['state_schema']])!r}\n\n"
         "KINDS: dict[str, KindSpec] = {\n" + "\n".join(specs) + "\n}\n\n"
         "STATE_RECORDS: dict[str, StateSpec] = {\n" + "\n".join(state_specs) + "\n}\n"
     )

@@ -1,5 +1,6 @@
 {
   "record": "host",
+  "protocol": "1.0-pre",
   "key": "lead-host-1",
   "writer": {
     "type": "host",
@@ -16,7 +17,7 @@
     "certificate": {
       "certificate_id": "cert_lead_host_1",
       "membership_epoch": 3,
-      "sha256": "j-99KmXNuxFq8YI531Lb7h7FVZVgt0BKiUvOCuAxNeg"
+      "sha256": "2JcwUjk0A9PYV14eUAqSBmci9q5QHX0m-MDgPbnTTCk"
     },
     "session_limit": 4,
     "sessions_active": 1,
@@ -47,6 +48,6 @@
     }
   },
   "algorithm": "ed25519",
-  "body_digest": "0gSW6iu3Az60YN_fap9XOwcVi47Z-RPB3wtlPLd0inc",
-  "signature": "AawexRifTc3L4Ye5GOH1h4-OE2hEqQx0BsXn9Cw3m_nBMCmUV2rX0idr_3SdZnnWzKS6cPgF4Epwgce0nRPmAg"
+  "body_digest": "E_QuRH_XiOFTpGhV235tmkVgcbE1QVrr3QakvqGoUyI",
+  "signature": "075ct_oD_o6Li_Zm4apZ9EBQpNrDchlF8Nkspq8-ybUOjvlf3fZ4wZgHLNWNmL8bHTlNn0AgjmSgWW-RMgDuDQ"
 }

@@ -1,5 +1,6 @@
 {
   "record": "certificate",
+  "protocol": "1.0-pre",
   "key": "host.install_example.gateway-1.1",
   "writer": {
     "type": "authority",
@@ -40,5 +41,5 @@
   },
   "algorithm": "ed25519",
   "body_digest": "0aqmPilQ7KoNTcyiTEDr9O6dxzsvyZLBkAUlrcug9Wo",
-  "signature": "z2eEaSYErMdSK4P-DPfs2XmoEWq3WPthSrLyjKMpS8goKYiJT51LmPjzRPeBEIxN737FISP6EnPqYl4wcVCXCA"
+  "signature": "bBG1pAePdi7vunTmDfiTQvZPZAlhMombcvXouUM-mpBZPh310i-xPczjTU4uz9fkcMY4edOwZwQeCYl-KXRnBQ"
 }

@@ -618,7 +618,7 @@ provide the exact bytes, proof and finished frame for other implementations.
 ## State records
 
 Hosts, agents, placements and the team view are key-value records, not messages. Each value is a signed state document (`schemas/state.schema.json`):
-- the record type, its key and its writer;
+- the record type, the writer's protocol label ("Versions"), its key and its writer;
 - a sequence that only grows;
 - issue and expiry times;
 - the body, its digest and an Ed25519 signature over the domain prefix `universal-agents/state-record/v1` and a newline, followed by the RFC 8785 canonical JSON of the document without its signature.
@@ -658,7 +658,10 @@ Within one protocol label:
 - a sender at the same or an older minor is read strictly: an unknown field is a defect;
 - a newer minor's unknown optional fields are ignored.
 
-The frame states its minor, so the receiver chooses before reading the body. A change that an
+The frame states its minor, so the receiver chooses before reading the body. State records
+state theirs the same way (`protocol`), so a certificate or a liveness record can gain
+optional fields within the major too; the signature covers the record as received,
+unknown fields included. A change that an
 older receiver must understand needs a new major, which brings new subjects and streams.
 Receivers recompute keys, so a kind's key parts and copies are fixed for the major: a newer
 minor never adds, removes or reorders them.
