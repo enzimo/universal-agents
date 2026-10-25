@@ -3,12 +3,20 @@
     "lead": "holds conversations with people, splits work and decides for its team",
     "worker": "does the work its lead or a person's own schedule gives it"
   },
+  "edges": {
+    "down": "the receiver holds the task, or is given it (a delegation)",
+    "out": "an outside agent through an edge adapter, or another team or installation",
+    "person": "a gateway route that reaches the person",
+    "sideways": "another agent of the same team, with no request between them",
+    "up": "the receiver is the task's requester"
+  },
   "fixed_rules": [
     "access requests and decisions go to the team services, never to a model",
     "the output of work a person gave a worker directly (a run of the person's own schedule, or system work with a configured route) goes to the person",
     "notifications for delegated work come from the lead",
     "a receiver refuses a message whose edge its topology does not allow, and the sender gets delivery.refused",
-    "a message from an agent that does not hold the task it names is refused"
+    "a message from an agent that does not hold the task it names is refused",
+    "only the lead receives work, answers and other messages from outside agents"
   ],
   "topologies": {
     "all_peers": {

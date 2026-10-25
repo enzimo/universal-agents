@@ -1,4 +1,33 @@
 {
+  "audience_targets": {
+    "agent": [
+      "lead_host",
+      "worker_host"
+    ],
+    "edge": [
+      "gateway",
+      "edge_adapter"
+    ],
+    "installation_service": [
+      "installation_authority"
+    ],
+    "pool": [
+      "lead_host",
+      "worker_host"
+    ],
+    "team": [
+      "gateway",
+      "lead_host",
+      "worker_host",
+      "team_services",
+      "edge_adapter",
+      "installation_authority",
+      "scheduler"
+    ],
+    "team_services": [
+      "team_services"
+    ]
+  },
   "classes": {
     "dead_letter": {
       "addresses": [

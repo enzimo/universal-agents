@@ -1,0 +1,35 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "ledger.fact",
+  "message_id": "01928f3a-7b2c-7311-8000-000000000311",
+  "idempotency_key": "ledger.fact:soUt_nerkdr-_d7TGb02fExZYUj-dSUapkTlhawRBzo",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.team-services-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "fact_id": "fact_11",
+    "task_id": "task_root_1",
+    "fact": {
+      "type": "access_decided",
+      "request_id": "areq_1",
+      "status": "granted"
+    }
+  },
+  "body_digest": "N2HYXNrEA0Bsgw04LmpLiyR3rvrUTVxCvRuxhuiFaMs",
+  "signature": "s0z387Po5QI2NV5_aqy-tFQASSwQ8vuk1GFIfcpVo1tsdNGDuusIcuKW5Z1BL_Z2NcKMnYmWygsxDSVhTrWWAg"
+}

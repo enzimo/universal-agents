@@ -1,0 +1,230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/task.result.schema.json",
+  "title": "task.result body",
+  "description": "The final answer of a task, sent by its holder.",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "delivery_ref": {
+      "description": "Copied from the task's work context when the message goes to a gateway route, so the gateway knows whom it is for.",
+      "$ref": "../common.schema.json#/$defs/delivery_ref"
+    },
+    "conversation_id": {
+      "description": "Copied from the task's work context when the message goes to a gateway route.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "sequence": {
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "intent_version": {
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "steering_seen": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/assumption"
+      },
+      "maxItems": 20
+    },
+    "summary": {
+      "$ref": "../common.schema.json#/$defs/short_text"
+    },
+    "outcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "completed"
+            },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
+            },
+            "answer": {
+              "$ref": "../common.schema.json#/$defs/answer"
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/attachment"
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "state",
+            "custody_token",
+            "answer"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "partial"
+            },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
+            },
+            "answer": {
+              "$ref": "../common.schema.json#/$defs/answer"
+            },
+            "missing": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/attachment"
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "state",
+            "custody_token",
+            "answer",
+            "missing"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "failed"
+            },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
+            },
+            "failure": {
+              "$ref": "../common.schema.json#/$defs/failure"
+            }
+          },
+          "required": [
+            "state",
+            "custody_token",
+            "failure"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "cancelled"
+            },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "stopped",
+                "parent_ended",
+                "request_closed",
+                "conflict_not_decided",
+                "custody_moved"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "custody_token",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "paused"
+            },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
+            },
+            "trigger": {
+              "type": "string",
+              "enum": [
+                "tool_call_budget_exceeded",
+                "context_budget_exceeded",
+                "delegated_subtask_timeout",
+                "specialist_runtime_budget_pause",
+                "provider_overloaded"
+              ]
+            },
+            "detail": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            }
+          },
+          "required": [
+            "state",
+            "custody_token",
+            "trigger"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "yielded"
+            },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
+            },
+            "reason": {
+              "$ref": "../common.schema.json#/$defs/short_text"
+            }
+          },
+          "required": [
+            "state",
+            "custody_token",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "rejected"
+            },
+            "custody_token": {
+              "$ref": "../common.schema.json#/$defs/custody_token"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "queue_full",
+                "not_allowed"
+              ]
+            },
+            "detail": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "task_id",
+    "sequence",
+    "outcome"
+  ],
+  "additionalProperties": false
+}

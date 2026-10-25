@@ -1,0 +1,100 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.request",
+  "message_id": "01928f3a-7b2c-7130-8000-000000000130",
+  "idempotency_key": "task.request:joAc3RjLjM91HJoIEtw6PZQ3RfmEi5by-eGOyP6c3vU",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "pool",
+    "id": "researcher"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.work.pool.researcher",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_sub_2",
+    "work": {
+      "origin": "delegation",
+      "reply_to": {
+        "target": "agent",
+        "id": "lead"
+      },
+      "root_task_id": "task_root_1",
+      "topology": "hub_and_spoke"
+    },
+    "instructions": "Find the three largest invoices.",
+    "reassignment": {
+      "handback_id": "hb_1",
+      "prior_holder": "researcher-1",
+      "prior_disposition": "interrupted",
+      "interruption_count": 1,
+      "actions": [],
+      "ledger": {
+        "plan": {
+          "sha256": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+          "size": 7168,
+          "media_type": "application/json"
+        },
+        "checkpoint": {
+          "sha256": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg",
+          "size": 8192,
+          "media_type": "application/json"
+        },
+        "history_summary": "Grouped two of five categories.",
+        "delegations": [
+          {
+            "task_id": "task_sub_1_sub_1",
+            "number": 1,
+            "holder": "researcher-3",
+            "state": "standin"
+          }
+        ],
+        "questions": [
+          {
+            "question_id": "q_1",
+            "number": 1,
+            "purpose": "input"
+          }
+        ],
+        "assumptions": [
+          {
+            "assumption_id": "asm_1",
+            "text": "The report covers the last quarter only.",
+            "affects": [
+              "S2"
+            ]
+          }
+        ],
+        "held_actions": [
+          {
+            "action_id": "act_1",
+            "action_type": "send_email",
+            "summary": "Send the summary to the finance list.",
+            "state": "held"
+          }
+        ],
+        "counters": {
+          "subtask": 1,
+          "question": 1,
+          "attachment": 0,
+          "report": 0
+        }
+      }
+    }
+  },
+  "causation_id": "01928f3a-7b2c-710f-8000-00000000010f",
+  "body_digest": "q3Wi2dPUEwSFvVbPVm-EpZ8q7rj7c2Dl7i4t6UVi5VU",
+  "signature": "6iS_sGk09STz_9SkfwXb2qBmTjmvXKEDh8CRNzicrMCItvcadwaL_a8xJCjbPF52sTUEV34uHyU_gtEIWEmfBg"
+}

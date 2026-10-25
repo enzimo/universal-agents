@@ -1,7 +1,13 @@
 {
   "publish": [
+    "$JS.ACK.UA1_WORK.team~{team}.>",
+    "$JS.API.CONSUMER.INFO.UA1_WORK.team~{team}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.team~{team}",
     "ua.v1.{team}.{self}.ctl.agent.*.pause",
-    "ua.v1.{team}.{self}.work.agent.*"
+    "ua.v1.{team}.{self}.work.agent.*",
+    "ua.v1.{team}.{self}.work.edge.*",
+    "ua.v1.{team}.{self}.work.pool.*",
+    "ua.v1.{team}.{self}.work.team"
   ],
   "role": "team_services",
   "subscribe": [

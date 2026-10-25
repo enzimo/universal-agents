@@ -1,0 +1,23 @@
+{
+  "description": "Only the team services write facts into an agent's ledger.",
+  "refusal": "wrong_sender",
+  "at": "/kind",
+  "base": "ledger.fact/wait.json",
+  "changes": [
+    {
+      "set": "/issuer",
+      "to": {
+        "installation": "install_example",
+        "team": "team_example",
+        "runtime": "lead-host-1",
+        "agent": "lead",
+        "session": "s-lead-1",
+        "membership_epoch": 3,
+        "revocation_epoch": 1,
+        "key_id": "test-lead-key-1"
+      }
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"ledger.fact\", \"message_id\": \"01928f3a-7b2c-7122-8000-000000000122\", \"idempotency_key\": \"ledger.fact:IF-F_UbK6wyT6yGI616ef5SEV0kKopXnwipMsSUaGos\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"lead\"}, \"subject\": \"ua.v1.team_example.team-services-1.work.agent.lead\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"fact_id\": \"fact_2\", \"task_id\": \"task_root_1\", \"fact\": {\"type\": \"wait\", \"kind\": \"change_conflict\", \"case_id\": \"case_1\", \"state\": \"open\", \"until\": \"2026-10-22T06:00:00.000Z\"}}, \"body_digest\": \"Ccej2ifHqgYRbP-_jz9Tk_4o8AWiOALcWXhAYoDQjys\", \"signature\": \"gp4WmBY8pIrJmrJdw22M4S-8VVrFssjytHDqsDEr0ppierLKLpepSjJSrQKPkXB6BqXY6Un9z2S-5gC1SjfTDA\"}"
+}

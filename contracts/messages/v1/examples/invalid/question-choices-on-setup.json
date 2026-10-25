@@ -1,0 +1,48 @@
+{
+  "description": "A setup question has no choices.",
+  "refusal": "invalid_body",
+  "at": "/body/purpose/choices",
+  "base": "task.question/runtime-pause.json",
+  "changes": [
+    {
+      "set": "/body/question_id",
+      "to": "q_9"
+    },
+    {
+      "set": "/body/task_id",
+      "to": "task_sub_1"
+    },
+    {
+      "set": "/body/sequence",
+      "to": 1
+    },
+    {
+      "set": "/body/text",
+      "to": "Which service?"
+    },
+    {
+      "set": "/body/purpose/type",
+      "to": "setup"
+    },
+    {
+      "set": "/body/purpose/service",
+      "to": "x"
+    },
+    {
+      "set": "/body/purpose/need",
+      "to": "y"
+    },
+    {
+      "set": "/body/purpose/choices",
+      "to": []
+    },
+    {
+      "remove": "/body/purpose/trigger"
+    },
+    {
+      "remove": "/body/purpose/allowed_decisions"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.question\", \"message_id\": \"01928f3a-7b2c-7109-8000-000000000109\", \"idempotency_key\": \"task.question:Uob1nMRLflC_MBiAp8RSg0QhcoOQWrMi6MAXP8qRqdg\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"agent\": \"researcher-2\", \"session\": \"s-researcher-2-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"lead\"}, \"subject\": \"ua.v1.team_example.worker-host-1.work.agent.lead\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"question_id\": \"q_9\", \"task_id\": \"task_sub_1\", \"sequence\": 1, \"text\": \"Which service?\", \"can_answer\": \"lead\", \"purpose\": {\"type\": \"setup\", \"service\": \"x\", \"need\": \"y\", \"choices\": []}}, \"body_digest\": \"s9umlLSErdvk9TaZ-Tf67ZyPl_rNYP8xIHeA2tEYwWo\", \"signature\": \"VLZyRfHwthckRgrznUguKMsX7GkwROWhxeKaYiwV1WzwEK9-jwTcwZrSLdJA1REEpdDLrRtcBm4gVx_m7I2JDA\"}"
+}

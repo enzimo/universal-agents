@@ -1,5 +1,9 @@
 {
-  "publish": [],
+  "publish": [
+    "ua.v1.{team}.{self}.work.agent.*",
+    "ua.v1.{team}.{self}.work.pool.*",
+    "ua.v1.{team}.{self}.work.team"
+  ],
   "role": "scheduler",
   "subscribe": [
     "_INBOX.{self}.>"

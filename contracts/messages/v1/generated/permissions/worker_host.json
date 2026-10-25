@@ -5,8 +5,14 @@
   },
   "publish": [
     "$JS.ACK.UA1_WORK.agent~{team}~{agent}.>",
+    "$JS.ACK.UA1_WORK.pool~{team}~{pool}.>",
     "$JS.API.CONSUMER.INFO.UA1_WORK.agent~{team}~{agent}",
-    "$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.agent~{team}~{agent}"
+    "$JS.API.CONSUMER.INFO.UA1_WORK.pool~{team}~{pool}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.agent~{team}~{agent}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.pool~{team}~{pool}",
+    "ua.v1.{team}.{self}.work.agent.*",
+    "ua.v1.{team}.{self}.work.edge.*",
+    "ua.v1.{team}.{self}.work.team"
   ],
   "role": "worker_host",
   "subscribe": [

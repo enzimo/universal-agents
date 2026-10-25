@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/task.handback.schema.json",
+  "title": "task.handback body",
+  "description": "A holder that lost its lease returns a task.",
+  "type": "object",
+  "properties": {
+    "handback_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "custody_token": {
+      "description": "The custody the holder hands back; a hand-back from a former holder is kept as late work.",
+      "$ref": "../common.schema.json#/$defs/custody_token"
+    },
+    "disposition": {
+      "type": "string",
+      "enum": [
+        "not_started",
+        "interrupted"
+      ]
+    },
+    "launch_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "interrupted_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "reason": {
+      "$ref": "../common.schema.json#/$defs/short_text"
+    },
+    "scheduler_errors": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/short_text"
+      },
+      "maxItems": 10
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/held_action"
+      },
+      "maxItems": 50
+    },
+    "ledger": {
+      "$ref": "../common.schema.json#/$defs/ledger_snapshot"
+    }
+  },
+  "required": [
+    "handback_id",
+    "task_id",
+    "custody_token",
+    "disposition",
+    "launch_id",
+    "reason",
+    "actions"
+  ],
+  "additionalProperties": false
+}

@@ -42,6 +42,18 @@
       "public_key": "dSnEVtk40rj-kPpsz5FtNGdwpkvLt7UyO2h6zeIM0Aw",
       "installation": "install_peer",
       "holder": "peer-lead-host-1"
+    },
+    "test-scheduler-key-1": {
+      "seed": "EU4Q96QrwzwIK06z0GySxR9ldIh464aOTwCl2PxdPMQ",
+      "public_key": "UX8YDKs4vuGr34IjMFYE8FVBJUkCJ1p6znXk1ExO87g",
+      "installation": "install_example",
+      "holder": "scheduler-1"
+    },
+    "test-edge-key-1": {
+      "seed": "RhgDvIIkP_mma5Kc1B-jdc__y26LCS9OHoKMHIXZCcA",
+      "public_key": "lsy1UwdJesPa9n2oD7wr9avSQUGV4RRHfgeQAa7TdC8",
+      "installation": "install_example",
+      "holder": "edge-adapter-1"
     }
   }
 }

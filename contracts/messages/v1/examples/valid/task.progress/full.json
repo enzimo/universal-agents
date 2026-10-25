@@ -1,0 +1,59 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.progress",
+  "message_id": "01928f3a-7b2c-710b-8000-00000000010b",
+  "idempotency_key": "task.progress:wtm2gLKNhq3MIxSmf1VY8SRE4iEgKMrLiRmfNqsRiiI",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_sub_1",
+    "sequence": 2,
+    "custody_token": 3,
+    "status": "Grouped the travel invoices.",
+    "state": "working",
+    "checkpoint": {
+      "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+      "size": 5120,
+      "media_type": "application/json"
+    },
+    "assumptions": [
+      {
+        "assumption_id": "asm_1",
+        "text": "The report covers the last quarter only.",
+        "affects": [
+          "S2"
+        ]
+      }
+    ],
+    "held_actions": [
+      {
+        "action_id": "act_1",
+        "action_type": "send_email",
+        "summary": "Send the summary to the finance list.",
+        "state": "held"
+      }
+    ],
+    "expected_finish": "2026-10-22T05:00:00.000Z",
+    "steering_seen": "steer_1"
+  },
+  "body_digest": "K-gZe9hZ2d0kIbOPC5sNn5qtQ3Ljxns-7Eaqce01_A4",
+  "signature": "PaHrQ3J-T3uNvc0E_6z0azZ4elWg1WZfvC9NjC5klSIvPd4RnCXIyuaUNsAWX312bMhEJQ1Rffk7YhAnrim7Aw"
+}

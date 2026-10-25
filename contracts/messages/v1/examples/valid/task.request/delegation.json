@@ -1,0 +1,108 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.request",
+  "message_id": "01928f3a-7b2c-7101-8000-000000000101",
+  "idempotency_key": "task.request:LQqO0I_NeB-f6ZvAeA5r1-Ht4bUqxiWrZc8PcigtEKc",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "researcher-2"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.work.agent.researcher-2",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_sub_1",
+    "work": {
+      "origin": "delegation",
+      "reply_to": {
+        "target": "agent",
+        "id": "lead"
+      },
+      "root_task_id": "task_root_1",
+      "parent_task_id": "task_root_1",
+      "conversation_id": "conv_1",
+      "follows_task_id": "task_prev_1",
+      "objective_id": "obj_1",
+      "time_zone": "Europe/Berlin",
+      "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
+      "started_on_purpose": true,
+      "topology": "hub_and_spoke",
+      "intent": {
+        "version": 2,
+        "text": "A short report on last quarter's costs for the team meeting."
+      },
+      "root_request": {
+        "sha256": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+        "size": 1024,
+        "media_type": "application/json"
+      },
+      "deadline": {
+        "at": "2026-10-22T18:00:00.000Z",
+        "rule": "partial_result"
+      },
+      "expected_offline_until": "2026-10-22T08:00:00.000Z",
+      "decisions_ahead": [
+        {
+          "decision_id": "dec_1",
+          "kind": "forward_result_to_person"
+        }
+      ]
+    },
+    "instructions": "Summarize last quarter's costs by category.",
+    "replied_message": {
+      "author": "assistant",
+      "text": "Here is the draft you asked for.",
+      "shortened": false,
+      "quoted_text": "the draft",
+      "sent_at": "2026-10-22T04:00:00.000Z"
+    },
+    "attachments": [
+      {
+        "attachment_id": "att_1",
+        "blob": {
+          "sha256": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+          "size": 2048,
+          "media_type": "application/pdf",
+          "name": "costs.pdf"
+        },
+        "kind": "document",
+        "caption": "Last quarter's invoices"
+      }
+    ],
+    "reassignment": {
+      "handback_id": "hb_1",
+      "prior_holder": "researcher-1",
+      "prior_disposition": "interrupted",
+      "interruption_count": 1,
+      "interrupted_at": "2026-10-22T04:10:00.000Z",
+      "actions": [
+        {
+          "action_id": "act_1",
+          "action_type": "send_email",
+          "summary": "Send the summary to the finance list.",
+          "state": "held"
+        }
+      ],
+      "checkpoint": {
+        "sha256": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+        "size": 3072,
+        "media_type": "application/json"
+      }
+    }
+  },
+  "body_digest": "ChtAn5XBnCEWOL16jsfC5MAHe2o2J1ZuXeQ5wTRMhZw",
+  "signature": "U1lKGyCUra3kqPiSZFsI-PeeeSGQJ6rbRqUcVkoanqd1B97cLz0ORHYl1WDZNZ79LdHkRJ7gvXlsxGse4WDWDQ"
+}

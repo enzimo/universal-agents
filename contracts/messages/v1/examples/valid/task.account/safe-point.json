@@ -1,0 +1,37 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.account",
+  "message_id": "01928f3a-7b2c-7319-8000-000000000319",
+  "idempotency_key": "task.account:T9uBesXrZ14p21cH4FPwu6XZVHHjBogqt10j15K4CqE",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_sub_1",
+    "steer_id": "steer_3",
+    "sequence": 6,
+    "stage": {
+      "type": "safe_point",
+      "note": "About 60% of the sources read; the EU part has not started."
+    }
+  },
+  "body_digest": "M6cPgErj9BKwQl9pMFaVShV9nE1YYsxzTGh29WRQrag",
+  "signature": "nV9H5cQFBxrrzoiUFM5dfvqtwPdO45ZNl78yIoL81bizc12fHWvaE3GKVIDSN5Stgu5IcznyHqNYa9wbN0ueAA"
+}

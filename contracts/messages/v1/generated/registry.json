@@ -23,6 +23,7 @@
       "meaning": "another request is writing the file or sign-in; carries when to try again"
     }
   ],
+  "decision_token_domain": "universal-agents/decision-token/v1",
   "frame_schema": "frame.schema.json",
   "host_roles": {
     "edge_adapter": "connects outside agents (A2A)",
@@ -34,6 +35,168 @@
     "worker_host": "runs worker agents"
   },
   "kinds": {
+    "access.decision": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/access.decision.schema.json",
+      "body_rules": [
+        {
+          "requires": "/body/status/expires_at",
+          "when": [
+            {
+              "at": "/body/status/state",
+              "is": "granted"
+            },
+            {
+              "at": "/body/status/lifetime",
+              "is": "until"
+            }
+          ]
+        }
+      ],
+      "class": "durable",
+      "description": "What became of an access request, sent to the waiting task.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/request_id",
+        "/body/status/state"
+      ],
+      "ledger": "access_wait_closed",
+      "receivers": [
+        "worker_host",
+        "lead_host"
+      ],
+      "rendering": "none",
+      "routing": "named",
+      "senders": [
+        "team_services"
+      ],
+      "topology_edge": "none",
+      "wakes_model": {
+        "by": "status.state",
+        "values": {
+          "already_held": "always",
+          "denied": "always",
+          "granted": "always",
+          "handed_down": "always",
+          "refused": "always",
+          "waiting": "never",
+          "withdrawn": "always"
+        }
+      }
+    },
+    "access.request": {
+      "address": "work.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/access.request.schema.json",
+      "body_rules": [
+        {
+          "requires": "/body/what/hours",
+          "when": [
+            {
+              "at": "/body/what/lifetime",
+              "is": "until"
+            }
+          ]
+        }
+      ],
+      "class": "durable",
+      "description": "A task asks the team services for access; no model decides it.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "access_wait_open",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "routing": "team",
+      "senders": [
+        "worker_host",
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "access.resolved": {
+      "address": "work.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "access_request"
+      },
+      "body": "bodies/access.resolved.schema.json",
+      "class": "durable",
+      "description": "A person's decision on an access request, from the gateway to the team services.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "access.review": {
+      "address": "work.edge.{edge}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/access.review.schema.json",
+      "body_rules": [
+        {
+          "unique": "/body/state/choices"
+        }
+      ],
+      "class": "durable",
+      "description": "An access review for the gateway's Inbox, from the team services; a refused decision returns this way too.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/request_id",
+        "/body/state/type",
+        "/body/state/refused_message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "gateway"
+      ],
+      "rendering": "none",
+      "routing": "person",
+      "senders": [
+        "team_services"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
     "agent.pause": {
       "address": "ctl.agent.{agent}.pause",
       "admission": {
@@ -46,7 +209,10 @@
       "class": "request_reply",
       "description": "Pause one agent at its next safe point; it keeps its queued work.",
       "expiry_seconds": 30,
-      "idempotency": "agent_pause:<agent>:<request_id>",
+      "idempotency": [
+        "/audience/id",
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "lead_host",
@@ -67,6 +233,278 @@
       "topology_edge": "down",
       "wakes_model": "never"
     },
+    "credential.form.request": {
+      "address": "work.edge.{edge}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/root_task_id",
+        "type": "root_task"
+      },
+      "body": "bodies/credential.form.request.schema.json",
+      "class": "durable",
+      "description": "Ask the gateway to collect, set up or delete a credential through a secure form.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/form_id"
+      ],
+      "ledger": "form_wait_open",
+      "receivers": [
+        "gateway"
+      ],
+      "rendering": "none",
+      "routing": "person",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": [
+        "person"
+      ],
+      "wakes_model": "never"
+    },
+    "credential.form.result": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": true,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/credential.form.result.schema.json",
+      "class": "durable",
+      "description": "What became of a credential form.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/form_id"
+      ],
+      "ledger": "form_wait_closed",
+      "receivers": [
+        "lead_host"
+      ],
+      "rendering": "summary",
+      "routing": "requester",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "next_turn"
+    },
+    "custody.moved": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/custody.moved.schema.json",
+      "class": "durable",
+      "description": "Tells a former holder that its task moved; later results are kept as late work.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/task_id",
+        "/body/custody_token"
+      ],
+      "ledger": "custody_lost",
+      "receivers": [
+        "worker_host",
+        "lead_host",
+        "edge_adapter"
+      ],
+      "rendering": "none",
+      "routing": "named",
+      "senders": [
+        "team_services"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "delivery.receipt": {
+      "address": "work.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/delivery.receipt.schema.json",
+      "class": "durable",
+      "description": "The gateway delivered an answer or notice to a person.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/receipt_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "delivery.refused": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}",
+        "work.team"
+      ],
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/delivery.refused.schema.json",
+      "class": "durable",
+      "description": "A receiver refused a message; sent back to its sender.",
+      "expiry_seconds": 86400,
+      "idempotency": [
+        "/body/refused_message_id",
+        "/issuer/runtime",
+        "/issuer/agent"
+      ],
+      "ledger": "send_refused",
+      "receivers": [
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "gateway",
+        "edge_adapter"
+      ],
+      "rendering": "summary",
+      "routing": "sender",
+      "senders": [
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "gateway",
+        "edge_adapter"
+      ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host",
+          "team_services"
+        ]
+      },
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "ledger.fact": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/ledger.fact.schema.json",
+      "class": "durable",
+      "description": "A fact for an agent's work ledger from the team services.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/fact_id"
+      ],
+      "ledger": "fact_recorded",
+      "receivers": [
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "summary",
+      "routing": "named",
+      "senders": [
+        "team_services"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "person.notify": {
+      "address": "work.edge.{edge}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/person.notify.schema.json",
+      "class": "durable",
+      "description": "A notice for a person, delivered by the gateway.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/notice_id"
+      ],
+      "ledger": "person_notified",
+      "receivers": [
+        "gateway"
+      ],
+      "rendering": "none",
+      "routing": "person",
+      "senders": [
+        "lead_host",
+        "worker_host",
+        "team_services"
+      ],
+      "topology_edge": [
+        "person"
+      ],
+      "wakes_model": "never"
+    },
+    "question.closed": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": true,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/question.closed.schema.json",
+      "class": "durable",
+      "description": "A question ended without an answer.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/question_id"
+      ],
+      "ledger": "question_closed",
+      "receivers": [
+        "lead_host",
+        "worker_host",
+        "edge_adapter"
+      ],
+      "rendering": "summary",
+      "routing": "named",
+      "senders": [
+        "gateway",
+        "team_services",
+        "lead_host"
+      ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host",
+          "team_services"
+        ]
+      },
+      "topology_edge": [
+        "down",
+        "out"
+      ],
+      "wakes_model": "always"
+    },
     "skills.changed": {
       "address": "evt.skills_changed",
       "admission": {
@@ -79,7 +517,9 @@
       "class": "event",
       "description": "Hint that a managed skill was installed or removed. Receivers verify the stored receipt before they refresh.",
       "expiry_seconds": 300,
-      "idempotency": "skills_changed:<change_id>",
+      "idempotency": [
+        "/body/change_id"
+      ],
       "ledger": "none",
       "receivers": [
         "lead_host",
@@ -93,23 +533,501 @@
       "topology_edge": "none",
       "wakes_model": "never"
     },
-    "task.stop": {
+    "task.account": {
       "address": "work.agent.{agent}",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
         "priority": "high"
       },
+      "authority": "none",
+      "body": "bodies/task.account.schema.json",
+      "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
+      "description": "A held holder's account of where its task stopped.",
+      "expiry_seconds": 86400,
+      "idempotency": [
+        "/body/task_id",
+        "/body/steer_id",
+        "/body/stage/type"
+      ],
+      "ledger": "hold_account",
+      "receivers": [
+        "lead_host"
+      ],
+      "rendering": "summary",
+      "routing": "requester",
+      "senders": [
+        "worker_host",
+        "lead_host"
+      ],
+      "topology_edge": [
+        "up"
+      ],
+      "wakes_model": "never"
+    },
+    "task.answer": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": true,
+        "priority": "high"
+      },
       "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/task.answer.schema.json",
+      "body_rules": [
+        {
+          "unique": "/body/selected_choice_ids"
+        },
+        {
+          "any_of": [
+            "/body/text",
+            "/body/text_file",
+            "/body/selected_choice_ids",
+            "/body/decision",
+            "/body/decision_token"
+          ]
+        }
+      ],
+      "class": "durable",
+      "description": "The answer to one question.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/question_id"
+      ],
+      "ledger": "question_answered",
+      "receivers": [
+        "lead_host",
+        "worker_host",
+        "edge_adapter"
+      ],
+      "rendering": "full",
+      "routing": "named",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "team_services",
+        "worker_host",
+        "edge_adapter"
+      ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host"
+        ]
+      },
+      "topology_edge": [
+        "down",
+        "sideways",
+        "out"
+      ],
+      "wakes_model": "always"
+    },
+    "task.claimed": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/task.claimed.schema.json",
+      "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
+      "description": "A holder took a task.",
+      "expiry_seconds": 86400,
+      "idempotency": [
+        "/body/claim_id"
+      ],
+      "ledger": "standin_holder",
+      "receivers": [
+        "lead_host"
+      ],
+      "rendering": "none",
+      "routing": "requester",
+      "senders": [
+        "worker_host",
+        "lead_host",
+        "edge_adapter"
+      ],
+      "topology_edge": [
+        "up"
+      ],
+      "wakes_model": "never"
+    },
+    "task.handback": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/task.handback.schema.json",
+      "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
+      "description": "A holder that lost its lease returns a task.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/handback_id"
+      ],
+      "ledger": "standin_returned",
+      "receivers": [
+        "lead_host"
+      ],
+      "rendering": "summary",
+      "routing": "requester",
+      "senders": [
+        "worker_host",
+        "lead_host"
+      ],
+      "topology_edge": [
+        "up"
+      ],
+      "wakes_model": "never"
+    },
+    "task.progress": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/task.progress.schema.json",
+      "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
+      "description": "Where a task stands, from its holder to its requester.",
+      "expiry_seconds": 86400,
+      "idempotency": [
+        "/body/task_id",
+        "/body/custody_token",
+        "/body/sequence"
+      ],
+      "ledger": "standin_progress",
+      "receivers": [
+        "lead_host"
+      ],
+      "rendering": "summary",
+      "routing": "requester",
+      "senders": [
+        "worker_host",
+        "lead_host",
+        "edge_adapter"
+      ],
+      "topology_edge": [
+        "up"
+      ],
+      "wakes_model": "never"
+    },
+    "task.question": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": true,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/task.question.schema.json",
+      "body_rules": [
+        {
+          "by": "choice_id",
+          "unique": "/body/purpose/choices"
+        },
+        {
+          "unique": "/body/purpose/allowed_decisions"
+        },
+        {
+          "requires": "/body/purpose/choices",
+          "when": [
+            {
+              "at": "/body/purpose/allow_free_text",
+              "is": false
+            }
+          ]
+        }
+      ],
+      "class": "durable",
+      "description": "A question from a task's holder to the one who can answer it.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/question_id"
+      ],
+      "ledger": "question_open",
+      "receivers": [
+        "lead_host",
+        "gateway",
+        "edge_adapter"
+      ],
+      "rendering": "full",
+      "routing": "requester",
+      "senders": [
+        "worker_host",
+        "lead_host",
+        "edge_adapter"
+      ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "worker_host",
+          "lead_host"
+        ]
+      },
+      "topology_edge": [
+        "up",
+        "person",
+        "sideways",
+        "out"
+      ],
+      "wakes_model": "next_turn"
+    },
+    "task.report": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/task.report.schema.json",
+      "class": "durable",
+      "description": "A report from a holder to its requester; the lead decides whether a person sees it.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/report_id"
+      ],
+      "ledger": "report_received",
+      "receivers": [
+        "lead_host"
+      ],
+      "rendering": "full",
+      "routing": "requester",
+      "senders": [
+        "worker_host",
+        "lead_host"
+      ],
+      "topology_edge": [
+        "up"
+      ],
+      "wakes_model": "next_turn"
+    },
+    "task.request": {
+      "address": [
+        "work.agent.{agent}",
+        "work.pool.{pool}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": true,
+        "priority": "normal"
+      },
+      "authority": "optional",
+      "authority_binding": {
+        "at": "/body/work/root_task_id",
+        "type": "root_task"
+      },
+      "body": "bodies/task.request.schema.json",
+      "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
+      "description": "Give a task to an agent or a pool.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/task_id",
+        "/message_id"
+      ],
+      "ledger": "task_held",
+      "receivers": [
+        "lead_host",
+        "worker_host",
+        "edge_adapter"
+      ],
+      "rendering": "full",
+      "routing": "named",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "scheduler",
+        "edge_adapter",
+        "team_services"
+      ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host"
+        ],
+        "work.pool.{pool}": [
+          "gateway",
+          "lead_host",
+          "scheduler",
+          "team_services"
+        ]
+      },
+      "topology_edge": [
+        "down",
+        "out"
+      ],
+      "wakes_model": "always"
+    },
+    "task.result": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": true,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/task.result.schema.json",
+      "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
+      "description": "The final answer of a task, sent by its holder.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/task_id",
+        "/issuer/agent",
+        "/body/outcome/custody_token",
+        "/body/sequence"
+      ],
+      "ledger": "delegated_resolved",
+      "receivers": [
+        "lead_host",
+        "gateway",
+        "edge_adapter"
+      ],
+      "rendering": "full",
+      "routing": "requester",
+      "senders": [
+        "worker_host",
+        "lead_host",
+        "edge_adapter",
+        "team_services"
+      ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "worker_host",
+          "lead_host",
+          "team_services"
+        ]
+      },
+      "topology_edge": [
+        "up",
+        "person",
+        "out"
+      ],
+      "wakes_model": {
+        "by": "outcome.state",
+        "values": {
+          "cancelled": "next_turn",
+          "completed": "next_turn",
+          "failed": "always",
+          "partial": "next_turn",
+          "paused": "always",
+          "rejected": "always",
+          "yielded": "next_turn"
+        }
+      }
+    },
+    "task.steer": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/task.steer.schema.json",
+      "class": "durable",
+      "description": "Steering for the holder of one named task.",
+      "expiry_seconds": 86400,
+      "idempotency": [
+        "/body/task_id",
+        "/body/steer_id"
+      ],
+      "ledger": "steering_received",
+      "receivers": [
+        "worker_host",
+        "lead_host",
+        "edge_adapter"
+      ],
+      "rendering": "full",
+      "routing": "holder",
+      "senders": [
+        "lead_host",
+        "team_services"
+      ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host",
+          "team_services"
+        ]
+      },
+      "topology_edge": [
+        "down",
+        "out"
+      ],
+      "wakes_model": {
+        "by": "action.type",
+        "values": {
+          "guidance": "always",
+          "hold": "never",
+          "release": "never"
+        }
+      }
+    },
+    "task.stop": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/task.stop.schema.json",
       "class": "durable",
       "description": "Stop one task. Sent only to the task's current holder.",
       "expiry_seconds": 86400,
-      "idempotency": "task.stop:<base64url(sha256(RFC8785([task_id, stop_id])))>",
+      "idempotency": [
+        "/body/task_id",
+        "/body/stop_id"
+      ],
       "ledger": "task_stopped",
       "receivers": [
         "lead_host",
-        "worker_host"
+        "worker_host",
+        "edge_adapter"
       ],
       "rendering": "none",
       "routing": "holder",
@@ -117,7 +1035,76 @@
         "lead_host",
         "team_services"
       ],
-      "topology_edge": "down",
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host",
+          "team_services"
+        ]
+      },
+      "topology_edge": [
+        "down",
+        "out"
+      ],
+      "wakes_model": "never"
+    },
+    "tool.setup.request": {
+      "address": "work.edge.{edge}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/root_task_id",
+        "type": "root_task"
+      },
+      "body": "bodies/tool.setup.request.schema.json",
+      "class": "durable",
+      "description": "Ask the gateway to have a person or administrator set a tool up.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/setup_request_id"
+      ],
+      "ledger": "setup_wait_open",
+      "receivers": [
+        "gateway"
+      ],
+      "rendering": "none",
+      "routing": "person",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": [
+        "person"
+      ],
+      "wakes_model": "never"
+    },
+    "tool.setup.result": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": true,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/tool.setup.result.schema.json",
+      "class": "durable",
+      "description": "What became of a tool setup.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/setup_request_id"
+      ],
+      "ledger": "setup_wait_closed",
+      "receivers": [
+        "lead_host"
+      ],
+      "rendering": "summary",
+      "routing": "requester",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
       "wakes_model": "never"
     }
   },
@@ -214,7 +1201,7 @@
     },
     {
       "code": "wrong_sender",
-      "meaning": "none of the certificate's roles may send the kind (for a reply, receive its request); or the frame comes from another installation with a kind, class or destination team its agreement does not allow"
+      "meaning": "none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request); or the frame comes from another installation with a kind, class or destination team its agreement does not allow; or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)"
     },
     {
       "code": "wrong_team",
@@ -246,11 +1233,11 @@
     },
     {
       "code": "invalid_body",
-      "meaning": "the body breaks the kind's schema"
+      "meaning": "the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give"
     },
     {
       "code": "bad_authority",
-      "meaning": "the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names another team than the issuer's, was not valid when the frame was issued, lasts longer than authority_token_max_seconds, or is bound to another root task or command than the one the receiver holds"
+      "meaning": "the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, lasts longer than authority_token_max_seconds, or is bound to another record than its kind's binding names or the receiver holds; or a change-conflict decision token in the body is not signed by a team-services certificate of the frame's installation and team, or was not valid when the frame was issued"
     },
     {
       "code": "access_denied",

@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/person.notify.schema.json",
+  "title": "person.notify body",
+  "description": "A notice for a person, delivered by the gateway.",
+  "type": "object",
+  "properties": {
+    "notice_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "recipient": {
+      "$ref": "../common.schema.json#/$defs/recipient"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "conversation_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "text": {
+      "$ref": "../common.schema.json#/$defs/long_text"
+    },
+    "urgency": {
+      "type": "string",
+      "enum": [
+        "normal",
+        "urgent"
+      ]
+    },
+    "reason": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "source": {
+              "const": "agent"
+            },
+            "note": {
+              "$ref": "../common.schema.json#/$defs/short_text"
+            }
+          },
+          "required": [
+            "source",
+            "note"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "source": {
+              "const": "code"
+            },
+            "code": {
+              "type": "string",
+              "enum": [
+                "delegated_work_started",
+                "delegated_work_progress",
+                "scheduled_fire_coalesced",
+                "task_queue_near_capacity",
+                "task_queue_safety",
+                "model_provider_failover",
+                "task_wait_limit_reached",
+                "tool_setup_workflow",
+                "messages_set_aside",
+                "work_stuck",
+                "work_recovered",
+                "schedule_run_missed",
+                "reasoning_summary_unsupported_repaired",
+                "conflict_outcome",
+                "fixed_reminder"
+              ]
+            }
+          },
+          "required": [
+            "source",
+            "code"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "blob": {
+            "$ref": "../common.schema.json#/$defs/blob_ref"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "image",
+              "document",
+              "audio",
+              "video"
+            ]
+          },
+          "caption": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "blob",
+          "kind"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 10
+    }
+  },
+  "required": [
+    "notice_id",
+    "recipient",
+    "text",
+    "urgency",
+    "reason"
+  ],
+  "additionalProperties": false
+}

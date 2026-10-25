@@ -1,0 +1,44 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.question",
+  "message_id": "01928f3a-7b2c-7109-8000-000000000109",
+  "idempotency_key": "task.question:Xn0dI6nZBqtdbSpr_En_EV4RFyD_1QMlIGBLuuC1pOk",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "question_id": "q_3",
+    "task_id": "task_sub_3",
+    "sequence": 6,
+    "text": "The tool budget ran out. Continue?",
+    "can_answer": "lead",
+    "purpose": {
+      "type": "runtime_pause",
+      "trigger": "tool_call_budget_exceeded",
+      "allowed_decisions": [
+        "resume",
+        "partial",
+        "cancel"
+      ]
+    }
+  },
+  "body_digest": "vmdh23gNs_AcwSSYuYCFTZRAVwPoH24yajMPf0ZMrVw",
+  "signature": "g5dDp56Zfgj8mu6a5tiMpWzIW866xBkBbX6_yj-iQcNOjq6D0QoWnzMfAZgyoETV7WH8yEGeMGt_ZkwLMJLPCA"
+}

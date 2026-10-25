@@ -11,10 +11,10 @@ values:
 - ``signing-vectors/vectors.json``: frames, a token and a record with their exact
   signing bytes.
 
-This module fills in public keys, body digests, signatures and each invalid
-example's ``frame_text``. It signs with RFC 8785 and Ed25519 directly, not with
-``custom_messages.wire``, so the tests compare two implementations of the signing
-rules. ``scripts/export_message_contract.py`` runs it before writing its manifest;
+This module fills in public keys, idempotency keys, body digests, signatures and
+each invalid example's ``frame_text``. It signs and derives keys with RFC 8785,
+SHA-256 and Ed25519 directly, not with ``custom_messages.wire``, so the tests
+compare two implementations of the signing and key rules. ``scripts/export_message_contract.py`` runs it before writing its manifest;
 ``--check`` there fails when a file here is not what this module renders.
 """
 
@@ -92,12 +92,25 @@ def _respell(text: str) -> str:
     return text[:-1] + BASE64URL[BASE64URL.index(text[-1]) ^ 1]
 
 
+def _pointed(document: dict[str, Any], pointer: str) -> Any:
+    value: Any = document
+    for step in pointer[1:].split("/"):
+        if not isinstance(value, dict) or step not in value:
+            return None
+        value = value[step]
+    return value
+
+
 class Signer:
     def __init__(self, keys: dict[str, dict[str, Any]], registry: dict[str, Any]) -> None:
         self.keys = keys
+        self.kinds = registry["kinds"]
+        # Requests by message id, so a reply's key can come from its request's key.
+        self.requests: dict[str, dict[str, Any]] = {}
         self.frame_domain = registry["signing_domain"]
         self.state_domain = registry["state_signing_domain"]
         self.token_domain = registry["authority_token_domain"]
+        self.decision_domain = registry["decision_token_domain"]
 
     def private_key(self, key_id: str) -> Ed25519PrivateKey:
         if key_id not in self.keys:
@@ -118,6 +131,26 @@ class Signer:
     def digest(body: Any) -> str:
         return b64url(hashlib.sha256(rfc8785.dumps(body)).digest())
 
+    def idempotency_key(self, frame: dict[str, Any]) -> str:
+        """The key the registry's parts give (README, "Idempotency keys"); unknown kinds keep theirs."""
+
+        kind = frame["kind"]
+        if kind.endswith(".reply") and kind.removesuffix(".reply") in self.kinds:
+            request = self.requests.get(frame.get("causation_id", ""))
+            if request is None:
+                return str(frame["idempotency_key"])  # a reply without its request is refused before its key matters
+            parts = [request["idempotency_key"]]
+        elif kind in self.kinds:
+            entry = self.kinds[kind]
+            parts = [_pointed(frame, pointer) for pointer in entry["idempotency"]]
+            copies = {"team_services" for address in entry.get("copy_to", []) if address == "work.team"}
+            if frame["audience"]["target"] in copies:
+                parts.append(frame["audience"]["target"])
+        else:
+            return str(frame["idempotency_key"])
+        digest = hashlib.sha256(rfc8785.dumps(parts)).digest()
+        return f"{kind}:{b64url(digest)}"
+
     def token(self, token: dict[str, Any]) -> dict[str, Any]:
         token = dict(token, algorithm="ed25519")
         token["signature"] = self.sign(self.token_domain, token, token["issuer"]["key_id"])
@@ -130,6 +163,11 @@ class Signer:
         frame = dict(frame)
         if "authority" in frame and sign_token:
             frame["authority"] = self.token(frame["authority"])
+        body = frame.get("body")
+        if isinstance(body, dict) and isinstance(body.get("decision_token"), dict) and sign_token:
+            decision = dict(body["decision_token"], algorithm="ed25519")
+            decision["signature"] = self.sign(self.decision_domain, decision, decision["issuer"]["key_id"])
+            frame["body"] = dict(body, decision_token=decision)
         frame["algorithm"] = "ed25519"
         frame["body_digest"] = digest or self.digest(frame["body"])
         frame["signature"] = self.sign(self.frame_domain, frame, key_id or frame["issuer"]["key_id"])
@@ -180,9 +218,16 @@ def render_trust(signer: Signer) -> dict[Path, str]:
 
 
 def render_valid(signer: Signer) -> tuple[dict[str, dict[str, Any]], dict[Path, str]]:
+    """Requests first, so each reply's key can name its request's key."""
+
+    documents = {path: _read(path) for path in sorted((EXAMPLES / "valid").rglob("*.json"))}
+    ordered = sorted(documents, key=lambda path: (documents[path]["kind"].endswith(".reply"), path))
     frames, files = {}, {}
-    for path in sorted((EXAMPLES / "valid").rglob("*.json")):
-        frame = signer.frame(_read(path))
+    for path in ordered:
+        document = documents[path]
+        document["idempotency_key"] = signer.idempotency_key(document)
+        frame = signer.frame(document)
+        signer.requests.setdefault(frame["message_id"], frame)
         frames[path.relative_to(EXAMPLES / "valid").as_posix()] = frame
         files[path] = document_text(frame)
     return frames, files
@@ -198,6 +243,8 @@ def invalid_frame_text(case: dict[str, Any], frames: dict[str, dict[str, Any]], 
     frame = copy.deepcopy(frames[case["base"]])
     for change in case.get("changes", []):
         _apply(frame, change)
+    if not any(change.get("set", change.get("remove")) == "/idempotency_key" for change in case.get("changes", [])):
+        frame["idempotency_key"] = signer.idempotency_key(frame)
     if mode != "before":
         frame = signer.frame(frame, key_id=case.get("signed_by"),
                              digest=frame["body_digest"] if mode == "stale_digest" else None,
@@ -243,6 +290,7 @@ def render_vectors(signer: Signer, registry: dict[str, Any]) -> dict[Path, str]:
 
     for entry in document["frames"]:
         key_id = entry["key_id"]
+        entry["frame"]["idempotency_key"] = signer.idempotency_key(entry["frame"])
 
         def sign_frame(frame: dict[str, Any], key_id: str = key_id) -> dict[str, Any]:
             return signer.frame(frame, key_id=key_id)

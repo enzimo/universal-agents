@@ -11,6 +11,17 @@ subject_prefix: ua.v1.{team}.{sender}
 reply_inbox_prefix: _INBOX.{runtime}
 peer_sender_slot: x-{installation}
 
+# Which host roles serve each audience target. A role receives a kind's address, and
+# gets its subscription or consumer grants, only when it is one of the kind's receivers
+# and serves the target that address delivers to.
+audience_targets:
+  agent: [lead_host, worker_host]
+  pool: [lead_host, worker_host]
+  edge: [gateway, edge_adapter]   # an edge is a gateway route or an outside-agent adapter
+  team_services: [team_services]
+  team: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
+  installation_service: [installation_authority]
+
 # How far apart two hosts' clocks may be. Receivers apply it at both ends of every
 # time window: a frame's issue, not-before and expiry times, and the validity of the
 # certificates, sessions and authority tokens it relies on.

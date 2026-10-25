@@ -1,0 +1,13 @@
+{
+  "description": "A failed outcome must say why.",
+  "refusal": "invalid_body",
+  "at": "/body/outcome/failure",
+  "base": "task.result/failed.json",
+  "changes": [
+    {
+      "remove": "/body/outcome/failure"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.result\", \"message_id\": \"01928f3a-7b2c-7105-8000-000000000105\", \"idempotency_key\": \"task.result:TruhBxb8XsTFbCwptNj6FXAz4o5iGorf5SRcr8QAw4U\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"agent\": \"researcher-2\", \"session\": \"s-researcher-2-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"lead\"}, \"subject\": \"ua.v1.team_example.worker-host-1.work.agent.lead\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_sub_2\", \"sequence\": 2, \"outcome\": {\"state\": \"failed\", \"custody_token\": 1}}, \"body_digest\": \"fy_Pvr5uUYzeT7M0fzzDC9fJmWamKd9ZZls9EYuRetY\", \"signature\": \"ULw18Uzqkhpm5osHcYG9s2SJFwgosSvEgA_N0qUEn0C9M3oG8HFoKD44SRBsVTcKotU1w23esURVFoKoAx5sCw\"}"
+}

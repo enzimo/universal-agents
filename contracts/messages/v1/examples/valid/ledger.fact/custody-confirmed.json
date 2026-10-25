@@ -1,0 +1,35 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "ledger.fact",
+  "message_id": "01928f3a-7b2c-7121-8000-000000000121",
+  "idempotency_key": "ledger.fact:bt0g87slsSo5xxVTOWXGsmyMQSvvfaLyzvUqLoZnaJg",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "researcher-2"
+  },
+  "subject": "ua.v1.team_example.team-services-1.work.agent.researcher-2",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "fact_id": "fact_1",
+    "task_id": "task_sub_1",
+    "fact": {
+      "type": "custody_confirmed",
+      "holder": "researcher-2",
+      "custody_token": 3
+    }
+  },
+  "body_digest": "AqYfdya-BC6D6U6JLOCB_y70jQv5yPxH5uOTR9KzWWw",
+  "signature": "7FxfXFlBI0o1pP1XDqlnLx3wQiTYdA05Gk4X_C8gpgIjT9Q0Wt2adcQC9pg37VhBE4apMR9BpPZ_28IhmXFKAQ"
+}

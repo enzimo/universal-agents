@@ -1,0 +1,62 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.account",
+  "message_id": "01928f3a-7b2c-710e-8000-00000000010e",
+  "idempotency_key": "task.account:gInvusdI3RwpCF3iP-pnC0Chk5HDyQ1_0Anvhgv29gY",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_sub_1",
+    "steer_id": "steer_3",
+    "sequence": 5,
+    "stage": {
+      "type": "immediate",
+      "current_step": "Reading the August invoices.",
+      "checkpoint": {
+        "sha256": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY",
+        "size": 6144,
+        "media_type": "application/json"
+      },
+      "tools_in_progress": [
+        "fn:file_read"
+      ],
+      "held_actions": [
+        {
+          "action_id": "act_1",
+          "action_type": "send_email",
+          "summary": "Send the summary to the finance list.",
+          "state": "held"
+        }
+      ],
+      "assumptions": [
+        {
+          "assumption_id": "asm_1",
+          "text": "The report covers the last quarter only.",
+          "affects": [
+            "S2"
+          ]
+        }
+      ]
+    }
+  },
+  "body_digest": "p_TCUUJpcsahlF9Idv6XtzV7AuRi3g3k0c4n92pIzvo",
+  "signature": "Tnw2zbnQc5Zy3cZtO5xcVH6svD3VYdjPMCvQmwaWzWVtBKqyOU1Cw3fuiUic9O48GQ-wPE67q4oaZxFMvAx5Bw"
+}

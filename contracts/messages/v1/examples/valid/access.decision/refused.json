@@ -1,0 +1,35 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "access.decision",
+  "message_id": "01928f3a-7b2c-7305-8000-000000000305",
+  "idempotency_key": "access.decision:t6gMmV0jW-cnlZ4CF3c0pKOrYGP8h8C-sqOooqZQ3Y8",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "researcher-2"
+  },
+  "subject": "ua.v1.team_example.team-services-1.work.agent.researcher-2",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "areq_1",
+    "task_id": "task_sub_1",
+    "status": {
+      "state": "refused",
+      "code": "blocked",
+      "message": "An administrator blocked this folder for agents."
+    }
+  },
+  "body_digest": "lu0pS7sv5QYNPZCg7Lka7L640E6e84jAHT9zrAQtMwQ",
+  "signature": "3Ag9KjwgecjNBMcBkTBo1-CLvn-I-tILbuWTTHSW1NDBw_ipbWn3OP-5Qf3hfHk_YZ2MQQfIl0Oc-Lnv4wm2DQ"
+}

@@ -1,0 +1,44 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tool.setup.result",
+  "message_id": "01928f3a-7b2c-7340-8000-000000000340",
+  "idempotency_key": "tool.setup.result:__nS-o7yq-8JgpwI7x6_WN-bznjBa69mzmJlYat1HHc",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.gateway-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "setup_request_id": "setup_2",
+    "task_id": "task_root_1",
+    "status": "completed",
+    "tool_id": "mcp:example.calendar",
+    "setup": {
+      "type": "sign_in",
+      "owner": "person"
+    },
+    "source": "task_request",
+    "attempt": 1,
+    "account_label": "Work calendar",
+    "needs_administrator": false,
+    "reason_code": "linked",
+    "message": "Connected.",
+    "link_id": "link_1",
+    "broker_session_id": "Tq3nW8yHs2LkP5vR0cXe7A"
+  },
+  "body_digest": "209NUqfGftuwEFRdPynQA6mBQVFO-jB-bYKR7lBYVSk",
+  "signature": "sR1XwewDFyp6mwkUfo_-UXnM-CG2CBJviqD3AohKi-vHZh8YD2IM_Ayb0lKrwNqQWOxrXKPYd8SPIOYADKPqDw"
+}
