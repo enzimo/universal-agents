@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.disable.reply",
   "message_id": "01928f3a-7b2c-7438-8000-000000000438",
-  "idempotency_key": "schedules.disable.reply:wbmyEpLdSc0E-FA28ZFKbix8olEpUB9cM8YMNpQtp8w",
+  "idempotency_key": "schedules.disable.reply:RxfdysVyBlrcuwtWgjOaqiG35kvnFeo0vv3mBTq8NLc",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -26,9 +26,12 @@
     "outcome": "ok",
     "state": "disabled",
     "schedule_id": "schedule_id_1",
-    "seen_version": "v3"
+    "version": {
+      "state": "available",
+      "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc"
+    }
   },
   "causation_id": "01928f3a-7b2c-7437-8000-000000000437",
-  "body_digest": "SKfRrX45ic3SCR5Ma0H1BFboVR6wrfoL0Gxu84Ptovg",
-  "signature": "NpH6ygN1zRYCBcS0IXR8jpo6HMK557y3vH7lEj4svXsk_Z2xwuBgtaK0MK4UZ43wEo3xwv6QC2W8_Gl45CnWDA"
+  "body_digest": "kPGQ4O1YOZ7RQxsirBsbMOu6HaZyRBPJ7gn_OSdZf1Q",
+  "signature": "myNRXhr52v5Ss4x2NCznizdj_KAF58k3dL_gXO1Tyf3cV802h5yPnTG6Cz-ttz3OC9YjFDGVVEPIs1FG_A_lBA"
 }

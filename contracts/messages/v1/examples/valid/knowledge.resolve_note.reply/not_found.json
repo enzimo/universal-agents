@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "knowledge.resolve_note.reply",
-  "message_id": "01928f3a-7b2c-748d-8000-00000000048d",
-  "idempotency_key": "knowledge.resolve_note.reply:wMoI6J6Klne3Set26RH3tfFpC-YjXd32P7pmtgqEHQE",
+  "message_id": "01928f3a-7b2c-7000-8000-000000005072",
+  "idempotency_key": "knowledge.resolve_note.reply:_sCuUHYib_xM6iYJZVzk5pPkIapph-NS-s1x6q6ETzY",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -24,9 +24,9 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "not_found",
-    "message": "Example short text"
+    "message": "The requested page, revision, note or contribution was not found."
   },
   "causation_id": "01928f3a-7b2c-748b-8000-00000000048b",
-  "body_digest": "kjF9c_l0diFRNuvYGjQmkStmu5fcSEld8Fzu2xnpRcU",
-  "signature": "NIPzLZ5p_NAmy7AlDPUFcCSYGRSKQGTAT_fFz8P5lntRpABU8xcfRvj8ymIVNf8QLWaOZz0kmDO-NUXcHhk3DA"
+  "body_digest": "D32h1Y8tDHiciQc7Rob3bs-oWzKJVXDTwPLTf0pz4c0",
+  "signature": "bqw-FCHIB_1FnfCapgWaXe32e6wnpJUNovC8Gm-8pba2Z_cvNFGVb7Xmcaqsk7QD2MfZaGBc6JWvvJ81qFVbAg"
 }

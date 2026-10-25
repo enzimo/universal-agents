@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tasks.remove.reply",
+  "message_id": "60a2790b-fcd1-7085-895f-0b1bfbd43f91",
+  "idempotency_key": "tasks.remove.reply:pz9OgRld9ETwujXqL9f3SmClqQEl6XcN0XO7ZRFT6Eg",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-740d-8000-00000000040d",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "not_found",
+    "message": "The requested record no longer exists."
+  },
+  "causation_id": "01928f3a-7b2c-740d-8000-00000000040d",
+  "body_digest": "uqAIYHGi_5sST-GMr9Lslii_irHCMo5y0w7TDPEJXag",
+  "signature": "tkLOKFxeXognkeaA6P0Q4Ya6yYBgzXJcwoD48Z9oA3ibrxHXQmcDephJWcMyOlQ83ZDMlnkPOFYmpRy5H8m7Aw"
+}

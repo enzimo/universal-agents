@@ -11,120 +11,7 @@
           "const": "ok"
         },
         "page": {
-          "type": "object",
-          "properties": {
-            "space": {
-              "type": "string",
-              "enum": [
-                "team",
-                "personal"
-              ]
-            },
-            "page": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 240
-            },
-            "title": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 1000
-            },
-            "summary": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 4000
-            },
-            "body": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 32768
-            },
-            "body_ref": {
-              "$ref": "../common.schema.json#/$defs/blob_ref"
-            },
-            "tags": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
-              },
-              "maxItems": 100
-            },
-            "status": {
-              "type": "string",
-              "enum": [
-                "active",
-                "archived"
-              ]
-            },
-            "seen_version": {
-              "$ref": "../common.schema.json#/$defs/record_version"
-            },
-            "updated_at": {
-              "$ref": "../common.schema.json#/$defs/timestamp"
-            },
-            "updated_by": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "properties": {
-                    "kind": {
-                      "const": "agent"
-                    },
-                    "agent_type": {
-                      "$ref": "../common.schema.json#/$defs/agent_type"
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "agent_type"
-                  ],
-                  "additionalProperties": false
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "kind": {
-                      "const": "person"
-                    },
-                    "person": {
-                      "$ref": "../common.schema.json#/$defs/person_ref"
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "person"
-                  ],
-                  "additionalProperties": false
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "kind": {
-                      "const": "system"
-                    }
-                  },
-                  "required": [
-                    "kind"
-                  ],
-                  "additionalProperties": false
-                }
-              ]
-            }
-          },
-          "required": [
-            "space",
-            "page",
-            "title",
-            "tags",
-            "status",
-            "seen_version",
-            "updated_at",
-            "updated_by"
-          ],
-          "additionalProperties": false
+          "$ref": "knowledge.read.reply.schema.json#/$defs/page"
         },
         "revisions": {
           "type": "array",
@@ -187,20 +74,49 @@
               },
               "change_summary": {
                 "type": "string",
+                "minLength": 0,
+                "maxLength": 4000
+              },
+              "title": {
+                "type": "string",
                 "minLength": 1,
-                "maxLength": 500
+                "maxLength": 1000
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "archived"
+                ]
+              },
+              "change_kind": {
+                "type": "string",
+                "enum": [
+                  "create",
+                  "edit",
+                  "archive",
+                  "restore",
+                  "revert",
+                  "merge"
+                ]
               }
             },
             "required": [
               "revision",
               "updated_at",
-              "updated_by"
+              "updated_by",
+              "title",
+              "status",
+              "change_kind"
             ],
             "additionalProperties": false
           },
           "maxItems": 50
         },
         "total": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "next_offset": {
           "$ref": "../common.schema.json#/$defs/count"
         }
       },
@@ -247,6 +163,21 @@
       "properties": {
         "outcome": {
           "const": "feature_off"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "personal_space_unavailable"
         },
         "message": {
           "$ref": "../common.schema.json#/$defs/short_text"

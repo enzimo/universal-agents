@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "staged_changes.apply.reply",
   "message_id": "01928f3a-7b2c-74d1-8000-0000000004d1",
-  "idempotency_key": "staged_changes.apply.reply:OgQudhGbF6veu8OtAzige3qKtCqdfJZE9cPeM8Xm-p0",
+  "idempotency_key": "staged_changes.apply.reply:o7et_zgBJd02zZTFep9mLIy-Ulv865Q3XOYm0qLL-PU",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -24,10 +24,10 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "waiting",
-    "access_request_id": "access_request_id_1",
-    "message": "Example short text"
+    "message": "Still waiting for a person to decide. Do not stage this change again.",
+    "access_request_id": "access_change_7f"
   },
   "causation_id": "01928f3a-7b2c-74cf-8000-0000000004cf",
-  "body_digest": "SRI83iHblDKLp45E6m1iPjRnhf1ckpjx0vvxKYdqrZw",
-  "signature": "7-pTDP7BGI9XseFYXQ_dV4finh6qlnV0gGCoQOePULROu_5Ag-9ncC_LBKHGRN0aCzsXZg-0B5YfCM-UtgJKAQ"
+  "body_digest": "zd2jZyYzVwqXF52OydlPit2pUdq48FKF0yXgVq81hpE",
+  "signature": "mn_l2YbIMZjJLTp8_RcaimC7L-7GqGafTMdxZFoWx_RIwsUZiNKUn5d8i58KzaDp2QQlJD3jbVqO-KqbAtdyBg"
 }

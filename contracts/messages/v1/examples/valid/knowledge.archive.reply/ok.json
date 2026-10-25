@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "knowledge.archive.reply",
-  "message_id": "01928f3a-7b2c-7474-8000-000000000474",
-  "idempotency_key": "knowledge.archive.reply:DLR8EWoXz_d03LtSyGaZ-efarr_irvjfe3KmjZUUW2I",
+  "message_id": "01928f3a-7b2c-7000-8000-000000005019",
+  "idempotency_key": "knowledge.archive.reply:izz14vkcv35ZxTH3GBtWeREPGumjr1uBNhqGgQTnrcw",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -26,29 +26,104 @@
     "outcome": "ok",
     "page": {
       "space": "team",
-      "page": "Example page",
-      "title": "Example title",
-      "summary": "Example summary",
-      "body": "Example body",
-      "body_ref": {
-        "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
-        "size": 3,
-        "media_type": "application/pdf",
-        "name": "Example name"
-      },
+      "page": "deployment-guide",
+      "title": "Deployment guide",
+      "page_type": "how-to",
+      "summary": "Steps to review and deploy a release.",
       "tags": [
-        "Example tags"
+        "releases"
       ],
-      "status": "active",
-      "seen_version": "v3",
+      "status": "archived",
+      "seen_version": "4",
       "updated_at": "2026-10-22T04:30:00.000Z",
+      "content": {
+        "type": "inline",
+        "text": "Review the release checklist, then run the deployment. See [[release-checklist]]."
+      },
+      "created_at": "2026-10-21T09:00:00.000Z",
       "updated_by": {
-        "kind": "agent",
-        "agent_type": "token_id_1"
-      }
+        "kind": "person",
+        "person": "person_7c1"
+      },
+      "shown_by": {
+        "kind": "person",
+        "person": "person_7c1"
+      },
+      "backlinks": [
+        {
+          "space": "team",
+          "page": "release-checklist",
+          "title": "Release checklist",
+          "page_type": "how-to",
+          "summary": "Steps to review and deploy a release.",
+          "tags": [
+            "releases"
+          ],
+          "status": "active",
+          "seen_version": "2",
+          "updated_at": "2026-10-22T04:30:00.000Z"
+        }
+      ],
+      "open_notes": [
+        {
+          "note_id": "kb_note_01",
+          "content": {
+            "type": "inline",
+            "text": "Check that the rollback steps match the current release."
+          },
+          "created_at": "2026-10-22T04:30:00.000Z",
+          "created_by": {
+            "kind": "person",
+            "person": "person_7c1"
+          }
+        },
+        {
+          "note_id": "kb_note_02",
+          "content": {
+            "type": "blob",
+            "ref": {
+              "sha256": "bAo6Qv70pBlfvvIPTJfUQ9kixZs5HB6XObJGtqKBgg4",
+              "size": 56,
+              "media_type": "text/plain"
+            }
+          },
+          "created_at": "2026-10-22T04:30:00.000Z",
+          "created_by": {
+            "kind": "agent",
+            "agent_type": "KnowledgeCuratorAgent"
+          }
+        },
+        {
+          "note_id": "kb_note_03",
+          "content": {
+            "type": "inline",
+            "text": "Check that the rollback steps match the current release."
+          },
+          "created_at": "2026-10-22T04:30:00.000Z",
+          "created_by": {
+            "kind": "system"
+          }
+        }
+      ],
+      "pending_contributions": [
+        {
+          "contribution_id": "kb_contrib_7f",
+          "kind": "edit",
+          "created_at": "2026-10-22T04:30:00.000Z"
+        }
+      ],
+      "links": [
+        {
+          "written": "release-checklist",
+          "space": "team",
+          "page": "release-checklist",
+          "exists": true
+        }
+      ],
+      "type": "inline"
     }
   },
   "causation_id": "01928f3a-7b2c-7473-8000-000000000473",
-  "body_digest": "sntrRbyZu3LR-SZItTgUA0wClhbP939cnrR3eG2ExIM",
-  "signature": "aOXN8sbuDXjx0aTjU_9KDBs0PyRRDwNTgNN1XSb6YbjEzSqHq0_pk_GCP_F7IZmOTR79-3kLbEi8rCwUDTRFAA"
+  "body_digest": "navWwjIUJrM_L15kBLz7vD8aphcpJkYwKUZppWUVX8c",
+  "signature": "EyM4O_F5Ppc21be9tDQRns7goNNr8wU6bCKZdwYQDXME-Su5UravSQ1hiJgcr-IBsShRMFp9MI3letlH2qWCBw"
 }

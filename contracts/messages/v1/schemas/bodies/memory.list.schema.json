@@ -5,6 +5,9 @@
   "description": "List a memory bank's facts.",
   "type": "object",
   "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
     "bank": {
       "type": "string",
       "enum": [
@@ -15,15 +18,17 @@
     "sort": {
       "type": "string",
       "enum": [
+        "memory_id",
         "newest",
-        "oldest",
-        "updated"
-      ]
+        "valid_from",
+        "expires"
+      ],
+      "description": "memory_id ascending; newest by update time then id descending; valid_from ascending then id; expires ascending then id, with no expiry last."
     },
     "offset": {
       "type": "integer",
       "minimum": 0,
-      "maximum": 100000
+      "maximum": 9007199254740991
     },
     "limit": {
       "type": "integer",
@@ -32,6 +37,7 @@
     }
   },
   "required": [
+    "request_id",
     "bank",
     "sort",
     "offset",

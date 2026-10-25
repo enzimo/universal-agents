@@ -16,31 +16,34 @@
       ]
     },
     "fact_text": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 12000
+      "$ref": "../common.schema.json#/$defs/text_content"
     },
     "tags": {
       "type": "array",
       "items": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 64
+        "maxLength": 256
       },
-      "maxItems": 20
+      "maxItems": 100
     },
     "valid_from": {
       "$ref": "../common.schema.json#/$defs/timestamp"
     },
     "expires": {
       "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "metadata_json": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 16384,
+      "description": "JSON text encoding a metadata object. Apply the bank's max_metadata_chars and exclude reserved import provenance from public replies."
     }
   },
   "required": [
     "request_id",
     "bank",
-    "fact_text",
-    "tags"
+    "fact_text"
   ],
   "additionalProperties": false
 }

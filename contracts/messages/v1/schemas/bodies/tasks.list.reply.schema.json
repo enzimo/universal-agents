@@ -34,6 +34,14 @@
               },
               "last_updated_at": {
                 "$ref": "../common.schema.json#/$defs/timestamp"
+              },
+              "blocker": {
+                "$ref": "../common.schema.json#/$defs/text_content"
+              },
+              "latest_activity": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 500
               }
             },
             "required": [
@@ -56,6 +64,9 @@
         },
         "queue_digest": {
           "$ref": "../common.schema.json#/$defs/record_version"
+        },
+        "next_offset": {
+          "$ref": "../common.schema.json#/$defs/count"
         }
       },
       "required": [

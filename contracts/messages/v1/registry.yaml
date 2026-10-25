@@ -12,29 +12,38 @@
 #   body_rules     optional: what a schema cannot say, checked after it (README, "What bodies carry"):
 #                  unique values in a list, a field required when others have given values,
 #                  or at least one of several fields
-#   reply          request/reply only: the reply body schema and the error codes it may carry
+#   reply          request/reply only: the reply body schema and its error codes, which are exactly
+#                  the reply's outcomes other than ok
 #   senders        host roles that may publish it; receivers check them against the issuer's certificate
 #   senders_by_address  optional: fewer senders for some of its own addresses (the edge adapter
 #                  reaches agents, not worker pools)
 #   receivers      host roles that may receive it at its own addresses (and so send its reply)
 #   expiry_seconds how long after issue a receiver still accepts it (at most its class's max_expiry_seconds)
 #   authority      none | optional | required: whether the frame carries an authority token
-#   authority_binding  what a token on it is bound to: {type, at}; with `at`, the receiver checks
-#                  the token against that body field, otherwise the handler checks it against the
-#                  task it holds (README, "On behalf of a person")
+#   authority_binding  the token types it takes: one binding {type, at, senders}, or a list of them,
+#                  one per type; a token of another type is refused. `type` is what the token is
+#                  bound to (root_task, command or access_request). With `at`, the body field
+#                  naming that record, the receiver compares the two ids; a command binding always
+#                  has it. Without `at`, the handler checks the token against the task it holds.
+#                  `senders` are the host roles that may present that type (default: every sender
+#                  of the frame's address). (README, "On behalf of a person")
 #   idempotency    JSON pointers into the frame whose values make the idempotency key:
 #                  <kind>:<unpadded base64url SHA-256 of the RFC 8785 array of the values>
 #                  (README, "Idempotency keys")
 #   admission      execution_slot (needs a free slot), accepted_while_paused, priority
 #   routing        requester | holder | team | person | named | broadcast | sender (README, "Replies")
 #   topology_edge  the edges an agent may send it on: up | down | person | sideways | out, or none
-#                  when it is not a topology check: sent to the team services, or only by hosts
-#                  (team-topologies.yaml)
+#                  when it is not a topology check: sent to the team services, only by hosts, or
+#                  back to a refused frame's sender; a kind that agent hosts send to an agent,
+#                  pool or edge address names its edges (team-topologies.yaml)
 #   ledger         the entry the receiver's work ledger records, or none
 #   wakes_model    never | always | next_turn, or {by: <body oneOf constant>, values: {<alternative>: ...}}
 #                  giving every alternative its own value
 #   rendering      how a model sees it: none | sender_line | summary | full
-#   covered_change the store record it changes and whether it needs the version the writer saw
+#   covered_change request/reply only: {record_kind, seen_version}, the store record it changes
+#                  (one of covered_record_kinds) and whether the writer sends the version it
+#                  read: required | required_for_request_writers | optional | none
+#                  (README, "Covered changes")
 #
 # Edit by hand, then run scripts/export_message_contract.py.
 
@@ -48,6 +57,7 @@ state_schema: state.schema.json
 max_frame_bytes: 262144
 max_nesting_depth: 64
 authority_token_max_seconds: 604800   # today's signed person context lasts at most 7 days
+command_token_max_seconds: 300        # a token bound to one command lasts minutes (plan, section 8)
 
 # Refusals a receiver gives before any handler runs, in the order it checks them.
 # "The issuer's certificate" is the host certificate the receiver's trust store holds
@@ -88,10 +98,11 @@ verification_refusals:
   - code: invalid_body
     meaning: the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give
   - code: bad_authority
-    meaning: the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, lasts longer than authority_token_max_seconds, or is bound to another record than its kind's binding names or the receiver holds; or a change-conflict decision token in the body is not signed by a team-services certificate of the frame's installation and team, or was not valid when the frame was issued
+    meaning: the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds; or a change-conflict decision token in the body is not signed by a team-services certificate of the frame's installation and team, or was not valid when the frame was issued
   - code: access_denied
     meaning: the receiver's access decision refused the sender
-# Refusals of a change to a covered store record (shared by every covered operation).
+# Refusals of a change to a covered store record. Each covered operation offers those that
+# can happen to it (README, "Covered changes").
 change_refusals:
   - code: changed_since_read
     meaning: the record changed after the writer read it; carries the current version
@@ -103,6 +114,17 @@ change_refusals:
     meaning: the person must decide before the change is saved
   - code: record_busy
     meaning: another request is writing the file or sign-in; carries when to try again
+# The store records whose changes are covered changes: the store-safety code's
+# ChangeRecordKind (a test pins them). No operation changes a file yet; files stay with
+# the host that has the folder, and record_busy covers a file another request writes.
+covered_record_kinds: [memory_fact, knowledge_page, schedule, objective, heartbeat_item, file, staged_change]
+# Outcomes that ask the sender to try again. The receiver of a change operation stores
+# every other final outcome under the operation's key, but not these, so a retry with the
+# same key is decided again (README, "Stored outcomes"): not_started, steering while its
+# request still waits to start; record_busy, a file or sign-in another request is writing;
+# runtime_error, a failure that changed nothing; waiting, a staged change the person has
+# not decided yet.
+retry_outcomes: [not_started, record_busy, runtime_error, waiting]
 # Roles that hold NATS permissions. Agent roles for topology are in team-topologies.yaml.
 host_roles:
   gateway: talks to people through channels and the web
@@ -699,7 +721,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -720,7 +742,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: team
@@ -738,10 +760,11 @@ kinds:
       body: bodies/tasks.list.reply.schema.json
       errors: [not_allowed, runtime_error]
     senders: [gateway, team_services]
+    senders_by_address: {svc.team.tasks.list: [gateway], "ctl.agent.{agent}.tasks.list": [team_services]}
     receivers: [team_services, lead_host, worker_host]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -759,10 +782,11 @@ kinds:
       body: bodies/tasks.list_finished.reply.schema.json
       errors: [not_allowed, runtime_error]
     senders: [gateway, team_services]
+    senders_by_address: {svc.team.tasks.list_finished: [gateway], "ctl.agent.{agent}.tasks.list_finished": [team_services]}
     receivers: [team_services, lead_host, worker_host]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -780,10 +804,11 @@ kinds:
       body: bodies/tasks.remove.reply.schema.json
       errors: [queue_changed, not_found, not_allowed, runtime_error]
     senders: [gateway, team_services]
+    senders_by_address: {svc.team.tasks.remove: [gateway], "ctl.agent.{agent}.tasks.remove": [team_services]}
     receivers: [team_services, lead_host, worker_host]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -801,10 +826,11 @@ kinds:
       body: bodies/tasks.purge.reply.schema.json
       errors: [queue_changed, not_found, not_allowed, runtime_error]
     senders: [gateway, team_services]
+    senders_by_address: {svc.team.tasks.purge: [gateway], "ctl.agent.{agent}.tasks.purge": [team_services]}
     receivers: [team_services, lead_host, worker_host]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -821,13 +847,13 @@ kinds:
     reply:
       body: bodies/objectives.list.reply.schema.json
       errors: [runtime_error]
-    senders: [gateway]
+    senders: [gateway, lead_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: [{at: /body/request_id, senders: [gateway], type: command}, {senders: [lead_host], type: root_task}]
     idempotency: [/message_id]
-    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
     routing: team
     topology_edge: none
     ledger: none
@@ -846,7 +872,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -868,7 +894,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -890,7 +916,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -912,7 +938,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -934,7 +960,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -951,19 +977,20 @@ kinds:
     body: bodies/objectives.create.schema.json
     reply:
       body: bodies/objectives.create.reply.schema.json
-      errors: [not_found, feature_off, status_not_settable, confirmation_required, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_found, feature_off, status_not_settable, confirmation_required, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error, invalid_request]
     senders: [lead_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
     authority_binding: {type: root_task}
     idempotency: [/body/request_id]
-    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
     routing: team
     topology_edge: none
     ledger: none
     wakes_model: never
     rendering: none
+    covered_change: {record_kind: objective, seen_version: none}
 
   objectives.update_progress:
     description: The lead records progress on an Objective.
@@ -972,20 +999,22 @@ kinds:
     body: bodies/objectives.update_progress.schema.json
     reply:
       body: bodies/objectives.update_progress.reply.schema.json
-      errors: [not_found, feature_off, status_not_settable, confirmation_required, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_found, feature_off, status_not_settable, confirmation_required, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error, invalid_request]
     senders: [lead_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
     authority_binding: {type: root_task}
     idempotency: [/body/request_id]
-    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
     routing: team
     topology_edge: none
     ledger: none
     wakes_model: never
     rendering: none
     covered_change: {record_kind: objective, seen_version: required}
+    body_rules:
+      - {any_of: [/body/progress_summary, /body/current_focus, /body/criterion_updates]}
 
   objectives.update_status:
     description: The lead changes an Objective's status.
@@ -994,14 +1023,14 @@ kinds:
     body: bodies/objectives.update_status.schema.json
     reply:
       body: bodies/objectives.update_status.reply.schema.json
-      errors: [not_found, feature_off, status_not_settable, confirmation_required, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_found, feature_off, status_not_settable, confirmation_required, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error, invalid_request]
     senders: [lead_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
     authority_binding: {type: root_task}
     idempotency: [/body/request_id]
-    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
     routing: team
     topology_edge: none
     ledger: none
@@ -1021,7 +1050,32 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
+    idempotency: [/message_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  schedules.get:
+    description: Read complete safe details of one visible schedule, in JSON text pages.
+    class: request_reply
+    address: svc.team.schedules.get
+    body: bodies/schedules.get.schema.json
+    reply:
+      body: bodies/schedules.get.reply.schema.json
+      errors: [not_found, not_allowed, invalid_request, runtime_error]
+    senders: [gateway, lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1042,7 +1096,9 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1064,7 +1120,9 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1086,7 +1144,9 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1108,7 +1168,9 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1125,12 +1187,14 @@ kinds:
     body: bodies/schedules.install.schema.json
     reply:
       body: bodies/schedules.install.reply.schema.json
-      errors: [invalid_request, id_in_use, not_allowed, not_found, not_system_managed, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy]
-    senders: [gateway, lead_host, worker_host, team_services]
+      errors: [invalid_request, id_in_use, not_allowed, not_found, not_system_managed, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+    senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1141,18 +1205,20 @@ kinds:
     covered_change: {record_kind: schedule, seen_version: required_for_request_writers}
 
   schedules.update:
-    description: Change a schedule's instruction, timing or delivery.
+    description: Change a schedule's name, instruction, timing, controls or run notes.
     class: request_reply
     address: svc.team.schedules.update
     body: bodies/schedules.update.schema.json
     reply:
       body: bodies/schedules.update.reply.schema.json
-      errors: [approval_required, not_found, not_allowed, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [invalid_request, approval_required, not_found, not_allowed, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
     senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1163,13 +1229,13 @@ kinds:
     covered_change: {record_kind: schedule, seen_version: required}
 
   schedules.set_worker:
-    description: Choose which worker runs a schedule.
+    description: Save a schedule's worker type, startup policy and capability requirements.
     class: request_reply
     address: svc.team.schedules.set_worker
     body: bodies/schedules.set_worker.schema.json
     reply:
       body: bodies/schedules.set_worker.reply.schema.json
-      errors: [approval_required, not_found, not_allowed, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [invalid_request, approval_required, not_found, not_allowed, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error, schedule_worker_policy_revision_conflict]
     senders: [lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
@@ -1184,8 +1250,71 @@ kinds:
     rendering: none
     covered_change: {record_kind: schedule, seen_version: required}
 
+  schedules.inspect_worker:
+    description: Inspect worker assignment and startup diagnostics for a schedule.
+    class: request_reply
+    address: svc.team.schedules.inspect_worker
+    body: bodies/schedules.inspect_worker.schema.json
+    reply:
+      body: bodies/schedules.inspect_worker.reply.schema.json
+      errors: [not_found, not_allowed, invalid_request, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/message_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  schedules.prepare_access:
+    description: Preview worker readiness and missing access without starting the job.
+    class: request_reply
+    address: svc.team.schedules.prepare_access
+    body: bodies/schedules.prepare_access.schema.json
+    reply:
+      body: bodies/schedules.prepare_access.reply.schema.json
+      errors: [not_found, not_allowed, invalid_request, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/message_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  schedules.authorize_access:
+    description: Hand on access for a saved schedule policy and end obsolete setup grants.
+    class: request_reply
+    address: svc.team.schedules.authorize_access
+    body: bodies/schedules.authorize_access.schema.json
+    reply:
+      body: bodies/schedules.authorize_access.reply.schema.json
+      errors: [not_found, not_allowed, invalid_request, runtime_error, schedule_worker_policy_revision_conflict]
+    senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
   run_context.sign:
-    description: A worker running a scheduled job asks for the run's authority token.
+    description: A worker running a scheduled job asks the scheduler for the run's authority token.
     class: request_reply
     address: svc.team.run_context.sign
     body: bodies/run_context.sign.schema.json
@@ -1193,7 +1322,7 @@ kinds:
       body: bodies/run_context.sign.reply.schema.json
       errors: [signer_missing, not_found, claim_not_held, schedule_stopped, scheduled_job_mismatch, heartbeat_item_not_found, owner_inactive, check_failed]
     senders: [worker_host]
-    receivers: [team_services]
+    receivers: [scheduler]
     expiry_seconds: 30
     authority: none
     idempotency: [/body/request_id]
@@ -1216,7 +1345,9 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1237,7 +1368,9 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1253,12 +1386,14 @@ kinds:
     body: bodies/memory.create.schema.json
     reply:
       body: bodies/memory.create.reply.schema.json
-      errors: [not_allowed, not_found, capacity_reached, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_allowed, not_found, capacity_reached, invalid_request, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
     senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1266,20 +1401,23 @@ kinds:
     ledger: none
     wakes_model: never
     rendering: none
+    covered_change: {record_kind: memory_fact, seen_version: none}
 
   memory.replace:
-    description: Replace a memory fact's text or tags.
+    description: Change only the supplied fields of a memory fact.
     class: request_reply
     address: svc.team.memory.replace
     body: bodies/memory.replace.schema.json
     reply:
       body: bodies/memory.replace.reply.schema.json
-      errors: [not_allowed, not_found, capacity_reached, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_allowed, not_found, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
     senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1288,6 +1426,8 @@ kinds:
     wakes_model: never
     rendering: none
     covered_change: {record_kind: memory_fact, seen_version: required_for_request_writers}
+    body_rules:
+      - any_of: [/body/fact_text, /body/tags, /body/metadata_json, /body/valid_from, /body/expires, /body/clear_expiry]
 
   memory.delete:
     description: Delete a memory fact.
@@ -1296,12 +1436,14 @@ kinds:
     body: bodies/memory.delete.schema.json
     reply:
       body: bodies/memory.delete.reply.schema.json
-      errors: [not_allowed, not_found, capacity_reached, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_allowed, not_found, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
     senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1318,12 +1460,14 @@ kinds:
     body: bodies/memory.undo.schema.json
     reply:
       body: bodies/memory.undo.reply.schema.json
-      errors: [not_allowed, not_found, capacity_reached, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_allowed, not_found, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
     senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1345,7 +1489,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1366,7 +1510,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1387,7 +1531,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1403,12 +1547,14 @@ kinds:
     body: bodies/knowledge.list.schema.json
     reply:
       body: bodies/knowledge.list.reply.schema.json
-      errors: [not_allowed, feature_off, runtime_error]
+      errors: [not_allowed, feature_off, personal_space_unavailable, runtime_error]
     senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1424,12 +1570,14 @@ kinds:
     body: bodies/knowledge.read.schema.json
     reply:
       body: bodies/knowledge.read.reply.schema.json
-      errors: [not_found, not_allowed, feature_off, runtime_error]
+      errors: [not_found, not_allowed, feature_off, personal_space_unavailable, runtime_error]
     senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1445,12 +1593,14 @@ kinds:
     body: bodies/knowledge.history.schema.json
     reply:
       body: bodies/knowledge.history.reply.schema.json
-      errors: [not_found, not_allowed, feature_off, runtime_error]
+      errors: [not_found, not_allowed, feature_off, personal_space_unavailable, runtime_error]
     senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1466,12 +1616,14 @@ kinds:
     body: bodies/knowledge.write.schema.json
     reply:
       body: bodies/knowledge.write.reply.schema.json
-      errors: [pending_review, not_found, not_allowed, feature_off, page_exists, merged, review_required, sensitive_content, limit_reached, page_frozen, repeats_recent_revision, personal_space_unavailable, saved_write_mismatch, contribution_not_pending, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [pending_review, not_found, not_allowed, feature_off, page_exists, merged, review_required, sensitive_content, limit_reached, page_frozen, repeats_recent_revision, personal_space_unavailable, saved_write_mismatch, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
     senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1479,7 +1631,7 @@ kinds:
     ledger: none
     wakes_model: never
     rendering: none
-    covered_change: {record_kind: knowledge_page, seen_version: required_for_request_writers}
+    covered_change: {record_kind: knowledge_page, seen_version: optional}
 
   knowledge.add_note:
     description: Add a note to a knowledge page.
@@ -1488,12 +1640,14 @@ kinds:
     body: bodies/knowledge.add_note.schema.json
     reply:
       body: bodies/knowledge.add_note.reply.schema.json
-      errors: [pending_review, not_found, not_allowed, feature_off, page_exists, merged, review_required, sensitive_content, limit_reached, page_frozen, repeats_recent_revision, personal_space_unavailable, saved_write_mismatch, contribution_not_pending, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [pending_review, not_found, not_allowed, feature_off, review_required, sensitive_content, limit_reached, personal_space_unavailable, invalid_request, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
     senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1501,6 +1655,7 @@ kinds:
     ledger: none
     wakes_model: never
     rendering: none
+    covered_change: {record_kind: knowledge_page, seen_version: none}
 
   knowledge.archive:
     description: Archive a knowledge page.
@@ -1509,12 +1664,14 @@ kinds:
     body: bodies/knowledge.archive.schema.json
     reply:
       body: bodies/knowledge.archive.reply.schema.json
-      errors: [pending_review, not_found, not_allowed, feature_off, page_exists, merged, review_required, sensitive_content, limit_reached, page_frozen, repeats_recent_revision, personal_space_unavailable, saved_write_mismatch, contribution_not_pending, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [pending_review, not_found, not_allowed, feature_off, merged, review_required, sensitive_content, limit_reached, page_frozen, repeats_recent_revision, personal_space_unavailable, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
     senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1531,12 +1688,14 @@ kinds:
     body: bodies/knowledge.revert.schema.json
     reply:
       body: bodies/knowledge.revert.reply.schema.json
-      errors: [not_found, not_allowed, feature_off, page_exists, merged, review_required, sensitive_content, limit_reached, page_frozen, repeats_recent_revision, personal_space_unavailable, saved_write_mismatch, contribution_not_pending, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_found, not_allowed, feature_off, page_exists, merged, sensitive_content, personal_space_unavailable, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
     senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1558,7 +1717,9 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1579,7 +1740,9 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1600,7 +1763,9 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1616,12 +1781,14 @@ kinds:
     body: bodies/knowledge.publish_contribution.schema.json
     reply:
       body: bodies/knowledge.publish_contribution.reply.schema.json
-      errors: [not_found, not_allowed, feature_off, page_exists, merged, review_required, sensitive_content, limit_reached, page_frozen, repeats_recent_revision, personal_space_unavailable, saved_write_mismatch, contribution_not_pending, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_found, not_allowed, feature_off, page_exists, merged, sensitive_content, personal_space_unavailable, contribution_not_pending, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
     senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1629,7 +1796,7 @@ kinds:
     ledger: none
     wakes_model: never
     rendering: none
-    covered_change: {record_kind: knowledge_page, seen_version: required}
+    covered_change: {record_kind: knowledge_page, seen_version: optional}
 
   knowledge.withdraw_contribution:
     description: Withdraw one's own contribution.
@@ -1638,12 +1805,14 @@ kinds:
     body: bodies/knowledge.withdraw_contribution.schema.json
     reply:
       body: bodies/knowledge.withdraw_contribution.reply.schema.json
-      errors: [not_found, not_allowed, contribution_not_pending, runtime_error]
+      errors: [not_found, not_allowed, feature_off, contribution_not_pending, runtime_error]
     senders: [gateway, lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: [command, root_task]}
+    authority_binding:
+      - {type: command, at: /body/request_id, senders: [gateway]}
+      - {type: root_task, senders: [lead_host, worker_host]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1659,7 +1828,7 @@ kinds:
     body: bodies/knowledge.reject_contribution.schema.json
     reply:
       body: bodies/knowledge.reject_contribution.reply.schema.json
-      errors: [not_found, not_allowed, feature_off, page_exists, merged, review_required, sensitive_content, limit_reached, page_frozen, repeats_recent_revision, personal_space_unavailable, saved_write_mismatch, contribution_not_pending, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_found, not_allowed, feature_off, sensitive_content, contribution_not_pending, invalid_request, runtime_error]
     senders: [lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
@@ -1672,7 +1841,6 @@ kinds:
     ledger: none
     wakes_model: never
     rendering: none
-    covered_change: {record_kind: knowledge_page, seen_version: required}
 
   knowledge.resolve_note:
     description: A curator resolves a note on a page.
@@ -1681,7 +1849,7 @@ kinds:
     body: bodies/knowledge.resolve_note.schema.json
     reply:
       body: bodies/knowledge.resolve_note.reply.schema.json
-      errors: [not_found, not_allowed, feature_off, page_exists, merged, review_required, sensitive_content, limit_reached, page_frozen, repeats_recent_revision, personal_space_unavailable, saved_write_mismatch, contribution_not_pending, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_found, not_allowed, feature_off, runtime_error]
     senders: [lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
@@ -1694,7 +1862,6 @@ kinds:
     ledger: none
     wakes_model: never
     rendering: none
-    covered_change: {record_kind: knowledge_page, seen_version: required}
 
   knowledge.freeze:
     description: A curator freezes a page.
@@ -1703,7 +1870,7 @@ kinds:
     body: bodies/knowledge.freeze.schema.json
     reply:
       body: bodies/knowledge.freeze.reply.schema.json
-      errors: [not_found, not_allowed, feature_off, page_exists, merged, review_required, sensitive_content, limit_reached, page_frozen, repeats_recent_revision, personal_space_unavailable, saved_write_mismatch, contribution_not_pending, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_found, not_allowed, feature_off, personal_space_unavailable, invalid_request, runtime_error]
     senders: [lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
@@ -1716,7 +1883,6 @@ kinds:
     ledger: none
     wakes_model: never
     rendering: none
-    covered_change: {record_kind: knowledge_page, seen_version: required}
 
   knowledge.unfreeze:
     description: A curator unfreezes a page.
@@ -1725,7 +1891,7 @@ kinds:
     body: bodies/knowledge.unfreeze.schema.json
     reply:
       body: bodies/knowledge.unfreeze.reply.schema.json
-      errors: [not_found, not_allowed, feature_off, page_exists, merged, review_required, sensitive_content, limit_reached, page_frozen, repeats_recent_revision, personal_space_unavailable, saved_write_mismatch, contribution_not_pending, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_found, not_allowed, feature_off, personal_space_unavailable, invalid_request, runtime_error]
     senders: [lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
@@ -1738,7 +1904,6 @@ kinds:
     ledger: none
     wakes_model: never
     rendering: none
-    covered_change: {record_kind: knowledge_page, seen_version: required}
 
   knowledge.merge:
     description: A curator merges a page into another.
@@ -1747,7 +1912,7 @@ kinds:
     body: bodies/knowledge.merge.schema.json
     reply:
       body: bodies/knowledge.merge.reply.schema.json
-      errors: [not_found, not_allowed, feature_off, page_exists, merged, review_required, sensitive_content, limit_reached, page_frozen, repeats_recent_revision, personal_space_unavailable, saved_write_mismatch, contribution_not_pending, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_found, not_allowed, feature_off, merged, review_required, sensitive_content, page_frozen, personal_space_unavailable, invalid_request, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
     senders: [lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
@@ -1774,7 +1939,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1795,7 +1960,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1816,7 +1981,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/steer_id}
     idempotency: [/body/steer_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: team
@@ -1837,7 +2002,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1858,7 +2023,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: team
@@ -1879,7 +2044,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1900,7 +2065,7 @@ kinds:
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -1912,16 +2077,17 @@ kinds:
   debug.dump:
     description: Turn an agent's diagnostic context dumps on or off.
     class: request_reply
-    address: svc.team.debug.dump
+    address: [svc.team.debug.dump, "ctl.agent.{agent}.debug.dump"]
     body: bodies/debug.dump.schema.json
     reply:
       body: bodies/debug.dump.reply.schema.json
       errors: [not_allowed]
-    senders: [gateway]
-    receivers: [team_services]
+    senders: [gateway, team_services]
+    senders_by_address: {svc.team.debug.dump: [gateway], "ctl.agent.{agent}.debug.dump": [team_services]}
+    receivers: [team_services, lead_host, worker_host]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: command}
+    authority_binding: {type: command, at: /body/request_id}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -2063,7 +2229,7 @@ kinds:
     body: bodies/heartbeat_items.add.schema.json
     reply:
       body: bodies/heartbeat_items.add.reply.schema.json
-      errors: [not_found, objective_link_refused, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [not_found, objective_link_refused, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
     senders: [lead_host]
     receivers: [team_services]
     expiry_seconds: 30
@@ -2076,6 +2242,7 @@ kinds:
     ledger: none
     wakes_model: never
     rendering: none
+    covered_change: {record_kind: heartbeat_item, seen_version: none}
 
   heartbeat_items.update:
     description: The lead changes a heartbeat item.
@@ -2172,7 +2339,7 @@ kinds:
     body: bodies/staged_changes.apply.schema.json
     reply:
       body: bodies/staged_changes.apply.reply.schema.json
-      errors: [waiting, agreement_required, already_applied, not_found, not_allowed, denied, withdrawn, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+      errors: [failed, refused, waiting, agreement_required, already_applied, not_found, not_allowed, denied, withdrawn, changed_since_read, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
     senders: [lead_host]
     receivers: [team_services]
     expiry_seconds: 30
@@ -2199,10 +2366,10 @@ kinds:
     receivers: [lead_host, worker_host]
     expiry_seconds: 30
     authority: none
-    idempotency: [/body/request_id]
+    idempotency: [/audience/id, /body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: named
-    topology_edge: none
+    topology_edge: down
     ledger: none
     wakes_model: never
     rendering: none
@@ -2219,10 +2386,10 @@ kinds:
     receivers: [lead_host, worker_host]
     expiry_seconds: 30
     authority: none
-    idempotency: [/body/request_id]
+    idempotency: [/audience/id, /body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: named
-    topology_edge: none
+    topology_edge: down
     ledger: none
     wakes_model: never
     rendering: none
@@ -2242,7 +2409,7 @@ kinds:
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: named
-    topology_edge: none
+    topology_edge: down
     ledger: none
     wakes_model: never
     rendering: none
@@ -2262,9 +2429,301 @@ kinds:
     idempotency: [/message_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: named
-    topology_edge: none
+    topology_edge: down
     ledger: none
     wakes_model: never
     rendering: none
 
   # -- end of team operations --
+
+  objectives.get:
+    description: The lead reads an Objective's full record and agent-update version.
+    class: request_reply
+    address: svc.team.objectives.get
+    body: bodies/objectives.get.schema.json
+    reply:
+      body: bodies/objectives.get.reply.schema.json
+      errors: [not_found, runtime_error]
+    senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/message_id]
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+
+  heartbeat_items.list:
+    description: The lead reads heartbeat items and their versions.
+    class: request_reply
+    address: svc.team.heartbeat_items.list
+    body: bodies/heartbeat_items.list.schema.json
+    reply:
+      body: bodies/heartbeat_items.list.reply.schema.json
+      errors: [runtime_error]
+    senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/message_id]
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+
+  objectives.work_sessions.enable:
+    description: Enable explicitly accepted bounded work sessions on an Objective.
+    class: request_reply
+    address: svc.team.objectives.work_sessions.enable
+    body: bodies/objectives.work_sessions.enable.schema.json
+    reply:
+      body: bodies/objectives.work_sessions.enable.reply.schema.json
+      errors: [not_found, feature_off, invalid_request, direct_user_request_required, confirmation_required, missing_skills, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+    senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+    covered_change: {record_kind: objective, seen_version: none}
+
+
+  objectives.work_sessions.disable:
+    description: Disable bounded work sessions after the person agrees.
+    class: request_reply
+    address: svc.team.objectives.work_sessions.disable
+    body: bodies/objectives.work_sessions.disable.schema.json
+    reply:
+      body: bodies/objectives.work_sessions.disable.reply.schema.json
+      errors: [not_found, feature_off, invalid_request, direct_user_request_required, confirmation_required, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+    senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+    covered_change: {record_kind: objective, seen_version: none}
+
+
+  objectives.work_sessions.start:
+    description: Open a requested work session on the active Objective-linked task.
+    class: request_reply
+    address: svc.team.objectives.work_sessions.start
+    body: bodies/objectives.work_sessions.start.schema.json
+    reply:
+      body: bodies/objectives.work_sessions.start.reply.schema.json
+      errors: [not_found, feature_off, invalid_request, direct_user_request_required, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+    senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+    covered_change: {record_kind: objective, seen_version: none}
+
+
+  objectives.work_profiles.apply:
+    description: Apply the exact Objective work-profile proposal the person accepted.
+    class: request_reply
+    address: svc.team.objectives.work_profiles.apply
+    body: bodies/objectives.work_profiles.apply.schema.json
+    reply:
+      body: bodies/objectives.work_profiles.apply.reply.schema.json
+      errors: [not_found, feature_off, invalid_request, direct_user_request_required, confirmation_required, missing_skills, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+    senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+    covered_change: {record_kind: objective, seen_version: none}
+
+
+  objectives.record_checkpoint:
+    description: Save a continuation checkpoint for the active Objective work session.
+    class: request_reply
+    address: svc.team.objectives.record_checkpoint
+    body: bodies/objectives.record_checkpoint.schema.json
+    reply:
+      body: bodies/objectives.record_checkpoint.reply.schema.json
+      errors: [not_found, feature_off, invalid_request, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+    senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+    covered_change: {record_kind: objective, seen_version: none}
+
+
+  objectives.start_task:
+    description: Queue a continuation task for an Objective and its current plan.
+    class: request_reply
+    address: svc.team.objectives.start_task
+    body: bodies/objectives.start_task.schema.json
+    reply:
+      body: bodies/objectives.start_task.reply.schema.json
+      errors: [not_found, feature_off, invalid_request, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+    senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+    covered_change: {record_kind: objective, seen_version: none}
+
+
+  objectives.activate_plan:
+    description: Start runtime-owned execution of the active task's semantic plan steps.
+    class: request_reply
+    address: svc.team.objectives.activate_plan
+    body: bodies/objectives.activate_plan.schema.json
+    reply:
+      body: bodies/objectives.activate_plan.reply.schema.json
+      errors: [not_found, feature_off, invalid_request, change_conflict, request_closed, needs_person_decision, record_busy, runtime_error]
+    senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+    covered_change: {record_kind: objective, seen_version: none}
+
+
+  objectives.work_profiles.propose:
+    description: Persist an inert exact Objective work-profile proposal for the person.
+    class: request_reply
+    address: svc.team.objectives.work_profiles.propose
+    body: bodies/objectives.work_profiles.propose.schema.json
+    reply:
+      body: bodies/objectives.work_profiles.propose.reply.schema.json
+      errors: [not_found, feature_off, invalid_request, direct_user_request_required, runtime_error]
+    senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+
+  objectives.work_profiles.list:
+    description: Read configured profiles, the person's installed profiles and latest proposals.
+    class: request_reply
+    address: svc.team.objectives.work_profiles.list
+    body: bodies/objectives.work_profiles.list.schema.json
+    reply:
+      body: bodies/objectives.work_profiles.list.reply.schema.json
+      errors: [feature_off, invalid_request, runtime_error]
+    senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/message_id]
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+
+  objectives.work_profiles.remove:
+    description: Remove the person's reusable profile after explicit confirmation.
+    class: request_reply
+    address: svc.team.objectives.work_profiles.remove
+    body: bodies/objectives.work_profiles.remove.schema.json
+    reply:
+      body: bodies/objectives.work_profiles.remove.reply.schema.json
+      errors: [not_found, feature_off, invalid_request, direct_user_request_required, confirmation_required, runtime_error]
+    senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+
+  objectives.work_sessions.status:
+    description: Read an owned Objective's policy, recent sessions, checkpoints and tuning observations.
+    class: request_reply
+    address: svc.team.objectives.work_sessions.status
+    body: bodies/objectives.work_sessions.status.schema.json
+    reply:
+      body: bodies/objectives.work_sessions.status.reply.schema.json
+      errors: [not_found, invalid_request, runtime_error]
+    senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/message_id]
+    admission: {accepted_while_paused: true, execution_slot: false, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none

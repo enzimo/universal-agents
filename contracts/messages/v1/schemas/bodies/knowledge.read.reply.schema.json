@@ -11,129 +11,7 @@
           "const": "ok"
         },
         "page": {
-          "type": "object",
-          "properties": {
-            "space": {
-              "type": "string",
-              "enum": [
-                "team",
-                "personal"
-              ]
-            },
-            "page": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 240
-            },
-            "title": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 1000
-            },
-            "summary": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 4000
-            },
-            "body": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 32768
-            },
-            "body_ref": {
-              "$ref": "../common.schema.json#/$defs/blob_ref"
-            },
-            "tags": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
-              },
-              "maxItems": 100
-            },
-            "status": {
-              "type": "string",
-              "enum": [
-                "active",
-                "archived"
-              ]
-            },
-            "seen_version": {
-              "$ref": "../common.schema.json#/$defs/record_version"
-            },
-            "updated_at": {
-              "$ref": "../common.schema.json#/$defs/timestamp"
-            },
-            "updated_by": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "properties": {
-                    "kind": {
-                      "const": "agent"
-                    },
-                    "agent_type": {
-                      "$ref": "../common.schema.json#/$defs/agent_type"
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "agent_type"
-                  ],
-                  "additionalProperties": false
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "kind": {
-                      "const": "person"
-                    },
-                    "person": {
-                      "$ref": "../common.schema.json#/$defs/person_ref"
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "person"
-                  ],
-                  "additionalProperties": false
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "kind": {
-                      "const": "system"
-                    }
-                  },
-                  "required": [
-                    "kind"
-                  ],
-                  "additionalProperties": false
-                }
-              ]
-            },
-            "open_notes": {
-              "type": "array",
-              "description": "The oldest open notes on this page. Reading after resolution exposes the next notes.",
-              "items": {
-                "$ref": "../common.schema.json#/$defs/knowledge_note"
-              },
-              "maxItems": 5
-            }
-          },
-          "required": [
-            "space",
-            "page",
-            "title",
-            "tags",
-            "status",
-            "seen_version",
-            "updated_at",
-            "updated_by",
-            "open_notes"
-          ],
-          "additionalProperties": false
+          "$ref": "knowledge.read.reply.schema.json#/$defs/page"
         }
       },
       "required": [
@@ -191,6 +69,21 @@
       "type": "object",
       "properties": {
         "outcome": {
+          "const": "personal_space_unavailable"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
           "const": "runtime_error"
         },
         "message": {
@@ -202,5 +95,705 @@
       ],
       "additionalProperties": false
     }
-  ]
+  ],
+  "$defs": {
+    "page_summary": {
+      "type": "object",
+      "properties": {
+        "space": {
+          "type": "string",
+          "enum": [
+            "team",
+            "personal"
+          ]
+        },
+        "page": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "page_type": {
+          "type": "string",
+          "enum": [
+            "concept",
+            "how-to",
+            "decision",
+            "lesson",
+            "reference",
+            "source"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4000
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "maxItems": 100
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "archived"
+          ]
+        },
+        "seen_version": {
+          "$ref": "../common.schema.json#/$defs/record_version",
+          "description": "The current page revision as a decimal string, even when an older revision is shown."
+        },
+        "updated_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "snippet": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        }
+      },
+      "required": [
+        "space",
+        "page",
+        "title",
+        "page_type",
+        "summary",
+        "tags",
+        "status",
+        "seen_version",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    },
+    "page": {
+      "description": "The complete detailed page, inline or as JSON checked against the inline alternative after retrieval.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "inline"
+            },
+            "space": {
+              "type": "string",
+              "enum": [
+                "team",
+                "personal"
+              ]
+            },
+            "page": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            },
+            "page_type": {
+              "type": "string",
+              "enum": [
+                "concept",
+                "how-to",
+                "decision",
+                "lesson",
+                "reference",
+                "source"
+              ]
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 4000
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "maxItems": 100
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "active",
+                "archived"
+              ]
+            },
+            "seen_version": {
+              "$ref": "../common.schema.json#/$defs/record_version",
+              "description": "The current page revision as a decimal string, even when an older revision is shown."
+            },
+            "updated_at": {
+              "$ref": "../common.schema.json#/$defs/timestamp"
+            },
+            "content": {
+              "$ref": "../common.schema.json#/$defs/text_content"
+            },
+            "created_at": {
+              "$ref": "../common.schema.json#/$defs/timestamp"
+            },
+            "updated_by": {
+              "$ref": "../common.schema.json#/$defs/knowledge_editor"
+            },
+            "frozen_until": {
+              "$ref": "../common.schema.json#/$defs/timestamp"
+            },
+            "shown_revision": {
+              "$ref": "../common.schema.json#/$defs/count",
+              "description": "The historical revision whose title, type, summary, tags and content are shown. Absent for the current page."
+            },
+            "shown_by": {
+              "$ref": "../common.schema.json#/$defs/knowledge_editor",
+              "description": "The editor of the shown revision; updated_by identifies the current page editor."
+            },
+            "backlinks": {
+              "type": "array",
+              "items": {
+                "$ref": "knowledge.read.reply.schema.json#/$defs/backlink"
+              },
+              "maxItems": 20
+            },
+            "open_notes": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/knowledge_note"
+              },
+              "maxItems": 5
+            },
+            "pending_contributions": {
+              "type": "array",
+              "items": {
+                "$ref": "knowledge.read.reply.schema.json#/$defs/pending_contribution"
+              },
+              "maxItems": 20
+            },
+            "links": {
+              "type": "array",
+              "items": {
+                "$ref": "knowledge.read.reply.schema.json#/$defs/page_link"
+              },
+              "maxItems": 100
+            },
+            "redirected_from": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "required": [
+            "type",
+            "space",
+            "page",
+            "title",
+            "page_type",
+            "summary",
+            "tags",
+            "status",
+            "seen_version",
+            "updated_at",
+            "content",
+            "created_at",
+            "updated_by",
+            "backlinks",
+            "open_notes",
+            "pending_contributions",
+            "links"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "blob"
+            },
+            "ref": {
+              "$ref": "../common.schema.json#/$defs/blob_ref"
+            }
+          },
+          "required": [
+            "type",
+            "ref"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "page_link": {
+      "type": "object",
+      "properties": {
+        "written": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "space": {
+          "type": "string",
+          "enum": [
+            "team",
+            "personal"
+          ]
+        },
+        "page": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "exists": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "written",
+        "space",
+        "page",
+        "exists"
+      ],
+      "additionalProperties": false
+    },
+    "pending_contribution": {
+      "type": "object",
+      "properties": {
+        "contribution_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "create",
+            "edit",
+            "note",
+            "archive"
+          ]
+        },
+        "created_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "contribution_id",
+        "kind",
+        "created_at"
+      ],
+      "additionalProperties": false
+    },
+    "review_flag": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 67,
+          "description": "A runtime review kind, including custom:<name> for a blocked-pattern name of up to 60 characters."
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "field": {
+          "type": "string",
+          "enum": [
+            "",
+            "title",
+            "summary",
+            "body",
+            "tags",
+            "note"
+          ]
+        },
+        "line": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "column": {
+          "$ref": "../common.schema.json#/$defs/count"
+        }
+      },
+      "required": [
+        "kind",
+        "label",
+        "field",
+        "line",
+        "column"
+      ],
+      "additionalProperties": false
+    },
+    "contribution": {
+      "type": "object",
+      "properties": {
+        "contribution_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "create",
+            "edit",
+            "note",
+            "archive"
+          ]
+        },
+        "page": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "page_type": {
+          "type": "string",
+          "enum": [
+            "concept",
+            "how-to",
+            "decision",
+            "lesson",
+            "reference",
+            "source"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4000
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "maxItems": 100
+        },
+        "content": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "change_summary": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4000
+        },
+        "base_revision": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "published",
+            "withdrawn",
+            "rejected"
+          ]
+        },
+        "created_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "author": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "agent"
+            },
+            "agent_type": {
+              "$ref": "../common.schema.json#/$defs/agent_type"
+            }
+          },
+          "required": [
+            "kind",
+            "agent_type"
+          ],
+          "additionalProperties": false
+        },
+        "review_flags": {
+          "type": "array",
+          "items": {
+            "$ref": "knowledge.read.reply.schema.json#/$defs/review_flag"
+          },
+          "maxItems": 100
+        },
+        "current": {
+          "$ref": "knowledge.read.reply.schema.json#/$defs/page"
+        }
+      },
+      "required": [
+        "contribution_id",
+        "kind",
+        "page",
+        "title",
+        "page_type",
+        "summary",
+        "tags",
+        "change_summary",
+        "base_revision",
+        "state",
+        "created_at",
+        "author",
+        "review_flags"
+      ],
+      "additionalProperties": false
+    },
+    "backlink": {
+      "type": "object",
+      "properties": {
+        "space": {
+          "type": "string",
+          "enum": [
+            "team",
+            "personal"
+          ]
+        },
+        "page": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "page_type": {
+          "type": "string",
+          "enum": [
+            "concept",
+            "how-to",
+            "decision",
+            "lesson",
+            "reference",
+            "source"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4000
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "maxItems": 100
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "archived"
+          ]
+        },
+        "seen_version": {
+          "$ref": "../common.schema.json#/$defs/record_version",
+          "description": "The current page revision as a decimal string, even when an older revision is shown."
+        },
+        "updated_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "space",
+        "page",
+        "title",
+        "page_type",
+        "summary",
+        "tags",
+        "status",
+        "seen_version",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    },
+    "contribution_summary": {
+      "type": "object",
+      "properties": {
+        "contribution_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "create",
+            "edit",
+            "note",
+            "archive"
+          ]
+        },
+        "page": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "page_type": {
+          "type": "string",
+          "enum": [
+            "concept",
+            "how-to",
+            "decision",
+            "lesson",
+            "reference",
+            "source"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4000
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "maxItems": 100
+        },
+        "change_summary": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4000
+        },
+        "base_revision": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "published",
+            "withdrawn",
+            "rejected"
+          ]
+        },
+        "created_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "author": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "agent"
+            },
+            "agent_type": {
+              "$ref": "../common.schema.json#/$defs/agent_type"
+            }
+          },
+          "required": [
+            "kind",
+            "agent_type"
+          ],
+          "additionalProperties": false
+        },
+        "review_flags": {
+          "type": "array",
+          "items": {
+            "$ref": "knowledge.read.reply.schema.json#/$defs/review_flag"
+          },
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "contribution_id",
+        "kind",
+        "page",
+        "title",
+        "page_type",
+        "summary",
+        "tags",
+        "change_summary",
+        "base_revision",
+        "state",
+        "created_at",
+        "author",
+        "review_flags"
+      ],
+      "additionalProperties": false
+    },
+    "added_note": {
+      "description": "A note just added by the verified person or agent publishing it.",
+      "type": "object",
+      "properties": {
+        "note_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "content": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "created_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "created_by": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "agent"
+                },
+                "agent_type": {
+                  "$ref": "../common.schema.json#/$defs/agent_type"
+                }
+              },
+              "required": [
+                "kind",
+                "agent_type"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "person"
+                },
+                "person": {
+                  "$ref": "../common.schema.json#/$defs/person_ref"
+                }
+              },
+              "required": [
+                "kind",
+                "person"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "note_id",
+        "content",
+        "created_at",
+        "created_by"
+      ],
+      "additionalProperties": false
+    }
+  }
 }

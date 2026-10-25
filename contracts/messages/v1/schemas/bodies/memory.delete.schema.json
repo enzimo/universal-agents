@@ -21,14 +21,14 @@
       "maximum": 9007199254740991
     },
     "seen_version": {
-      "$ref": "../common.schema.json#/$defs/record_version"
+      "$ref": "../common.schema.json#/$defs/record_version",
+      "description": "The fact's version as the writer read it. Agents must send it; a person's own command may leave it out and then acts on the fact the number names (README, \"Covered changes\")."
     }
   },
   "required": [
     "request_id",
     "bank",
-    "memory_id",
-    "seen_version"
+    "memory_id"
   ],
   "additionalProperties": false
 }

@@ -1,0 +1,60 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.list",
+  "message_id": "01928f3a-7b2c-7000-8000-000000008007",
+  "idempotency_key": "knowledge.list:6PCK_ZbPAUkUKoxLK5AaSm43sCCMpn7E48yR6t0sUnY",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.knowledge.list",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7000-8000-000000008008",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "ZYGnGuaWwrrMAYOCmmlWp5zxNNMalxHCsJmx4U-xWD5dY458BN_hs2RRBGyxm9IRzhZDEJdLcnq3jTcW4JqtCQ"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "kb_command_000000008007",
+    "space": "all",
+    "status": "active",
+    "query": "release",
+    "page_type": "how-to",
+    "tag": "releases",
+    "offset": 0,
+    "limit": 50
+  },
+  "body_digest": "OiyKgNa9Tn-3DZ10Y6tESUmOEyLxIfZIovnDnAK0ftw",
+  "signature": "zhlphPSpW5L4oE7Q_968TufMV1XJatFE9cSwUaHaGWMjG__ILRpEKMS62ZGXNRlMuwG95C0gqBqT1ocLoXkpCA"
+}

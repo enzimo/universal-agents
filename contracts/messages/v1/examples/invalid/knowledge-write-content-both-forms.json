@@ -1,0 +1,18 @@
+{
+  "description": "knowledge write content both forms.",
+  "refusal": "invalid_body",
+  "at": "/body/content/ref",
+  "base": "knowledge.write/full.json",
+  "changes": [
+    {
+      "set": "/body/content/ref",
+      "to": {
+        "sha256": "MxyxSXdOhwdXCOqhAPTHkPhDNcowarb5sdIkSWMXc8I",
+        "size": 81,
+        "media_type": "text/plain"
+      }
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"knowledge.write\", \"message_id\": \"01928f3a-7b2c-746d-8000-00000000046d\", \"idempotency_key\": \"knowledge.write:XgcZoMfAdiBAf-B2tkOGC4At7W0FaUWowz2adINe8XQ\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"revocation_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.gateway-1.svc.team.knowledge.write\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7143-9000-000000000143\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"command\", \"id\": \"kb_write_full\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-22T04:34:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"CK9Mv27RR9qDrlhbndIVXKJFMnOF2uZah1ETQZ4NwhD37dzWvC71Z4K6mIstCQh1poHg_PLLv_-hJsKL_06WAA\"}, \"algorithm\": \"ed25519\", \"body\": {\"request_id\": \"kb_write_full\", \"space\": \"team\", \"page\": \"deployment-guide\", \"seen_version\": \"3\", \"title\": \"Deployment guide\", \"summary\": \"Steps to review and deploy a release.\", \"tags\": [\"releases\"], \"page_type\": \"how-to\", \"change_summary\": \"Add the release checklist.\", \"confirm_review\": false, \"content\": {\"type\": \"inline\", \"text\": \"Review the release checklist, then run the deployment. See [[release-checklist]].\", \"ref\": {\"sha256\": \"MxyxSXdOhwdXCOqhAPTHkPhDNcowarb5sdIkSWMXc8I\", \"size\": 81, \"media_type\": \"text/plain\"}}}, \"body_digest\": \"svHoNi3fpU51A2O1F4yMfGdIA8YDwxaudZEpORoKF5o\", \"signature\": \"BbPtNfWC7VpNPO3eGFoYokmFU82qC_nnG16h_9n8MsBwFxOshA4-NZU7DY5_ItzKYNFavo6jVs04DV1h3sjbAw\"}"
+}

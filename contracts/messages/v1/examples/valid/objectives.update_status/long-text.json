@@ -1,0 +1,76 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.update_status",
+  "message_id": "ebb2edb7-e448-7f5b-b85d-2b88155cf754",
+  "idempotency_key": "objectives.update_status:10pJzq2JNhs_Y42IS9uxFN72nwxxbhF6THhzCGG4k-0",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.objectives.update_status",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7161-9000-000000000161",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "CWyhGTlIQ12Nf6QZDu5Ux-lPu2ojOK5GqxgwG_j11u11xSxIVv_zj2rtfUkV9fkWWh9XSyFgumCDI9zYVlgSBA"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_objectives_update_status_long_text",
+    "objective_id": "objective_dependency_watch",
+    "seen_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+    "status": "satisfied",
+    "summary": {
+      "type": "blob",
+      "ref": {
+        "sha256": "q2f1AFwM5MSmh6LFNuY6t1TG8RbE5FIUwc2fMIseT74",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "satisfied_by_current_task": true,
+    "task_id": "task_root_7f",
+    "plan_id": "plan_dependency_watch",
+    "user_visible": true,
+    "user_confirmation_summary": {
+      "type": "blob",
+      "ref": {
+        "sha256": "cihTjVFTQna6WYyfhoM3nU6Vkt6bmraYVm265XkeEwM",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    }
+  },
+  "body_digest": "koeJgu1TGo9H0BY73-BKLW2iA28d2kaviLZcA8qxr1g",
+  "signature": "a1SKb99D5P-1DGdkF90iLsEbnRJhlhFqnV-nAn26OV5tRZVYK0_UYtk1zYjrj5QeRaUQVDu_q2LCwZ1yrVsVDQ"
+}

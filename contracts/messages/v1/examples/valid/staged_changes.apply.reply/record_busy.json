@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "staged_changes.apply.reply",
+  "message_id": "13796141-b481-76dd-9126-5db35efb40e2",
+  "idempotency_key": "staged_changes.apply.reply:o7et_zgBJd02zZTFep9mLIy-Ulv865Q3XOYm0qLL-PU",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-74cf-8000-0000000004cf",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "record_busy",
+    "message": "Another request is writing this record. Try again after retry_at.",
+    "retry_at": "2026-10-22T04:30:10.000Z"
+  },
+  "causation_id": "01928f3a-7b2c-74cf-8000-0000000004cf",
+  "body_digest": "QLUL_-FV9gxRsbWqZTLSjEjXlfovjrOBBOY3v8AAaFQ",
+  "signature": "u_bddiSFaPoZoyelOmCRSV115V8flIAwbQnU35aqtee_fOgVSrVgQXxmC-Kfpg44z-1r4vcsH4-oTqoeELkuBQ"
+}

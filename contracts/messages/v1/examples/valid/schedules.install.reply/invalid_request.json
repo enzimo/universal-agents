@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "schedules.install.reply",
-  "message_id": "01928f3a-7b2c-743f-8000-00000000043f",
-  "idempotency_key": "schedules.install.reply:LWblt63rLEr4T9SOrHefR68purxwUSxYu8EdkxVRfJA",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a043",
+  "idempotency_key": "schedules.install.reply:roUjRR04DScKpTKxHAlHPicgKcAwBsXjOovk1Gv6ToI",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -24,9 +24,9 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "invalid_request",
-    "message": "Example short text"
+    "message": "The requested combination is not valid for this schedule."
   },
   "causation_id": "01928f3a-7b2c-743d-8000-00000000043d",
-  "body_digest": "Wb7pwT_XEZMJ0bZaiqTqRGC9zbnVYfR8Cpz0le0MVnU",
-  "signature": "azopVu4snASpuadl3Bh7h0MeX5BrGKgm_PWJRQm2TxTUuqV-9WVyVeKgQSgfuqCz0sGZM3gQvZhTj_a6IygdBA"
+  "body_digest": "M52RjiM24fmcwA1gg37MJZKfd-q9XTxKVz15dmj7r_A",
+  "signature": "Hswa4y1AKdyoq1gmicPFx0ZnlRre1BtCnAj3OINmv_1XP2BGd71b3UCW2_DesG8NeuFqqgGGl-g2KdiHp72LBw"
 }

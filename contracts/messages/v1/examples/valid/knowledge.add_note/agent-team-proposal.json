@@ -1,0 +1,60 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.add_note",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a001",
+  "idempotency_key": "knowledge.add_note:NJQqn5-l0Vp4ANEC0YWX15RPzYij63jadtQcmAhqWAc",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.knowledge.add_note",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7000-8000-00000000a101",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "oAmlqYLfE5NDoXx91U8LzdmKOxLpLg52zO7EP3CxHc6u-qHtZ7AffTMhSBqu6lFP-gvQPYqdcyww1GCWtfGYBQ"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "kb_propose_add_note",
+    "space": "team",
+    "page": "deployment-guide",
+    "note": {
+      "type": "inline",
+      "text": "Check that the rollback steps match the current release."
+    },
+    "confirm_review": true
+  },
+  "body_digest": "9By1dNj7et-J4p0YRmEGSLiwbmABGliGmgb5agC1s_g",
+  "signature": "6tv4yUE2g3inDXTkiz0NJP7nwSXqe13YYdK50X-gAyMoR_ToQWVDFlE2_jjOXakjeL7MUPpiom0DOrCeqrTYAQ"
+}

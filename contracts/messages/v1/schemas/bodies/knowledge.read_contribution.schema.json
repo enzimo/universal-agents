@@ -5,6 +5,9 @@
   "description": "Read one contribution.",
   "type": "object",
   "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
     "contribution_id": {
       "type": "string",
       "minLength": 1,
@@ -12,6 +15,7 @@
     }
   },
   "required": [
+    "request_id",
     "contribution_id"
   ],
   "additionalProperties": false

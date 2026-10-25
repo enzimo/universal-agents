@@ -1,7 +1,7 @@
 {
   "protocol": "1.0-pre",
   "kind": "schedules.list.reply",
-  "message_id": "01928f3a-7b2c-7430-8000-000000000430",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a04e",
   "idempotency_key": "schedules.list.reply:pP9B1aHWeawuCyioHnmqT6VaNTFDMO9xo9Ot0gdKhLE",
   "issuer": {
     "installation": "install_example",
@@ -24,9 +24,9 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "not_allowed",
-    "message": "Example short text"
+    "message": "This task cannot change that schedule."
   },
   "causation_id": "01928f3a-7b2c-742e-8000-00000000042e",
-  "body_digest": "ndygni9OJ0mKj0moIMNE8d_WpJsDHbcv-NSrk03DUfg",
-  "signature": "OpjiE-VJ8vFZdfXUThii3NPhJW99JJRSE8MPeYGuxZRL-9skDKCffQ79kN-8H03xjPZrJciWJU2b3hO6Jf8cDQ"
+  "body_digest": "KOASxawxFOQqSfFZMWpL1eWaw3n2ZAXC1xC1YXfInU0",
+  "signature": "uNo1OgpYMf3sJVhNJelSNzox4AYrACDEZhl4EX_y7XXzti50OmRRjx9pk5G-fAJPKnV31X8WjcMRcD9sU7u7Cw"
 }

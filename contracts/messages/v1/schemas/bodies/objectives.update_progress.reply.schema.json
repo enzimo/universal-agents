@@ -14,7 +14,15 @@
           "$ref": "../common.schema.json#/$defs/record_id"
         },
         "seen_version": {
-          "$ref": "../common.schema.json#/$defs/record_version"
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "objective": {
+          "$ref": "../common.schema.json#/$defs/blob_ref",
+          "description": "The complete saved Objective record as UTF-8 application/json."
+        },
+        "markdown": {
+          "$ref": "../common.schema.json#/$defs/text_content"
         }
       },
       "required": [
@@ -91,14 +99,16 @@
           "const": "changed_since_read"
         },
         "current_version": {
-          "$ref": "../common.schema.json#/$defs/record_version"
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         },
         "message": {
           "$ref": "../common.schema.json#/$defs/short_text"
         }
       },
       "required": [
-        "outcome"
+        "outcome",
+        "current_version"
       ],
       "additionalProperties": false
     },
@@ -187,6 +197,21 @@
       "properties": {
         "outcome": {
           "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "invalid_request"
         },
         "message": {
           "$ref": "../common.schema.json#/$defs/short_text"

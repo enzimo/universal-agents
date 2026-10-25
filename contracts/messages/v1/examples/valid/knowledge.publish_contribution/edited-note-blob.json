@@ -1,0 +1,61 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.publish_contribution",
+  "message_id": "01928f3a-7b2c-7000-8000-0000000050b7",
+  "idempotency_key": "knowledge.publish_contribution:FgYbCZF8XuQIT2TQ36OrFZuFrtyPtvTc9BPllJkIOqg",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.knowledge.publish_contribution",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7000-8000-0000000050b8",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "command",
+      "id": "kb_command_0000000050b7"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "vjE8uDhGq8o0COsM4iQ7MUpv9IWshnWG-CzNOPISGvpvMSs-dl4Y7cXZsfvXFjuP_xrUow8ybrSmUVfh9I3MAg"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "kb_command_0000000050b7",
+    "contribution_id": "kb_contrib_note_8a",
+    "edited": true,
+    "note": {
+      "type": "blob",
+      "ref": {
+        "sha256": "bAo6Qv70pBlfvvIPTJfUQ9kixZs5HB6XObJGtqKBgg4",
+        "size": 56,
+        "media_type": "text/plain"
+      }
+    }
+  },
+  "body_digest": "kI9GNic4q3HHED0C5oxvHfRNMpZUJ5qI0JI2wtwTMJw",
+  "signature": "bhpfuSGzPYVyK57j6GGW-TTHqs-MICI5b4rjbK5UGOLXyP4c25oP-eM5VQHU_WU73EovS6LgIyScxs35XytkDA"
+}

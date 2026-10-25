@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "memory.delete.reply",
   "message_id": "01928f3a-7b2c-7456-8000-000000000456",
-  "idempotency_key": "memory.delete.reply:Tbi5bI_ry8ihD4aSMDnZxPsBazEx9y6a0m5yRaJck60",
+  "idempotency_key": "memory.delete.reply:I3FOvRsPxQr99yiw_kW131FcXl4aaTeK_GtuVfYn-Y0",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -25,9 +25,9 @@
   "body": {
     "outcome": "ok",
     "memory_id": 3,
-    "event_id": "event_id_1"
+    "event_id": "mem_event_delete_3"
   },
   "causation_id": "01928f3a-7b2c-7455-8000-000000000455",
-  "body_digest": "tOKhQ22ehu297UBrCTEY1hs0j-2JhFiD_rpHC0PsxjU",
-  "signature": "GjacdZAOcUU79Qg1CuF58ElRXg21yjV4R0M0Q0oNIKJ3WxlyXfLHaGNydthx-hgszc1SBoXV-dpPywhqkD1tDw"
+  "body_digest": "7nuzYqOcChkDPlbOuNz-j14iilzCNdRd6n2gLgvbAag",
+  "signature": "Bqru_Eu_0DXOGRzt1d-ZN4yB3qAO03tTTjzM-p_eavUd-pnhA5KJCmGVv2njAcO6wtnB8nYejW90n2jXC822Bw"
 }

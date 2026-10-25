@@ -1,0 +1,41 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.reject_contribution.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000506f",
+  "idempotency_key": "knowledge.reject_contribution.reply:4Gnfnmb5zPwXpclNaaIFpQpsFgTs8ZquTxDL6DKY5lc",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7488-8000-000000000488",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "sensitive_content",
+    "message": "Remove the content matched by the blocked rule.",
+    "review_flags": [
+      {
+        "kind": "custom:release-marker",
+        "label": "blocked pattern 'release-marker'",
+        "field": "body",
+        "line": 3,
+        "column": 8
+      }
+    ]
+  },
+  "causation_id": "01928f3a-7b2c-7488-8000-000000000488",
+  "body_digest": "L6GeL6ehhR-VOYl5CaPt331S81hmNURr-qiw9ikcdw0",
+  "signature": "sm-fI4-SXovosDNK8JjfHOnPTZvd-9xCrkRijQnyszrBwKMRphLPcgEiysVfekG1_6ey1oPS7PuvU1W1rr33Cg"
+}

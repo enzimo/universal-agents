@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.revert.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-000000005080",
+  "idempotency_key": "knowledge.revert.reply:1mxkWw2i6uzWI2z4LdpaaUgu5fn3VqO0OXI3URkE2HE",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7476-8000-000000000476",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "record_busy",
+    "message": "Another request is changing this record. Retry after the stated time.",
+    "retry_at": "2026-10-22T04:30:10.000Z"
+  },
+  "causation_id": "01928f3a-7b2c-7476-8000-000000000476",
+  "body_digest": "Tv7hFgBaPAZFIRqOlTz_ACYktrzn9nfJVIMIj2e8vE4",
+  "signature": "2HF1itKOSIIwYQHStwP_xOFESouPUjB8wE5X6_rFx8QhVdqY3z2TW2IJSGipmzUbht8wgc-6_Xiwce_G9maCDg"
+}

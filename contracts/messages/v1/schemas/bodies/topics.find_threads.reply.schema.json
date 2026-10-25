@@ -22,7 +22,25 @@
                 "$ref": "../common.schema.json#/$defs/record_id"
               },
               "status": {
-                "$ref": "../common.schema.json#/$defs/progress_state"
+                "description": "Stored conversation status: active before a turn completes, otherwise its latest task's progress state.",
+                "type": "string",
+                "enum": [
+                  "active",
+                  "abandoned",
+                  "accepted",
+                  "cancelled",
+                  "completed",
+                  "finalizing_plan",
+                  "failed",
+                  "in_progress",
+                  "not_started",
+                  "partial",
+                  "paused",
+                  "preparing",
+                  "retrying",
+                  "undefined",
+                  "waiting"
+                ]
               },
               "subject_preview": {
                 "type": "string",

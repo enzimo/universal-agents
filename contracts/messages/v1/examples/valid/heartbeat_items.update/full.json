@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "heartbeat_items.update",
-  "message_id": "01928f3a-7b2c-74c3-8000-0000000004c3",
-  "idempotency_key": "heartbeat_items.update:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "message_id": "e41a2412-43fc-7d11-9aad-21662a5ba542",
+  "idempotency_key": "heartbeat_items.update:7IPIWUaC7ZjX1--bRx0jlIAjSdqfyOfG9FBzV2GkuxM",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -46,14 +46,17 @@
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
-    "heartbeat_item_id": "heartbeat_item_id_1",
-    "seen_version": "v3",
-    "instruction": "Example instruction",
-    "title": "Example title",
-    "target_agent_type": "token_id_1",
-    "objective_id": "objective_id_1"
+    "request_id": "request_heartbeat_items_update",
+    "heartbeat_item_id": "heartbeat_dependency_watch",
+    "seen_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+    "instruction": {
+      "type": "inline",
+      "text": "Compare the report with new advisories and report actionable changes."
+    },
+    "title": "Track recurring dependency checks",
+    "target_agent_type": "TeamArchitect",
+    "objective_id": "objective_dependency_watch"
   },
-  "body_digest": "1KA45UpLP6eavenyF9CGMLngwtz_AIVPcI2UKwYMhOs",
-  "signature": "u8Q90Iu9_ooJ3xONBjiFgHjlRxlc6cSCY27iPBoaEv68PuxzxVSqNonbaqER2hkl8Ajp5VPzcCXVvd50YQj8CA"
+  "body_digest": "s-Eo0wSpFadVsE_mW475z5Oz0nmgxNknwMJEpFnfDcw",
+  "signature": "MRQyWChUzsRF9t9uUSwBS9NURtZmmVWZ5eWuRasyUXvr2My2L3vlWjTIQbdXf-OBfzt1e-7y39tsEYs8BeeLAw"
 }

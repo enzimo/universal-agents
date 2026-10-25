@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tasks.steer.reply",
+  "message_id": "02c3558c-b496-7aeb-8297-1c6a5fab89ce",
+  "idempotency_key": "tasks.steer.reply:VTTdYkthm1arj9ThtnX5N64M-20MgDUKXp2aLeZR5ZU",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-749d-8000-00000000049d",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "not_allowed",
+    "message": "The verified caller does not have access to this operation."
+  },
+  "causation_id": "01928f3a-7b2c-749d-8000-00000000049d",
+  "body_digest": "xLcUfr5LEBil-jYk0bjA5GGbbirsq89cI-42CgWuDx0",
+  "signature": "UFnDLCFe3YAUGGraWxByEG1Rih6XlEsKitPg00lC3Lgs9i_P96zi3BIbBmihQf4KMCiEyfIELtWlfUY4ehKNBg"
+}

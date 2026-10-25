@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "topics.tag_thread",
   "message_id": "01928f3a-7b2c-7461-8000-000000000461",
-  "idempotency_key": "topics.tag_thread:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "topics.tag_thread:EPM698Do8G-JGYD6rS0kdoCpMqtu13hyWsWhjkalPGc",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -35,22 +35,22 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000219"
+      "id": "cmd_topics_tag_thread"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "sezsYA4uvjMtlEUuyAJAvfFvGGHQkpfgx20APbK3vmoASEmCWHViOfgXMMQRNxqDl4Xl44GW2wpu8ZQaPy1LDg"
+    "signature": "lnylQ1Vl0EQ4JjYEKZFie7vF3sQd8Uw1wBknB3h1dQlP3TsSBEUxLTvYlCZpwikrr15Sn-Y6dzlhKqmpgoD9DA"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
-    "conversation_id": "conversation_id_1",
+    "request_id": "cmd_topics_tag_thread",
+    "conversation_id": "conversation_ops_7f",
     "tags": [
-      "tags_1"
+      "deployment"
     ],
     "private": true
   },
-  "body_digest": "__EFIO8xZGGMZ9xjszQ04QzXm10i4N5sJL1GiHKQqmg",
-  "signature": "O85aBH1qejCamLsUbEpPUF0rKgFeI-wXfEha6g-mHwn9voOE1RKs_x1LBOpMY22k54rIStDkPQIrfc_KM0aJCw"
+  "body_digest": "s7weNZ89fjVLWcYEVLn6xNrqKzayXKlp2MqfFUBpYcQ",
+  "signature": "xkPBQaOt8vp5Nqob4hySKj6cU_XD_kQSi68AoQ5G7MiCpnQleztu68tntU6_jYLbDYOWqmy1gx3tu5vebHfCCQ"
 }

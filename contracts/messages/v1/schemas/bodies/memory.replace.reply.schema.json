@@ -19,9 +19,7 @@
               "maximum": 9007199254740991
             },
             "fact_text": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 12000
+              "$ref": "../common.schema.json#/$defs/text_content"
             },
             "valid_from": {
               "$ref": "../common.schema.json#/$defs/timestamp"
@@ -34,9 +32,9 @@
               "items": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 64
+                "maxLength": 256
               },
-              "maxItems": 20
+              "maxItems": 100
             },
             "created_at": {
               "$ref": "../common.schema.json#/$defs/timestamp"
@@ -46,6 +44,12 @@
             },
             "seen_version": {
               "$ref": "../common.schema.json#/$defs/record_version"
+            },
+            "metadata_json": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 16384,
+              "description": "JSON text encoding a metadata object. Apply the bank's max_metadata_chars and exclude reserved import provenance from public replies."
             }
           },
           "required": [
@@ -103,21 +107,6 @@
       "type": "object",
       "properties": {
         "outcome": {
-          "const": "capacity_reached"
-        },
-        "message": {
-          "$ref": "../common.schema.json#/$defs/short_text"
-        }
-      },
-      "required": [
-        "outcome"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "outcome": {
           "const": "invalid_request"
         },
         "message": {
@@ -143,7 +132,8 @@
         }
       },
       "required": [
-        "outcome"
+        "outcome",
+        "current_version"
       ],
       "additionalProperties": false
     },

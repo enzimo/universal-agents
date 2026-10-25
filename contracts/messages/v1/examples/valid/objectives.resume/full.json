@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "objectives.resume",
-  "message_id": "01928f3a-7b2c-7419-8000-000000000419",
-  "idempotency_key": "objectives.resume:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "message_id": "238a5051-22c7-7a72-8149-098d7119b7b3",
+  "idempotency_key": "objectives.resume:wia1MseLyz7WqHT8XEQjO_BP6rGeCrqwBYF4gJI51Vs",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -35,20 +35,20 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000158"
+      "id": "request_objectives_resume"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "z36NisJev3wrvgL5FpAIWDdp2CV4p1x-o-O_8qK0X_pbBaW12qcPqsrXS-Wif6Zw593O4exqwClTeIS07kLTCQ"
+    "signature": "GjO-IERGNd2qSs_VFwyz51s-GTCVnSq7Z_4aEQZ0Sp_WOHJHIrHE9qMI6ZEi1W4vnzWQOI8CpiULNmzpwI7zAg"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
-    "objective_id": "objective_id_1",
-    "seen_version": "v3",
-    "reason": "Example reason"
+    "request_id": "request_objectives_resume",
+    "objective_id": "objective_dependency_watch",
+    "seen_version": "27f3b9c11e04194e2352ffe214bf68d66fc0bd4eec858a585850d952a4d3c5f4",
+    "reason": "dependency_watch"
   },
-  "body_digest": "PlFs1kjif6fl-bOlTwpb1kM-cJkvohI_O6at30iyjec",
-  "signature": "DYufQpPmgl997UpHRXkXVpcX2VpwTCoa6cYi4jh1N4B7WK7CTqVTQQwP-DO-UIAe_UcbS3XUIJOw6M7fl7kEBw"
+  "body_digest": "Kz_LSWkiPfxF0n-wgfuYl6IUyUzSiWUhdT6Jq3hj7dI",
+  "signature": "zIdA3c_GhwO7z-DY1l4YR9ZVOpVg8AFQ_X2xHAC8Fz1kdI3AbAI2O4mhhX44eRRCZ2fJd2uSuSlGCHh1APWnDg"
 }

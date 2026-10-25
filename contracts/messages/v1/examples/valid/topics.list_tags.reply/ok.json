@@ -26,13 +26,13 @@
     "outcome": "ok",
     "tags": [
       {
-        "tag": "tag_1",
-        "thread_count": 3,
+        "tag": "deployment",
+        "thread_count": 1,
         "updated_at": "2026-10-22T04:30:00.000Z"
       }
     ]
   },
   "causation_id": "01928f3a-7b2c-745b-8000-00000000045b",
-  "body_digest": "I7y1VvsQyWqovakdrdic75_4XK4dHiwKwitRmr-WFww",
-  "signature": "8ehUY5_ZgE4loh0H5us7UsRuc-AUb2ta77hcFN25_ddx1WDu1rfYKgPfiYkUANdD0x4LXUtQLg0hSCGrUhl4Bw"
+  "body_digest": "Cs-wr6Ge8HgofRaNbklXkZeqiAxZTz-ntpUWJ7zO5jo",
+  "signature": "Ke_5TwK1nPXLi2OtVTwB64AnfaTwH8fBpcNqfGvOV6w69Q67BM9iU-OmlWqm0jSOQuqcLOej1i_sK8Hd9mGdCQ"
 }

@@ -1,0 +1,152 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.list.reply",
+  "message_id": "3ce7fe1a-1728-79ea-ac72-894550b022ab",
+  "idempotency_key": "objectives.list.reply:LWgSSitO58FbcSGEP7ckwPhEs021JvLYY1EOQu4hA9s",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.4201abd6-e71b-7e29-b0af-82ec9e1feace",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "objectives": [
+      {
+        "objective_id": "objective_dependency_watch",
+        "seen_version": "27f3b9c11e04194e2352ffe214bf68d66fc0bd4eec858a585850d952a4d3c5f4",
+        "title": "Track recurring dependency checks",
+        "status": "active",
+        "horizon": "recurring",
+        "priority": "normal",
+        "desired_outcome": {
+          "type": "blob",
+          "ref": {
+            "sha256": "bVkH4jeyC20tYmhn0O5It9nabNQjNQxexbb8QJq1AQs",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "progress_summary": {
+          "type": "blob",
+          "ref": {
+            "sha256": "inL5Yfukb_VC4iWMxd7ObEb3Fx9zctgVm-c-neZUVqE",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "subgoals": [
+          {
+            "step_id": "step_verify_advisories",
+            "title": {
+              "type": "blob",
+              "ref": {
+                "sha256": "5oObVkPi5hruzw5eoXE-FlAOVhX5tmejfPw7EVDuh18",
+                "size": 4096,
+                "media_type": "text/plain"
+              }
+            },
+            "status": "in_progress",
+            "status_detail": {
+              "type": "blob",
+              "ref": {
+                "sha256": "0kUqwioE0EVLySSg0Pi6SDfEwoNOxI_tsfGPZ7dz6yQ",
+                "size": 4096,
+                "media_type": "text/plain"
+              }
+            },
+            "result_summary": {
+              "type": "blob",
+              "ref": {
+                "sha256": "0FnPXwoaU4Et7uNrZff_RvsaBC9Se5Ra4NRxGhGpjGk",
+                "size": 4096,
+                "media_type": "text/plain"
+              }
+            }
+          }
+        ],
+        "success_criteria": [
+          {
+            "criterion_id": "criterion_sources_verified",
+            "description": {
+              "type": "blob",
+              "ref": {
+                "sha256": "y9bjfX-SA4epXU3XScoFKdYhz0Saucm_0eDEOE9iuMU",
+                "size": 4096,
+                "media_type": "text/plain"
+              }
+            },
+            "status": "open",
+            "evidence_summary": {
+              "type": "blob",
+              "ref": {
+                "sha256": "a-5pTS137mxWoP4PCBwrT0RbTHzXA0pRz0RoEva_91Q",
+                "size": 4096,
+                "media_type": "text/plain"
+              }
+            },
+            "updated_at": "2026-10-22T04:30:00.000Z"
+          }
+        ],
+        "schedule_ids": [
+          "schedule_dependency_watch"
+        ],
+        "heartbeat_item_ids": [
+          "heartbeat_dependency_watch"
+        ],
+        "available_actions": [
+          "pause",
+          "stop",
+          "abandon",
+          "delete"
+        ],
+        "objective_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+        "current_focus": {
+          "type": "blob",
+          "ref": {
+            "sha256": "CNM3qiNAQ4_IejUzNMdE2UGoMlVUbOVrUm1u8KkIYT8",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "plan_summary": {
+          "type": "blob",
+          "ref": {
+            "sha256": "Jnw7kL6-rX60hakvWewM-936q4qGb7FWe2ZIWUqz73k",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "current_plan_id": "plan_dependency_watch",
+        "work_policy_status": "active",
+        "updated_at": "2026-10-22T04:30:00.000Z",
+        "owner_agent_id": "manager_scope:team_example:TeamArchitect",
+        "root_conversation_id": "conversation_dependency_watch",
+        "created_by_task_id": "task_root_7f",
+        "promoted_from_task_id": "task_root_7f",
+        "owner_agent_name": "Team lead",
+        "owner_person": "person_7c1",
+        "team_id": "team_example",
+        "owner_named_agent_type": "TeamArchitect",
+        "created_at": "2026-10-21T04:30:00.000Z"
+      }
+    ],
+    "total": 1
+  },
+  "causation_id": "4201abd6-e71b-7e29-b0af-82ec9e1feace",
+  "body_digest": "-OXnJTTwD96tT4QlUu1rNyTdEbQRC7gegK-orDMC3Jc",
+  "signature": "b9Yh9TpjxX6y6lQgWe1iiEHiQJqwCYINSlOvuT9Nt1Zb4vXQP3SAFo0BtsVGQGrdtOA3qtWTD86LY6IdG7oKDg"
+}

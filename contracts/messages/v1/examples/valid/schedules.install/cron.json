@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.install",
   "message_id": "01928f3a-7b2c-7a06-8000-000000000a06",
-  "idempotency_key": "schedules.install:vfLJL2c14BQ9xhQMQL-zK6-NnQo3qAmc9cnvaHwbnrY",
+  "idempotency_key": "schedules.install:cIrpvrsi7oTZRreXB_G0S99a3Gop5UCGx1UtICSU47Q",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -21,7 +21,7 @@
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
-    "token_id": "01928f3a-7b2c-7170-9000-000000000170",
+    "token_id": "01928f3a-7b2c-7000-9000-00000000c004",
     "issuer": {
       "installation": "install_example",
       "runtime": "gateway-1",
@@ -35,60 +35,57 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000170"
+      "id": "req_schedules_install_cron"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "r4lZm7KIEX2tQKdjQg5SoqZ15o3U8cpCIKNpV1R-tXCTPnSHo44z0xMGdtL2_JY6KYkbBlTm3PNAjUjO73mTAQ"
+    "signature": "Ieg8DydCOjFWhWkilgo-zG6zJEBVwatmTZZThUCbplx-CnfLsCWOriE7AV4ipXHGm_OQpTYahAEl-3wGm0knBA"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_2",
+    "request_id": "req_schedules_install_cron",
     "schedule_id": "schedule_id_1",
     "mode": "create",
-    "seen_version": "v3",
-    "name": "Example name",
+    "name": "Review product documentation",
     "management_class": "user",
-    "system_schedule_kind": "unclassified",
     "objective_id": "objective_id_1",
     "worker": {
-      "agent_type": "token_id_1",
-      "agent_id": "token_id_1"
+      "agent_type": "WebResearchAgent",
+      "agent_id": "researcher-2"
     },
     "timing": {
       "kind": "cron",
-      "expression": "0 7 * * 1-5",
+      "expression": "@daily",
       "time_zone": "Europe/Berlin"
     },
     "repeat_count": 3,
-    "expires_at": "2026-10-22T04:30:00.000Z",
-    "paused_until": "2026-10-22T04:30:00.000Z",
+    "expires_at": "2026-11-22T09:00:00.000Z",
+    "paused_until": "2026-10-23T09:00:00.000Z",
     "enabled": true,
     "action": {
       "type": "task",
-      "instruction": "Example instruction",
-      "attachments": [
-        {
-          "attachment_id": "attachment_id_1",
-          "blob": {
-            "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
-            "size": 3,
-            "media_type": "application/pdf",
-            "name": "Example name"
-          },
-          "kind": "image",
-          "caption": "Example caption"
-        }
-      ]
+      "instruction": {
+        "type": "inline",
+        "text": "Review the product documentation and report material changes."
+      }
     },
     "run_notes": {
-      "schedule_kind": "schedule_kind_1",
+      "schedule_kind": "product documentation / weekly review",
       "policy": {
-        "notify": true,
+        "notify": "on_change",
         "notify_on_failure": true,
-        "evidence_required": true
-      }
+        "evidence_required": "fresh authoritative source",
+        "custom_json": "{\"product\":\"example\",\"only_material_changes\":true}"
+      },
+      "state": {
+        "summary": "No material changes in the latest review.",
+        "confidence": "high",
+        "last_observed_at": "2026-10-22T04:30:00.000Z",
+        "last_changed_at": "2026-10-15T09:00:00.000Z",
+        "domain_json": "{\"last_release\":\"0.9.8\"}"
+      },
+      "domain_schema_hint_json": "{\"last_release\":\"string\"}"
     },
     "decisions_ahead": [
       {
@@ -102,6 +99,6 @@
       "time_zone": "Europe/Berlin"
     }
   },
-  "body_digest": "NjqzDVkgav-b8hrU4avDJ1Lrftd2et-hb1OIq0UaI7w",
-  "signature": "TL0M-P-hWe3yjx8k6X-FLXsTRoDhen17LNSLTT_VVoEJ9OQYy3dn43OaWY4uLeJ3qzvb0Cfv_EG7vt0XxhrXBA"
+  "body_digest": "8Qn1-Nmv1o6vrTJ3nqFVeqGLas62xfa18cqgYzv87xY",
+  "signature": "z8bVVkQ0zEy1H2THSlsiIAnEBtqNyVSv1wLxdHPQQiGF8aVyrpnGsNo2ty5fpvoCt-20skt2IMPz59RwvPSOBQ"
 }

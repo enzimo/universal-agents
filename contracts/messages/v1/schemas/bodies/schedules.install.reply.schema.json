@@ -22,22 +22,24 @@
         "schedule_id": {
           "$ref": "../common.schema.json#/$defs/record_id"
         },
-        "seen_version": {
-          "$ref": "../common.schema.json#/$defs/record_version"
-        },
         "timing_revision": {
           "$ref": "../common.schema.json#/$defs/count"
         },
         "next_fire_at": {
           "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "version": {
+          "$ref": "schedules.update.reply.schema.json#/$defs/saved_schedule_version"
+        },
+        "warnings": {
+          "$ref": "../common.schema.json#/$defs/text_content"
         }
       },
       "required": [
         "outcome",
         "state",
         "schedule_id",
-        "seen_version",
-        "timing_revision"
+        "version"
       ],
       "additionalProperties": false
     },
@@ -130,7 +132,8 @@
         }
       },
       "required": [
-        "outcome"
+        "outcome",
+        "current_version"
       ],
       "additionalProperties": false
     },
@@ -211,6 +214,21 @@
       "required": [
         "outcome",
         "retry_at"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
       ],
       "additionalProperties": false
     }

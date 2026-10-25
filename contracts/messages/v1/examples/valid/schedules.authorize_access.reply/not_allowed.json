@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.authorize_access.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a032",
+  "idempotency_key": "schedules.authorize_access.reply:qk-mn-IXr5o_gTs01ag9-yJgkJpHUqcMXUBLr0ibM58",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7000-8000-00000000a02c",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "not_allowed",
+    "message": "This task cannot change that schedule."
+  },
+  "causation_id": "01928f3a-7b2c-7000-8000-00000000a02c",
+  "body_digest": "KOASxawxFOQqSfFZMWpL1eWaw3n2ZAXC1xC1YXfInU0",
+  "signature": "0Ky7g4M_FtHZ2jl_8bKmHkbcyJ3AVeDjb8W90ucihCmJ-SXxc5iuk74kCXkpqP5ITm0qBbSt_5SIjB8-szBICw"
+}

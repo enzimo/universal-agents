@@ -21,7 +21,7 @@
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
-    "token_id": "01928f3a-7b2c-7206-9000-000000000206",
+    "token_id": "01928f3a-7b2c-7206-9003-000000000206",
     "issuer": {
       "installation": "install_example",
       "runtime": "gateway-1",
@@ -35,12 +35,12 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000206"
+      "id": "request_id_3"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "mUCPKLfYuUKwWqoZv4HrzvDQrzBofZrSUFUIKBp2XJd47nL8XkQqkfGVRgrui3LHCfZiOFB97qYvQgXOkkGlCA"
+    "signature": "JYoqyOtNkLQFQ1_JNAXMTei5YUCRk195Uuq6gFmM1vizTlxfeEXJkI0ZiwUExPoP_3WYpEkjsegDXE7FOxxIDA"
   },
   "algorithm": "ed25519",
   "body": {
@@ -52,5 +52,5 @@
     }
   },
   "body_digest": "W8lnJyGB-WJygV773GAv6npTvdolLkdjOsIo48tgRHY",
-  "signature": "qVFHUm9uyYlTikbyLEHMG8LtIpXmrXmCJqjnHZSkZOkWkIifAlPthKsPLoliMVFEGt9gW5-d7uoVlp7BgwmcDg"
+  "signature": "FfEubOGU8eD_UIF_QqrWxaKCAtm4hTCR13gKgWgYJsQMwyJqPkwnstcXC2PLWTE8Ia0lRI45sicBhaw0xvprDw"
 }

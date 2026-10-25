@@ -1,0 +1,39 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "staged_changes.apply.reply",
+  "message_id": "3c8c4411-666f-78c5-9c26-a26142ffaaa6",
+  "idempotency_key": "staged_changes.apply.reply:4XOgYDYECcjeqlWWiLb26zYrASNWoshHPrnn585uEB0",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.e95105a6-6baf-7c70-a977-0b1ac6ff3469",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "state": "applied",
+    "approval": {
+      "mode": "agreement",
+      "approved_by": "agreement",
+      "approved_at": "2026-10-22T04:30:00.000Z"
+    },
+    "note": "Use these settings for the next tasks.",
+    "result_json": "{\"status\":\"applied\",\"change_id\":\"runtime_settings:change_7f\",\"restart_required\":false}"
+  },
+  "causation_id": "e95105a6-6baf-7c70-a977-0b1ac6ff3469",
+  "body_digest": "dmhNKRJGD9iSP4ObvCFlQEbIsSx9XT3uKhu0JtUcrFw",
+  "signature": "T_KnPa1vdzS4YGfgVu2a6kDXeMi3uv0MBCK04ySRSX-7yu41dlxiDH65D6pbOnk5LHAN2R3Bovz6NLPozV5MAA"
+}

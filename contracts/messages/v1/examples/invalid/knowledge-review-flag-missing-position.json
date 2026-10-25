@@ -1,0 +1,13 @@
+{
+  "description": "A blocked-content flag must carry the position supplied by the manager.",
+  "refusal": "invalid_body",
+  "at": "/body/review_flags/0/column",
+  "base": "knowledge.write.reply/sensitive_content.json",
+  "changes": [
+    {
+      "remove": "/body/review_flags/0/column"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"knowledge.write.reply\", \"message_id\": \"01928f3a-7b2c-7000-8000-0000000050a5\", \"idempotency_key\": \"knowledge.write.reply:CyFuLx7P5iA200HfZiI81YLpAD7ne-T8janJKau0jlY\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"edge\", \"id\": \"web\", \"runtime\": \"gateway-1\"}, \"subject\": \"_INBOX.gateway-1.01928f3a-7b2c-746d-8000-00000000046d\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"outcome\": \"sensitive_content\", \"message\": \"Remove the content matched by the blocked rule.\", \"review_flags\": [{\"kind\": \"custom:release-marker\", \"label\": \"blocked pattern 'release-marker'\", \"field\": \"body\", \"line\": 3}]}, \"causation_id\": \"01928f3a-7b2c-746d-8000-00000000046d\", \"body_digest\": \"cbUdOQXgo13pYKz3eHRFnQawSudc3FuBO21406ftr_4\", \"signature\": \"tWkdorV94NRjzWynGlFQxhqQK8pEY1xOqjoz8sHXu49vwN_fuxBY8weGrzGaYlgPnbKG1hUM7rzbT9WFhrX6Cg\"}"
+}

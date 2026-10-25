@@ -1,0 +1,13 @@
+{
+  "description": "objectives.work_profiles.list requires its request id.",
+  "refusal": "invalid_body",
+  "at": "/body/request_id",
+  "base": "objectives.work_profiles.list/full.json",
+  "changes": [
+    {
+      "remove": "/body/request_id"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"objectives.work_profiles.list\", \"message_id\": \"01928f3a-7b2c-7e50-8000-000000000007\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.lead-host-1.svc.team.objectives.work_profiles.list\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7e50-8000-000000000008\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"root_task\", \"id\": \"task_root_7f\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-23T04:29:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"2_Kf-14IY2ND4ZxL6kwh7x4yRgEr39_XSVRHVS23KsjG4F7k_E0dgqy7Nr8Y9m52K06UQdUa52bTGhqgicR6CA\"}, \"algorithm\": \"ed25519\", \"body\": {\"include_proposals\": true}, \"idempotency_key\": \"objectives.work_profiles.list:aUgVLcMyqUeD3yQLAmxSskdQhlGdFbDPK60lWkIQJkU\", \"body_digest\": \"hJThQn0o4kTBIuBTCSdpBGJi24oQw2juwcQPJQ1JXrk\", \"signature\": \"893AXNjdxUswjk4xDV4JgDTyyVuo_3MUj-8XXaQUO-L4Fg-1fKsQLIFeLNjLTjQ2nTa_GkCW8DKwtEaODuphAQ\"}"
+}

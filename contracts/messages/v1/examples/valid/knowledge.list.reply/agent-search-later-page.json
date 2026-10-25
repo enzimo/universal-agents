@@ -1,0 +1,51 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.list.reply",
+  "message_id": "01928f3a-7b2c-7e40-8000-000000000002",
+  "idempotency_key": "knowledge.list.reply:LqDAwp7X0DV8VPF7ruURimaS3__RHSzg8q_qMa7_Toc",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7e40-8000-000000000001",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "pages": [
+      {
+        "space": "team",
+        "page": "deployment-guide",
+        "title": "Deployment guide",
+        "page_type": "how-to",
+        "summary": "Steps to review and deploy a release.",
+        "tags": [
+          "releases"
+        ],
+        "status": "active",
+        "seen_version": "3",
+        "updated_at": "2026-10-22T04:30:00.000Z",
+        "snippet": {
+          "type": "inline",
+          "text": "Review the [release] checklist, then run the deployment."
+        }
+      }
+    ],
+    "next_offset": 9
+  },
+  "causation_id": "01928f3a-7b2c-7e40-8000-000000000001",
+  "body_digest": "8RuKqUF72yoDj0GG90o8dNdXPI081og6vET90Rc6CXI",
+  "signature": "jUL1OEpKDbvSGSCqVC05Ezo1caxit30Hkc27ERDuIhVLhUiTF3gzRR6EBCkDHq-caVwcPn--PJVkJfCU_a3PDQ"
+}

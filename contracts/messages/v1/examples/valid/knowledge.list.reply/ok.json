@@ -1,7 +1,7 @@
 {
   "protocol": "1.0-pre",
   "kind": "knowledge.list.reply",
-  "message_id": "01928f3a-7b2c-7465-8000-000000000465",
+  "message_id": "01928f3a-7b2c-7000-8000-000000005036",
   "idempotency_key": "knowledge.list.reply:9tj0Js8om-wHeqwOEUnbgUuLp_wXqjS2vvppLx42gYU",
   "issuer": {
     "installation": "install_example",
@@ -27,31 +27,25 @@
     "pages": [
       {
         "space": "team",
-        "page": "Example page",
-        "title": "Example title",
-        "summary": "Example summary",
-        "body": "Example body",
-        "body_ref": {
-          "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
-          "size": 3,
-          "media_type": "application/pdf",
-          "name": "Example name"
-        },
+        "page": "deployment-guide",
+        "title": "Deployment guide",
+        "page_type": "how-to",
+        "summary": "Steps to review and deploy a release.",
         "tags": [
-          "Example tags"
+          "releases"
         ],
         "status": "active",
-        "seen_version": "v3",
+        "seen_version": "3",
         "updated_at": "2026-10-22T04:30:00.000Z",
-        "updated_by": {
-          "kind": "agent",
-          "agent_type": "token_id_1"
+        "snippet": {
+          "type": "inline",
+          "text": "Review the [release] checklist, then run the deployment."
         }
       }
     ],
-    "total": 3
+    "total": 1
   },
   "causation_id": "01928f3a-7b2c-7464-8000-000000000464",
-  "body_digest": "-PHFZHeokQgC-uAYe5SuGdvWLotJGKaqGnESaQLMy20",
-  "signature": "e0uvDVQc7Kw_ofL8LyH4beNdmlAv7uWI0HE9gpwW8IjuKaG1pN9PfkplKSfUZh8URbIbpm7OZs62KV40F5dQBA"
+  "body_digest": "4pEN2URe2QKJ6fSt1rZRRzphzfMceLOYybff7xA-oxc",
+  "signature": "6OV_qWDDs9lsPmb9ShP039_pSkagnlif-z4pdXjAmH_AwoxWVW6Lde5PHW7771uQ_G2P2HHsAX8FtrvzMGBaCg"
 }

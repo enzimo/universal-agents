@@ -11,41 +11,7 @@
           "const": "ok"
         },
         "item": {
-          "type": "object",
-          "properties": {
-            "heartbeat_item_id": {
-              "$ref": "../common.schema.json#/$defs/record_id"
-            },
-            "title": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 500
-            },
-            "instruction": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 32768
-            },
-            "target_agent_type": {
-              "$ref": "../common.schema.json#/$defs/agent_type"
-            },
-            "objective_id": {
-              "$ref": "../common.schema.json#/$defs/record_id"
-            },
-            "enabled": {
-              "type": "boolean"
-            },
-            "seen_version": {
-              "$ref": "../common.schema.json#/$defs/record_version"
-            }
-          },
-          "required": [
-            "heartbeat_item_id",
-            "instruction",
-            "enabled",
-            "seen_version"
-          ],
-          "additionalProperties": false
+          "$ref": "heartbeat_items.list.reply.schema.json#/$defs/heartbeat_read_item"
         },
         "warning": {
           "type": "string",
@@ -53,6 +19,19 @@
             "heartbeat_off",
             "launcher_missing"
           ]
+        },
+        "heartbeat_runtime": {
+          "$ref": "heartbeat_items.list.reply.schema.json#/$defs/heartbeat_runtime_state"
+        },
+        "warning_message": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/text_content"
+          },
+          "maxItems": 1000
         }
       },
       "required": [
@@ -81,24 +60,6 @@
       "properties": {
         "outcome": {
           "const": "objective_link_refused"
-        },
-        "message": {
-          "$ref": "../common.schema.json#/$defs/short_text"
-        }
-      },
-      "required": [
-        "outcome"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "outcome": {
-          "const": "changed_since_read"
-        },
-        "current_version": {
-          "$ref": "../common.schema.json#/$defs/record_version"
         },
         "message": {
           "$ref": "../common.schema.json#/$defs/short_text"

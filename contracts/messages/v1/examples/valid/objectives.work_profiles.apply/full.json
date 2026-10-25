@@ -1,0 +1,61 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.work_profiles.apply",
+  "message_id": "2f54b9fc-6c96-79bc-ac1a-16695249ebbe",
+  "idempotency_key": "objectives.work_profiles.apply:7yydx1LpHPkJHYCU9Q-h-2rXmUVK8VT4oF6cDjLbB5A",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.objectives.work_profiles.apply",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7154-9000-000000000154",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "6rG0DjDSHQrjmwz_useUIS7iIPZRmOlgpf0OjA58FlrkQQVynbxDCAWq6-NIwa1yz3fF6wjU8pU4Rsyn8I2DAw"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_objectives_work_profiles_apply",
+    "proposal_id": "proposal_dependency_watch",
+    "proposal_digest": "6775b70da276eb02baae3e88f4f7d62118acf67ff27812b0e9eadad81b1efd22",
+    "task_id": "task_root_7f",
+    "confirmation_summary": {
+      "type": "inline",
+      "text": "The person accepted a daily twenty-minute work session for this Objective."
+    },
+    "confirmed": true
+  },
+  "body_digest": "eqJX86YEQ2P3O13ocP6jJ_EbinccXLbQzkpefvV7uo0",
+  "signature": "slt5dG_Rdw_ND1GKJlfLkjjnvQxMDbRRdU9ICHMsfVI_YqqcshuHD29D_mnzVYLktcH29p5xoL0Vc1yVhRMfCg"
+}

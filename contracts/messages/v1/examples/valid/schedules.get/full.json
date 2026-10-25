@@ -1,0 +1,55 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.get",
+  "message_id": "01928f3a-7b2c-7e60-8000-000000000002",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.schedules.get",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7e60-8000-000000000003",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "command",
+      "id": "01928f3a-7b2c-7e60-8000-000000000001"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "U8NPkfb-yBvyiP4YD8Ya_Qa7USR3tx3qjDxYF0UZqVKPuukaBecGPUSTu6a69cjrHNDXIsgqqmJSqGFhGvALBA"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "01928f3a-7b2c-7e60-8000-000000000001",
+    "schedule_id": "schedule_id_1",
+    "offset": 0,
+    "max_chars": 4000,
+    "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0"
+  },
+  "idempotency_key": "schedules.get:qdUmJ8erDce9becifyjz44v_S2FK9YAyLCGOCXzDPuU",
+  "body_digest": "mb2fY_nxX7Ci8iiHmQbDgFZ7e7tA_JkDt1HnUhzdzfE",
+  "signature": "XSPojMTbskPb6C1yJ_DPrCngD_AN3odCtWvzYKCS_mxwaZ4vu05sglwulheY85rHNdsLQpkNuMy7xJ7uwja2Cg"
+}

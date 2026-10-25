@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tasks.purge.reply",
+  "message_id": "fb83bb01-3db0-70fd-8bd5-523762c00f8c",
+  "idempotency_key": "tasks.purge.reply:qxZQ01Z5A6MdgFSQzF0hIQ5WvhcqymHMh5aK6pIZokQ",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7410-8000-000000000410",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "runtime_error",
+    "message": "The operation failed before any change was saved. Retry the same command."
+  },
+  "causation_id": "01928f3a-7b2c-7410-8000-000000000410",
+  "body_digest": "25aU5zH0gzrN6I_iBfcPu_c5C0kNg0b5rFg5eATH9qE",
+  "signature": "razJCr2nQp9Simb9NjjFJ4O7CzOhWcOeWXb1URkk5J80061jadr80yLwvQVFEIsgEVjbKcm2b9JQEthVCqfxDg"
+}

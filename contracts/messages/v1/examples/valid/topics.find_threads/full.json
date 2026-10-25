@@ -35,19 +35,20 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000217"
+      "id": "cmd_topics_find_threads"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "AzTSb8IUFuhi7nDPNK72JzPjxyfzNKlY9an8eppYB0n_1JMmIsQbXEcp2xmt8EfSC__eKZUTjpYhZJh6TIM1Cw"
+    "signature": "dGTbMVr5VnhXyNMSQ7BKlgizGDXuUu246dYJpxAeUXMNT8yHXcnWmARof16Ax7Isi_FcVKVk5AlGBI24K3uhAg"
   },
   "algorithm": "ed25519",
   "body": {
+    "request_id": "cmd_topics_find_threads",
     "tags": [
-      "tags_1"
+      "deployment"
     ]
   },
-  "body_digest": "MU1PVzBvzTj5hz6XVaY8FlJmMw2F5N6FdFjEqaD23R4",
-  "signature": "vJM3efYecUIL3q6QFuzvSeU92OF5M1Tz5YaNGHw-4OhsQlbjim-M21PTs8b99GiX3WUWd-TUTptjGtw_0NhFBw"
+  "body_digest": "mvXZKgbXKnpY3350wS7_9TrIOGmhua5edJPi3gDMRRg",
+  "signature": "ANOD1voKZ5zibDoT0Bv_eFGAH7CzYjKjnirg3kZY0paW7JcoGnQaUNBTeGwr_XEBVZ5gy3ujza1Vg-DvVEG9CQ"
 }

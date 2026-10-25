@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.work_sessions.disable.reply",
+  "message_id": "4cb1ddb8-57c1-71a0-aa66-97c50aa80d3f",
+  "idempotency_key": "objectives.work_sessions.disable.reply:-Ev4b0NOkx4G30PSS8Ha2ip0uVKT4mTVeCJneRCS9jQ",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.f6ffa5f7-da79-7f1f-9ffa-eeaf7ab8b446",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "record_busy",
+    "retry_at": "2026-10-23T04:30:00.000Z",
+    "message": "Another request is writing the record; retry at the supplied time."
+  },
+  "causation_id": "f6ffa5f7-da79-7f1f-9ffa-eeaf7ab8b446",
+  "body_digest": "lmHF5CIL8Ip9wLCTKMEuXlaXQqxcS3TGRAgiOHlESSY",
+  "signature": "GBpY0-4D3vTFBCFAv_l4kOBOeVCYXEg1dzunk_Biq1QRmngbVyJ98W8y1jNFjm-k-BD4nvhB4So1QcYjtQVRCQ"
+}

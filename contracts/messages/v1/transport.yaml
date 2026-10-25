@@ -18,7 +18,7 @@ audience_targets:
   agent: [lead_host, worker_host]
   pool: [lead_host, worker_host]
   edge: [gateway, edge_adapter]   # an edge is a gateway route or an outside-agent adapter
-  team_services: [team_services]
+  team_services: [team_services, scheduler]   # the scheduler answers only run_context.sign, which signs a run's token
   team: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
   installation_service: [installation_authority]
 
@@ -50,7 +50,7 @@ classes:
       - work.team
     max_expiry_seconds: 604800
   request_reply:
-    description: answered at once or "no responders"; mutations carry an idempotency key and the receiver stores the outcome before replying
+    description: answered at once or "no responders"; changes carry an idempotency key, and the receiver stores the final outcome with the change before replying, except outcomes that ask for a retry (README, "Stored outcomes")
     between_installations: false
     addresses:
       - svc.team.{operation}

@@ -1,0 +1,38 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.merge.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000503d",
+  "idempotency_key": "knowledge.merge.reply:Hi37DH-S3NcF8c2rLrMV4DXCVGQUWIpsqCNXyqdqNtc",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7494-8000-000000000494",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "change_conflict",
+    "message": "Another request changed this page. Review the conflict brief.",
+    "case_id": "conflict_kb_31",
+    "brief": {
+      "sha256": "vhbMYT3Ig7b48nmMSVPQYC2W5O4_nrGZEXkcNB-4VZA",
+      "size": 42,
+      "media_type": "text/plain"
+    }
+  },
+  "causation_id": "01928f3a-7b2c-7494-8000-000000000494",
+  "body_digest": "5nKTXb9GxxvnLrC1fumRHebMK-2qwB8C7SVdzS6O7D0",
+  "signature": "BjMPbJBeGW79MNmGatV0lVXypZiljuFWLJUCcYP_kqjnUGOO0gqrLnUs1jIBSIoAPM-UmRixyOUdkTltuVkEAg"
+}

@@ -35,19 +35,20 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000136"
+      "id": "kb_read_full"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "LUlRaJZTprW8Vi1OD7jdHsLMzy11qYm0nhLPuD_T3qOQ6mfws-a31-RgCfxV8OzK7MxlGKbSfzC_9pkoNnaxDQ"
+    "signature": "sXtWKvDaWhxZX3LOtAMknB9LUlr2geeo6Sa2lnt1YgKxIpa8uKiuAm3az3phPmsqxxlra34_hrAQdAJtZ7SmBw"
   },
   "algorithm": "ed25519",
   "body": {
+    "request_id": "kb_read_full",
     "space": "team",
-    "page": "Example page",
-    "revision": 3
+    "page": "deployment-guide",
+    "revision": 2
   },
-  "body_digest": "pqFnXn8yf9CMiSMBCmwt49ZOEsFDiiNyen4RgSqL0W0",
-  "signature": "YdnFV4MBNP3GAMYd7p7c8KciKCq15C1C3EijjNHUc7f7q9FC9l2b445cuSAzxY1zznweJherEzrc-ZIoFughCA"
+  "body_digest": "N7k9_P9rIsNvkQTZHWCBaOpoMjnxPG_RBR8nZR3rB-A",
+  "signature": "K3-79XQmCXI8pdo23OVNuRItXOlRbBiy7Tv-b1uE6igNsI1lOt34m_mHhvAHylwMHjVtEVDdKKHg7PcWW8HUDg"
 }

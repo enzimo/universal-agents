@@ -1,0 +1,72 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.start_task",
+  "message_id": "c7f926eb-0c8d-7cc8-b1a5-35684b7ffc82",
+  "idempotency_key": "objectives.start_task:uP4hSuXncBBVT_LgBwtjW3xsfvpt6fknymVce50HF3o",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.objectives.start_task",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7154-9000-000000000154",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "6rG0DjDSHQrjmwz_useUIS7iIPZRmOlgpf0OjA58FlrkQQVynbxDCAWq6-NIwa1yz3fF6wjU8pU4Rsyn8I2DAw"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_objectives_start_task_long_text",
+    "objective_id": "objective_dependency_watch",
+    "work_brief": {
+      "type": "blob",
+      "ref": {
+        "sha256": "np1_lx71dX9B9azhvSVKiw2n93aCJBKYM4c0AcsNGqI",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "current_focus": {
+      "type": "blob",
+      "ref": {
+        "sha256": "CNM3qiNAQ4_IejUzNMdE2UGoMlVUbOVrUm1u8KkIYT8",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "source_task_id": "task_root_7f",
+    "user_visible": true
+  },
+  "body_digest": "w4Wo4BCRQxfJHvGnvvhcS_wCi-V7Ht3nB7fOiZkoKFg",
+  "signature": "1qIBtcL3Ladk4fTFliFREPg7sxAM7ez85OL5hVA0ZV0FJwKh9AeYeibVb943JxC-RV8DDB3m5WsUXNOQNNUgDg"
+}

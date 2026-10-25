@@ -31,12 +31,13 @@
         "problem_statement": "Example problem statement",
         "owner_agent_id": "token_id_1",
         "finished_at": "2026-10-22T04:30:00.000Z",
-        "answer": "Example answer"
+        "answer": "Example answer",
+        "owner_agent_name": "Researcher"
       }
     ],
     "total": 3
   },
   "causation_id": "01928f3a-7b2c-740a-8000-00000000040a",
-  "body_digest": "q05TeDdFGRcCX21p0kX7dQF_NeKCg15V4JjY0jFfinM",
-  "signature": "XhIVrnmreIQ6A91TpZjWc5m9PGSp7jNbhP_1Wjl31tnnoEEPBdedLQtlfF43VpIyPiHNu1Xn6grMQXytD977DQ"
+  "body_digest": "8ryoZFmnHcZCS53XeQhO7HdAha4qgwP2ULKZK09c6lQ",
+  "signature": "-y54Ypf_m-ViqLTNIOzcong5A-1_fw0MzIbllXR5XNey_E5nNQFxeQ818iZ-TQdzppWpDCN3UHlRiaS_DMicBA"
 }

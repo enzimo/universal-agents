@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.merge",
   "message_id": "01928f3a-7b2c-7494-8000-000000000494",
-  "idempotency_key": "knowledge.merge:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "knowledge.merge:nw739_Jsk3SpZ770B5j_wV5ExE7WeiWW9cPqQkN62eg",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -40,24 +40,24 @@
       "id": "task_root_7f"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "CuAJltcGcmAK3C3pZItpg-tvYJltiUZwtYukbga1LruGj3qEJsSmGAx8WxlWTkForOJBTAeYIqJtfhL-gbBABw"
+    "signature": "QKWD3Uz4XVHnh4UXXOJAxWwC6yKblAxxS7HOkWUZLsOA_l3qc-4Hmb82h3swM9WmVxFtV2jQHH3EUEd1y2hRAw"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
-    "space": "team",
-    "page": "Example page",
-    "seen_version": "v3",
-    "into": "Example into",
-    "target_seen_version": "2",
+    "request_id": "kb_merge_full",
+    "space": "personal",
+    "page": "release-notes",
+    "seen_version": "1",
+    "into": "deployment-guide",
+    "target_seen_version": "3",
     "content": {
       "type": "inline",
-      "text": "Run the checks, then deploy the reviewed version."
+      "text": "Review the release checklist, then run the deployment. See [[release-checklist]]."
     },
     "confirm_review": false
   },
-  "body_digest": "YKcJGLVlnQ39oqQqWuIXwZt0ReXHLWnCnAuwHg_6Du8",
-  "signature": "-kpnf7fG4SQ1OrLC12Wipfd2MHhg8qf1iYisjWKaWTnhv1sICbezHekyt1mjT4IXR6vgbcueiZwyWYJaADCbDQ"
+  "body_digest": "oTK5LxZU1AfvndWP-t1YTQHGrqm7sOeFcjvNJy7GWIw",
+  "signature": "lEycbvjTQv_XB72aYyAIYHC5MXby1ctyDtV4i48TEs6e_VUzVQYjTYiyl93nKTeZZ3dBJoXT1411EBIZxvNXDA"
 }

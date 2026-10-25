@@ -1,0 +1,14 @@
+{
+  "description": "A schedules.install.reply reply with an unknown protocol 1.0 field.",
+  "refusal": "invalid_body",
+  "at": "/body/unexpected",
+  "base": "schedules.install.reply/ok.json",
+  "changes": [
+    {
+      "set": "/body/unexpected",
+      "to": true
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"schedules.install.reply\", \"message_id\": \"01928f3a-7b2c-743e-8000-00000000043e\", \"idempotency_key\": \"schedules.install.reply:roUjRR04DScKpTKxHAlHPicgKcAwBsXjOovk1Gv6ToI\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"edge\", \"id\": \"web\", \"runtime\": \"gateway-1\"}, \"subject\": \"_INBOX.gateway-1.01928f3a-7b2c-743d-8000-00000000043d\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"outcome\": \"ok\", \"state\": \"installed\", \"schedule_id\": \"schedule_id_1\", \"timing_revision\": 3, \"next_fire_at\": \"2026-10-23T09:00:00.000Z\", \"version\": {\"state\": \"available\", \"seen_version\": \"82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc\"}, \"unexpected\": true}, \"causation_id\": \"01928f3a-7b2c-743d-8000-00000000043d\", \"body_digest\": \"iPpcyrXXGbAMgyCVAbYypkppmCo1gRd_GIWjNMfjSwc\", \"signature\": \"mVKZ3usuyHGFKFXmcMitMSPN9R8ZQfe0Ify6m6TJ9dhPn7d__AjMMpFB7-gx3UA3rwaKhyOIGLXy4tq4R-G4Ag\"}"
+}

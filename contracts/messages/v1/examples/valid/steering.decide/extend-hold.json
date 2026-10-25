@@ -48,12 +48,12 @@
   "body": {
     "request_id": "request_id_2",
     "person_steering_id": "person_steering_id_1",
-    "root_task_id": "root_task_id_1",
+    "root_task_id": "task_root_7f",
     "decision": {
       "type": "extend_hold",
       "until": "2026-10-22T04:40:00.000Z"
     }
   },
-  "body_digest": "FkNtz1DjAz0sGIBh6z4TVVTq2O0Fa77vD2a8f9ke0q8",
-  "signature": "meD2-PNfdXcfjglDxTrmqTd9fTwkRslc63PpNsmUiPPoPn8Ms1sCLxYMm-WaQfufV_1SZsELMoPt2-TNIavVBA"
+  "body_digest": "dS4Wor1nQK1WCSXhnmrBtCEwobUISWWSgq3eEsBTL3Y",
+  "signature": "s1POvg0ewi5q3aD3vPlv_BM6kOzoXQQM6hxAgEOiIHZ8R_9wdForWvFLjtQMUebWILKefEB60JjT-xLCrYupCA"
 }

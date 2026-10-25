@@ -1,0 +1,57 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.publish_contribution",
+  "message_id": "01928f3a-7b2c-7000-8000-0000000050b4",
+  "idempotency_key": "knowledge.publish_contribution:TkUX4fNIaiseh8c42z0tep0K4LdyC0CzQjnVnhpkOWg",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.knowledge.publish_contribution",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7000-8000-0000000050b5",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "command",
+      "id": "kb_command_0000000050b4"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "jCbnQuVK0AX5V614nsBf0GyjhhsMPCWEI536KVSLJK_IyrOb1dicFoxkMaqC63GZTyv5yhw9UtsqHst52dlhDQ"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "kb_command_0000000050b4",
+    "contribution_id": "kb_contrib_note_8a",
+    "edited": true,
+    "note": {
+      "type": "inline",
+      "text": "Check that the rollback steps match the current release."
+    }
+  },
+  "body_digest": "Q5srqqO_Tdsoe6iRbV_DesXAOnIwkZqaV7QMBn2-1QM",
+  "signature": "CQLwv-r2sR9Good0sCULJuVxIX9z_mphgCxspvHX6tfkIU_C1wxeTFr9TRuvvZcTbQB_buKbca1heWj0XvlYBw"
+}

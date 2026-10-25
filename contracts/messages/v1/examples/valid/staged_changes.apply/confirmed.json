@@ -1,0 +1,57 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "staged_changes.apply",
+  "message_id": "e95105a6-6baf-7c70-a977-0b1ac6ff3469",
+  "idempotency_key": "staged_changes.apply:8JDAyVebESjYBSvQ7wKFSeJ2Sd1GtUI5d24grElkrpk",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.staged_changes.apply",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "f09da3b4-16d7-756e-8031-da36c395d2e3",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "I81-vM5xVUfPtAiQwpzT4OxyEk6fydVy92-YYXOmsSPuysAIXdKtN7YmqjbT6VqW2crgI92RYOchGGSsKtn9CA"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "cmd_staged_changes_apply_confirmed",
+    "change_id": "runtime_settings:change_7f",
+    "seen_version": "60019de0f44235bb5b91f94a79a1ea60f2b2bded605a640fe47dec619793e7c1",
+    "reason": "Use the reviewed settings for the team's next tasks.",
+    "confirmed": true
+  },
+  "body_digest": "HkTsxR-agephYdyd_A1gN5LBaJJYHvcTRGjamzlCMiI",
+  "signature": "mste7zp7QVyZs8lHCk9ZGpB_DJ3sDmeqXsQKggKhs224LKu-H4mLagi1-HV2eSXQ5Lm3w-jYA4A-fXpxUi6wDw"
+}

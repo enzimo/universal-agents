@@ -1,0 +1,155 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.create",
+  "message_id": "01928f3a-7b2c-7e50-8000-0000000003e8",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.objectives.create",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7e50-8000-00000000044c",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "mc_ro7QJHKmxic40I7FF5nuu6CK6Fz6D56uquZqTBN0Fboz7rL5u5cKh2YixlqCLq29tbHP--3JvaCJd1cdKCw"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_01928f3a-7b2c-7e50-8000-0000000003e8",
+    "title": "Track recurring dependency checks",
+    "desired_outcome": {
+      "type": "blob",
+      "ref": {
+        "sha256": "CNM3qiNAQ4_IejUzNMdE2UGoMlVUbOVrUm1u8KkIYT8",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "horizon": "recurring",
+    "priority": "normal",
+    "success_criteria": [
+      {
+        "type": "blob",
+        "ref": {
+          "sha256": "CNM3qiNAQ4_IejUzNMdE2UGoMlVUbOVrUm1u8KkIYT8",
+          "size": 4096,
+          "media_type": "text/plain"
+        }
+      },
+      {
+        "type": "criterion",
+        "criterion_id": "criterion_tools",
+        "status": "met",
+        "description": {
+          "type": "blob",
+          "ref": {
+            "sha256": "CNM3qiNAQ4_IejUzNMdE2UGoMlVUbOVrUm1u8KkIYT8",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "evidence_summary": {
+          "type": "blob",
+          "ref": {
+            "sha256": "CNM3qiNAQ4_IejUzNMdE2UGoMlVUbOVrUm1u8KkIYT8",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "updated_at": "2026-10-20T01:02:03.000Z"
+      },
+      {
+        "type": "criterion",
+        "description": {
+          "type": "blob",
+          "ref": {
+            "sha256": "CNM3qiNAQ4_IejUzNMdE2UGoMlVUbOVrUm1u8KkIYT8",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        }
+      }
+    ],
+    "why": {
+      "type": "blob",
+      "ref": {
+        "sha256": "CNM3qiNAQ4_IejUzNMdE2UGoMlVUbOVrUm1u8KkIYT8",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "current_focus": {
+      "type": "blob",
+      "ref": {
+        "sha256": "CNM3qiNAQ4_IejUzNMdE2UGoMlVUbOVrUm1u8KkIYT8",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "progress_summary": {
+      "type": "blob",
+      "ref": {
+        "sha256": "CNM3qiNAQ4_IejUzNMdE2UGoMlVUbOVrUm1u8KkIYT8",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "completion_policy": "recurring_indefinite",
+    "requires_user_confirmation": false,
+    "creation_mode": "promote_task",
+    "task_id": "task_root_7f",
+    "constraints": [
+      {
+        "type": "blob",
+        "ref": {
+          "sha256": "CNM3qiNAQ4_IejUzNMdE2UGoMlVUbOVrUm1u8KkIYT8",
+          "size": 4096,
+          "media_type": "text/plain"
+        }
+      }
+    ],
+    "non_goals": [
+      {
+        "type": "blob",
+        "ref": {
+          "sha256": "CNM3qiNAQ4_IejUzNMdE2UGoMlVUbOVrUm1u8KkIYT8",
+          "size": 4096,
+          "media_type": "text/plain"
+        }
+      }
+    ]
+  },
+  "idempotency_key": "objectives.create:fLfQikeEJNpFDzwjlm43TVIglmuaPtS026llkl7R9wA",
+  "body_digest": "2m0XcFBOtsdhW07OjvqdcQTKNDobhlJJR6DcbVcNjJE",
+  "signature": "rZ-Vtm3jKvrv6M9Ts4pBzexI8omfB2f5InPfmgV4UJ-ggOl8SANc81FJUPAHQK8Z6bfsQhJaNLwyYvHoM3YnCw"
+}

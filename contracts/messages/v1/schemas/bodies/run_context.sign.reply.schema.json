@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/run_context.sign.reply.schema.json",
   "title": "run_context.sign reply",
-  "description": "A worker running a scheduled job asks for the run's authority token.",
+  "description": "The scheduler's answer to a worker running a scheduled job: the run's authority token, or why it signed none.",
   "oneOf": [
     {
       "type": "object",
@@ -11,15 +11,18 @@
           "const": "ok"
         },
         "system_work": {
+          "description": "True exactly when the token names no person: the schedule works for no person (system work).",
           "type": "boolean"
         },
         "authority": {
+          "description": "The run's authority token, signed by the scheduler with the run's schedule_id.",
           "$ref": "../common.schema.json#/$defs/authority_token"
         }
       },
       "required": [
         "outcome",
-        "system_work"
+        "system_work",
+        "authority"
       ],
       "additionalProperties": false
     },

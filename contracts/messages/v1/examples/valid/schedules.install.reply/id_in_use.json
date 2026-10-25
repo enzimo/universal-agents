@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.install.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a044",
+  "idempotency_key": "schedules.install.reply:roUjRR04DScKpTKxHAlHPicgKcAwBsXjOovk1Gv6ToI",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-743d-8000-00000000043d",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "id_in_use",
+    "message": "A schedule already uses that id."
+  },
+  "causation_id": "01928f3a-7b2c-743d-8000-00000000043d",
+  "body_digest": "63E-iK1lIIy9RqDYDihiLLlsx4DbOkWVdRcqR1MjLJ8",
+  "signature": "LXrtM8MElv7o0hYqyMJTTbftK3K1SmClLmuSm7jRLNI6bSqcM0AMOgC4M5HZBB1DNCvIPY_tHhKxPmQRVQr8DQ"
+}

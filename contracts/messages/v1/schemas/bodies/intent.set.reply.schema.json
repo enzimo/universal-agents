@@ -27,14 +27,15 @@
           "const": "changed_since_read"
         },
         "current_version": {
-          "$ref": "../common.schema.json#/$defs/record_version"
+          "$ref": "../common.schema.json#/$defs/count"
         },
         "message": {
           "$ref": "../common.schema.json#/$defs/short_text"
         }
       },
       "required": [
-        "outcome"
+        "outcome",
+        "current_version"
       ],
       "additionalProperties": false
     },

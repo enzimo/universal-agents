@@ -28,7 +28,7 @@ from pydantic import ValidationError
 from referencing import Registry
 from referencing.jsonschema import DRAFT202012
 
-from custom_messages.enums import ChangeRefusal
+from custom_messages.enums import ChangeRecordKind, ChangeRefusal
 from custom_messages.wire import canonical, frame as wire_frame, kinds, models, topology
 from custom_messages.wire.canonical import CanonicalJsonError
 from custom_messages.wire.frame import (
@@ -108,6 +108,16 @@ def body_schema_file(kind: str) -> str:
     return REGISTRY["kinds"][kind.removesuffix(".reply")]["reply"]["body"]
 
 
+def checked(kind: str, body: dict):
+    """A workflow body survives both language-neutral validation and a generated-model round trip."""
+
+    validator(body_schema_file(kind)).validate(body)
+    adapter, _ = body_model(kind)
+    result = adapter.validate_python(body)
+    assert adapter.dump_python(result, mode="json", exclude_none=True, by_alias=True) == body
+    return result
+
+
 def valid_examples() -> list[Path]:
     return sorted((EXAMPLES / "valid").rglob("*.json"))
 
@@ -166,19 +176,10 @@ def test_generated_files_are_current() -> None:
     assert EXPORT.stale(EXPORT.render()) == []
 
 
-@pytest.mark.parametrize("kind", ["tasks.steer", "conflicts.decide"])
-def test_export_refuses_retry_keys_with_missing_inputs(kind: str) -> None:
-    registry = deepcopy(REGISTRY)
-    registry["kinds"][kind]["idempotency"] = ["/body/undefined_command_id"]
-    with pytest.raises(EXPORT.ContractError, match="undefined_command_id"):
-        EXPORT.check_registry(registry, EXPORT.load_yaml("transport.yaml"),
-                              EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
-
-
 def test_export_refuses_a_retry_key_based_on_an_optional_field() -> None:
     registry = deepcopy(REGISTRY)
     registry["kinds"]["tasks.steer"]["idempotency"] = ["/body/replied_message/author"]
-    with pytest.raises(EXPORT.ContractError, match="replied_message"):
+    with pytest.raises(EXPORT.ContractError, match="is not supplied by every request"):
         EXPORT.check_registry(registry, EXPORT.load_yaml("transport.yaml"),
                               EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
 
@@ -294,6 +295,28 @@ def test_change_refusals_are_the_stores_refusal_codes() -> None:
 
 
 TRANSPORT = json.loads((CONTRACT / "generated" / "transport.json").read_text(encoding="utf-8"))
+CONTRACT_SCHEMAS = EXPORT.load_schemas()
+
+
+def test_covered_record_kinds_are_the_stores_record_kinds() -> None:
+    assert kinds.COVERED_RECORD_KINDS == tuple(REGISTRY["covered_record_kinds"])
+    assert kinds.COVERED_RECORD_KINDS == tuple(record_kind.value for record_kind in ChangeRecordKind)
+
+
+def test_outcomes_that_ask_for_a_retry_are_not_stored() -> None:
+    """README, "Stored outcomes": a retry with the same key is decided again after these outcomes.
+
+    Steering sent while its request waits gets not_started and is sent again under the same
+    steering id (0.9.8's held guidance); a staged change waits for the person's decision.
+    """
+
+    assert kinds.RETRY_OUTCOMES == frozenset(REGISTRY["retry_outcomes"])
+    assert "not_started" in kinds.KINDS["tasks.steer"].reply_errors and "not_started" in kinds.RETRY_OUTCOMES
+    assert "waiting" in kinds.KINDS["staged_changes.apply"].reply_errors and "waiting" in kinds.RETRY_OUTCOMES
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["retry_outcomes"].append("waiting")
+    with pytest.raises(EXPORT.ContractError, match="retry_outcomes lists distinct snake_case names"):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), CONTRACT_SCHEMAS)
 
 
 @pytest.mark.parametrize(
@@ -452,6 +475,92 @@ def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change
         EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
 
 
+def reply_variant(schemas: dict, kind: str, outcome: str) -> dict:
+    """The alternative of a kind's reply schema with this outcome."""
+
+    reply = schemas[REGISTRY["kinds"][kind]["reply"]["body"]]
+    return next(variant for variant in reply["oneOf"] if variant["properties"]["outcome"]["const"] == outcome)
+
+
+def drop_reply_outcome(registry: dict, schemas: dict, kind: str, outcome: str) -> None:
+    """Remove an outcome from both the registry's error list and the reply schema, so the two still agree."""
+
+    registry["kinds"][kind]["reply"]["errors"].remove(outcome)
+    schemas[registry["kinds"][kind]["reply"]["body"]]["oneOf"].remove(reply_variant(schemas, kind, outcome))
+
+
+def covered(registry: dict, kind: str, **value) -> None:
+    registry["kinds"][kind]["covered_change"] = value
+
+
+COVERED_CHANGE_BREAKS = {
+    "unknown record kind": (lambda r, s: covered(r, "memory.replace", record_kind="memory",
+                                                  seen_version="required_for_request_writers"),
+                            "covered_change is {record_kind, seen_version}"),
+    "unknown version rule": (lambda r, s: covered(r, "memory.replace", record_kind="memory_fact", seen_version="sometimes"),
+                             "covered_change is {record_kind, seen_version}"),
+    "not a mapping": (lambda r, s: r["kinds"]["memory.replace"].update(covered_change="memory_fact"),
+                      "covered_change is {record_kind, seen_version}"),
+    "an unknown field": (lambda r, s: covered(r, "memory.undo", record_kind="memory_fact", seen_version="none",
+                                              checked=True),
+                         "covered_change is {record_kind, seen_version}"),
+    "record kinds repeated": (lambda r, s: r["covered_record_kinds"].append("schedule"), "lists distinct snake_case names"),
+    "a durable kind": (lambda r, s: covered(r, "task.stop", record_kind="schedule", seen_version="none"),
+                       "only request/reply operations"),
+    "required but the body may leave it out": (lambda r, s: s["bodies/schedules.pause.schema.json"]["required"].remove("seen_version"),
+                                               "seen_version required needs a body whose seen_version is required, not optional"),
+    "for request writers but the body requires it": (lambda r, s: s["bodies/memory.replace.schema.json"]["required"].append("seen_version"),
+                                                     "is optional, not required"),
+    "optional but required": (lambda r, s: covered(r, "knowledge.write", record_kind="knowledge_page", seen_version="required"),
+                              "is required, not optional"),
+    "none but the body has it": (lambda r, s: s["bodies/memory.create.schema.json"]["properties"].update(
+        seen_version={"$ref": "../common.schema.json#/$defs/record_version"}), "is absent, not optional"),
+    "the current version is optional": (lambda r, s: reply_variant(s, "heartbeat_items.update", "changed_since_read")["required"].remove(
+        "current_version"), "changed_since_read with a required current_version"),
+    "no stale refusal": (lambda r, s: drop_reply_outcome(r, s, "objectives.pause", "changed_since_read"),
+                         "changed_since_read with a required current_version"),
+    "an agent's missing version has no refusal": (lambda r, s: drop_reply_outcome(r, s, "memory.delete", "invalid_request"),
+                                                  "so its reply offers invalid_request"),
+    "a covered create left unmarked": (lambda r, s: r["kinds"]["memory.create"].pop("covered_change"),
+                                       "which only covered changes give"),
+    "a key made from the message id": (lambda r, s: r["kinds"]["memory.replace"].update(idempotency=["/message_id"]),
+                                       "/message_id changes with every frame"),
+    "a key made from the issue time": (lambda r, s: r["kinds"]["schedules.pause"].update(idempotency=["/body/request_id", "/issued_at"]),
+                                       "/issued_at changes with every frame"),
+}
+
+
+@pytest.mark.parametrize(("change", "problem"), COVERED_CHANGE_BREAKS.values(), ids=COVERED_CHANGE_BREAKS.keys())
+def test_the_generator_refuses_covered_changes_that_disagree_with_their_schemas(change, problem: str) -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    schemas = copy.deepcopy(CONTRACT_SCHEMAS)
+    change(registry, schemas)
+    with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), schemas)
+
+
+def rename_ok(registry: dict, schemas: dict) -> None:
+    reply_variant(schemas, "tasks.remove", "ok")["properties"]["outcome"]["const"] = "done"
+    registry["kinds"]["tasks.remove"]["reply"]["errors"].append("done")
+
+
+REPLY_ERROR_BREAKS = {
+    "a code the reply schema lacks": lambda r, s: r["kinds"]["knowledge.freeze"]["reply"]["errors"].append("page_exists"),
+    "an outcome the list leaves out": lambda r, s: r["kinds"]["tasks.remove"]["reply"]["errors"].remove("not_found"),
+    "a code listed twice": lambda r, s: r["kinds"]["tasks.remove"]["reply"]["errors"].append("not_found"),
+    "a reply without ok": rename_ok,
+}
+
+
+@pytest.mark.parametrize("change", REPLY_ERROR_BREAKS.values(), ids=REPLY_ERROR_BREAKS.keys())
+def test_reply_errors_are_the_reply_schemas_outcomes_other_than_ok(change) -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    schemas = copy.deepcopy(CONTRACT_SCHEMAS)
+    change(registry, schemas)
+    with pytest.raises(EXPORT.ContractError, match="reply errors .* must be the reply schema's outcomes|one of them ok"):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), schemas)
+
+
 @pytest.mark.parametrize(("kind", "role", "edge", "given_by_person", "allowed"), [
     ("task.result", "lead", "person", False, True),     # the lead answers the person (forwarded-as-is)
     ("task.question", "lead", "person", False, True),   # the lead asks the person (change-conflict)
@@ -469,11 +578,136 @@ def test_edges_follow_the_kind_and_the_senders_role(kind: str, role: str, edge: 
     assert topology.edge_allowed(kind, "hub_and_spoke", role, edge, given_by_person=given_by_person) is allowed
 
 
+@pytest.mark.parametrize("kind", ["agent.resume", "agent.exit", "agent.status", "task.probe"])
+def test_a_kind_agent_hosts_send_to_an_agent_names_its_edges(kind: str) -> None:
+    """The lead sends these to an agent's address, like agent.pause; none would skip the receiver's edge check."""
+
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    assert registry["kinds"][kind]["topology_edge"] == "down"
+    registry["kinds"][kind]["topology_edge"] = "none"
+    with pytest.raises(EXPORT.ContractError, match="so it is a topology check"):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+def test_a_lead_control_sent_to_several_agents_gets_one_key_per_agent() -> None:
+    """One request id resumes two agents; a key without the audience would answer the second from the first's outcome."""
+
+    for kind in ("agent.pause", "agent.resume", "agent.exit"):
+        frames = [json.loads(path.read_text(encoding="utf-8")) for path in sorted((EXAMPLES / "valid" / kind).glob("*.json"))]
+        assert len({frame["body"]["request_id"] for frame in frames}) == 1, kind
+        assert len({frame["audience"]["id"] for frame in frames}) == len(frames) > 1, kind
+        assert len({frame["idempotency_key"] for frame in frames}) == len(frames), kind
+
+
 def test_a_token_binding_must_name_a_field_every_body_carries() -> None:
     registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
     registry["kinds"]["tool.setup.request"]["authority_binding"] = {"type": "root_task", "at": "/body/delivery_ref"}
     with pytest.raises(EXPORT.ContractError, match="names no field every body carries"):
         EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+GATEWAY_COMMAND = {"type": "command", "at": "/body/request_id", "senders": ["gateway"]}
+
+
+@pytest.mark.parametrize(("kind", "binding", "problem"), [
+    ("tasks.cancel", {"type": "command"}, "give its binding `at`"),                       # a command names its id
+    ("tasks.cancel", {"type": ["command", "root_task"]}, "is a binding"),                 # one type per binding
+    ("tasks.cancel", {"type": "person", "at": "/body/request_id"}, "is a binding"),       # an unknown type
+    ("objectives.create", [{"type": "root_task"}, {"type": "root_task"}], "each with its own type"),
+    ("memory.delete", [dict(GATEWAY_COMMAND, senders=["scheduler"]), {"type": "root_task"}], "some of the kind's senders"),
+    ("memory.delete", [GATEWAY_COMMAND, {"type": "root_task", "senders": ["lead_host"]}], "worker_host sends it"),
+])
+def test_token_bindings_name_known_types_and_who_presents_them(kind: str, binding, problem: str) -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["kinds"][kind]["authority_binding"] = binding
+    with pytest.raises(EXPORT.ContractError, match=problem):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+def test_a_command_token_lasts_no_longer_than_other_tokens() -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["command_token_max_seconds"] = registry["authority_token_max_seconds"] + 1
+    with pytest.raises(EXPORT.ContractError, match="command_token_max_seconds"):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+def role_permissions(role: str) -> dict:
+    return json.loads((CONTRACT / "generated" / "permissions" / f"{role}.json").read_text(encoding="utf-8"))
+
+
+def test_agent_queues_and_debug_settings_are_reached_only_through_the_team_services() -> None:
+    """Plan 13A.4 and 11A.10: the gateway asks the team services, which pass the command on to the agent's host."""
+
+    relayed = ("tasks.list", "tasks.list_finished", "tasks.remove", "tasks.purge", "debug.dump")
+    to_agents = {f"ua.v1.{{team}}.{{self}}.ctl.agent.*.{operation}" for operation in relayed}
+    to_services = {f"ua.v1.{{team}}.{{self}}.svc.team.{operation}" for operation in relayed}
+    gateway, services = role_permissions("gateway"), role_permissions("team_services")
+    assert to_services <= set(gateway["publish"]) and not to_agents & set(gateway["publish"])
+    assert to_agents <= set(services["publish"]) and not to_services & set(services["publish"])
+    for host in ("lead_host", "worker_host"):
+        assert "ua.v1.{team}.*.ctl.agent.{agent}.debug.dump" in role_permissions(host)["subscribe"]
+
+
+def test_the_scheduler_answers_only_run_context_sign_and_reads_no_copies() -> None:
+    """Only a scheduler signs a run's token (plan 13A.10); serving svc.team for it gives it nothing else."""
+
+    scheduler = role_permissions("scheduler")
+    assert scheduler["subscribe"] == ["_INBOX.{self}.>", "ua.v1.{team}.*.svc.team.run_context.sign"]
+    assert not [subject for subject in scheduler["publish"] if subject.startswith("$JS.")]
+    assert "ua.v1.{team}.*.svc.team.run_context.sign" not in role_permissions("team_services")["subscribe"]
+
+
+def carried_tokens(value, at: str):
+    """The authority tokens a body carries, with their JSON pointers."""
+
+    if isinstance(value, dict):
+        if {"token_id", "bound_to", "signature"} <= set(value):
+            yield at, value
+        for name, item in value.items():
+            yield from carried_tokens(item, f"{at}/{name}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from carried_tokens(item, f"{at}/{index}")
+
+
+def test_every_token_an_example_body_carries_verifies() -> None:
+    """A token in a body (the scheduler's run token) passes the receivers' own checks of a token.
+
+    Its signer's certificate and role, the person or schedule it names, its signature
+    and its lifetime, at the time the frame carrying it was issued.
+    """
+
+    trust = fixtures.trust_store()
+    checked = []
+    for path in valid_examples():
+        frame = json.loads(path.read_text(encoding="utf-8"))
+        for at, token in carried_tokens(frame["body"], "/body"):
+            verified = wire_frame.verify_authority_token(models.AuthorityToken.model_validate(token), token, trust,
+                                                         valid_at=parse_timestamp(frame["issued_at"]), at=at)
+            checked.append((path.parent.name, verified.certificate.runtime))
+    assert ("run_context.sign.reply", "scheduler-1") in checked, checked
+
+
+def test_a_run_token_names_no_person_exactly_when_the_run_is_system_work() -> None:
+    answers = [json.loads(path.read_text(encoding="utf-8"))["body"]
+               for path in (EXAMPLES / "valid" / "run_context.sign.reply").glob("*.json")]
+    signed = [body for body in answers if body["outcome"] == "ok"]
+    assert {body["system_work"] for body in signed} == {True, False}
+    assert all(body["system_work"] == ("person" not in body["authority"]) for body in signed)
+
+
+def test_each_example_command_has_its_own_token() -> None:
+    """Plan section 8: a command token is bound to one command; only the team services' relay carries it again."""
+
+    uses: dict[str, list] = {}
+    for path in valid_examples():
+        frame = json.loads(path.read_text(encoding="utf-8"))
+        token = frame.get("authority")
+        if token is not None and token["bound_to"]["type"] == "command":
+            uses.setdefault(token["token_id"], []).append((frame["kind"], token))
+    assert uses
+    for token_id, carried in uses.items():
+        assert all(use == carried[0] for use in carried), token_id
 
 
 def test_every_reply_example_names_exactly_one_request() -> None:
@@ -504,8 +738,8 @@ def variant_values(file: str, node: dict, path: str, found: dict, depth: int = 0
     while "$ref" in node:
         file, fragment = RESOLVER.resolve(file, node["$ref"])
         node = RESOLVER.node(file, fragment)
-    if depth > 8:
-        return
+    if depth > 32:
+        raise AssertionError(f"{file}{path}: schema nesting exceeds the frame limit; example coverage cannot skip it")
     if "oneOf" in node:
         key = EXPORT.discriminator(file, "", node)
         found.setdefault(f"{path}.{key}", set()).update(variant["properties"][key]["const"] for variant in node["oneOf"])
@@ -528,9 +762,14 @@ def example_values(value, path: str, wanted: dict, seen: dict) -> None:
             example_values(item, path + "[]", wanted, seen)
 
 
-@pytest.mark.parametrize("kind", sorted(REGISTRY["kinds"]))
+@pytest.mark.parametrize("kind", sorted([
+    *REGISTRY["kinds"],
+    *(f"{name}.reply" for name, entry in REGISTRY["kinds"].items() if "reply" in entry),
+]))
 def test_every_variant_of_a_body_has_a_valid_example(kind: str) -> None:
-    file = REGISTRY["kinds"][kind]["body"]
+    """Request and reply alternatives both belong to the shared conformance corpus."""
+
+    file = body_schema_file(kind)
     wanted: dict = {}
     variant_values(file, json.loads((CONTRACT / "schemas" / file).read_text(encoding="utf-8")), "", wanted)
     seen: dict = {}

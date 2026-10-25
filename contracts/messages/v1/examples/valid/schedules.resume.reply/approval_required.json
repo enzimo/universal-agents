@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "schedules.resume.reply",
-  "message_id": "01928f3a-7b2c-7436-8000-000000000436",
-  "idempotency_key": "schedules.resume.reply:wa9p2UTpy5EP4nDblFEWMiFqyafLmNPHP5hBvb2mbb0",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a066",
+  "idempotency_key": "schedules.resume.reply:-Bg6BPbYqd8rO9LbsBkn2c1Y7jt4ghq914iG6kF8HNg",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -24,10 +24,10 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "approval_required",
-    "change_id": "change_id_1",
-    "message": "Example short text"
+    "message": "A person must approve this protected schedule change.",
+    "change_id": "change_review_policy"
   },
   "causation_id": "01928f3a-7b2c-7434-8000-000000000434",
-  "body_digest": "MGAgr4FoR1ZarCEC_dvtzL30YRUyWPjcsBq6NFGlQlE",
-  "signature": "Jf7o7h9OAW0D80WdValyw0QkawSnP12N8vjc3Z1OSWwg2p7FU4eePOBlcnDLXuCVT9wmBAxfbnsdcFvQohRHAQ"
+  "body_digest": "C5yQfZrFlq-Dg3-Rwt4kib0p4izDDObhypuMHRR3Lhc",
+  "signature": "Lq-xkXQ8NvHJFjayWJtkwBdnh7ZAMwqx0nya6N-321MWnCfVi-IrSn4_jlSPpUFCDfocvzMVKyUrYLqpImxvCg"
 }

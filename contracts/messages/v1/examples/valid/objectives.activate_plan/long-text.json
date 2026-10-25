@@ -1,0 +1,83 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.activate_plan",
+  "message_id": "ccf08064-d8bc-78f0-8435-d10427083964",
+  "idempotency_key": "objectives.activate_plan:5HQbwXvW17R6S1jojYm_21LPhCsnic_ch_kwMY2denM",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.objectives.activate_plan",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7154-9000-000000000154",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "6rG0DjDSHQrjmwz_useUIS7iIPZRmOlgpf0OjA58FlrkQQVynbxDCAWq6-NIwa1yz3fF6wjU8pU4Rsyn8I2DAw"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_objectives_activate_plan_long_text",
+    "task_id": "task_root_7f",
+    "steps": [
+      {
+        "title": {
+          "type": "blob",
+          "ref": {
+            "sha256": "5oObVkPi5hruzw5eoXE-FlAOVhX5tmejfPw7EVDuh18",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "objective": {
+          "type": "blob",
+          "ref": {
+            "sha256": "iTwTrMMn6XDmytOTUj-xpq8sbWcy2xo5faGz5fLMpnE",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "rationale": {
+          "type": "blob",
+          "ref": {
+            "sha256": "5vr8d1nNLl31cvDu4zarjlDwvePZln9_E5fX-SGcS1Q",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        }
+      }
+    ],
+    "final_review": true
+  },
+  "body_digest": "8w8zzfoU6VjDt-rfgY1W-MdBqEDIjbrSI1Ci2y8XV80",
+  "signature": "1Uj6M9KC1Sr02ERDBXzHOOML9PP36-43AIq4GD0ZCf9c5Yi-cvAHx9AzqjWDQdw9T8qaALLY0Pxd1gky8yr4Dw"
+}

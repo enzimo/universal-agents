@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.resolve_note",
   "message_id": "01928f3a-7b2c-748b-8000-00000000048b",
-  "idempotency_key": "knowledge.resolve_note:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "knowledge.resolve_note:FxXDVxlCY0CmZPatLdBkYe-geDsZ4T79aIV2oHUjcRU",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -40,19 +40,16 @@
       "id": "task_root_7f"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "19oSLDocbgMpX5gmsh3FTqUC07TfYG60ojEuvnA6FYEX1w0wPxkdetbfanxkRtkPWZopKc9MRjK9pot9V3iaDg"
+    "signature": "q77YcZ4kmgpSTrPi162LA68BiLrpvjOJQmHZDxiHIID9DnleEGt1wfSSjGfhXw9xTaHFJd9Ze8m1U_E9Y4K6Cw"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
-    "space": "team",
-    "page": "Example page",
-    "seen_version": "v3",
-    "note_id": "note_id_1",
+    "request_id": "kb_resolve_note_full",
+    "note_id": "kb_note_01",
     "merged": true
   },
-  "body_digest": "51n1S0YCpX3kVIZhB7_d40v_e5ctphCUhTzDjxOWpfo",
-  "signature": "uh-Fzl3s907PLBbqqyQvI3zNHrmI7ocrwsAhB43aNWFWR0PG0nr_aTeo5SZ7wAHy8mlCp3BdQN2iG6dlzs9HAg"
+  "body_digest": "0ZxqwbhvpMoaGrXXH4ndknPPsEY3tZ1uuiWnqZwiaqM",
+  "signature": "ywq74dmQgBI2sGqW9gL0rH21_NEsGbmH3XfqDRwu-oep1ECd4-dLGX_InP09tZa60qm-AnKiLXSwnBqYxNdsDg"
 }

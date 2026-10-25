@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "heartbeat_items.remove.reply",
+  "message_id": "48bf0d05-3fd9-75e2-a72c-0fed8140a339",
+  "idempotency_key": "heartbeat_items.remove.reply:BhZgvvUyJx4zT27lSTnRP7-OBtL9MDLelMsBA1j1p2A",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.753e05ec-0c1c-7f46-9537-a43ec306cc6b",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "objective_link_refused",
+    "message": "The Objective is unavailable to the person this task works for."
+  },
+  "causation_id": "753e05ec-0c1c-7f46-9537-a43ec306cc6b",
+  "body_digest": "MzcjwVV2sj3TXDCgjaKXXgACuolukd_9r6_qwQW6K14",
+  "signature": "2zTrG4dWlEX5bF9fpYAZOlIKFr2qogpSMmFEX5b3jnZ9Zu_Yp83uSB_8cIiCDhSn0wtX5uk0rZgf-HE4pv7uAw"
+}
