@@ -1,0 +1,24 @@
+{
+  "description": "The team services host is named as the writer of an agent record, which only agent hosts sign, but the signature is still the lead host's.",
+  "refusal": "bad_signature",
+  "also": [
+    "wrong_issuer"
+  ],
+  "at": "/signature",
+  "base": "agent/lead-busy.json",
+  "changes": [
+    {
+      "set": "/writer",
+      "to": {
+        "type": "host",
+        "installation": "install_example",
+        "runtime": "team-services-1",
+        "membership_epoch": 2,
+        "key_id": "test-services-key-1"
+      }
+    }
+  ],
+  "signing": "before",
+  "context": {},
+  "document_text": "{\"record\": \"agent\", \"protocol\": \"1.0-pre\", \"key\": \"team_example.lead\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"key_id\": \"test-services-key-1\"}, \"sequence\": 12, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"body\": {\"team\": \"team_example\", \"agent\": \"lead\", \"agent_type\": \"TeamArchitect\", \"session\": \"session_7\", \"state\": \"busy\", \"accepting_work\": true, \"since\": \"2026-10-22T04:29:00.000Z\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"VV93gFoPmHei-4IBdjEAth19XWv_vIcmQyYp0Zi1zyg\", \"signature\": \"ii-8Tlhgm6eh2LkovclnDtfsuUEBHjElcaQyEVi88KkltsDUgIjphnNH1mDHB4q_wVyspf_H5K5dQnfJ2xQOBg\"}"
+}

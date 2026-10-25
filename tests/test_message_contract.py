@@ -866,6 +866,21 @@ def test_invalid_state_records_are_refused_with_their_code_at_their_place(path: 
     assert (refused.value.code, refused.value.at) == (case["refusal"], case["at"]), refused.value
 
 
+def test_state_examples_with_two_defects_name_the_later_refusal() -> None:
+    """State reports are refused in the registry's order too; each two-defect example lists the later code."""
+
+    order = list(kinds.VERIFICATION_REFUSALS)
+    pairs = set()
+    for path in (STATE_EXAMPLES / "invalid").glob("*.json"):
+        case = json.loads(path.read_text(encoding="utf-8"))
+        for later in case.get("also", []):
+            assert order.index(later) > order.index(case["refusal"]), path.stem
+            pairs.add((case["refusal"], later))
+    assert {("bad_signature", "wrong_issuer"), ("revoked", "epoch_too_old"), ("epoch_too_old", "wrong_team"),
+            ("wrong_issuer", "invalid_body"), ("wrong_team", "expired"), ("expired", "invalid_body"),
+            ("replayed", "invalid_body")} <= pairs
+
+
 def test_every_state_record_has_a_valid_example() -> None:
     trust = {json.loads(path.read_text())["record"] for path in (EXAMPLES / "trust").rglob("*.json") if path.name != "anchors.json"}
     reports = {path.parent.name for path in (STATE_EXAMPLES / "valid").rglob("*.json")}
@@ -961,6 +976,23 @@ def test_asyncapi_installation_subjects_match_the_authority_subscription(operati
     assert document["channels"][channel_id]["address"] == f"ua.v1._install.{{sender}}.svc.host.{operation}"
     authority = json.loads((CONTRACT / "generated/permissions/installation_authority.json").read_text())
     assert f"ua.v1._install.*.svc.host.{operation}" in authority["subscribe"]
+
+
+def test_a_notice_names_a_refusal_up_to_the_last_field_the_schema_knows() -> None:
+    """README, "Dead letters": an unknown field's name, which the sender chose, never reaches the notice."""
+
+    name = "dear_bob_my_password_is_hunter2"
+    stop = signed_example()
+    stop["body"][name] = 1
+    refused = refusal(fixtures.resign(stop), stop)
+    assert (refused.code, refused.at, refused.known_at) == ("invalid_body", f"/body/{name}", "/body")
+    frame = signed_example()
+    frame[name] = 1
+    refused = refusal(fixtures.resign(frame), frame)
+    assert (refused.code, refused.known_at) == ("malformed", "")
+    notice = fixtures.example_frame("dlq.notice", "bad-signature")["body"]
+    assert validator("bodies/dlq.notice.schema.json").is_valid(dict(notice, pointer="/body"))
+    assert not validator("bodies/dlq.notice.schema.json").is_valid(dict(notice, pointer="/body/Dear Bob, my password"))
 
 
 def test_dead_letter_senders_can_publish_raw_copies_under_their_own_id() -> None:

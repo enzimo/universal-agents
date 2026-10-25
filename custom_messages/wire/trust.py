@@ -48,22 +48,25 @@ from custom_messages.wire.kinds import (
     BETWEEN_INSTALLATIONS,
     CERTIFICATE_OVERLAP_SECONDS,
     CLOCK_SKEW_SECONDS,
+    INSTALLATION_SCOPE,
     KINDS,
     MAX_FRAME_BYTES,
+    PEER_SENDER_SLOT,
     PROTOCOL,
     STATE_RECORDS,
     STATE_SHAPE,
     STATE_SIGNING_DOMAIN,
 )
 from custom_messages.wire.models import State, StateWriterAuthority, StateWriterHost
-from custom_messages.wire.refusals import FrameRefused, pointer
+from custom_messages.wire.refusals import FrameRefused, refused_by
 from custom_messages.wire.spec import StateSpec, newer_minor, prune
 from custom_messages.wire.values import parse_timestamp
 
 SKEW = timedelta(seconds=CLOCK_SKEW_SECONDS)
 OVERLAP = timedelta(seconds=CERTIFICATE_OVERLAP_SECONDS)
-# Runtime ids that would read as another installation's sender slot or a system id.
-RESERVED_RUNTIME_PREFIXES = ("x-", "_")
+# Runtime ids that would read as another installation's sender slot (x-<installation>)
+# or a system id such as the installation scope (_install); transport.yaml defines both.
+RESERVED_RUNTIME_PREFIXES = (PEER_SENDER_SLOT.split("{", 1)[0], INSTALLATION_SCOPE[:1])
 # Where each trust record's body says when it ends; the record's own expiry, when it
 # has one, must say the same, so the record has one validity window.
 BODY_END = {"certificate": "expires_at", "agent_session": "ends_at", "agreement": "expires_at"}
@@ -266,13 +269,7 @@ class TrustStore:
 
         if now.tzinfo is None:
             raise ValueError("now must name its time zone")
-        record = self._checked(self._parsed(data))
-        document = record.document
-        if document.record in TRUST_RECORDS:
-            raise ValueError(f"{document.record} records vouch for keys and agents; keep them with add instead")
-        assert record.signer is not None  # state reports are host-signed (registry signer: host)
-        self._check_report_freshness(document, record, now, held)
-        return record
+        return self._checked(self._parsed(data), reading=(now, held))
 
     @staticmethod
     def _parsed(data: bytes | bytearray | memoryview) -> dict[str, Any]:
@@ -284,22 +281,6 @@ class TrustStore:
         except CanonicalJsonError as error:
             raise FrameRefused("malformed", str(error).splitlines()[0]) from error
 
-    def _check_report_freshness(self, document: State, record: VerifiedRecord, now: datetime,
-                                held: Optional[tuple[int, str]]) -> None:
-        signer = record.signer
-        assert signer is not None
-        membership, revocation = self.minimum_epochs(signer.installation, signer.runtime)
-        if signer.membership_epoch < membership or signer.revocation_epoch < revocation:
-            raise FrameRefused("epoch_too_old", "the writer's certificate is below the receiver's minimum epochs",
-                               at="/writer/membership_epoch")
-        if document.expires_at is not MISSING and now - parse_timestamp(document.expires_at) >= SKEW:
-            raise FrameRefused("expired", at="/expires_at")
-        if parse_timestamp(document.issued_at) - now > SKEW:
-            raise FrameRefused("not_yet_valid", at="/issued_at")
-        if held is not None and (document.sequence < held[0] or (document.sequence == held[0] and record.digest != held[1])):
-            raise FrameRefused("replayed", "an older record than the one the reader holds, or other content under its sequence",
-                               at="/sequence")
-
     def issued_certificate(self, raw: Mapping[str, Any]) -> HostCertificate:
         """Verify a certificate record carried in a join or renewal reply, without keeping it.
 
@@ -307,24 +288,32 @@ class TrustStore:
         signature covers. The receiver keeps it afterwards with ``add``.
         """
 
-        record = self._checked(raw)
-        if record.document.record != CERTIFICATE:
+        if raw.get("record") != CERTIFICATE:
             raise FrameRefused("invalid_body", "a join or renewal returns a certificate record", at="/record")
+        record = self._checked(raw)
         return self._certificate(record.document, record.body)
 
-    def _checked(self, raw: Mapping[str, Any]) -> VerifiedRecord:
-        """A parsed record's form, signer, signature, digest and record rules (``verify`` without parsing).
+    def _checked(self, raw: Mapping[str, Any], reading: Optional[tuple[datetime, Optional[tuple[int, str]]]] = None
+                 ) -> VerifiedRecord:
+        """Check a parsed record in the registry's refusal order (README, "State records").
 
-        A record from a newer minor loses the unknown optional fields this version does
-        not know before strict validation; its signature still covers them (README, "Versions").
+        ``reading`` is the reader's clock and held record for a state report (``verify``),
+        or None for a trust record (``add``). A record from a newer minor loses the
+        unknown optional fields this version does not know before strict validation; its
+        signature still covers them (README, "Versions").
         """
 
         newer = newer_minor(raw, PROTOCOL)
         try:
             document = State.model_validate(prune(raw, STATE_SHAPE) if newer else raw)
         except ValidationError as error:
-            raise FrameRefused("malformed", str(error).splitlines()[0], at=pointer(error.errors()[0])) from error
+            raise refused_by("malformed", error) from error
         spec = STATE_RECORDS[document.record]
+        report = document.record not in TRUST_RECORDS
+        if report and reading is None:
+            raise ValueError(f"{document.record} records report state; verify them when read instead")
+        if not report and reading is not None:
+            raise ValueError(f"{document.record} records vouch for keys and agents; keep them with add instead")
         issued_at = parse_timestamp(document.issued_at)
         public_key, signer = self._signer(document, spec, issued_at)
         try:
@@ -333,16 +322,74 @@ class TrustStore:
             raise FrameRefused("bad_signature", at="/signature") from error
         if body_digest(raw["body"]) != document.body_digest:
             raise FrameRefused("bad_digest", at="/body_digest")
-        # A state report is used as soon as it is read; a kept record's signer is checked
-        # again whenever the record is used, so a later revocation still counts.
-        if (document.record not in TRUST_RECORDS and signer is not None
-                and self.revoked(signer.installation, signer.certificate_id)):
-            raise FrameRefused("revoked", "the writer's certificate is revoked", at="/writer/key_id")
+        digest = b64url(hashlib.sha256(state_signing_bytes(raw)).digest())
+        if report:
+            assert signer is not None and reading is not None  # state reports are host-signed (registry signer: host)
+            self._check_report_writer(signer)
+        if signer is not None and not signer.roles & set(spec.signer_roles):
+            raise FrameRefused("wrong_issuer", f"only {', '.join(spec.signer_roles)} hosts sign {document.record} records",
+                               at="/writer")
+        if report:
+            assert signer is not None and reading is not None
+            self._check_report_scope(raw, document, signer)
+            self._check_report_time(document, digest, *reading)
         try:
             body = spec.body_model.validate_python(prune(raw["body"], spec.body_shape) if newer else raw["body"])
         except ValidationError as error:
-            raise FrameRefused("invalid_body", str(error).splitlines()[0],
-                               at=pointer(error.errors()[0], prefix="/body")) from error
+            raise refused_by("invalid_body", error, prefix="/body") from error
+        self._check_record_dates(document, spec, body, issued_at)
+        if report:
+            assert signer is not None
+            self._check_state_report(document, body, signer)
+        return VerifiedRecord(document=document, body=body, signer=signer, digest=digest)
+
+    def _check_report_writer(self, signer: HostCertificate) -> None:
+        """A state report is used as soon as it is read, so its writer's certificate is not revoked and meets the minimum epochs.
+
+        A kept trust record's signer is checked whenever the record is used instead, so a
+        later revocation still counts.
+        """
+
+        if self.revoked(signer.installation, signer.certificate_id):
+            raise FrameRefused("revoked", "the writer's certificate is revoked", at="/writer/key_id")
+        membership, revocation = self.minimum_epochs(signer.installation, signer.runtime)
+        if signer.membership_epoch < membership or signer.revocation_epoch < revocation:
+            raise FrameRefused("epoch_too_old", "the writer's certificate is below the receiver's minimum epochs",
+                               at="/writer/membership_epoch")
+
+    def _check_report_scope(self, raw: Mapping[str, Any], document: State, signer: HostCertificate) -> None:
+        """Hosts of this installation write reports, of teams their certificate serves.
+
+        The team comes from the key (team view) or the body's team as received, before
+        the body schema: a missing team fails here.
+        """
+
+        if signer.installation != self.installation:
+            # Agreements carry durable work only; another installation reports no state here.
+            raise FrameRefused("wrong_issuer", "only hosts of this installation write state reports", at="/writer/installation")
+        if document.record == HOST:
+            return
+        team = document.key.split(".", 1)[0] if document.record == TEAM_VIEW else raw["body"].get("team")
+        if not isinstance(team, str) or team not in signer.teams:
+            raise FrameRefused("wrong_team", "the writer's certificate does not serve the record's team",
+                               at="/key" if document.record == TEAM_VIEW else "/body/team")
+
+    @staticmethod
+    def _check_report_time(document: State, digest: str, now: datetime, held: Optional[tuple[int, str]]) -> None:
+        """Not expired, not dated ahead, and not older than the record the reader holds for the key."""
+
+        if document.expires_at is not MISSING and now - parse_timestamp(document.expires_at) >= SKEW:
+            raise FrameRefused("expired", at="/expires_at")
+        if parse_timestamp(document.issued_at) - now > SKEW:
+            raise FrameRefused("not_yet_valid", at="/issued_at")
+        if held is not None and (document.sequence < held[0] or (document.sequence == held[0] and digest != held[1])):
+            raise FrameRefused("replayed", "an older record than the one the reader holds, or other content under its sequence",
+                               at="/sequence")
+
+    @staticmethod
+    def _check_record_dates(document: State, spec: StateSpec, body: Any, issued_at: datetime) -> None:
+        """A record expires after it is written, within its bucket's lifetime, and when its body says it ends."""
+
         if document.expires_at is not MISSING and parse_timestamp(document.expires_at) <= issued_at:
             raise FrameRefused("invalid_body", "a record cannot expire before it is written", at="/expires_at")
         if spec.ttl_seconds is not None and (document.expires_at is MISSING or parse_timestamp(document.expires_at) - issued_at
@@ -352,18 +399,12 @@ class TrustStore:
         end = BODY_END.get(document.record)
         if end is not None and document.expires_at is not MISSING and document.expires_at != getattr(body, end):
             raise FrameRefused("invalid_body", f"the record expires when its body's {end} says", at="/expires_at")
-        if document.record not in TRUST_RECORDS:
-            self._check_state_report(document, body, signer)
-        return VerifiedRecord(document=document, body=body, signer=signer,
-                              digest=b64url(hashlib.sha256(state_signing_bytes(raw)).digest()))
 
     def add(self, data: bytes | bytearray | memoryview) -> bool:
         """Verify one trust record and keep it; return False when a newer one is already held."""
 
         record = self._checked(self._parsed(data))
         document = record.document
-        if document.record not in TRUST_RECORDS:
-            raise ValueError(f"{document.record} records report state; verify them when read instead")
         slot = (document.record, document.key)
         held_sequence, held_digest = self._sequences.get(slot, (0, ""))
         if held_sequence == document.sequence and held_digest != record.digest:
@@ -390,9 +431,6 @@ class TrustStore:
         if certificate is None or certificate.key_id != writer.key_id or not certificate.valid_at(issued_at):
             raise FrameRefused("unknown_key", "no certificate for the writer valid when the record was written",
                                at="/writer/key_id")
-        if not certificate.roles & set(spec.signer_roles):
-            raise FrameRefused("wrong_issuer", f"only {', '.join(spec.signer_roles)} hosts sign {document.record} records",
-                               at="/writer")
         return certificate.public_key, certificate
 
     def _authority_key(self, installation: str, key_id: str, record: str) -> Ed25519PublicKey:
@@ -418,20 +456,12 @@ class TrustStore:
             raise FrameRefused("wrong_issuer", "an installation vouches only for its own hosts and agents",
                                at="/body/installation")
 
-    def _check_state_report(self, document: State, body: Any, signer: Optional[HostCertificate]) -> None:
-        """Hosts of this installation write reports: their own liveness, and records of teams their certificate serves."""
+    def _check_state_report(self, document: State, body: Any, signer: HostCertificate) -> None:
+        """A report's key and body rules: a host's own liveness, an agent's or placement's key, the team view's key form."""
 
-        assert signer is not None  # state reports are host-signed (registry signer: host)
-        if signer.installation != self.installation:
-            # Agreements carry durable work only; another installation reports no state here.
-            raise FrameRefused("wrong_issuer", "only hosts of this installation write state reports", at="/writer/installation")
         if document.record == HOST:
             self._check_host_record(document, body, signer)
             return
-        team = document.key.split(".", 1)[0] if document.record == TEAM_VIEW else body.team
-        if team not in signer.teams:
-            raise FrameRefused("wrong_team", "the writer's certificate does not serve the record's team",
-                               at="/key" if document.record == TEAM_VIEW else "/body/team")
         if document.record == TEAM_VIEW:
             parts = document.key.split(".")
             if len(parts) != 3 or parts[1] != body.entry:
@@ -458,6 +488,8 @@ class TrustStore:
                                    at=f"/body/certificate/{field_name}")
         if body.session_limit > signer.session_limit:
             raise FrameRefused("invalid_body", "a host runs at most the sessions its certificate allows", at="/body/session_limit")
+        if body.sessions_active > body.session_limit:
+            raise FrameRefused("invalid_body", "a host runs no more sessions than its limit", at="/body/sessions_active")
 
     def _certificate(self, document: State, body: Any) -> HostCertificate:
         """The certificate a verified certificate record states, after its own rules."""

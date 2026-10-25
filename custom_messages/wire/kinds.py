@@ -589,7 +589,7 @@ KINDS: dict[str, KindSpec] = {
         ledger='none',
         wakes_model='never',
         rendering='none',
-        body_shape={'properties': {'copy_id': None, 'stage': None, 'reason': None, 'pointer': None, 'original': {'properties': {'subject': None, 'stream': None, 'stream_sequence': None, 'deliveries': None}}, 'claimed': {'properties': {'kind': None, 'message_id': None, 'issuer_team': None, 'issuer_runtime': None, 'protocol': None}}, 'raw': {'properties': {'stored': None, 'size': None, 'sha256': None}}, 'release': None}},
+        body_shape={'properties': {'copy_id': None, 'reason': None, 'pointer': None, 'original': {'properties': {'subject': None, 'stream': None, 'stream_sequence': None, 'deliveries': None}}, 'claimed': {'properties': {'kind': None, 'message_id': None, 'issuer_team': None, 'issuer_runtime': None, 'protocol': None}}, 'raw': {'properties': {'stored': None, 'size': None, 'sha256': None}}, 'release': None}},
         reply_shape=None,
         verification='standard',
     ),

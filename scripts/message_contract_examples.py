@@ -45,7 +45,7 @@ RENEW_KIND, KEY_ROTATION = "host.renew", "application_key_rotation"
 # Fields of an invalid example; frame_text is the one this module writes.
 INVALID_FIELDS = {"description", "refusal", "also", "at", "base", "changes", "signing", "signed_by", "token_signing",
                   "record_signing", "after_signing", "text_changes", "pad_to_bytes", "context", "frame_text"}
-INVALID_STATE_FIELDS = {"description", "refusal", "at", "base", "changes", "signing", "context", "document_text"}
+INVALID_STATE_FIELDS = {"description", "refusal", "also", "at", "base", "changes", "signing", "context", "document_text"}
 # A host record names its writer's certificate; the ref's digest is that record's.
 HOST_RECORD = "host"
 SIGNING_MODES = {"after", "before", "stale_digest"}

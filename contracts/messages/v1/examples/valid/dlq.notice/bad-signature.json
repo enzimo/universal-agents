@@ -23,7 +23,6 @@
   "algorithm": "ed25519",
   "body": {
     "copy_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    "stage": "verification",
     "reason": "bad_signature",
     "pointer": "/signature",
     "original": {
@@ -46,6 +45,6 @@
     },
     "release": "0.9.8"
   },
-  "body_digest": "-B9g8UhN6eHGS7dNkp9ZaNZnJgTEYn0DVFGB0K7hHZY",
-  "signature": "5f9Sbc9M4p6RDoy-wYDJOFXRTeB4RqG7cAbM8_1NWyP21cDJi8qneQl1e_emI1F-9B-nwau3TyjzkG4Vu9uhDQ"
+  "body_digest": "SXw6TUHIt1tQXS8AHK1HkdJwa5B91M_Uzlax2oAtN8k",
+  "signature": "rvN2A3wN4wT-v1wqSIS7P7HP6lKcOPSg-xCsqnRJJ27Wisl1pK8H889oUL1CVtn_aA951i1z3FX_ZBFdwV39BQ"
 }

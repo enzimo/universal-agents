@@ -953,6 +953,10 @@ def check_transport(transport: dict[str, Any]) -> None:
     an old message in again.
     """
 
+    if (transport.get("installation_scope"), transport.get("subject_prefix", "").split("{team}", 1)[0]) != (
+            INSTALLATION_SCOPE, SUBJECT_ROOT):
+        # The generator reads both once, when it loads; a transport passed in later must agree.
+        raise ContractError("transport.yaml: installation_scope and the subject root are the ones the generator loaded")
     skew = transport["clock_skew_seconds"]
     if not isinstance(skew, int) or not 0 <= skew <= 300:
         raise ContractError("transport.yaml: clock_skew_seconds is a whole number of seconds from 0 to 300")

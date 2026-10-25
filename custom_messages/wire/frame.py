@@ -48,7 +48,7 @@ from custom_messages.wire.kinds import (
     SUBJECT_PREFIX,
 )
 from custom_messages.wire.models import AuthorityToken, Frame
-from custom_messages.wire.refusals import FrameRefused, pointer
+from custom_messages.wire.refusals import FrameRefused, refused_by
 from custom_messages.wire.spec import KindSpec, newer_minor, prune
 from custom_messages.wire.trust import RESERVED_RUNTIME_PREFIXES, SKEW, AgentSession, HostCertificate, TrustStore, within
 from custom_messages.wire.values import parse_timestamp
@@ -316,7 +316,7 @@ def _parse(data: bytes) -> tuple[dict[str, Any], Frame, bool]:
     except CanonicalJsonError as error:
         raise FrameRefused("malformed", str(error)) from error
     except ValidationError as error:
-        raise FrameRefused("malformed", str(error).splitlines()[0], at=pointer(error.errors()[0], FRAME_SHAPE)) from error
+        raise refused_by("malformed", error, FRAME_SHAPE) from error
     return raw, frame, newer_minor
 
 
@@ -622,8 +622,9 @@ def _verify_renew_key_proof(raw: Mapping[str, Any], certificate: Optional[HostCe
     """A renewal that rotates keys names a new key id and proves possession of that key over the whole renewal.
 
     The key id is new to the installation: not the signing certificate's, not another
-    host's, not an authority key. The one exception is a retry after a lost reply: the
-    certificate that already replaced the signing one, with the same public key.
+    host's, not an authority key. The one exception is the key of the certificate that
+    already replaced the signing one, with the same public key: what a retry after a lost
+    reply names. The authority answers it with that certificate.
     """
 
     if raw["kind"] != _HOST_RENEW or _KEY_ROTATION not in raw["body"]:
@@ -945,22 +946,27 @@ def verify_frame(
     if spec is None:
         raise FrameRefused("unknown_kind", frame.kind, at="/kind")
     model, shape = body_model(frame.kind)
+    # The body as this version knows it: a newer minor's unknown optional fields are
+    # dropped. Checks that look inside the body start from a field only when the schema
+    # knows it, and verify signatures over the field as received.
+    known = prune(raw["body"], shape) if newer_minor else raw["body"]
     try:
-        body = model.validate_python(prune(raw["body"], shape) if newer_minor else raw["body"])
+        body = model.validate_python(known)
     except ValidationError as error:
-        raise FrameRefused("invalid_body", str(error).splitlines()[0],
-                           at=pointer(error.errors()[0], shape, prefix="/body")) from error
+        raise refused_by("invalid_body", error, shape, prefix="/body") from error
     if not is_reply:
         _check_body_rules(raw, spec)
     if frame.idempotency_key != expected_idempotency_key(raw, spec, is_reply, answering):
         raise FrameRefused("invalid_body", "the idempotency key is not the one the kind's key parts give",
                            at="/idempotency_key")
-    authority = _verify_authority(raw, frame, spec, is_reply, trust, certificate)
-    if is_reply and _installation_operation(spec):
+    # The remaining invalid_body checks compare the body with records; bad_authority comes after them.
+    if not is_reply:
+        _verify_renew_key_proof(raw, certificate, trust)
+    elif _installation_operation(spec) and ISSUED_CERTIFICATE_AT.rsplit("/", 1)[1] in known:
         assert answering is not None  # _verify_issuer refused replies without their request
         _verify_issued_certificate(raw, answering, trust)
-    else:
-        _verify_renew_key_proof(raw, certificate, trust)
+    authority = _verify_authority(raw, frame, spec, is_reply, trust, certificate)
+    if not is_reply and DECISION_TOKEN_AT.rsplit("/", 1)[1] in known:
         _verify_decision_token(raw, frame, trust)
     return VerifiedFrame(frame=frame, body=body, certificate=certificate, session=session, authority=authority,
                          replay_key=replay_key, frame_digest=digest, raw=raw)

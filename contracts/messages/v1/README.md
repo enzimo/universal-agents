@@ -573,6 +573,8 @@ Joining an installation and renewing a certificate use addresses under `ua.v1._i
 - the issuer names `_install`, no agent, epoch zero and a runtime id that does not start with `x-` or `_`, and the body asks for that runtime in that installation (`wrong_issuer`);
 - the body asks only for roles among the kind's senders, never the installation authority's (`wrong_sender`).
 
+These comparisons, and a renewal's comparison with its certificate, read the body's fields as received, before the body schema: a missing or mistyped field counts as another value (`examples/invalid/host-renew-without-certificate-id.json`).
+
 A join is not answered with a fresh challenge from the authority, as the authorization plan's enrollment endpoint is (12.3, 12.4). A join frame lasts 30 seconds, the receiver's replay record refuses other content under its message id, and its retry key names the runtime, key and join id. A copied join can therefore only repeat the same request within its lifetime, and the certificate it gets back is useless without the private key.
 
 **What the authority decides.** An administrator approves the key's fingerprint, or the installation approves a local process automatically; until then the reply is `pending`. A join for a runtime that already holds an unexpired certificate under another key is a lost-key recovery: an administrator approves it again (plan 12.5), and the new certificate gets a higher membership epoch and `replaces` the old one. A join's certificate grants at most the teams, roles, agent types and sessions it asked for.
@@ -597,7 +599,8 @@ the application key. The new key needs a key id the installation does not use ye
 the host's current key id, another host's, or an authority key's (`invalid_body` at
 `/body/application_key_rotation/key/key_id`). The one exception is a retry after a lost
 reply: the key id of the certificate that already replaced the signing one, with the same
-public key. The renewed certificate has a higher membership epoch, like every renewal.
+public key, which is what a retry after a lost reply names; the authority answers it with
+that certificate. The renewed certificate has a higher membership epoch, like every renewal.
 
 The new private key signs these bytes:
 
@@ -627,7 +630,17 @@ The registry's `state_records` section names each record's bucket, key form, sig
 - **Writer.** The record is signed by its writer's host certificate, valid when the record was written, not revoked, and with one of the record's `signer_roles`. Only hosts of the reader's own installation write state reports (`wrong_issuer`): agreements carry durable work only, and a peer's host keeps its own state in its own installation.
 - **Epochs.** The writer's certificate meets the reader's minimum epochs (`epoch_too_old`).
 - **Time.** A record that has expired, or is dated ahead of the reader's clock by more than the clock tolerance, is refused (`expired`, `not_yet_valid`). A record of a bucket with a per-key lifetime (`ttl_seconds`: host liveness, 60 seconds) states an expiry within it (`invalid_body`), so a copy kept elsewhere is never read as current.
-- **Sequence.** The reader passes the sequence and digest of the record it holds for the key, if any. An older sequence, or other content under the same sequence, is refused (`replayed`): someone who can write to the bucket cannot put back an older signed record.
+- **Sequence.** The reader passes the sequence and digest of the record it holds for the key, if any. An older sequence, or other content under the same sequence, is refused (`replayed`), so a reader that holds a newer record never reads an older one written back to the bucket. A reader that holds nothing, after a restart for example, takes the newest record it reads: host liveness records expire within a minute, but agent, placement and team-view records do not expire, so a reader that must not go back keeps the highest sequence it has seen across restarts.
+
+A reader refuses a state report with the first failing check, in the registry's order:
+1. `too_large`, `malformed` (the document's form);
+2. `wrong_issuer` when the writer's type is not the record's signer (it decides where the key comes from), then `unknown_key`;
+3. `bad_signature`, `bad_digest`, `revoked`, `epoch_too_old`;
+4. `wrong_issuer` for the writer's roles or installation, then `wrong_team` for the record's team, read from the key or the body as received;
+5. `expired`, `not_yet_valid`, `replayed`;
+6. `invalid_body`: the body schema, then the record's dates (its expiry, its bucket's lifetime, a trust record's single validity window), then its key and body rules.
+
+Trust records (`TrustStore.add`) follow the same order without the reader's checks; their own-installation rules need the body and come with its rules. The two-defect examples under `examples/state/invalid/` (`also`) pin the order.
 
 What each record says, and what `TrustStore.verify` checks about it:
 - **Host liveness.** A host writes only its own record, under its runtime id. The record names the certificate it is signed with: its id, membership epoch and `sha256`, the SHA-256 of the certificate record's signing bytes, which `TrustStore.add` recorded. It allows at most that certificate's sessions. Its roles, teams and agent types are the certificate's, so the record does not repeat them.
@@ -639,11 +652,12 @@ What each record says, and what `TrustStore.verify` checks about it:
 
 ## Dead letters
 
-A receiver that sets a message aside picks a copy id at random (256 bits, written as 64 lowercase hexadecimal characters). It keeps the exact bytes at `dlq.raw.<copy>` under its own runtime id, and sends a `dlq.notice` to its team's services, which tell administrators. Both wait in `UA1_DLQ` for 30 days.
+A receiver that sets a message aside picks a copy id at random (256 bits, written as 64 lowercase hexadecimal characters). It keeps the exact bytes at `dlq.raw.<copy>` under its own runtime id, and sends a `dlq.notice` to its team's services, which tell administrators. Both wait in `UA1_DLQ` for 30 days. The installation authority, whose installation traffic has no team, sends notices about that traffic to a team its certificate serves; a certificate always serves at least one.
 - **The notice holds identifiers only:**
   - the copy id, which its subject also names;
-  - the stage, and the reason: a verification refusal code, or why a handler or delivery gave up (the generator checks that the list names every refusal code);
-  - the refusal's JSON pointer, and where the message sat in its stream;
+  - the reason: a verification refusal code, or `handler_failed`, `delivery_limit` or `upgrade_drain` (the generator checks that the list names every refusal code);
+  - the refusal's JSON pointer, up to the last field the receiver's schema knows (`FrameRefused.known_at`): an unknown field is named by the object that holds it, so a name the sender chose never reaches the notice;
+  - where the message sat in its stream;
   - the set-aside message's own unverified claims: kind, message id, issuer team and runtime, protocol;
   - the raw copy's size and SHA-256.
 

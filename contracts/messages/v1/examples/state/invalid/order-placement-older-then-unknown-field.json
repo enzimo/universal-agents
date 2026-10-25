@@ -1,0 +1,22 @@
+{
+  "description": "A placement older than the one the reader holds, whose body also holds an unknown field.",
+  "refusal": "replayed",
+  "also": [
+    "invalid_body"
+  ],
+  "at": "/sequence",
+  "base": "placement/lead.json",
+  "changes": [
+    {
+      "set": "/body/future_field",
+      "to": 1
+    }
+  ],
+  "context": {
+    "held": {
+      "sequence": 5,
+      "digest": "DQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0"
+    }
+  },
+  "document_text": "{\"record\": \"placement\", \"protocol\": \"1.0-pre\", \"key\": \"team_example.lead\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"key_id\": \"test-services-key-1\"}, \"sequence\": 1, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"body\": {\"team\": \"team_example\", \"agent\": \"lead\", \"agent_type\": \"TeamArchitect\", \"host\": \"lead-host-1\", \"host_epoch\": 3, \"definition_sha256\": \"CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws\", \"required_labels\": [\"sandbox:container\"], \"placed_at\": \"2026-10-22T04:00:00.000Z\", \"reason\": \"initial\", \"previous_host\": \"lead-host-0\", \"future_field\": 1}, \"algorithm\": \"ed25519\", \"body_digest\": \"3KoLrLJcFbDnmlir1K16P5M1Cp8u2CfWG7s1FI5aFSE\", \"signature\": \"iU-T1Nqds3FBBH5oJdQ09ST3rHQvMrQPcQYws2135sxqR25EWyDcrHU3LmlD7ZaID_dFuARIRLl_B1OjPYiPDg\"}"
+}
