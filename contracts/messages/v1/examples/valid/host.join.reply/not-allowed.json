@@ -1,0 +1,31 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "host.join.reply",
+  "message_id": "01928f3a-7b2c-7711-8000-000000000711",
+  "issuer": {
+    "installation": "install_example",
+    "team": "_install",
+    "runtime": "authority-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-authority-host-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "_install",
+    "target": "installation_service",
+    "id": "new-host-1",
+    "runtime": "new-host-1"
+  },
+  "subject": "_INBOX.new-host-1.01928f3a-7b2c-7701-8000-000000000701",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "not_allowed"
+  },
+  "causation_id": "01928f3a-7b2c-7701-8000-000000000701",
+  "idempotency_key": "host.join.reply:BY8cG8hVYmaZQH9Ij28B17jA44N6_5FnXKYg_WLfqJY",
+  "body_digest": "zUCzi6cAt69NAU6l6u3v6oLQIjBvLNhKm-SHXe9HWzk",
+  "signature": "YKvnz8aDSZijYWn69uA_2XXW2oKvsUVNQbyXH1GG7usWJlqaHFLLCrvZ_YXZ9n5fKa-hcad_wNyOOv5zR_i6Ag"
+}

@@ -1,0 +1,18 @@
+{
+  "description": "The certificate in a join reply was given another team after the authority signed it; the reply itself is signed again.",
+  "refusal": "invalid_body",
+  "at": "/body/certificate/signature",
+  "base": "host.join.reply/ok.json",
+  "changes": [
+    {
+      "set": "/body/certificate/body/teams",
+      "to": [
+        "team_example",
+        "team_other"
+      ]
+    }
+  ],
+  "record_signing": "before",
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"host.join.reply\", \"message_id\": \"01928f3a-7b2c-7702-8000-000000000702\", \"idempotency_key\": \"host.join.reply:BY8cG8hVYmaZQH9Ij28B17jA44N6_5FnXKYg_WLfqJY\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"_install\", \"runtime\": \"authority-1\", \"membership_epoch\": 1, \"revocation_epoch\": 1, \"key_id\": \"test-authority-host-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"_install\", \"target\": \"installation_service\", \"id\": \"new-host-1\", \"runtime\": \"new-host-1\"}, \"subject\": \"_INBOX.new-host-1.01928f3a-7b2c-7701-8000-000000000701\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"outcome\": \"ok\", \"certificate\": {\"record\": \"certificate\", \"protocol\": \"1.0-pre\", \"key\": \"host.install_example.new-host-1.1\", \"writer\": {\"type\": \"authority\", \"installation\": \"install_example\", \"key_id\": \"test-authority-key-1\"}, \"sequence\": 1, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-11-21T04:30:00.000Z\", \"body\": {\"certificate_id\": \"cert_new_host_1\", \"installation\": \"install_example\", \"runtime\": \"new-host-1\", \"teams\": [\"team_example\", \"team_other\"], \"roles\": [\"worker_host\"], \"membership_epoch\": 1, \"revocation_epoch\": 1, \"application_key\": {\"key_id\": \"new-host-key-1\", \"public_key\": \"7VSln7GsOlEjk1E2KUG4aOhaYOPXskhdgogh3Hppwnk\"}, \"nats_public_key\": \"UBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\", \"agent_types\": [\"researcher\"], \"session_limit\": 4, \"protocol\": \"1.0-pre\", \"deployment\": \"local\", \"profile_sha256\": \"CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo\", \"software\": {\"name\": \"universal-agents\", \"version\": \"0.10.0\"}, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-11-21T04:30:00.000Z\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"fgmzw_BVQqZzO-QLs9cNZ6xzQEIh8Y4RMJDvfxRwwmg\", \"signature\": \"46lXcqCguojCSgyiwMSYsfPu1BwtLeEe5IoB63OJzyMIxZ8oPKeEydzyv7X28cd8L1APEb7yllc0DT-cZIm3Ag\"}, \"connection\": {\"type\": \"nats_user_jwt\", \"jwt\": \"eyJh.eyJi.c2ln\", \"expires_at\": \"2026-10-23T04:30:00.000Z\"}}, \"causation_id\": \"01928f3a-7b2c-7701-8000-000000000701\", \"body_digest\": \"o5puEkMwNKlfeYzdzGgtO5UiDAkTofXC7GaOBm6LPfE\", \"signature\": \"jYP4o-Z7qAlPDzMMIVMo_VDEEV5vU3wbzBmNwQt29Mcd6U5DkQb5prB_TIN-nTmNZaNq4aDhgJyu6ehYyJm3Ag\"}"
+}

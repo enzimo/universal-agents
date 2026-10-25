@@ -8,8 +8,10 @@ values:
 - ``examples/valid/``: complete frames;
 - ``examples/invalid/``: a refusal case built from a valid example and listed
   changes (README, "Examples");
+- ``examples/state/``: state records that report state (host liveness, agent
+  state, placement, team view), valid and refusal cases like ``invalid/``;
 - ``signing-vectors/vectors.json``: frames, a token and a record with their exact
-  signing bytes.
+  signing bytes, and ``key-rotation.json``: a renewal's new-key proof.
 
 This module fills in public keys, idempotency keys, body digests, signatures and
 each invalid example's ``frame_text``. Tokens are signed wherever a frame carries
@@ -37,9 +39,15 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 CONTRACT = Path(__file__).resolve().parents[1] / "contracts" / "messages" / "v1"
 EXAMPLES = CONTRACT / "examples"
 VECTORS = CONTRACT / "signing-vectors" / "vectors.json"
+ROTATION_VECTOR = CONTRACT / "signing-vectors" / "key-rotation.json"
+STATES = EXAMPLES / "state"
+RENEW_KIND, KEY_ROTATION = "host.renew", "application_key_rotation"
 # Fields of an invalid example; frame_text is the one this module writes.
 INVALID_FIELDS = {"description", "refusal", "also", "at", "base", "changes", "signing", "signed_by", "token_signing",
-                  "after_signing", "text_changes", "pad_to_bytes", "context", "frame_text"}
+                  "record_signing", "after_signing", "text_changes", "pad_to_bytes", "context", "frame_text"}
+INVALID_STATE_FIELDS = {"description", "refusal", "also", "at", "base", "changes", "signing", "context", "document_text"}
+# A host record names its writer's certificate; the ref's digest is that record's.
+HOST_RECORD = "host"
 SIGNING_MODES = {"after", "before", "stale_digest"}
 BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
@@ -113,6 +121,7 @@ class Signer:
         self.frame_domain = registry["signing_domain"]
         self.state_domain = registry["state_signing_domain"]
         self.token_domain = registry["authority_token_domain"]
+        self.renew_domain = registry["renew_key_proof_domain"]
         self.decision_domain = registry["decision_token_domain"]
 
     def private_key(self, key_id: str) -> Ed25519PrivateKey:
@@ -160,10 +169,18 @@ class Signer:
         return token
 
     def frame(self, frame: dict[str, Any], *, key_id: str | None = None, digest: str | None = None,
-              sign_token: bool = True) -> dict[str, Any]:
-        """Sign a frame: its tokens first (the frame's and those its body carries), then the body digest, then the frame."""
+              sign_token: bool = True, sign_records: bool = True) -> dict[str, Any]:
+        """Sign a frame: its tokens and nested records first (those its body carries), then the body digest, then the frame.
+
+        ``sign_records=False`` keeps a nested record's signature, so a record changed
+        after its writer signed it can be described.
+        """
 
         frame = dict(frame)
+        body = self.fill_public_keys(frame["body"])
+        frame["body"] = self.sign_nested_records(body) if sign_records else body
+        if frame["kind"] == RENEW_KIND and KEY_ROTATION in frame["body"]:
+            frame = self.rotation_proof(frame)
         if "authority" in frame and sign_token:
             frame["authority"] = self.token(frame["authority"])
         body = frame.get("body")
@@ -177,6 +194,32 @@ class Signer:
         frame["body_digest"] = digest or self.digest(frame["body"])
         frame["signature"] = self.sign(self.frame_domain, frame, key_id or frame["issuer"]["key_id"])
         return frame
+
+    def renew_signing_bytes(self, frame: dict[str, Any]) -> bytes:
+        """The renewal without its signature, digest and proof: what the new key's proof covers."""
+
+        unsigned = {key: value for key, value in frame.items() if key not in {"signature", "body_digest"}}
+        unsigned["algorithm"] = "ed25519"
+        body = dict(frame["body"])
+        body[KEY_ROTATION] = {key: value for key, value in body[KEY_ROTATION].items() if key != "proof"}
+        unsigned["body"] = body
+        return bytes(self.renew_domain.encode("ascii") + b"\n" + rfc8785.dumps(unsigned))
+
+    def rotation_proof(self, frame: dict[str, Any]) -> dict[str, Any]:
+        rotation = frame["body"][KEY_ROTATION]
+        proof = b64url(self.private_key(rotation["key"]["key_id"]).sign(self.renew_signing_bytes(frame)))
+        return dict(frame, body=dict(frame["body"], **{KEY_ROTATION: dict(rotation, proof=proof)}))
+
+    def sign_nested_records(self, value: Any) -> Any:
+        """State records inside a body (a certificate in a join reply) are signed by their own writer."""
+
+        if isinstance(value, list):
+            return [self.sign_nested_records(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        if {"record", "writer", "sequence", "body"} <= set(value):
+            return self.state(value)
+        return {key: self.sign_nested_records(item) for key, item in value.items()}
 
     def state(self, document: dict[str, Any]) -> dict[str, Any]:
         document = dict(document, algorithm="ed25519")
@@ -211,15 +254,24 @@ def render_keys() -> tuple[dict[str, dict[str, Any]], dict[Path, str]]:
     return document["keys"], {path: document_text(document)}
 
 
-def render_trust(signer: Signer) -> dict[Path, str]:
-    files = {}
+def render_trust(signer: Signer) -> tuple[dict[str, str], dict[Path, str]]:
+    """The trust records, and each certificate record's digest by its key (host.<installation>.<runtime>.<epoch>).
+
+    The digest is SHA-256 of the record's signing bytes, which a host record's
+    certificate ref names.
+    """
+
+    files, digests = {}, {}
     for path in sorted((EXAMPLES / "trust").rglob("*.json")):
         document = _read(path)
         if path.name == "anchors.json":
             files[path] = document_text(signer.fill_public_keys(document))
-        else:
-            files[path] = document_text(signer.state(document))
-    return files
+            continue
+        signed = signer.state(document)
+        files[path] = document_text(signed)
+        if signed["record"] == "certificate" and path.parent.name != "extra":
+            digests[signed["key"]] = b64url(hashlib.sha256(signer.signing_bytes(signer.state_domain, signed)).digest())
+    return digests, files
 
 
 def render_valid(signer: Signer) -> tuple[dict[str, dict[str, Any]], dict[Path, str]]:
@@ -253,7 +305,8 @@ def invalid_frame_text(case: dict[str, Any], frames: dict[str, dict[str, Any]], 
     if mode != "before":
         frame = signer.frame(frame, key_id=case.get("signed_by"),
                              digest=frame["body_digest"] if mode == "stale_digest" else None,
-                             sign_token=case.get("token_signing", "after") == "after")
+                             sign_token=case.get("token_signing", "after") == "after",
+                             sign_records=case.get("record_signing", "after") == "after")
     for change in case.get("after_signing", []):
         parent, last = _parent(frame, change["respell"])
         parent[last] = _respell(parent[last])
@@ -275,6 +328,50 @@ def render_invalid(signer: Signer, frames: dict[str, dict[str, Any]]) -> dict[Pa
             raise ExampleError(f"{path.name}: {error}") from error
         files[path] = document_text(case)
     return files
+
+
+def render_states(signer: Signer, certificates: dict[str, str]) -> dict[Path, str]:
+    """Valid state reports, signed by their writers, and refusal cases built from them.
+
+    A valid host record's certificate ref gets the digest of its writer's certificate record.
+    """
+
+    files, records = {}, {}
+    for path in sorted((STATES / "valid").rglob("*.json")):
+        document = _read(path)
+        if document["record"] == HOST_RECORD:
+            writer = document["writer"]
+            key = f"host.{writer['installation']}.{writer['runtime']}.{writer['membership_epoch']}"
+            document["body"]["certificate"]["sha256"] = certificates[key]
+        document = signer.state(document)
+        records[path.relative_to(STATES / "valid").as_posix()] = document
+        files[path] = document_text(document)
+    for path in sorted((STATES / "invalid").glob("*.json")):
+        case = _read(path)
+        mode = case.get("signing", "after")
+        if set(case) - INVALID_STATE_FIELDS or mode not in SIGNING_MODES or case["base"] not in records:
+            raise ExampleError(f"{path.name}: unknown fields, signing {mode!r} or base {case['base']!r}")
+        document = copy.deepcopy(records[case["base"]])
+        for change in case.get("changes", []):
+            _apply(document, change)
+        if mode == "after":
+            document = signer.state(document)
+        elif mode == "stale_digest":
+            stale = document["body_digest"]
+            document = signer.state(document)
+            document["body_digest"] = stale
+            document["signature"] = signer.sign(signer.state_domain, document, document["writer"]["key_id"])
+        case["document_text"] = json.dumps(document, ensure_ascii=False)
+        files[path] = document_text(case)
+    return files
+
+
+def render_rotation_vector(signer: Signer, frames: dict[str, dict[str, Any]]) -> dict[Path, str]:
+    document = _read(ROTATION_VECTOR)
+    frame = frames[document["frame"].removeprefix("examples/valid/")]
+    document["signing_bytes_hex"] = signer.renew_signing_bytes(frame).hex()
+    document["proof"] = frame["body"][KEY_ROTATION]["proof"]
+    return {ROTATION_VECTOR: document_text(document)}
 
 
 def render_vectors(signer: Signer, registry: dict[str, Any]) -> dict[Path, str]:
@@ -313,9 +410,12 @@ def render_examples(registry: dict[str, Any]) -> dict[Path, str]:
 
     keys, files = render_keys()
     signer = Signer(keys, registry)
-    files.update(render_trust(signer))
+    certificates, trust = render_trust(signer)
+    files.update(trust)
     frames, valid = render_valid(signer)
     files.update(valid)
     files.update(render_invalid(signer, frames))
+    files.update(render_states(signer, certificates))
     files.update(render_vectors(signer, registry))
+    files.update(render_rotation_vector(signer, frames))
     return files

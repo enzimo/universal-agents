@@ -374,18 +374,19 @@ def test_permissions_name_exact_identities_and_publish_only_under_the_senders_ow
                 assert stream_and_name and stream_and_name.group(1) in consumer_names, (role, subject)
                 assert (stream_and_name.group(2) is not None) == subject.startswith("$JS.ACK."), (role, subject)
             else:
-                assert subject.startswith("ua.v1.{team}.{self}."), (role, subject)
+                assert subject.startswith(("ua.v1.{team}.{self}.", "ua.v1._install.{self}.")), (role, subject)
         assert document["subscribe"][0] == "_INBOX.{self}.>"
         for subject in document["subscribe"][1:]:
-            assert subject.startswith("ua.v1.{team}.*.") and "*" not in subject.removeprefix("ua.v1.{team}.*."), subject
+            prefix = "ua.v1._install.*." if subject.startswith("ua.v1._install.") else "ua.v1.{team}.*."
+            assert subject.startswith(prefix) and "*" not in subject.removeprefix(prefix), subject
         receives_requests = False
         for entry in REGISTRY["kinds"].values():
             for address in EXPORT.entry_addresses(entry):
                 if role in EXPORT.address_senders(entry, address):
-                    assert "ua.v1.{team}.{self}." + EXPORT.send_pattern(address) in document["publish"]
+                    assert EXPORT.full_subject(EXPORT.send_pattern(address), "{self}") in document["publish"]
                 receives = role in EXPORT.receiving_roles(entry, address, TRANSPORT)
-                if entry["class"] != "durable":
-                    assert ("ua.v1.{team}.*." + address in document["subscribe"]) == receives, (role, address)
+                if entry["class"] not in {"durable", "dead_letter"}:
+                    assert (EXPORT.full_subject(address, "*") in document["subscribe"]) == receives, (role, address)
                 receives_requests |= receives and entry["class"] == "request_reply"
         expires = f"{TRANSPORT['classes']['request_reply']['max_expiry_seconds'] + TRANSPORT['clock_skew_seconds']}s"
         assert document.get("allow_responses") == ({"max": 1, "expires": expires} if receives_requests else None)
@@ -416,7 +417,7 @@ def test_asyncapi_describes_both_operations_for_every_kind_and_destination() -> 
         for address in EXPORT.entry_addresses(entry):
             is_copy = address in entry.get("copy_to", [])
             channel_id = EXPORT.channel_name(address)
-            assert document["channels"][channel_id]["address"] == "ua.v1.{team}.{sender}." + address
+            assert document["channels"][channel_id]["address"] == EXPORT.full_subject(address, "{sender}")
             assert key in document["channels"][channel_id]["messages"]
             for action in ("send", "receive"):
                 operation = operations[f"{action}_{key}_{'copy_' if is_copy else ''}{EXPORT.audience_target(address)}"]
@@ -473,6 +474,56 @@ def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change
     registry["kinds"]["task.result"].update(change)
     with pytest.raises(EXPORT.ContractError, match=problem):
         EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+def drop_notice_reason(_registry: dict, _transport: dict, schemas: dict) -> None:
+    schemas["bodies/dlq.notice.schema.json"]["properties"]["reason"]["enum"].remove("bad_authority")
+
+
+def host_ttl(ttl: int | None):
+    def change(registry: dict, _transport: dict, _schemas: dict) -> None:
+        registry["state_records"]["host"].pop("ttl_seconds")
+        if ttl is not None:
+            registry["state_records"]["host"]["ttl_seconds"] = ttl
+    return change
+
+
+def proof_of_possession_on(kind: str):
+    def change(registry: dict, _transport: dict, _schemas: dict) -> None:
+        registry["kinds"][kind]["verification"] = "proof_of_possession"
+    return change
+
+
+def overlap(seconds: int):
+    def change(registry: dict, _transport: dict, _schemas: dict) -> None:
+        registry["certificate_overlap_seconds"] = seconds
+    return change
+
+
+def scope_pattern(_registry: dict, _transport: dict, schemas: dict) -> None:
+    schemas["common.schema.json"]["$defs"]["scope_id"]["pattern"] = "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+
+
+def notice_reader(registry: dict, _transport: dict, _schemas: dict) -> None:
+    registry["kinds"]["dlq.notice"]["receivers"] = ["team_services", "installation_authority"]
+
+
+@pytest.mark.parametrize(("change", "problem"), [
+    (drop_notice_reason, "names every verification refusal"),
+    (host_ttl(None), "ttl_seconds is its bucket's"),
+    (host_ttl(30), "ttl_seconds is its bucket's"),
+    (proof_of_possession_on("agent.pause"), "proves possession"),
+    (overlap(0), "certificate_overlap_seconds"),
+    (overlap(86400), "certificate_overlap_seconds"),
+    (scope_pattern, "scope_id must allow"),
+    (notice_reader, "serve none of its addresses"),
+])
+def test_the_generator_refuses_records_and_notices_that_break_the_contract(change, problem: str) -> None:
+    registry, transport, schemas = (copy.deepcopy(EXPORT.load_yaml("registry.yaml")), copy.deepcopy(TRANSPORT),
+                                    copy.deepcopy(EXPORT.load_schemas()))
+    change(registry, transport, schemas)
+    with pytest.raises(EXPORT.ContractError, match=problem):
+        EXPORT.check_registry(registry, transport, EXPORT.load_yaml("team-topologies.yaml"), schemas)
 
 
 def reply_variant(schemas: dict, kind: str, outcome: str) -> dict:
@@ -785,6 +836,401 @@ def test_every_kind_and_reply_has_a_valid_example() -> None:
     assert expected <= examples, sorted(expected - examples)
 
 
+# -- state records, installation traffic and dead letters ---------------------------------------------
+
+STATE_EXAMPLES = EXAMPLES / "state"
+
+
+def state_case(path: Path) -> tuple[dict, bytes]:
+    case = json.loads(path.read_text(encoding="utf-8"))
+    return case, case["document_text"].encode("utf-8")
+
+
+@pytest.mark.parametrize("path", sorted((STATE_EXAMPLES / "valid").rglob("*.json")),
+                         ids=lambda path: path.relative_to(STATE_EXAMPLES / "valid").as_posix())
+def test_valid_state_records_are_accepted(path: Path) -> None:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    validator("state.schema.json").validate(document)
+    validator(REGISTRY["state_records"][document["record"]]["body"]).validate(document["body"])
+    verified = fixtures.verify_state(path.read_bytes())
+    assert verified.document.record == path.parent.name
+    model = kinds.STATE_RECORDS[document["record"]].body_model
+    assert model.dump_python(verified.body, mode="json", exclude_none=True, by_alias=True) == document["body"]
+
+
+@pytest.mark.parametrize("path", sorted((STATE_EXAMPLES / "invalid").glob("*.json")), ids=lambda path: path.stem)
+def test_invalid_state_records_are_refused_with_their_code_at_their_place(path: Path) -> None:
+    case, data = state_case(path)
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(data, case["context"])
+    assert (refused.value.code, refused.value.at) == (case["refusal"], case["at"]), refused.value
+
+
+def test_state_examples_with_two_defects_name_the_later_refusal() -> None:
+    """State reports are refused in the registry's order too; each two-defect example lists the later code."""
+
+    order = list(kinds.VERIFICATION_REFUSALS)
+    pairs = set()
+    for path in (STATE_EXAMPLES / "invalid").glob("*.json"):
+        case = json.loads(path.read_text(encoding="utf-8"))
+        for later in case.get("also", []):
+            assert order.index(later) > order.index(case["refusal"]), path.stem
+            pairs.add((case["refusal"], later))
+    assert {("bad_signature", "wrong_issuer"), ("revoked", "epoch_too_old"), ("epoch_too_old", "wrong_team"),
+            ("wrong_issuer", "invalid_body"), ("wrong_team", "expired"), ("expired", "invalid_body"),
+            ("replayed", "invalid_body")} <= pairs
+
+
+def test_every_state_record_has_a_valid_example() -> None:
+    trust = {json.loads(path.read_text())["record"] for path in (EXAMPLES / "trust").rglob("*.json") if path.name != "anchors.json"}
+    reports = {path.parent.name for path in (STATE_EXAMPLES / "valid").rglob("*.json")}
+    assert set(REGISTRY["state_records"]) <= trust | reports
+
+
+def state_example(name: str) -> dict:
+    document = json.loads((STATE_EXAMPLES / "valid" / name).read_text(encoding="utf-8"))
+    return {key: value for key, value in document.items() if key not in {"algorithm", "body_digest", "signature"}}
+
+
+def signed_state(document: dict) -> bytes:
+    return json.dumps(sign_state(document, fixtures.private_key(document["writer"]["key_id"]))).encode()
+
+
+@pytest.mark.parametrize("record", ["agent/lead-busy.json", "placement/lead.json", "team_view/roster.json"])
+def test_state_records_cannot_claim_a_team_the_writer_does_not_serve(record: str) -> None:
+    document = state_example(record)
+    document["key"] = document["key"].replace("team_example", "another_team")
+    if "team" in document["body"]:
+        document["body"]["team"] = "another_team"
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(document))
+    assert refused.value.code == "wrong_team"
+
+
+def test_a_host_cannot_write_another_hosts_liveness() -> None:
+    document = state_example("host/lead-host.json")
+    document["writer"].update(runtime="worker-host-1", key_id="test-worker-key-1")
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(document))
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/runtime")
+
+
+def test_team_view_key_must_name_its_body_entry() -> None:
+    document = state_example("team_view/roster.json")
+    document["key"] = "team_example.task.lead"
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(document))
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/key")
+
+
+def test_state_reports_are_verified_when_read_not_kept() -> None:
+    """Whoever writes to a bucket chooses what it holds, so another record type is refused, not trusted."""
+
+    agent = (STATE_EXAMPLES / "valid" / "agent" / "lead-busy.json").read_bytes()
+    certificate = (EXAMPLES / "trust" / "certificates" / "lead-host-1.json").read_bytes()
+    for read in (lambda: fixtures.trust_store().add(agent), lambda: fixtures.verify_state(certificate, record="placement"),
+                 lambda: fixtures.verify_state(agent, record="placement")):
+        with pytest.raises(FrameRefused) as refused:
+            read()
+        assert (refused.value.code, refused.value.at) == ("malformed", "/record")
+    with pytest.raises(ValueError, match="kept with add"):
+        fixtures.verify_state(certificate)
+    with pytest.raises(ValueError, match="time zone"):
+        fixtures.trust_store().verify(agent, record="agent", now=fixtures.NOW.replace(tzinfo=None))
+
+
+def test_a_newer_minors_record_loses_unknown_optional_fields_and_the_same_minors_is_refused() -> None:
+    """README, "Versions": records follow the frames' rule, so a certificate can gain optional fields within protocol 1."""
+
+    document = state_example("agent/lead-busy.json")
+    document["future_note"] = "an envelope field this version does not know"
+    document["body"]["future_detail"] = "a body field this version does not know"
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(document))
+    assert refused.value.code == "malformed"
+    document["protocol"] = "1.1-pre"
+    verified = fixtures.verify_state(signed_state(document))
+    assert not hasattr(verified.body, "future_detail") and verified.body.agent == "lead"
+    del document["future_note"]
+    document["protocol"] = kinds.PROTOCOL
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(document))
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/future_detail")
+
+
+def test_a_reader_accepts_the_record_it_holds_and_newer_ones_only() -> None:
+    """A placement's signed sequence is its fencing token: a copy written back to the bucket is never newer."""
+
+    data = (STATE_EXAMPLES / "valid" / "placement" / "lead.json").read_bytes()
+    record = fixtures.verify_state(data)
+    held = {"sequence": record.document.sequence, "digest": record.digest}
+    fixtures.verify_state(data, {"held": held})
+    newer = state_example("placement/lead.json")
+    newer.update(sequence=2)
+    newer["body"]["reason"] = "rebalanced"
+    fixtures.verify_state(signed_state(newer), {"held": held})
+    same_sequence = dict(newer, sequence=record.document.sequence)
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(same_sequence), {"held": held})
+    assert (refused.value.code, refused.value.at) == ("replayed", "/sequence")
+
+
+@pytest.mark.parametrize("operation", ["join", "renew"])
+def test_asyncapi_installation_subjects_match_the_authority_subscription(operation: str) -> None:
+    document = json.loads((CONTRACT / "generated/asyncapi.json").read_text())
+    channel_id = EXPORT.channel_name(REGISTRY["kinds"][f"host.{operation}"]["address"])
+    assert document["channels"][channel_id]["address"] == f"ua.v1._install.{{sender}}.svc.host.{operation}"
+    authority = json.loads((CONTRACT / "generated/permissions/installation_authority.json").read_text())
+    assert f"ua.v1._install.*.svc.host.{operation}" in authority["subscribe"]
+
+
+def test_a_notice_names_a_refusal_up_to_the_last_field_the_schema_knows() -> None:
+    """README, "Dead letters": an unknown field's name, which the sender chose, never reaches the notice."""
+
+    name = "dear_bob_my_password_is_hunter2"
+    stop = signed_example()
+    stop["body"][name] = 1
+    refused = refusal(fixtures.resign(stop), stop)
+    assert (refused.code, refused.at, refused.known_at) == ("invalid_body", f"/body/{name}", "/body")
+    frame = signed_example()
+    frame[name] = 1
+    refused = refusal(fixtures.resign(frame), frame)
+    assert (refused.code, refused.known_at) == ("malformed", "")
+    # A newer minor's reply whose certificate, labelled with this minor, holds a field it does not know.
+    reply = fixtures.example_frame("host.join.reply", "ok")
+    reply["protocol"] = "1.1-pre"
+    reply["body"]["certificate"][name] = 1
+    refused = refusal(fixtures.resign(reply), reply)
+    assert (refused.code, refused.at, refused.known_at) == ("invalid_body", f"/body/certificate/{name}", "/body/certificate")
+    notice = fixtures.example_frame("dlq.notice", "bad-signature")["body"]
+    assert validator("bodies/dlq.notice.schema.json").is_valid(dict(notice, pointer="/body"))
+    assert not validator("bodies/dlq.notice.schema.json").is_valid(dict(notice, pointer="/body/Dear Bob, my password"))
+
+
+def test_dead_letter_senders_can_publish_raw_copies_under_their_own_id() -> None:
+    for role in REGISTRY["kinds"]["dlq.notice"]["senders"]:
+        document = json.loads((CONTRACT / f"generated/permissions/{role}.json").read_text())
+        assert "ua.v1.{team}.{self}.dlq.raw.*" in document["publish"]
+        assert not any("ua.v1.{team}.*.dlq.raw" in subject for subject in document["publish"])
+
+
+def join_frame(key_id: str = "test-lead-key-1", public_key_of: str | None = None) -> dict:
+    """The join example, from lead-host-1 presenting ``public_key_of``'s key under ``key_id``."""
+
+    document = fixtures.example_frame("host.join", "full")
+    document["issuer"].update(runtime="lead-host-1", key_id=key_id)
+    document["subject"] = "ua.v1._install.lead-host-1.svc.host.join"
+    document["body"]["runtime"] = "lead-host-1"
+    document["body"]["application_key"] = {"key_id": key_id,
+                                           "public_key": fixtures.KEYS[public_key_of or key_id]["public_key"]}
+    document["idempotency_key"] = registry_key(document)
+    return document
+
+
+def without_lead_host() -> TrustStore:
+    return fixtures.trust_store(remove=["certificates/lead-host-1.json", "sessions/lead.json"])
+
+
+@pytest.mark.parametrize("known", [False, True])
+def test_join_proves_possession_even_when_the_key_is_known(known: bool) -> None:
+    store = fixtures.trust_store() if known else without_lead_host()
+    document = join_frame()
+    signed = json.dumps(sign_frame(document, fixtures.private_key("test-lead-key-1"))).encode()
+    verified = fixtures.verify(signed, document, trust=store)
+    assert verified.frame.kind == "host.join" and verified.certificate is None
+    document = join_frame(public_key_of="test-worker-key-1")
+    signed = json.dumps(sign_frame(document, fixtures.private_key("test-lead-key-1"))).encode()
+    assert refusal(signed, document, trust=fixtures.trust_store() if known else without_lead_host()).code == (
+        "unknown_key" if known else "bad_signature")
+
+
+def test_known_join_key_id_cannot_be_reassigned_to_another_public_key() -> None:
+    document = join_frame(public_key_of="test-worker-key-1")
+    signed = json.dumps(sign_frame(document, fixtures.private_key("test-worker-key-1"))).encode()
+    refused = refusal(signed, document)
+    assert (refused.code, refused.at) == ("unknown_key", "/issuer/key_id")
+
+
+def test_lost_join_reply_can_be_recovered_after_the_key_becomes_known() -> None:
+    document = join_frame()
+    data = json.dumps(sign_frame(document, fixtures.private_key("test-lead-key-1"))).encode()
+    fixtures.verify(data, document, trust=without_lead_host())
+    fixtures.verify(data, document, {"minimum_epochs": [{"installation": "install_example", "membership": 9, "revocation": 9}]})
+    assert refusal(data, document, {"trust": {"add": ["extra/lead-host-revoked-after-issue.json"]}}).code == "revoked"
+
+
+def test_a_join_speaks_only_for_its_host_in_the_installation_scope() -> None:
+    document = join_frame()
+    document["issuer"]["team"] = "team_example"
+    data = json.dumps(sign_frame(document, fixtures.private_key("test-lead-key-1"))).encode()
+    assert refusal(data, document).code == "wrong_issuer"
+
+
+def test_queued_work_is_judged_by_its_certificate_not_the_epoch_minimum() -> None:
+    frame = signed_example()
+    minimum = {"minimum_epochs": [{"installation": "install_example", "runtime": "lead-host-1", "membership": 4}]}
+    fixtures.verify(json.dumps(frame).encode(), frame, minimum)
+    pause = fixtures.example_frame("agent.pause")
+    assert refusal(json.dumps(pause).encode(), pause, minimum).code == "epoch_too_old"
+    # A dead-letter notice waits in UA1_DLQ like queued work.
+    notice = fixtures.example_frame("dlq.notice", "bad-signature")
+    worker_minimum = {"minimum_epochs": [{"installation": "install_example", "runtime": "worker-host-1", "membership": 9}]}
+    fixtures.verify(json.dumps(notice).encode(), notice, worker_minimum)
+
+
+def test_renewal_rotation_signing_vector() -> None:
+    vector = json.loads((CONTRACT / "signing-vectors/key-rotation.json").read_text())
+    document = fixtures.example_frame("host.renew", "rotate")
+    before = copy.deepcopy(document)
+    assert wire_frame.renew_key_proof_bytes(document).hex() == vector["signing_bytes_hex"]
+    assert document["body"]["application_key_rotation"]["proof"] == vector["proof"]
+    signed = wire_frame.sign_renew_key_proof(document, fixtures.private_key(vector["new_key"]))
+    assert sign_frame(signed, fixtures.private_key(vector["old_key"])) == document
+    assert document == before, "signing must not mutate the caller's frame"
+
+
+@pytest.mark.parametrize(("location", "field", "value", "code"), [
+    ("body", "renew_id", "changed", "invalid_body"),
+    ("body", "certificate_id", "changed", "wrong_issuer"),  # a renewal names the certificate that signs it
+    ("body", "profile_sha256", "A" * 43, "invalid_body"),
+    ("issuer", "revocation_epoch", 2, "wrong_issuer"),
+    ("audience", "id", "another_authority", "invalid_body"),
+    ("", "message_id", "01928f3a-7b2c-7709-8000-000000000709", "invalid_body"),
+    ("", "expires_at", "2026-10-22T04:31:00.000Z", "invalid_body"),
+    ("", "protocol", "1.1-pre", "invalid_body"),
+])
+def test_new_key_proof_cannot_be_reused_for_a_different_renewal(location: str, field: str, value, code: str) -> None:
+    document = fixtures.example_frame("host.renew", "rotate")
+    target = document[location] if location else document
+    target[field] = value
+    assert refusal(fixtures.resign(document), document).code == code
+
+
+def test_rotation_proof_covers_a_newer_minors_unknown_fields() -> None:
+    document = fixtures.example_frame("host.renew", "rotate")
+    document["protocol"] = "1.1-pre"
+    document["body"]["application_key_rotation"]["future_option"] = "original"
+    document = sign_frame(wire_frame.sign_renew_key_proof(document, fixtures.private_key("test-lead-key-2")),
+                          fixtures.private_key("test-lead-key-1"))
+    fixtures.verify(json.dumps(document).encode(), document)
+    document["body"]["application_key_rotation"]["future_option"] = "changed"
+    assert refusal(fixtures.resign(document), document).code == "invalid_body"
+
+
+@pytest.mark.parametrize("missing", ["key", "proof"])
+def test_rotation_requires_both_key_and_proof_in_both_validators(missing: str) -> None:
+    document = fixtures.example_frame("host.renew", "rotate")
+    del document["body"]["application_key_rotation"][missing]
+    assert list(validator("bodies/host.renew.schema.json").iter_errors(document["body"]))
+    assert refusal(fixtures.resign(document), document).code == "invalid_body"
+
+
+@pytest.mark.parametrize("bad", ["key", "proof"])
+def test_rotation_requires_a_valid_signature_by_the_new_key(bad: str) -> None:
+    document = fixtures.example_frame("host.renew", "rotate")
+    rotation = document["body"]["application_key_rotation"]
+    if bad == "key":
+        rotation["key"]["public_key"] = fixtures.KEYS["test-gateway-key-1"]["public_key"]
+    else:
+        rotation["proof"] = b64url(bytes(64))
+    refused = refusal(fixtures.resign(document), document)
+    assert (refused.code, refused.at) == ("invalid_body", "/body/application_key_rotation/proof")
+
+
+def test_rotation_cannot_be_null() -> None:
+    document = fixtures.example_frame("host.renew", "rotate")
+    document["body"]["application_key_rotation"] = None
+    assert list(validator("bodies/host.renew.schema.json").iter_errors(document["body"]))
+    assert refusal(fixtures.resign(document), document).code == "invalid_body"
+
+
+def test_a_host_that_has_not_joined_may_only_ask_to_join_and_read_its_inbox() -> None:
+    joining = role_permissions(EXPORT.JOINING)
+    assert joining == {"role": EXPORT.JOINING, "publish": ["ua.v1._install.{self}.svc.host.join"],
+                       "subscribe": ["_INBOX.{self}.>"]}
+    assert EXPORT.JOINING not in REGISTRY["host_roles"]
+
+
+def renewed_lead_certificate(*, issued_at: str = "2026-10-22T04:30:00.000Z", epoch: int = 4,
+                             key_id: str = "test-lead-key-2") -> bytes:
+    """The certificate the rotation example's reply carries, issued at ``issued_at``."""
+
+    document = copy.deepcopy(fixtures.example_frame("host.renew.reply", "ok")["body"]["certificate"])
+    document["key"] = f"host.install_example.lead-host-1.{epoch}"
+    document["body"].update(membership_epoch=epoch, issued_at=issued_at,
+                            application_key={"key_id": key_id, "public_key": fixtures.KEYS[key_id]["public_key"]})
+    document["issued_at"] = issued_at
+    document["sequence"] = 2  # a newer record than any held under the same key
+    return json.dumps(sign_state(document, fixtures.private_key(document["writer"]["key_id"]))).encode()
+
+
+def test_a_replaced_certificate_signs_new_frames_only_during_the_overlap() -> None:
+    """Authorization plan 12.5: in-flight frames from the old key are accepted until a short deadline."""
+
+    store = fixtures.trust_store(extra_documents=[renewed_lead_certificate(issued_at="2026-10-22T04:20:00.000Z")])
+    pause = fixtures.example_frame("agent.pause")
+    assert parse_timestamp(pause["issued_at"]) - parse_timestamp("2026-10-22T04:20:00.000Z") > timedelta(
+        seconds=kinds.CERTIFICATE_OVERLAP_SECONDS) + SKEW
+    refused = refusal(json.dumps(pause).encode(), pause, trust=store)
+    assert (refused.code, refused.at) == ("unknown_key", "/issued_at")
+    # Within the overlap the old key still signs new frames.
+    store = fixtures.trust_store(extra_documents=[renewed_lead_certificate(issued_at="2026-10-22T04:28:00.000Z")])
+    fixtures.verify(json.dumps(pause).encode(), pause, trust=store)
+    # Queued work issued before the replacement is still judged by the old certificate.
+    stop = signed_example()
+    store = fixtures.trust_store(extra_documents=[renewed_lead_certificate(issued_at="2026-10-22T04:35:00.000Z")])
+    fixtures.verify(json.dumps(stop).encode(), stop, {"now": "2026-10-22T05:00:00.000Z"}, trust=store)
+
+
+@pytest.mark.parametrize("epoch", [3, 2])
+def test_a_renewed_certificate_needs_a_higher_epoch(epoch: int) -> None:
+    """At the same epoch it would overwrite the certificate queued work still needs (host.<installation>.<runtime>.<epoch>)."""
+
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.trust_store(extra_documents=[renewed_lead_certificate(epoch=epoch)])
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/membership_epoch")
+
+
+def test_a_renewed_certificate_needs_a_higher_epoch_when_it_arrives_first() -> None:
+    store = fixtures.trust_store(remove=["certificates/lead-host-1.json"])
+    store.add(renewed_lead_certificate(epoch=2))
+    with pytest.raises(FrameRefused) as refused:
+        store.add((EXAMPLES / "trust/certificates/lead-host-1.json").read_bytes())
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/membership_epoch")
+
+
+def test_a_rotation_retried_after_a_lost_reply_is_accepted_once_its_certificate_is_known() -> None:
+    document = fixtures.example_frame("host.renew", "rotate")
+    fixtures.verify(json.dumps(document).encode(), document, trust=fixtures.trust_store(extra_documents=[renewed_lead_certificate()]))
+    # The same key id with another public key is not a retry.
+    document["body"]["application_key_rotation"]["key"]["public_key"] = fixtures.KEYS["test-gateway-key-1"]["public_key"]
+    refused = refusal(fixtures.resign(document), document, trust=fixtures.trust_store(extra_documents=[renewed_lead_certificate()]))
+    assert (refused.code, refused.at) == ("invalid_body", "/body/application_key_rotation/key/key_id")
+
+
+def test_a_new_host_verifies_its_join_reply_from_the_bootstrap_records_alone() -> None:
+    """The bootstrap bundle: the authority keys, the authority hosts' certificates and the revocations (README)."""
+
+    bootstrap = fixtures.trust_store(remove=[name for name in fixtures.default_records()
+                                             if name not in {"certificates/authority-1.json", "revocations/install_example.json"}])
+    reply = fixtures.example_frame("host.join.reply", "ok")
+    verified = fixtures.verify(json.dumps(reply).encode(), reply, trust=bootstrap)
+    bootstrap.add(json.dumps(verified.raw["body"]["certificate"]).encode())
+    assert bootstrap.host_certificate("install_example", "new-host-1", 1) is not None
+
+
+@pytest.mark.parametrize("operation", ["join", "renew"])
+@pytest.mark.parametrize("bad", ["record", "body"])
+def test_successful_installation_replies_require_a_certificate(operation: str, bad: str) -> None:
+    document = fixtures.example_frame(f"host.{operation}.reply", "ok")
+    if bad == "record":
+        document["body"]["certificate"] = json.loads((STATE_EXAMPLES / "valid" / "team_view" / "roster.json").read_text())
+    else:
+        del document["body"]["certificate"]["body"]["application_key"]
+    assert list(validator(f"bodies/host.{operation}.reply.schema.json").iter_errors(document["body"]))
+    assert refusal(fixtures.resign(document), document).code == "invalid_body"
+
+
 # -- canonical form and encodings ------------------------------------------------------------------
 
 VECTORS = json.loads((CONTRACT / "signing-vectors" / "vectors.json").read_text(encoding="utf-8"))
@@ -916,16 +1362,33 @@ def test_neighbouring_checks_each_have_a_two_defect_example() -> None:
     assert {(first, second) for first, second in zip(order, order[1:])} <= covered
 
 
-def receiver_only(case: dict) -> bool:
-    """A schema cannot recompute a key from other fields or apply a body rule: those refusals are the receiver's alone.
+# Body fields a receiver checks against its trust store or the request a reply answers:
+# a reply's certificate (its signature, single validity window and what it certifies)
+# and a key rotation's new key id and proof (README, "Installation traffic").
+RECEIVER_CHECKED = re.compile(r"/body/certificate/(signature|expires_at|body/[a-z_]+)|/body/application_key_rotation/(key/key_id|proof)")
 
-    README, "Idempotency keys" and "What bodies carry".
+
+def receiver_only(case: dict) -> bool:
+    """Refusals a schema cannot give: they recompute a key, apply a body rule, or compare the body with records.
+
+    README, "Idempotency keys", "What bodies carry" and "Installation traffic".
     """
 
     kind = json.loads(case["frame_text"])["kind"]
     rules = REGISTRY["kinds"].get(kind, {}).get("body_rules", [])
     places = {rule.get("unique") or rule.get("requires") or rule["any_of"][0].rsplit("/", 1)[0] for rule in rules}
-    return case["at"] == "/idempotency_key" or case["at"] in places
+    return case["at"] == "/idempotency_key" or case["at"] in places or RECEIVER_CHECKED.fullmatch(case["at"]) is not None
+
+
+@pytest.mark.parametrize("path", [p for p in invalid_examples() if RECEIVER_CHECKED.fullmatch(json.loads(p.read_text())["at"])],
+                         ids=lambda path: path.stem)
+def test_refusals_that_compare_the_body_with_records_pass_the_schema(path: Path) -> None:
+    """Only a receiver gives these, so the shared examples are its tests; a schema accepts the body."""
+
+    case = json.loads(path.read_text(encoding="utf-8"))
+    document = json.loads(case["frame_text"])
+    assert case["refusal"] == "invalid_body"
+    assert not list(validator(body_schema_file(document["kind"])).iter_errors(document["body"]))
 
 
 @pytest.mark.parametrize("path", [p for p in invalid_examples() if json.loads(p.read_text())["refusal"] == "invalid_body"
@@ -989,7 +1452,7 @@ def certificate_record(runtime: str, *, roles: tuple[str, ...], epoch: int = 1,
         "deployment": "local", "profile_sha256": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo",
         "issued_at": issued_at, "expires_at": expires_at,
     }
-    document = {"record": "certificate", "key": f"host.{installation}.{runtime}.{epoch}",
+    document = {"record": "certificate", "protocol": kinds.PROTOCOL, "key": f"host.{installation}.{runtime}.{epoch}",
                 "writer": {"type": "authority", "installation": installation, "key_id": authority},
                 "sequence": 1, "issued_at": issued_at, "body": body}
     return json.dumps(sign_state(document, fixtures.private_key(authority))).encode()

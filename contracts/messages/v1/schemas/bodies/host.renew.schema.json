@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/host.renew.schema.json",
+  "title": "host.renew body",
+  "description": "A host renews its certificate and connection credential, or rotates its keys.",
+  "type": "object",
+  "properties": {
+    "renew_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "certificate_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "membership_epoch": {
+      "$ref": "../common.schema.json#/$defs/epoch"
+    },
+    "profile_sha256": {
+      "$ref": "../common.schema.json#/$defs/sha256_digest"
+    },
+    "software": {
+      "$ref": "../common.schema.json#/$defs/software"
+    },
+    "new_nats_public_key": {
+      "$ref": "../common.schema.json#/$defs/nats_user_key"
+    },
+    "application_key_rotation": {
+      "description": "Both the new application key and its proof are required when rotating. The proof signs the renewal frame as specified in README.md, using the new private key.",
+      "type": "object",
+      "properties": {
+        "key": {
+          "$ref": "../common.schema.json#/$defs/application_key"
+        },
+        "proof": {
+          "$ref": "../common.schema.json#/$defs/ed25519_signature"
+        }
+      },
+      "required": [
+        "key",
+        "proof"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "renew_id",
+    "certificate_id",
+    "membership_epoch",
+    "profile_sha256"
+  ],
+  "additionalProperties": false
+}

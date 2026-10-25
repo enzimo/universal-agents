@@ -1,5 +1,6 @@
 {
   "record": "certificate",
+  "protocol": "1.0-pre",
   "key": "host.install_example.scheduler-1.1",
   "writer": {
     "type": "authority",
@@ -40,5 +41,5 @@
   },
   "algorithm": "ed25519",
   "body_digest": "sjYRUMQ_31HBucaCo9_cnNhWsWoBrQRD2ozpkBkuYvY",
-  "signature": "xWRWq1uJ5OzO91-5DtJV_qXaUATpxsUobTtpaXLbVjIv8WGTCi3KJ6Bht6HT79I0lXMOPjZ_c4N6S6ouDV7yBQ"
+  "signature": "MZQmPRUPJ0d2T4EF98LVFfwVKqDNEGMixArNq825g_MmmdWp-8b7MFSg8jbhTOKe5LuoCKpQ4uOwIHiDS8ozCw"
 }

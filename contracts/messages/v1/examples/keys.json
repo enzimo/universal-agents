@@ -43,6 +43,24 @@
       "installation": "install_peer",
       "holder": "peer-lead-host-1"
     },
+    "test-lead-key-2": {
+      "seed": "4eLj5OXm5-jp6uvs7e7v8PHy8_T19vf4-fr7_P3-_wA",
+      "public_key": "bI0UsEdZPXEX3ERZV9i91ncsMD0GQpf9yOMpkn03C9o",
+      "installation": "install_example",
+      "holder": "lead-host-1"
+    },
+    "new-host-key-1": {
+      "seed": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzA",
+      "public_key": "7VSln7GsOlEjk1E2KUG4aOhaYOPXskhdgogh3Hppwnk",
+      "installation": "install_example",
+      "holder": "new-host-1"
+    },
+    "test-authority-host-key-1": {
+      "seed": "MTIzNDU2Nzg5Ojs8PT4_QEFCQ0RFRkdISUpLTE1OT1A",
+      "public_key": "bCj9BYwYyIxszir5gdLRHIUbEj7Vtpt4dnc-0JnqP4M",
+      "installation": "install_example",
+      "holder": "authority-1"
+    },
     "test-scheduler-key-1": {
       "seed": "EU4Q96QrwzwIK06z0GySxR9ldIh464aOTwCl2PxdPMQ",
       "public_key": "UX8YDKs4vuGr34IjMFYE8FVBJUkCJ1p6znXk1ExO87g",

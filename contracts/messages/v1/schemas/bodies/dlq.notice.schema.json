@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/dlq.notice.schema.json",
+  "title": "dlq.notice body",
+  "description": "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only.",
+  "type": "object",
+  "properties": {
+    "copy_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "An id the receiver chooses at random for each copy it sets aside (256 bits as lowercase hexadecimal). It names the copy's subjects, dlq.raw.<copy> and dlq.notice.<copy>."
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "too_large",
+        "malformed",
+        "unknown_key",
+        "bad_signature",
+        "bad_digest",
+        "revoked",
+        "epoch_too_old",
+        "wrong_issuer",
+        "wrong_sender",
+        "wrong_team",
+        "wrong_audience",
+        "subject_mismatch",
+        "expired",
+        "not_yet_valid",
+        "replayed",
+        "unknown_kind",
+        "invalid_body",
+        "bad_authority",
+        "access_denied",
+        "handler_failed",
+        "delivery_limit",
+        "upgrade_drain"
+      ],
+      "description": "Why the message was set aside: a verification refusal code (registry verification_refusals), or handler_failed (its handler failed), delivery_limit (it was delivered too often) or upgrade_drain (it waited through an upgrade)."
+    },
+    "pointer": {
+      "description": "The refusal's JSON pointer, up to the last field the receiver's schema knows: an unknown field is named by the object that holds it, so a name the sender chose never reaches the notice.",
+      "type": "string",
+      "pattern": "^(/[a-z0-9_]{1,64}){0,16}$"
+    },
+    "original": {
+      "type": "object",
+      "properties": {
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "stream": {
+          "$ref": "../common.schema.json#/$defs/token_id"
+        },
+        "stream_sequence": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "deliveries": {
+          "$ref": "../common.schema.json#/$defs/count"
+        }
+      },
+      "required": [
+        "subject",
+        "stream",
+        "stream_sequence",
+        "deliveries"
+      ],
+      "additionalProperties": false
+    },
+    "claimed": {
+      "type": "object",
+      "description": "What the set-aside message claimed about itself, unverified.",
+      "properties": {
+        "kind": {
+          "$ref": "../common.schema.json#/$defs/kind"
+        },
+        "message_id": {
+          "$ref": "../common.schema.json#/$defs/message_id"
+        },
+        "issuer_team": {
+          "$ref": "../common.schema.json#/$defs/scope_id"
+        },
+        "issuer_runtime": {
+          "$ref": "../common.schema.json#/$defs/runtime_id"
+        },
+        "protocol": {
+          "$ref": "../common.schema.json#/$defs/protocol_label"
+        }
+      },
+      "additionalProperties": false
+    },
+    "raw": {
+      "type": "object",
+      "properties": {
+        "stored": {
+          "type": "boolean"
+        },
+        "size": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "sha256": {
+          "$ref": "../common.schema.json#/$defs/sha256_digest"
+        }
+      },
+      "required": [
+        "stored",
+        "size",
+        "sha256"
+      ],
+      "additionalProperties": false,
+      "description": "The set-aside bytes: whether they were stored at dlq.raw.<copy> (only messages of at most max_frame_bytes are), their size, and their SHA-256 in unpadded base64url."
+    },
+    "release": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    }
+  },
+  "required": [
+    "copy_id",
+    "reason",
+    "original",
+    "raw",
+    "release"
+  ],
+  "additionalProperties": false
+}

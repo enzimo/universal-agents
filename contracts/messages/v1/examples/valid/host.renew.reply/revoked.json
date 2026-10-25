@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "host.renew.reply",
+  "message_id": "01928f3a-7b2c-7706-8000-000000000706",
+  "idempotency_key": "host.renew.reply:bTqTsJTPsYOjxfmJ-SqfRU-DHTgE_J_PBhQ2o4Wi6iI",
+  "issuer": {
+    "installation": "install_example",
+    "team": "_install",
+    "runtime": "authority-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-authority-host-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "_install",
+    "target": "installation_service",
+    "id": "lead-host-1",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7704-8000-000000000704",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "revoked",
+    "revocation_epoch": 2
+  },
+  "causation_id": "01928f3a-7b2c-7704-8000-000000000704",
+  "body_digest": "dhFMNsKFmB5DDEPRH2-R8vU1rYv7AeslmInhXLxjr3Y",
+  "signature": "LYy4NFecBUS-_AhxZ5fsloAk5tqH8OlK9q1r95v7UE8L6LP5W-Ef8oxsSzb2N844E4FI4mW40X39jacdv4yUBA"
+}

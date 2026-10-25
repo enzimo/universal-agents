@@ -44,11 +44,16 @@ STORAGE = {"file": StorageType.FILE, "memory": StorageType.MEMORY}
 HOSTS = {
     "lead": {"role": "lead_host", "runtime": "lead-host-1", "agents": ["lead"], "pools": [], "edges": []},
     "worker": {"role": "worker_host", "runtime": "worker-host-1", "agents": ["researcher-2"], "pools": ["researcher"], "edges": []},
+    "authority": {"role": "installation_authority", "runtime": "authority-1", "agents": [], "pools": [], "edges": []},
     "services": {"role": "team_services", "runtime": "team-services-1", "agents": [], "pools": [], "edges": []},
     "scheduler": {"role": "scheduler", "runtime": "scheduler-1", "agents": [], "pools": [], "edges": []},
     "gateway": {"role": "gateway", "runtime": "gateway-1", "agents": [], "pools": [], "edges": ["web"]},
     "edge": {"role": "edge_adapter", "runtime": "edge-adapter-1", "agents": [], "pools": [], "edges": ["a2a_partner"]},
+    # A host that has not joined yet: the bootstrap bundle's pre-join permissions only.
+    "joining": {"role": "joining_host", "runtime": "new-host-1", "agents": [], "pools": [], "edges": []},
 }
+# What a new host's bootstrap bundle carries besides the authority keys (README, "Installation traffic").
+BOOTSTRAP_RECORDS = {"certificates/authority-1.json", "revocations/install_example.json"}
 
 
 def expand(template: str, bindings: dict[str, list[str]]) -> list[str]:
@@ -399,6 +404,68 @@ async def test_a_reassigned_task_is_delivered_again_and_its_retry_is_deduplicate
         await received.ack_sync(timeout=2)
         assert (await js.stream_info("UA1_WORK")).state.messages == 0
         assert lead.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_installation_requests_reach_the_authority_and_dead_letters_keep_raw_copies(isolated_broker) -> None:
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        authority = await connect(stack, isolated_broker, "authority")
+        worker = await connect(stack, isolated_broker, "worker")
+        api = json.loads((CONTRACT / "generated/asyncapi.json").read_text())
+        for operation in ("join", "renew"):
+            received: asyncio.Queue = asyncio.Queue()
+
+            async def take(message, queue=received):
+                await queue.put(message.data)
+
+            await subscribe_ready(authority, f"ua.v1._install.*.svc.host.{operation}", take)
+            await worker.nc.publish(api["channels"][f"install_svc_host_{operation}"]["address"].format(sender="worker-host-1"),
+                                    operation.encode())
+            await worker.nc.flush()
+            assert await asyncio.wait_for(received.get(), timeout=2) == operation.encode()
+
+        js = admin.nc.jetstream()
+        await js.add_stream(config=stream_config("UA1_DLQ"))
+        raw = b"{a refused message stays byte-for-byte identical\x00"
+        raw_subject = "ua.v1.team_example.worker-host-1.dlq.raw." + "c" * 64
+        await worker.nc.jetstream().publish(raw_subject, raw)
+        notice = fixtures.example_frame("dlq.notice", "bad-signature")
+        await worker.nc.jetstream().publish(notice["subject"], json.dumps(notice).encode(), headers=headers(notice))
+        assert (await js.get_last_msg("UA1_DLQ", raw_subject)).data == raw
+        stored = await js.get_last_msg("UA1_DLQ", notice["subject"])
+        fixtures.verify(stored.data, notice)  # a stored frame is verified without its headers
+        other = raw_subject.replace("worker-host-1", "another-host")
+        await worker.publish_refused(other, raw)
+        with pytest.raises(nats.js.errors.NotFoundError):
+            await js.get_last_msg("UA1_DLQ", other)
+        assert worker.errors.empty() and authority.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_a_new_host_joins_with_only_its_pre_join_permissions_and_bootstrap_records(isolated_broker) -> None:
+    async with AsyncExitStack() as stack:
+        authority = await connect(stack, isolated_broker, "authority")
+        joining = await connect(stack, isolated_broker, "joining")
+        request = fixtures.example_frame("host.join", "full")
+
+        async def answer(message):
+            verified = fixtures.verify(message.data, request, arrived(request, message))
+            reply = fixtures.example_frame("host.join.reply", "ok")
+            reply.update(subject=message.reply, causation_id=verified.frame.message_id)
+            await authority.nc.publish(message.reply, fixtures.resign(reply), headers=headers(reply))
+
+        await subscribe_ready(authority, "ua.v1._install.*.svc.host.join", answer)
+        response = await joining.nc.request(request["subject"], json.dumps(request).encode(), timeout=2, headers=headers(request))
+        reply = json.loads(response.data)
+        bootstrap = fixtures.trust_store(remove=[name for name in fixtures.default_records() if name not in BOOTSTRAP_RECORDS])
+        verified = fixtures.verify(response.data, reply, arrived(reply, response), trust=bootstrap)
+        assert verified.body.outcome == "ok" and verified.body.certificate.body.runtime == "new-host-1"
+        await joining.publish_refused("ua.v1._install.new-host-1.svc.host.renew")
+        await joining.publish_refused("ua.v1._install.worker-host-1.svc.host.join")
+        await joining.publish_refused("ua.v1.team_example.new-host-1.work.team")
+        await joining.subscribe_refused("_INBOX.worker-host-1.>")
+        assert joining.errors.empty() and authority.errors.empty()
 
 
 @pytest.mark.asyncio

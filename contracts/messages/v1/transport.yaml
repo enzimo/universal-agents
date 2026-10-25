@@ -10,6 +10,10 @@
 subject_prefix: ua.v1.{team}.{sender}
 reply_inbox_prefix: _INBOX.{runtime}
 peer_sender_slot: x-{installation}
+# Installation-wide traffic (joining, renewing a certificate) names this scope where other
+# frames name a team: as the issuer's and the audience's team, and as the subject's team
+# token (ua.v1._install.<sender>.svc.<operation>). Team ids cannot start with _.
+installation_scope: _install
 
 # Which host roles serve each audience target. A role receives a kind's address, and
 # gets its subscription or consumer grants, only when it is one of the kind's receivers
@@ -87,6 +91,7 @@ streams:
     retention: limits
     storage: file
     max_age_seconds: 2592060    # the dead-letter class's expiry plus a minute
+    max_message_bytes: 262144   # a raw copy is kept only up to max_frame_bytes; a larger message gets a notice with raw.stored false
 
 # Consumer names join ids with ~, which ids cannot contain: with _ (allowed in ids),
 # team "team_example" with agent "researcher-2" and team "team" with agent
@@ -131,13 +136,13 @@ key_value:
     description: host certificates, revocations, agent sessions and agreements (registry state_records); each record is signed, so readers trust the signature, not the bucket
     per_key_ttl_seconds: 0
   UA1_HOSTS:
-    description: one record per runtime host; written every 20 s, expires after 60 s
+    description: one record per runtime host; written every 20 s, expires after 60 s (each record also states its expiry)
     per_key_ttl_seconds: 60
   UA1_AGENTS:
     description: one record per agent (availability, busy, idle, paused, exiting), written only on change
     per_key_ttl_seconds: 0
   UA1_PLACEMENT:
-    description: which host runs an agent and that host's epoch; its revision is the fencing token
+    description: which host runs an agent and that host's epoch; the record's signed sequence is the fencing token
     per_key_ttl_seconds: 0
   UA1_TEAM_VIEW:
     description: the team's shared view of open work

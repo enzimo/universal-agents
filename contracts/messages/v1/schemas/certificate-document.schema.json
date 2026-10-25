@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/certificate-document.schema.json",
+  "title": "Signed membership certificate of protocol 1",
+  "description": "The signed state document returned by host.join and host.renew. Its record is certificate, its writer an authority key of the installation, and its body a membership certificate. Receivers verify its signature with that authority key and check that it certifies the host that asked (README, \"Installation traffic\").",
+  "type": "object",
+  "properties": {
+    "record": {
+      "const": "certificate"
+    },
+    "protocol": {
+      "description": "The writer's protocol label. A reader at an older minor drops a newer minor's unknown optional fields, as for frames (README, \"Versions\").",
+      "$ref": "common.schema.json#/$defs/protocol_label"
+    },
+    "key": {
+      "$ref": "common.schema.json#/$defs/state_key"
+    },
+    "writer": {
+      "description": "Only an installation's authority key signs a certificate.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "authority"
+        },
+        "installation": {
+          "$ref": "common.schema.json#/$defs/installation_id"
+        },
+        "key_id": {
+          "$ref": "common.schema.json#/$defs/key_id"
+        }
+      },
+      "required": [
+        "type",
+        "installation",
+        "key_id"
+      ],
+      "additionalProperties": false
+    },
+    "sequence": {
+      "$ref": "common.schema.json#/$defs/state_sequence"
+    },
+    "issued_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "expires_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "algorithm": {
+      "const": "ed25519"
+    },
+    "body_digest": {
+      "$ref": "common.schema.json#/$defs/sha256_digest"
+    },
+    "body": {
+      "$ref": "state/certificate.schema.json"
+    },
+    "signature": {
+      "$ref": "common.schema.json#/$defs/ed25519_signature"
+    }
+  },
+  "required": [
+    "record",
+    "protocol",
+    "key",
+    "writer",
+    "sequence",
+    "issued_at",
+    "algorithm",
+    "body_digest",
+    "body",
+    "signature"
+  ],
+  "additionalProperties": false
+}

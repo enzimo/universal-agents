@@ -1,6 +1,7 @@
 {
   "authority_token_domain": "universal-agents/authority-token/v1",
   "authority_token_max_seconds": 604800,
+  "certificate_overlap_seconds": 300,
   "change_refusals": [
     {
       "code": "changed_since_read",
@@ -758,6 +759,40 @@
       "topology_edge": "none",
       "wakes_model": "never"
     },
+    "dlq.notice": {
+      "address": "dlq.notice.{copy}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/dlq.notice.schema.json",
+      "class": "dead_letter",
+      "description": "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only. The team services tell administrators.",
+      "expiry_seconds": 2592000,
+      "idempotency": [
+        "/issuer/runtime",
+        "/body/copy_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "installation_authority",
+        "scheduler"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
     "heartbeat_items.add": {
       "address": "svc.team.heartbeat_items.add",
       "admission": {
@@ -1024,6 +1059,92 @@
       "routing": "team",
       "senders": [
         "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "host.join": {
+      "address": "_install.{sender}.svc.host.join",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/host.join.schema.json",
+      "class": "request_reply",
+      "description": "A new host asks to join the installation; the frame is signed with the key it presents.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/issuer/runtime",
+        "/issuer/key_id",
+        "/body/join_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "installation_authority"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/host.join.reply.schema.json",
+        "errors": [
+          "pending",
+          "denied",
+          "protocol_mismatch",
+          "not_allowed"
+        ]
+      },
+      "routing": "named",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "scheduler"
+      ],
+      "topology_edge": "none",
+      "verification": "proof_of_possession",
+      "wakes_model": "never"
+    },
+    "host.renew": {
+      "address": "_install.{sender}.svc.host.renew",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/host.renew.schema.json",
+      "class": "request_reply",
+      "description": "A host renews its certificate and connection credential, or rotates its keys.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/issuer/runtime",
+        "/body/renew_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "installation_authority"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/host.renew.reply.schema.json",
+        "errors": [
+          "revoked",
+          "needs_approval",
+          "protocol_mismatch",
+          "not_allowed"
+        ]
+      },
+      "routing": "named",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "scheduler"
       ],
       "topology_edge": "none",
       "wakes_model": "never"
@@ -5515,6 +5636,7 @@
   "max_frame_bytes": 262144,
   "max_nesting_depth": 64,
   "protocol": "1.0-pre",
+  "renew_key_proof_domain": "universal-agents/host-renew-key-proof/v1",
   "retry_outcomes": [
     "not_started",
     "record_busy",
@@ -5523,6 +5645,22 @@
   ],
   "signing_domain": "universal-agents/message-frame/v1",
   "state_records": {
+    "agent": {
+      "body": "state/agent.schema.json",
+      "bucket": "UA1_AGENTS",
+      "description": "An agent's state, written by the host it is placed on when the state changes.",
+      "key": "<team>.<agent>",
+      "signer": "host",
+      "signer_roles": [
+        "lead_host",
+        "worker_host"
+      ],
+      "write_rule": "written on change, at most once per 2 seconds; readers accept it only from the placement's host",
+      "writers": [
+        "lead_host",
+        "worker_host"
+      ]
+    },
     "agent_session": {
       "body": "state/agent_session.schema.json",
       "bucket": "UA1_CERTS",
@@ -5561,6 +5699,47 @@
         "edge_adapter"
       ]
     },
+    "host": {
+      "body": "state/host.schema.json",
+      "bucket": "UA1_HOSTS",
+      "description": "A runtime host's liveness and capacity, written by the host itself every 20 seconds and naming its certificate.",
+      "key": "<runtime>",
+      "signer": "host",
+      "signer_roles": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "installation_authority",
+        "scheduler"
+      ],
+      "ttl_seconds": 60,
+      "write_rule": "written by the host itself every 20 seconds, expiring within ttl_seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions",
+      "writers": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "installation_authority",
+        "scheduler"
+      ]
+    },
+    "placement": {
+      "body": "state/placement.schema.json",
+      "bucket": "UA1_PLACEMENT",
+      "description": "Which host runs an agent; its signed sequence is the fencing token.",
+      "key": "<team>.<agent>",
+      "signer": "host",
+      "signer_roles": [
+        "team_services"
+      ],
+      "write_rule": "compare-and-set on the last key-value revision, with the next sequence; the signed sequence, not the unsigned revision, is the fencing token, so a stored copy written back is never newer",
+      "writers": [
+        "team_services"
+      ]
+    },
     "revocations": {
       "body": "state/revocations.schema.json",
       "bucket": "UA1_CERTS",
@@ -5571,6 +5750,20 @@
       "writers": [
         "installation_authority",
         "edge_adapter"
+      ]
+    },
+    "team_view": {
+      "body": "state/team_view.schema.json",
+      "bucket": "UA1_TEAM_VIEW",
+      "description": "One entry of a team's shared view of its members, requests, tasks and Objectives.",
+      "key": "<team>.<entry>.<id>",
+      "signer": "host",
+      "signer_roles": [
+        "team_services"
+      ],
+      "write_rule": "deleted when the item closes or the person it names departs; each entry at most 4 KiB",
+      "writers": [
+        "team_services"
       ]
     }
   },
@@ -5587,7 +5780,7 @@
     },
     {
       "code": "unknown_key",
-      "meaning": "the trust store holds no certificate for the issuer's installation, runtime and membership epoch that names the issuer's key id and was valid when the frame was issued, or the installation is neither the receiver's nor one it has an agreement with"
+      "meaning": "the trust store holds no certificate for the issuer's installation, runtime and membership epoch that names the issuer's key id and was valid when the frame was issued (a certificate another one replaces is valid only until certificate_overlap_seconds after its replacement was issued), or the installation is neither the receiver's nor one it has an agreement with; a join (verification proof_of_possession) must instead come from the receiver's own installation and name the key it presents in its body, which is not an authority key, and a key id the trust store already knows must keep its public key"
     },
     {
       "code": "bad_signature",
@@ -5603,15 +5796,15 @@
     },
     {
       "code": "epoch_too_old",
-      "meaning": "the issuer's certificate has a membership or revocation epoch below the receiver's minimum for that runtime or installation"
+      "meaning": "the issuer's certificate has a membership or revocation epoch below the receiver's minimum for that runtime or installation (request/reply and events only; queued work is judged by the certificate valid when it was issued, and a join by the key it presents)"
     },
     {
       "code": "wrong_issuer",
-      "meaning": "the issuer's revocation epoch or team disagrees with its certificate; or it names an agent without a session, or a session that does not place that agent, of a type the certificate allows, on the signing runtime when the frame was issued; or a reply does not come from the agent and team the request was for"
+      "meaning": "the issuer's revocation epoch or team disagrees with its certificate (installation operations and their replies name the installation scope as their team and no agent, and other kinds a team of the certificate); or it names an agent without a session, or a session that does not place that agent, of a type the certificate allows, on the signing runtime when the frame was issued; or a reply does not come from the agent and team the request was for; or a join names an epoch other than zero, a reserved runtime id (x- or _), an agent, or a body runtime or installation other than its issuer's; or a renewal's body names another certificate or membership epoch than the certificate that signs it"
     },
     {
       "code": "wrong_sender",
-      "meaning": "none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request); or the frame comes from another installation with a kind, class or destination team its agreement does not allow; or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)"
+      "meaning": "none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request), or a join asks for a role that is not among the kind's senders; or a frame from the receiver's own installation is addressed to another team than its issuer's; or the frame comes from another installation with a kind, class or destination team its agreement does not allow; or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)"
     },
     {
       "code": "wrong_team",
@@ -5643,7 +5836,7 @@
     },
     {
       "code": "invalid_body",
-      "meaning": "the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give"
+      "meaning": "the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give; or a renewal's key rotation names a key id the installation already uses or a proof that does not verify; or the certificate in a join or renewal reply does not verify against the receiver's authority keys or does not certify the host that asked (README, \"Installation traffic\")"
     },
     {
       "code": "bad_authority",

@@ -138,7 +138,7 @@
           "$ref": "#/$defs/installation_id"
         },
         "team": {
-          "$ref": "#/$defs/team_id"
+          "$ref": "#/$defs/scope_id"
         },
         "runtime": {
           "$ref": "#/$defs/runtime_id"
@@ -177,7 +177,7 @@
           "$ref": "#/$defs/installation_id"
         },
         "team": {
-          "$ref": "#/$defs/team_id"
+          "$ref": "#/$defs/scope_id"
         },
         "target": {
           "type": "string",
@@ -685,6 +685,25 @@
           },
           "required": [
             "category"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "category": {
+              "const": "outcome_unknown"
+            },
+            "attempts": {
+              "$ref": "#/$defs/count"
+            },
+            "message": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "category",
+            "attempts"
           ],
           "additionalProperties": false
         }
@@ -1508,6 +1527,60 @@
         "content",
         "created_at",
         "created_by"
+      ],
+      "additionalProperties": false
+    },
+    "scope_id": {
+      "description": "A team, or _install for installation-wide traffic.",
+      "type": "string",
+      "pattern": "^(_install|[A-Za-z0-9][A-Za-z0-9_-]{0,63})$"
+    },
+    "placement_label": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+    },
+    "certificate_ref": {
+      "type": "object",
+      "properties": {
+        "certificate_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "membership_epoch": {
+          "$ref": "#/$defs/epoch"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256_digest",
+          "description": "SHA-256 of the certificate record's signing bytes (its domain prefix and canonical JSON without the signature), as TrustStore.add records it."
+        }
+      },
+      "required": [
+        "certificate_id",
+        "membership_epoch",
+        "sha256"
+      ],
+      "additionalProperties": false,
+      "description": "A host certificate record: its id, membership epoch and digest."
+    },
+    "connection_credential": {
+      "type": "object",
+      "description": "The credential a host connects to NATS with. Never logged.",
+      "properties": {
+        "type": {
+          "const": "nats_user_jwt"
+        },
+        "jwt": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
+          "maxLength": 16384
+        },
+        "expires_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "type",
+        "jwt",
+        "expires_at"
       ],
       "additionalProperties": false
     }

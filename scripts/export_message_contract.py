@@ -47,7 +47,8 @@ GENERATED = CONTRACT / "generated"
 WIRE = REPO_ROOT / "custom_messages" / "wire"
 SCHEMA_BASE = "https://universal-agents.local/contracts/messages/v1/schemas/"
 
-CLASSES = {"durable", "request_reply", "event"}
+CLASSES = {"durable", "request_reply", "event", "dead_letter"}
+VERIFICATION = {"standard", "proof_of_possession"}
 AUTHORITY = {"none", "optional", "required"}
 ROUTING = {"requester", "holder", "team", "person", "named", "broadcast", "sender"}
 EDGES = {"up", "down", "person", "sideways", "out", "none"}
@@ -57,10 +58,10 @@ PRIORITIES = {"low", "normal", "high"}
 ENTRY_FIELDS = {
     "description", "class", "address", "body", "reply", "senders", "receivers", "expiry_seconds",
     "authority", "idempotency", "admission", "routing", "topology_edge", "ledger", "wakes_model",
-    "rendering", "covered_change", "copy_to", "senders_by_address", "authority_binding", "body_rules",
+    "rendering", "covered_change", "copy_to", "senders_by_address", "authority_binding", "body_rules", "verification",
 }
 REQUIRED_ENTRY_FIELDS = ENTRY_FIELDS - {"reply", "covered_change", "copy_to", "senders_by_address", "authority_binding",
-                                        "body_rules"}
+                                        "body_rules", "verification"}
 
 # The schema subset (contracts/messages/v1/README.md).
 ALLOWED_KEYWORDS = {
@@ -90,6 +91,9 @@ ID_CHARACTER = re.compile(r"[A-Za-z0-9_-]")
 # its team; a receiver reads only its own, so subscriptions and consumer grants keep
 # them as placeholders for membership code to fill per assigned id.
 RECEIVER_PLACEHOLDERS = ("agent", "pool", "edge")
+# Other address placeholders: a dead-letter copy id (the body's copy_id), and the
+# sender of an installation address (<installation scope>.{sender}.svc.<op>).
+COPY_PLACEHOLDER, SENDER_PLACEHOLDER = "copy", "sender"
 # Hosts that send frames for agents; a kind no agent sends is not a topology check.
 AGENT_HOSTS = {"lead_host", "worker_host"}
 # Audience targets that get durable copies, and the roles that read them there: the
@@ -98,6 +102,9 @@ AGENT_HOSTS = {"lead_host", "worker_host"}
 COPY_READERS = {"team_services": ["team_services"]}
 # The token type bound to one command; its binding always names the command id (`at`).
 COMMAND_BINDING = "command"
+# The permission set of a host that has not joined yet (it holds no role): it only sends
+# its own join request and reads its own reply inbox (README, "Installation traffic").
+JOINING = "joining_host"
 # A kind (with ".reply") within 84 characters keeps its idempotency key, the kind,
 # a colon and 43 digest characters, within the 128 that common.schema.json allows.
 MAX_KIND_LENGTH = 84
@@ -131,6 +138,15 @@ def load_yaml(name: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ContractError(f"{name} must hold a mapping")
     return data
+
+
+# Names transport.yaml defines once: the scope installation-wide traffic names instead
+# of a team, and the subject root before the team token (ua.v1.). Every installation
+# address and subject this script builds follows them.
+_NAMES = load_yaml("transport.yaml")
+INSTALLATION_SCOPE = str(_NAMES["installation_scope"])
+INSTALLATION_ADDRESS = INSTALLATION_SCOPE + ".{" + SENDER_PLACEHOLDER + "}."
+SUBJECT_ROOT = str(_NAMES["subject_prefix"]).split("{team}", 1)[0]
 
 
 def load_schemas() -> dict[str, dict[str, Any]]:
@@ -295,6 +311,9 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
     check_shared_lists(registry, transport, topologies, schemas)
     if not 0 < registry["command_token_max_seconds"] <= registry["authority_token_max_seconds"]:
         raise ContractError("registry.yaml: command_token_max_seconds is positive and within authority_token_max_seconds")
+    overlap = registry["certificate_overlap_seconds"]
+    if not isinstance(overlap, int) or not 0 < overlap <= 3600:
+        raise ContractError("registry.yaml: certificate_overlap_seconds is a short positive deadline, at most an hour")
     check_name_lists(registry)
     edges = set(EDGES) - {"none"}
     if set(topologies["edges"]) != edges:
@@ -355,6 +374,12 @@ def check_entry_fields(where: str, name: str, entry: dict[str, Any], registry: d
     if "reply" in entry and entry["reply"]["body"] not in schemas:
         raise ContractError(f"{where}: reply schema {entry['reply']['body']} is missing")
     check_authority_binding(where, entry, schemas)
+    if entry.get("verification", "standard") not in VERIFICATION:
+        raise ContractError(f"{where}: verification must be one of {sorted(VERIFICATION)}")
+    if entry.get("verification") == "proof_of_possession" and (
+            entry["class"] != "request_reply" or entry["authority"] != "none"
+            or not all(address.startswith(INSTALLATION_ADDRESS) for address in own_addresses(entry))):
+        raise ContractError(f"{where}: only an installation request without an authority token proves possession of its own key")
 
 
 def check_routing_rules(where: str, entry: dict[str, Any]) -> None:
@@ -474,8 +499,11 @@ def check_entry_addresses(where: str, name: str, entry: dict[str, Any], transpor
     for address in entry_addresses(entry):
         if not any(address_matches(address, template, name) for template in class_addresses(transport, entry["class"])):
             raise ContractError(f"{where}: address {address!r} fits no {entry['class']} address")
-        if not set(re.findall(r"\{([a-z_]+)\}", address)) <= set(RECEIVER_PLACEHOLDERS):
-            raise ContractError(f"{where}: an address's only placeholders name its receiver")
+        allowed = set(RECEIVER_PLACEHOLDERS) | {COPY_PLACEHOLDER}
+        if address.startswith(INSTALLATION_ADDRESS):
+            allowed.add(SENDER_PLACEHOLDER)
+        if not set(re.findall(r"\{([a-z_]+)\}", address)) <= allowed:
+            raise ContractError(f"{where}: an address's placeholders name its receiver, a copy or an installation sender")
     targets = [audience_target(address) for address in entry_addresses(entry)]
     if len(set(targets)) != len(targets):
         raise ContractError(f"{where}: two of its addresses deliver to one audience target")
@@ -507,6 +535,17 @@ def own_addresses(entry: dict[str, Any]) -> list[str]:
     """The addresses a kind is delivered to as itself, without its copies."""
 
     return list(entry["address"]) if isinstance(entry["address"], list) else [entry["address"]]
+
+
+def full_subject(address: str, owner: str) -> str:
+    """The NATS subject of an address: team addresses sit under ua.v1.<team>.<sender>, installation ones under ua.v1.
+
+    An installation address already names its scope and sender (_install.{sender}.svc.<op>).
+    """
+
+    if address.startswith(INSTALLATION_ADDRESS):
+        return SUBJECT_ROOT + address.replace("{" + SENDER_PLACEHOLDER + "}", owner)
+    return f"{SUBJECT_ROOT}{{team}}.{owner}." + address
 
 
 def entry_addresses(entry: dict[str, Any]) -> list[str]:
@@ -817,11 +856,22 @@ def check_state_records(registry: dict[str, Any], transport: dict[str, Any], sch
             raise ContractError(f"{where}: host-signed records, and only they, name signer_roles from host_roles")
         if not set(entry["writers"]) <= roles or entry["body"] not in schemas:
             raise ContractError(f"{where}: writers must be host roles and the body schema must exist")
+        bucket_ttl = transport["key_value"][entry["bucket"]]["per_key_ttl_seconds"]
+        if entry.get("ttl_seconds", 0) != bucket_ttl:
+            raise ContractError(f"{where}: ttl_seconds is its bucket's per_key_ttl_seconds ({bucket_ttl}), and only then present")
 
 
 def check_shared_lists(registry: dict[str, Any], transport: dict[str, Any], topologies: dict[str, Any],
                        schemas: dict[str, dict[str, Any]]) -> None:
     """Lists the schemas repeat must match the registry and topologies they come from."""
+
+    refusals = {item["code"] for item in registry["verification_refusals"]}
+    for entry in registry["kinds"].values():
+        if entry["class"] == "dead_letter":
+            reasons = set(schemas[entry["body"]]["properties"]["reason"]["enum"])
+            if not refusals <= reasons:
+                raise ContractError(f"{entry['body']}: a notice's reason names every verification refusal; missing "
+                                    f"{sorted(refusals - reasons)}")
 
     common = schemas["common.schema.json"]["$defs"]
     if set(common["host_role"]["enum"]) != set(registry["host_roles"]):
@@ -833,6 +883,11 @@ def check_shared_lists(registry: dict[str, Any], transport: dict[str, Any], topo
         raise ContractError("transport.yaml audience_targets name host roles only")
     if set(common["agent_role"]["enum"]) != set(topologies["agent_roles"]):
         raise ContractError("common.schema.json agent_role must list team-topologies.yaml agent_roles")
+    if not common["scope_id"]["pattern"].startswith(f"^({re.escape(INSTALLATION_SCOPE)}|"):
+        raise ContractError("common.schema.json scope_id must allow transport.yaml installation_scope")
+    for spec in transport["classes"].values():
+        if not all(address.startswith(INSTALLATION_ADDRESS) for address in spec.get("installation_addresses", [])):
+            raise ContractError(f"transport.yaml: installation addresses start with {INSTALLATION_ADDRESS}")
 
 
 def check_name_lists(registry: dict[str, Any]) -> None:
@@ -855,7 +910,9 @@ def audience_target(address: str) -> str:
         return "team"
     if address == "work.team" or address.startswith("svc.team."):
         return "team_services"
-    if address.startswith("_install."):
+    if address.startswith("dlq."):
+        return "team_services"
+    if address.startswith(INSTALLATION_ADDRESS):
         return "installation_service"
     raise ContractError(f"address {address!r} names no audience target")
 
@@ -896,6 +953,10 @@ def check_transport(transport: dict[str, Any]) -> None:
     an old message in again.
     """
 
+    if (transport.get("installation_scope"), transport.get("subject_prefix", "").split("{team}", 1)[0]) != (
+            INSTALLATION_SCOPE, SUBJECT_ROOT):
+        # The generator reads both once, when it loads; a transport passed in later must agree.
+        raise ContractError("transport.yaml: installation_scope and the subject root are the ones the generator loaded")
     skew = transport["clock_skew_seconds"]
     if not isinstance(skew, int) or not 0 <= skew <= 300:
         raise ContractError("transport.yaml: clock_skew_seconds is a whole number of seconds from 0 to 300")
@@ -929,9 +990,21 @@ def address_matches(address: str, template: str, kind: str) -> bool:
 # -- generated JSON ------------------------------------------------------------------------------
 
 def send_pattern(address: str) -> str:
-    """The subjects a sender may publish an address to: any receiver of its team."""
+    """The subjects a sender may publish an address to: any receiver of its team and any copy id.
 
-    return re.sub(r"\{(" + "|".join(RECEIVER_PLACEHOLDERS) + r")\}", "*", address)
+    The sender placeholder stays: full_subject binds it to the publisher.
+    """
+
+    return re.sub(r"\{(?!sender\})[a-z_]+\}", "*", address)
+
+
+def publication_addresses(entry: dict[str, Any], transport: dict[str, Any]) -> list[str]:
+    addresses = entry_addresses(entry)
+    if entry["class"] == "dead_letter":
+        # Exact raw copies have no frame kind, but the receiver must be able
+        # to store them beside its signed notices, under its own runtime id.
+        addresses += transport["classes"]["dead_letter"]["addresses"]
+    return addresses
 
 
 def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
@@ -969,8 +1042,6 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
     inboxes.
     """
 
-    sender_prefix = transport["subject_prefix"].replace("{sender}", "{self}") + "."
-    receiver_prefix = transport["subject_prefix"].replace("{sender}", "*") + "."
     reply_window = transport["classes"]["request_reply"]["max_expiry_seconds"] + transport["clock_skew_seconds"]
     result = {}
     for role in registry["host_roles"]:
@@ -978,20 +1049,28 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
         subscribe = {f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"}
         answers_requests = False
         for entry in registry["kinds"].values():
-            publish.update(sender_prefix + send_pattern(address) for address in entry_addresses(entry)
+            publish.update(full_subject(send_pattern(address), "{self}") for address in publication_addresses(entry, transport)
                            if role in address_senders(entry, address))
             for address in entry_addresses(entry):
                 if role not in receiving_roles(entry, address, transport):
                     continue
                 if entry["class"] == "durable":
                     publish.update(consumer_permissions(address, transport))
-                else:
-                    subscribe.add(receiver_prefix + address)
+                elif entry["class"] != "dead_letter":
+                    # Dead letters wait in UA1_DLQ; its read grants come with the services
+                    # that read it (message contract plan 13A.9), not as a subscription.
+                    subscribe.add(full_subject(address, "*"))
                 answers_requests = answers_requests or entry["class"] == "request_reply"
         document: dict[str, Any] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
         if answers_requests:
             document["allow_responses"] = {"max": 1, "expires": f"{reply_window}s"}
         result[role] = document
+    if JOINING in result:
+        raise ContractError(f"registry.yaml: {JOINING} is the permission set of hosts that hold no role yet")
+    joins = [address for entry in registry["kinds"].values() if entry.get("verification") == "proof_of_possession"
+             for address in own_addresses(entry)]
+    result[JOINING] = {"role": JOINING, "publish": sorted(full_subject(send_pattern(address), "{self}") for address in joins),
+                       "subscribe": [f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"]}
     return result
 
 
@@ -1046,7 +1125,7 @@ def asyncapi(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, A
             channel_id = channel_name(address)
             if addresses.setdefault(channel_id, address) != address:
                 raise ContractError(f"addresses {addresses[channel_id]} and {address} make one AsyncAPI channel id")
-            channels.setdefault(channel_id, channel(transport["subject_prefix"] + "." + address))["messages"][key] = \
+            channels.setdefault(channel_id, channel(full_subject(address, "{sender}")))["messages"][key] = \
                 {"$ref": f"#/components/messages/{key}"}
             operations.update(address_operations(key, entry, address, channel_id, reply))
     return {
@@ -1253,6 +1332,8 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
     writer.named(registry["state_schema"], "")
     states = [(name, entry, writer.type_of(entry["body"], schemas[entry["body"]], class_name(name) + "State"))
               for name, entry in sorted(registry["state_records"].items())]
+    for _name, entry, body in states:
+        writer.names[(entry["body"], "")] = body
     kinds = []
     for name, entry in sorted(registry["kinds"].items()):
         body = writer.type_of(f"bodies/{Path(entry['body']).name}", schemas[entry["body"]], class_name(name) + "Body")
@@ -1315,12 +1396,15 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
             f"        rendering={entry['rendering']!r},\n"
             f"        body_shape={shape(writer, body_file, schemas[body_file])!r},\n"
             f"        reply_shape={reply_shape},\n"
+            f"        verification={entry.get('verification', 'standard')!r},\n"
             "    ),"
         )
     state_specs = [
         f"    {name!r}: StateSpec(name={name!r}, bucket={entry['bucket']!r}, key={entry['key']!r}, "
         f"signer={entry['signer']!r}, signer_roles={tuple(entry.get('signer_roles', ()))!r}, "
-        f"writers={tuple(entry['writers'])!r}, body_model=models.{class_name(name)}StateAdapter),"
+        f"writers={tuple(entry['writers'])!r}, ttl_seconds={entry.get('ttl_seconds')!r}, "
+        f"body_model=models.{class_name(name)}StateAdapter, "
+        f"body_shape={shape(writer, entry['body'], schemas[entry['body']])!r}),"
         for name, entry, _body in states
     ]
     between = sorted(name for name, spec in transport["classes"].items() if spec["between_installations"])
@@ -1333,14 +1417,18 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"STATE_SIGNING_DOMAIN = {registry['state_signing_domain']!r}\n"
         f"AUTHORITY_TOKEN_DOMAIN = {registry['authority_token_domain']!r}\n"
         f"DECISION_TOKEN_DOMAIN = {registry['decision_token_domain']!r}\n"
+        f"RENEW_KEY_PROOF_DOMAIN = {registry['renew_key_proof_domain']!r}\n"
         f"AUTHORITY_TOKEN_MAX_SECONDS = {registry['authority_token_max_seconds']!r}\n"
         f"COMMAND_TOKEN_MAX_SECONDS = {registry['command_token_max_seconds']!r}\n"
+        f"CERTIFICATE_OVERLAP_SECONDS = {registry['certificate_overlap_seconds']!r}\n"
         f"MAX_FRAME_BYTES = {registry['max_frame_bytes']!r}\n"
         f"MAX_NESTING_DEPTH = {registry['max_nesting_depth']!r}\n"
         f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
         f"SUBJECT_PREFIX = {transport['subject_prefix']!r}\n"
         f"PEER_SENDER_SLOT = {transport['peer_sender_slot']!r}\n"
         f"REPLY_INBOX_PREFIX = {transport['reply_inbox_prefix']!r}\n"
+        f"INSTALLATION_SCOPE = {INSTALLATION_SCOPE!r}\n"
+        f"INSTALLATION_ADDRESS_PREFIX = {INSTALLATION_ADDRESS!r}\n"
         f"BETWEEN_INSTALLATIONS = frozenset({between!r})\n"
         f"VERIFICATION_REFUSALS = {tuple(item['code'] for item in registry['verification_refusals'])!r}\n"
         f"CHANGE_REFUSALS = {tuple(item['code'] for item in registry['change_refusals'])!r}\n"
@@ -1348,7 +1436,8 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"RETRY_OUTCOMES = frozenset({sorted(registry['retry_outcomes'])!r})\n"
         f"HOST_ROLES = {tuple(registry['host_roles'])!r}\n"
         f"TOPOLOGIES = { {name: {role: tuple(edges) for role, edges in spec['allowed_edges'].items()} for name, spec in topologies['topologies'].items()}!r}\n"
-        f"FRAME_SHAPE = {shape(writer, 'frame.schema.json', schemas['frame.schema.json'])!r}\n\n"
+        f"FRAME_SHAPE = {shape(writer, 'frame.schema.json', schemas['frame.schema.json'])!r}\n"
+        f"STATE_SHAPE = {shape(writer, registry['state_schema'], schemas[registry['state_schema']])!r}\n\n"
         "KINDS: dict[str, KindSpec] = {\n" + "\n".join(specs) + "\n}\n\n"
         "STATE_RECORDS: dict[str, StateSpec] = {\n" + "\n".join(state_specs) + "\n}\n"
     )

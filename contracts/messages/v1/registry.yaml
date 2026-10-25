@@ -4,8 +4,11 @@
 #   class          durable | request_reply | event   (transport.yaml describes each class)
 #   address        the subject after ua.v1.<audience team>.<sender slot>. , or a list of them, each
 #                  delivering to a different audience target; {agent}, {pool} and {edge} are the
-#                  audience id, and the address decides the audience target: agent, pool, edge,
-#                  team_services (work.team, svc.team.*) or team (evt.*)
+#                  audience id, {copy} is the body's copy_id, and the address decides the audience
+#                  target: agent, pool, edge, team_services (work.team, svc.team.*, dlq.*) or team
+#                  (evt.*). An installation operation's address, _install.{sender}.svc.<operation>,
+#                  follows ua.v1. directly: its frames name transport.yaml's installation_scope as
+#                  the issuer's and the audience's team, and {sender} is the issuer's runtime
 #   copy_to        durable only: addresses that also get a copy of each frame (README, "Durable
 #                  copies"); the roles serving the copy's target receive it
 #   body           the body schema, under schemas/
@@ -44,11 +47,14 @@
 #                  (one of covered_record_kinds) and whether the writer sends the version it
 #                  read: required | required_for_request_writers | optional | none
 #                  (README, "Covered changes")
+#   verification   standard (the issuer's certificate), or proof_of_possession (a join, signed by the
+#                  key its body presents)
 #
 # Edit by hand, then run scripts/export_message_contract.py.
 
 protocol: 1.0-pre
 signing_domain: universal-agents/message-frame/v1
+renew_key_proof_domain: universal-agents/host-renew-key-proof/v1
 state_signing_domain: universal-agents/state-record/v1
 authority_token_domain: universal-agents/authority-token/v1
 decision_token_domain: universal-agents/decision-token/v1
@@ -58,6 +64,7 @@ max_frame_bytes: 262144
 max_nesting_depth: 64
 authority_token_max_seconds: 604800   # today's signed person context lasts at most 7 days
 command_token_max_seconds: 300        # a token bound to one command lasts minutes (plan, section 8)
+certificate_overlap_seconds: 300      # a replaced certificate still signs new frames this long after its replacement is issued (authorization plan 12.5)
 
 # Refusals a receiver gives before any handler runs, in the order it checks them.
 # "The issuer's certificate" is the host certificate the receiver's trust store holds
@@ -68,7 +75,7 @@ verification_refusals:
   - code: malformed
     meaning: the frame is not one JSON object, repeats a key, holds a number with a fraction or exponent part, or breaks the frame schema
   - code: unknown_key
-    meaning: the trust store holds no certificate for the issuer's installation, runtime and membership epoch that names the issuer's key id and was valid when the frame was issued, or the installation is neither the receiver's nor one it has an agreement with
+    meaning: the trust store holds no certificate for the issuer's installation, runtime and membership epoch that names the issuer's key id and was valid when the frame was issued (a certificate another one replaces is valid only until certificate_overlap_seconds after its replacement was issued), or the installation is neither the receiver's nor one it has an agreement with; a join (verification proof_of_possession) must instead come from the receiver's own installation and name the key it presents in its body, which is not an authority key, and a key id the trust store already knows must keep its public key
   - code: bad_signature
     meaning: the signature is not the one unpadded base64url spelling of a signature that verifies over the canonical frame with the certificate's key
   - code: bad_digest
@@ -76,11 +83,11 @@ verification_refusals:
   - code: revoked
     meaning: the issuer's certificate, or the certificate that signed the issuer's agent session, is listed in its installation's revocations, whenever it was revoked and whenever the frame says it was issued
   - code: epoch_too_old
-    meaning: the issuer's certificate has a membership or revocation epoch below the receiver's minimum for that runtime or installation
+    meaning: the issuer's certificate has a membership or revocation epoch below the receiver's minimum for that runtime or installation (request/reply and events only; queued work is judged by the certificate valid when it was issued, and a join by the key it presents)
   - code: wrong_issuer
-    meaning: the issuer's revocation epoch or team disagrees with its certificate; or it names an agent without a session, or a session that does not place that agent, of a type the certificate allows, on the signing runtime when the frame was issued; or a reply does not come from the agent and team the request was for
+    meaning: the issuer's revocation epoch or team disagrees with its certificate (installation operations and their replies name the installation scope as their team and no agent, and other kinds a team of the certificate); or it names an agent without a session, or a session that does not place that agent, of a type the certificate allows, on the signing runtime when the frame was issued; or a reply does not come from the agent and team the request was for; or a join names an epoch other than zero, a reserved runtime id (x- or _), an agent, or a body runtime or installation other than its issuer's; or a renewal's body names another certificate or membership epoch than the certificate that signs it
   - code: wrong_sender
-    meaning: none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request); or the frame comes from another installation with a kind, class or destination team its agreement does not allow; or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)
+    meaning: none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request), or a join asks for a role that is not among the kind's senders; or a frame from the receiver's own installation is addressed to another team than its issuer's; or the frame comes from another installation with a kind, class or destination team its agreement does not allow; or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)
   - code: wrong_team
     meaning: the frame is for another installation or team
   - code: wrong_audience
@@ -96,7 +103,7 @@ verification_refusals:
   - code: unknown_kind
     meaning: the kind is not in this registry
   - code: invalid_body
-    meaning: the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give
+    meaning: the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give; or a renewal's key rotation names a key id the installation already uses or a proof that does not verify; or the certificate in a join or renewal reply does not verify against the receiver's authority keys or does not certify the host that asked (README, "Installation traffic")
   - code: bad_authority
     meaning: the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds; or a change-conflict decision token in the body is not signed by a team-services certificate of the frame's installation and team, or was not valid when the frame was issued
   - code: access_denied
@@ -135,13 +142,17 @@ host_roles:
   installation_authority: issues and revokes certificates and authority keys
   scheduler: fires schedules
 
-# Signed records that vouch for keys and agents (state.schema.json). Readers verify each
-# one: authority records with the installation's authority keys (their own, or a peer's
-# from an agreement), host records with the writer's certificate that was valid when the
-# record was written, unless that certificate is revoked. Where a record is stored adds
-# no trust. Fields: bucket and key form; signer (authority | host); writers, the host
-# roles that may store it (the edge adapter stores unchanged copies of a peer's records
-# under the peer's installation id); body; write_rule.
+# Signed records (state.schema.json). Readers verify each one: authority records with the
+# installation's authority keys (their own, or a peer's from an agreement), host records
+# with the writer's certificate that was valid when the record was written, unless that
+# certificate is revoked. The first four vouch for keys and agents and are kept by the trust
+# store; the others report state, are written only by this installation's hosts, and are
+# checked again whenever they are read: expiry, issue time, minimum epochs and sequence
+# (README, "State records"). Where a record is stored adds no trust. Fields: bucket and key
+# form; signer (authority | host); signer_roles, the roles whose certificates may sign it;
+# writers, the host roles that may store it (the edge adapter stores unchanged copies of a
+# peer's records under the peer's installation id); body; ttl_seconds, the bucket's per-key
+# lifetime, within which each record must expire; write_rule.
 state_records:
   certificate:
     description: A host's membership certificate.
@@ -176,6 +187,43 @@ state_records:
     writers: [installation_authority]
     body: state/agreement.schema.json
     write_rule: rewritten with a higher sequence to change or end it; only the receiver's own authority signs it
+  host:
+    description: A runtime host's liveness and capacity, written by the host itself every 20 seconds and naming its certificate.
+    bucket: UA1_HOSTS
+    key: "<runtime>"
+    signer: host
+    signer_roles: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
+    writers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
+    body: state/host.schema.json
+    ttl_seconds: 60
+    write_rule: written by the host itself every 20 seconds, expiring within ttl_seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions
+  agent:
+    description: An agent's state, written by the host it is placed on when the state changes.
+    bucket: UA1_AGENTS
+    key: "<team>.<agent>"
+    signer: host
+    signer_roles: [lead_host, worker_host]
+    writers: [lead_host, worker_host]
+    body: state/agent.schema.json
+    write_rule: written on change, at most once per 2 seconds; readers accept it only from the placement's host
+  placement:
+    description: Which host runs an agent; its signed sequence is the fencing token.
+    bucket: UA1_PLACEMENT
+    key: "<team>.<agent>"
+    signer: host
+    signer_roles: [team_services]
+    writers: [team_services]
+    body: state/placement.schema.json
+    write_rule: compare-and-set on the last key-value revision, with the next sequence; the signed sequence, not the unsigned revision, is the fencing token, so a stored copy written back is never newer
+  team_view:
+    description: One entry of a team's shared view of its members, requests, tasks and Objectives.
+    bucket: UA1_TEAM_VIEW
+    key: "<team>.<entry>.<id>"
+    signer: host
+    signer_roles: [team_services]
+    writers: [team_services]
+    body: state/team_view.schema.json
+    write_rule: deleted when the item closes or the person it names departs; each entry at most 4 KiB
 
 kinds:
   task.stop:
@@ -2727,3 +2775,64 @@ kinds:
     ledger: none
     wakes_model: never
     rendering: none
+
+  # -- installation and dead letters --
+  host.join:
+    description: A new host asks to join the installation; the frame is signed with the key it presents.
+    class: request_reply
+    address: _install.{sender}.svc.host.join
+    body: bodies/host.join.schema.json
+    reply:
+      body: bodies/host.join.reply.schema.json
+      errors: [pending, denied, protocol_mismatch, not_allowed]
+    senders: [gateway, lead_host, worker_host, team_services, edge_adapter, scheduler]
+    receivers: [installation_authority]
+    expiry_seconds: 30
+    authority: none
+    idempotency: [/issuer/runtime, /issuer/key_id, /body/join_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: named
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+    verification: proof_of_possession
+
+  host.renew:
+    description: A host renews its certificate and connection credential, or rotates its keys.
+    class: request_reply
+    address: _install.{sender}.svc.host.renew
+    body: bodies/host.renew.schema.json
+    reply:
+      body: bodies/host.renew.reply.schema.json
+      errors: [revoked, needs_approval, protocol_mismatch, not_allowed]
+    senders: [gateway, lead_host, worker_host, team_services, edge_adapter, scheduler]
+    receivers: [installation_authority]
+    expiry_seconds: 30
+    authority: none
+    idempotency: [/issuer/runtime, /body/renew_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: named
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  dlq.notice:
+    description: A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only. The team services tell administrators.
+    class: dead_letter
+    address: dlq.notice.{copy}
+    body: bodies/dlq.notice.schema.json
+    senders: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
+    receivers: [team_services]
+    expiry_seconds: 2592000
+    authority: none
+    idempotency: [/issuer/runtime, /body/copy_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  # -- end of installation and dead letters --

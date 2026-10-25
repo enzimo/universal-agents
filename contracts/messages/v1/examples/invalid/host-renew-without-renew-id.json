@@ -1,0 +1,13 @@
+{
+  "description": "A host.renew without its renew id.",
+  "refusal": "invalid_body",
+  "at": "/body/renew_id",
+  "base": "host.renew/full.json",
+  "changes": [
+    {
+      "remove": "/body/renew_id"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"host.renew\", \"message_id\": \"01928f3a-7b2c-7704-8000-000000000704\", \"idempotency_key\": \"host.renew:im0rVPlt-MO8-LHvW-iIycFlqiBNHT5zbJD-tRz-Dqc\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"_install\", \"runtime\": \"lead-host-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"_install\", \"target\": \"installation_service\", \"id\": \"authority\"}, \"subject\": \"ua.v1._install.lead-host-1.svc.host.renew\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"certificate_id\": \"cert_lead_host_1\", \"membership_epoch\": 3, \"profile_sha256\": \"CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo\", \"software\": {\"name\": \"universal-agents\", \"version\": \"0.9.8\"}}, \"body_digest\": \"NSYQNF4-LagzCeVImo1tx6ZjZP6r5jGE5I-UNj9Ekgo\", \"signature\": \"mrv5eXcdLbQl5rKM95qWL3RzH-4aoa6wvtCswxT3PbOHSzi-VM5_8BMcws3BnE4Bk9-YZZXNkMRby0NUBDk6AQ\"}"
+}

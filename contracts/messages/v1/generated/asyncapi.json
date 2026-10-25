@@ -191,6 +191,25 @@
         }
       }
     },
+    "dlq_notice": {
+      "address": "ua.v1.{team}.{sender}.dlq.notice.{copy}",
+      "messages": {
+        "dlq_notice": {
+          "$ref": "#/components/messages/dlq_notice"
+        }
+      },
+      "parameters": {
+        "copy": {
+          "description": "The copy subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
     "evt_skills_changed": {
       "address": "ua.v1.{team}.{sender}.evt.skills_changed",
       "messages": {
@@ -204,6 +223,32 @@
         },
         "team": {
           "description": "The team subject token."
+        }
+      }
+    },
+    "install_svc_host_join": {
+      "address": "ua.v1._install.{sender}.svc.host.join",
+      "messages": {
+        "host_join": {
+          "$ref": "#/components/messages/host_join"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        }
+      }
+    },
+    "install_svc_host_renew": {
+      "address": "ua.v1._install.{sender}.svc.host.renew",
+      "messages": {
+        "host_renew": {
+          "$ref": "#/components/messages/host_renew"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
         }
       }
     },
@@ -257,6 +302,12 @@
         },
         "heartbeat_items_update_reply": {
           "$ref": "#/components/messages/heartbeat_items_update_reply"
+        },
+        "host_join_reply": {
+          "$ref": "#/components/messages/host_join_reply"
+        },
+        "host_renew_reply": {
+          "$ref": "#/components/messages/host_renew_reply"
         },
         "intent_set_reply": {
           "$ref": "#/components/messages/intent_set_reply"
@@ -2706,6 +2757,28 @@
         },
         "summary": "A receiver refused a message; sent back to its sender."
       },
+      "dlq_notice": {
+        "name": "dlq.notice",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/dlq.notice.schema.json"
+                },
+                "kind": {
+                  "const": "dlq.notice"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only. The team services tell administrators."
+      },
       "heartbeat_items_add": {
         "name": "heartbeat_items.add",
         "payload": {
@@ -2957,6 +3030,92 @@
                 },
                 "kind": {
                   "const": "heartbeat_items.update.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "host_join": {
+        "name": "host.join",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/host.join.schema.json"
+                },
+                "kind": {
+                  "const": "host.join"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "A new host asks to join the installation; the frame is signed with the key it presents."
+      },
+      "host_join_reply": {
+        "name": "host.join.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/host.join.reply.schema.json"
+                },
+                "kind": {
+                  "const": "host.join.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "host_renew": {
+        "name": "host.renew",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/host.renew.schema.json"
+                },
+                "kind": {
+                  "const": "host.renew"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "A host renews its certificate and connection credential, or rotates its keys."
+      },
+      "host_renew_reply": {
+        "name": "host.renew.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/host.renew.reply.schema.json"
+                },
+                "kind": {
+                  "const": "host.renew.reply"
                 }
               },
               "type": "object"
@@ -6977,6 +7136,17 @@
         }
       ]
     },
+    "receive_dlq_notice_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/dlq_notice"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/dlq_notice/messages/dlq_notice"
+        }
+      ]
+    },
     "receive_heartbeat_items_add_team_services": {
       "action": "receive",
       "channel": {
@@ -7099,6 +7269,48 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/heartbeat_items_update_reply"
+          }
+        ]
+      }
+    },
+    "receive_host_join_installation_service": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/install_svc_host_join"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/install_svc_host_join/messages/host_join"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/host_join_reply"
+          }
+        ]
+      }
+    },
+    "receive_host_renew_installation_service": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/install_svc_host_renew"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/install_svc_host_renew/messages/host_renew"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/host_renew_reply"
           }
         ]
       }
@@ -9499,6 +9711,17 @@
         }
       ]
     },
+    "send_dlq_notice_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/dlq_notice"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/dlq_notice/messages/dlq_notice"
+        }
+      ]
+    },
     "send_heartbeat_items_add_team_services": {
       "action": "send",
       "channel": {
@@ -9621,6 +9844,48 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/heartbeat_items_update_reply"
+          }
+        ]
+      }
+    },
+    "send_host_join_installation_service": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/install_svc_host_join"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/install_svc_host_join/messages/host_join"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/host_join_reply"
+          }
+        ]
+      }
+    },
+    "send_host_renew_installation_service": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/install_svc_host_renew"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/install_svc_host_renew/messages/host_renew"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/host_renew_reply"
           }
         ]
       }
