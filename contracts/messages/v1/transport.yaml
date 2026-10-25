@@ -135,13 +135,13 @@ key_value:
     description: host certificates, revocations, agent sessions and agreements (registry state_records); each record is signed, so readers trust the signature, not the bucket
     per_key_ttl_seconds: 0
   UA1_HOSTS:
-    description: one record per runtime host; written every 20 s, expires after 60 s
+    description: one record per runtime host; written every 20 s, expires after 60 s (each record also states its expiry)
     per_key_ttl_seconds: 60
   UA1_AGENTS:
     description: one record per agent (availability, busy, idle, paused, exiting), written only on change
     per_key_ttl_seconds: 0
   UA1_PLACEMENT:
-    description: which host runs an agent and that host's epoch; its revision is the fencing token
+    description: which host runs an agent and that host's epoch; the record's signed sequence is the fencing token
     per_key_ttl_seconds: 0
   UA1_TEAM_VIEW:
     description: the team's shared view of open work

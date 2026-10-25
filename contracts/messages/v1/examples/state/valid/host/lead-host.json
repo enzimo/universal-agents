@@ -10,22 +10,14 @@
   },
   "sequence": 91,
   "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:31:00.000Z",
   "body": {
     "runtime": "lead-host-1",
     "certificate": {
       "certificate_id": "cert_lead_host_1",
       "membership_epoch": 3,
-      "sha256": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk"
+      "sha256": "j-99KmXNuxFq8YI531Lb7h7FVZVgt0BKiUvOCuAxNeg"
     },
-    "roles": [
-      "lead_host"
-    ],
-    "teams": [
-      "team_example"
-    ],
-    "agent_types": [
-      "TeamArchitect"
-    ],
     "session_limit": 4,
     "sessions_active": 1,
     "protocol": "1.0-pre",
@@ -54,8 +46,7 @@
       "version": "0.9.8"
     }
   },
-  "expires_at": "2026-10-22T04:31:00.000Z",
   "algorithm": "ed25519",
-  "body_digest": "HMy0reGhr4lt1IPLWqkcgOi8Ejs6GyGpO66BtcV8O5o",
-  "signature": "hx-NubDVA84L3xhuFRTjhj6gfJFRPTojV9VwGaAKDoowTUV5BszcjG8pMNOEBPOAMydw6FbHUrhkp5tikuCrDQ"
+  "body_digest": "0gSW6iu3Az60YN_fap9XOwcVi47Z-RPB3wtlPLd0inc",
+  "signature": "AawexRifTc3L4Ye5GOH1h4-OE2hEqQx0BsXn9Cw3m_nBMCmUV2rX0idr_3SdZnnWzKS6cPgF4Epwgce0nRPmAg"
 }

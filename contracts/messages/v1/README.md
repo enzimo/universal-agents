@@ -509,6 +509,12 @@ Each file in `examples/invalid/` describes one refusal:
   `minimum_epochs` and `answering` (a valid example, or null for none);
 - `frame_text`: the frame exactly as received, written by the script.
 
+`examples/state/invalid/` describes refusals of state reports the same way, from a valid
+record under `examples/state/valid/`. Its `context` may add or remove trust records, set
+`minimum_epochs`, replace `now`, and name the record the reader `held` (sequence and
+digest); `document_text` is the record as stored. The script also fills each valid host
+record's certificate digest.
+
 Every refusal code except `access_denied` has an example, and every two neighbouring
 checks have an example with both defects, so a receiver that checks in another order
 fails one. Every kind has a valid and an invalid example, and every alternative of a body
@@ -615,13 +621,19 @@ Hosts, agents, placements and the team view are key-value records, not messages.
 - issue and expiry times;
 - the body, its digest and an Ed25519 signature over the domain prefix `universal-agents/state-record/v1` and a newline, followed by the RFC 8785 canonical JSON of the document without its signature.
 
-The registry's `state_records` section names each record's bucket, key form, signer, the roles whose certificates may sign it (`signer_roles`), the roles that may store it, and its body schema. The trust records of "Who sent it" use the same format and are kept by the trust store; the records here report state and are verified each time they are read (`TrustStore.verify`).
-- **Placement.** A placement record's key-value revision is its fencing token.
-- **Agent records.** A reader accepts an agent record only from the host its placement names.
-- **Writer identity.** A record is signed by its writer's host certificate, valid when the record was written and not revoked, and one of whose roles is in `signer_roles`. A host record's body runtime must equal its writer's runtime. Agent and placement bodies, and a team-view key's first token, name a team that the writer's certificate serves. A team-view key starts with that team and its body's entry type; its remaining id names the view entry and need not equal a task id.
+The registry's `state_records` section names each record's bucket, key form, signer, the roles whose certificates may sign it (`signer_roles`), the roles that may store it (`writers`), and its body schema. The trust records of "Who sent it" use the same format and are kept by the trust store (`TrustStore.add`). The records here report state, are used as soon as they are read, like requests, and are verified on every read (`TrustStore.verify(data, now=..., held=...)`):
+- **Writer.** The record is signed by its writer's host certificate, valid when the record was written, not revoked, and with one of the record's `signer_roles`. Only hosts of the reader's own installation write state reports (`wrong_issuer`): agreements carry durable work only, and a peer's host keeps its own state in its own installation.
+- **Epochs.** The writer's certificate meets the reader's minimum epochs (`epoch_too_old`).
+- **Time.** A record that has expired, or is dated ahead of the reader's clock by more than the clock tolerance, is refused (`expired`, `not_yet_valid`). A record of a bucket with a per-key lifetime (`ttl_seconds`: host liveness, 60 seconds) states an expiry within it (`invalid_body`), so a copy kept elsewhere is never read as current.
+- **Sequence.** The reader passes the sequence and digest of the record it holds for the key, if any. An older sequence, or other content under the same sequence, is refused (`replayed`): someone who can write to the bucket cannot put back an older signed record.
 
-`TrustStore.verify` checks these bindings. The caller checks the agent's placement,
-which requires runtime state and is not inferred from the record's own claims.
+What each record says, and what `TrustStore.verify` checks about it:
+- **Host liveness.** A host writes only its own record, under its runtime id. The record names the certificate it is signed with: its id, membership epoch and `sha256`, the SHA-256 of the certificate record's signing bytes, which `TrustStore.add` recorded. It allows at most that certificate's sessions. Its roles, teams and agent types are the certificate's, so the record does not repeat them.
+- **Agent records.** The key is `<team>.<agent>` of the body, and the team is one the writer's certificate serves. A reader accepts an agent record only from the host its placement names; the reader checks that, since it needs the placement.
+- **Placement.** The key and team follow the same rule. The team services write a placement with compare-and-set on the last key-value revision and the next sequence. The fencing token written into admission records is the signed sequence, not the revision, which the server assigns and nobody signs. `host_epoch` is the membership epoch of the host's certificate when the agent was placed. Renewals raise the epoch without moving the agent: a reader accepts the placement while the host's liveness record names a certificate of that runtime at `host_epoch` or later.
+- **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows (message contract plan 11A.9). An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs.
+
+**Not generated yet.** The NATS permissions for the key-value buckets, the object store and the dead-letter stream come with the services that use them (message contract plan 13A.9). Until then the registry's `writers` say who may store each record, and the readers' checks above do not depend on who stored it.
 
 ## Dead letters
 

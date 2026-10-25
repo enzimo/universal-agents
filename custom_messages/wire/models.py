@@ -532,6 +532,8 @@ PlacementLabel = Annotated[str, StringConstraints(pattern='^[a-z][a-z0-9_]{0,31}
 
 
 class CertificateRef(WireModel):
+    "A host certificate record: its id, membership epoch and digest."
+
     certificate_id: RecordId
     membership_epoch: Epoch
     sha256: Sha256Digest
@@ -651,13 +653,10 @@ class HostStateComponentsItem(WireModel):
 
 
 class HostState(WireModel):
-    "A runtime host's liveness and capacity, written every 20 seconds."
+    "A runtime host's liveness and capacity, written by the host itself every 20 seconds and expiring within 60. Its roles, teams and agent types are the ones its certificate states; the record names that certificate."
 
     runtime: RuntimeId
     certificate: CertificateRef
-    roles: Annotated[list[HostRole], Field(min_length=1, max_length=7)]
-    teams: Annotated[list[TeamId], Field(min_length=1, max_length=64)]
-    agent_types: Annotated[list[AgentType], Field(max_length=256)]
     session_limit: Annotated[int, Field(ge=0, le=100000)]
     sessions_active: Count
     protocol: ProtocolLabel
@@ -673,7 +672,7 @@ class HostState(WireModel):
 
 
 class PlacementState(WireModel):
-    "Which host runs an agent; its key-value revision is the fencing token."
+    "Which host runs an agent; its signed sequence is the fencing token."
 
     team: TeamId
     agent: AgentId

@@ -20,6 +20,10 @@ Lookups return only verified records. Revocation is checked when a
 frame is verified, so a revocation that arrives later still stops every frame that
 was not yet admitted.
 
+``TrustStore.verify`` reads a state report (host liveness, agent state, placement,
+team view): reports are not kept, and are checked on every read against the reader's
+clock, minimum epochs and the record it already holds for the key.
+
 A renewed certificate (a renewal or a key rotation) has a higher membership epoch
 than the one it ``replaces``, so both stay in the store and queued frames still find
 the certificate valid when they were issued. The replaced certificate signs new
@@ -114,6 +118,7 @@ class HostCertificate:
     key_id: str
     public_key: Ed25519PublicKey
     nats_public_key: str
+    session_limit: int
     issued_at: datetime
     expires_at: datetime
     replaces: Optional[str] = None
@@ -241,21 +246,57 @@ class TrustStore:
 
     # -- adding records ---------------------------------------------------------------------------
 
-    def verify(self, data: bytes | bytearray | memoryview) -> VerifiedRecord:
-        """Verify one signed state record of any kind without keeping it.
+    def verify(self, data: bytes | bytearray | memoryview, *, now: datetime,
+               held: Optional[tuple[int, str]] = None) -> VerifiedRecord:
+        """Verify one state report (host liveness, agent state, placement, team view) as a reader reads it.
 
-        Readers use this for the records that report state (host liveness, agent
-        state, placement, team view); ``add`` uses it for the records it keeps.
+        Reports are used as soon as they are read, like requests, so besides the
+        signer's certificate and the record's rules (README, "State records"):
+        - only hosts of this installation write them (``wrong_issuer``);
+        - the writer's certificate meets the receiver's minimum epochs (``epoch_too_old``);
+        - the record has not expired and is not dated ahead of ``now`` beyond the
+          clock tolerance (``expired``, ``not_yet_valid``);
+        - ``held`` is the sequence and digest of the record the reader holds for the
+          same key, if any: an older record, or other content under that sequence, is
+          refused (``replayed``), so a stored copy written back is never read as newer.
+        Trust records are kept with ``add`` instead.
         """
 
+        if now.tzinfo is None:
+            raise ValueError("now must name its time zone")
+        record = self._checked(self._parsed(data))
+        document = record.document
+        if document.record in TRUST_RECORDS:
+            raise ValueError(f"{document.record} records vouch for keys and agents; keep them with add instead")
+        assert record.signer is not None  # state reports are host-signed (registry signer: host)
+        self._check_report_freshness(document, record, now, held)
+        return record
+
+    @staticmethod
+    def _parsed(data: bytes | bytearray | memoryview) -> dict[str, Any]:
         data = bytes(data)
         if len(data) > MAX_FRAME_BYTES:
             raise FrameRefused("too_large", f"{len(data)} bytes")
         try:
-            raw = parse(data)
+            return parse(data)
         except CanonicalJsonError as error:
             raise FrameRefused("malformed", str(error).splitlines()[0]) from error
-        return self._checked(raw)
+
+    def _check_report_freshness(self, document: State, record: VerifiedRecord, now: datetime,
+                                held: Optional[tuple[int, str]]) -> None:
+        signer = record.signer
+        assert signer is not None
+        membership, revocation = self.minimum_epochs(signer.installation, signer.runtime)
+        if signer.membership_epoch < membership or signer.revocation_epoch < revocation:
+            raise FrameRefused("epoch_too_old", "the writer's certificate is below the receiver's minimum epochs",
+                               at="/writer/membership_epoch")
+        if document.expires_at is not MISSING and now - parse_timestamp(document.expires_at) >= SKEW:
+            raise FrameRefused("expired", at="/expires_at")
+        if parse_timestamp(document.issued_at) - now > SKEW:
+            raise FrameRefused("not_yet_valid", at="/issued_at")
+        if held is not None and (document.sequence < held[0] or (document.sequence == held[0] and record.digest != held[1])):
+            raise FrameRefused("replayed", "an older record than the one the reader holds, or other content under its sequence",
+                               at="/sequence")
 
     def issued_certificate(self, raw: Mapping[str, Any]) -> HostCertificate:
         """Verify a certificate record carried in a join or renewal reply, without keeping it.
@@ -297,6 +338,10 @@ class TrustStore:
                                at=pointer(error.errors()[0], prefix="/body")) from error
         if document.expires_at is not MISSING and parse_timestamp(document.expires_at) <= issued_at:
             raise FrameRefused("invalid_body", "a record cannot expire before it is written", at="/expires_at")
+        if spec.ttl_seconds is not None and (document.expires_at is MISSING or parse_timestamp(document.expires_at) - issued_at
+                                             > timedelta(seconds=spec.ttl_seconds)):
+            raise FrameRefused("invalid_body", f"a {document.record} record expires within its bucket's {spec.ttl_seconds} seconds",
+                               at="/expires_at")
         end = BODY_END.get(document.record)
         if end is not None and document.expires_at is not MISSING and document.expires_at != getattr(body, end):
             raise FrameRefused("invalid_body", f"the record expires when its body's {end} says", at="/expires_at")
@@ -308,7 +353,7 @@ class TrustStore:
     def add(self, data: bytes | bytearray | memoryview) -> bool:
         """Verify one trust record and keep it; return False when a newer one is already held."""
 
-        record = self.verify(data)
+        record = self._checked(self._parsed(data))
         document = record.document
         if document.record not in TRUST_RECORDS:
             raise ValueError(f"{document.record} records report state; verify them when read instead")
@@ -367,23 +412,45 @@ class TrustStore:
                                at="/body/installation")
 
     def _check_state_report(self, document: State, body: Any, signer: Optional[HostCertificate]) -> None:
-        """A host writes only its own liveness; team records name a team the writer's certificate serves."""
+        """Hosts of this installation write reports: their own liveness, and records of teams their certificate serves."""
 
         assert signer is not None  # state reports are host-signed (registry signer: host)
+        if signer.installation != self.installation:
+            # Agreements carry durable work only; another installation reports no state here.
+            raise FrameRefused("wrong_issuer", "only hosts of this installation write state reports", at="/writer/installation")
         if document.record == HOST:
-            self._expect_key(document, body.runtime)
-            if body.runtime != signer.runtime:
-                raise FrameRefused("invalid_body", "a host writes only its own liveness record", at="/body/runtime")
+            self._check_host_record(document, body, signer)
             return
         team = document.key.split(".", 1)[0] if document.record == TEAM_VIEW else body.team
         if team not in signer.teams:
             raise FrameRefused("wrong_team", "the writer's certificate does not serve the record's team",
                                at="/key" if document.record == TEAM_VIEW else "/body/team")
         if document.record == TEAM_VIEW:
-            if not document.key.startswith(f"{team}.{body.entry}."):
-                raise FrameRefused("invalid_body", "a team view key names its team and entry", at="/key")
+            parts = document.key.split(".")
+            if len(parts) != 3 or parts[1] != body.entry:
+                raise FrameRefused("invalid_body", "a team view key is <team>.<entry>.<id>", at="/key")
         else:
             self._expect_key(document, f"{body.team}.{body.agent}")
+
+    def _check_host_record(self, document: State, body: Any, signer: HostCertificate) -> None:
+        """A host writes only its own liveness, naming the certificate it signs with and no more sessions than it allows.
+
+        The certificate ref's digest is the one ``add`` recorded for that certificate
+        record: SHA-256 of its signing bytes (README, "State records").
+        """
+
+        self._expect_key(document, body.runtime)
+        if body.runtime != signer.runtime:
+            raise FrameRefused("invalid_body", "a host writes only its own liveness record", at="/body/runtime")
+        held = self._sequences.get((CERTIFICATE, f"host.{signer.installation}.{signer.runtime}.{signer.membership_epoch}"))
+        named = body.certificate
+        for field_name, expected in (("certificate_id", signer.certificate_id), ("membership_epoch", signer.membership_epoch),
+                                     ("sha256", held[1] if held else None)):
+            if getattr(named, field_name) != expected:
+                raise FrameRefused("invalid_body", "a host record names the certificate it is signed with",
+                                   at=f"/body/certificate/{field_name}")
+        if body.session_limit > signer.session_limit:
+            raise FrameRefused("invalid_body", "a host runs at most the sessions its certificate allows", at="/body/session_limit")
 
     def _certificate(self, document: State, body: Any) -> HostCertificate:
         """The certificate a verified certificate record states, after its own rules."""
@@ -401,7 +468,7 @@ class TrustStore:
             membership_epoch=body.membership_epoch, revocation_epoch=body.revocation_epoch,
             key_id=body.application_key.key_id,
             public_key=Ed25519PublicKey.from_public_bytes(b64url_decode(body.application_key.public_key)),
-            nats_public_key=body.nats_public_key, issued_at=issued_at, expires_at=expires_at,
+            nats_public_key=body.nats_public_key, session_limit=body.session_limit, issued_at=issued_at, expires_at=expires_at,
             replaces=None if body.replaces is MISSING else body.replaces,
         )
 

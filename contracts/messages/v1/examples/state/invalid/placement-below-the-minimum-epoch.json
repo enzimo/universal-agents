@@ -1,0 +1,17 @@
+{
+  "description": "The reader requires a newer membership epoch from the team services host that wrote the placement.",
+  "refusal": "epoch_too_old",
+  "at": "/writer/membership_epoch",
+  "base": "placement/lead.json",
+  "changes": [],
+  "context": {
+    "minimum_epochs": [
+      {
+        "installation": "install_example",
+        "runtime": "team-services-1",
+        "membership": 9
+      }
+    ]
+  },
+  "document_text": "{\"record\": \"placement\", \"key\": \"team_example.lead\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"key_id\": \"test-services-key-1\"}, \"sequence\": 1, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"body\": {\"team\": \"team_example\", \"agent\": \"lead\", \"agent_type\": \"TeamArchitect\", \"host\": \"lead-host-1\", \"host_epoch\": 3, \"definition_sha256\": \"CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws\", \"required_labels\": [\"sandbox:container\"], \"placed_at\": \"2026-10-22T04:00:00.000Z\", \"reason\": \"initial\", \"previous_host\": \"lead-host-0\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"Ja2l8J5cis9x2RSMFOPCaJ62lY_FLeIycFclM7P0IaY\", \"signature\": \"JFCUN3mKWYoHBczKdnJCaT-2OLEGk_qLFYNHPAGkmGOzHeyTCOhag8e6POKSqoje3gbd4jjifU6bRwaNM4OqAA\"}"
+}

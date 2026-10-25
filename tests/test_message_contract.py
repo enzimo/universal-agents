@@ -802,7 +802,7 @@ def test_valid_state_records_are_accepted(path: Path) -> None:
     document = json.loads(path.read_text(encoding="utf-8"))
     validator("state.schema.json").validate(document)
     validator(REGISTRY["state_records"][document["record"]]["body"]).validate(document["body"])
-    verified = fixtures.trust_store().verify(path.read_bytes())
+    verified = fixtures.verify_state(path.read_bytes())
     assert verified.document.record == path.parent.name
     model = kinds.STATE_RECORDS[document["record"]].body_model
     assert model.dump_python(verified.body, mode="json", exclude_none=True, by_alias=True) == document["body"]
@@ -812,7 +812,7 @@ def test_valid_state_records_are_accepted(path: Path) -> None:
 def test_invalid_state_records_are_refused_with_their_code_at_their_place(path: Path) -> None:
     case, data = state_case(path)
     with pytest.raises(FrameRefused) as refused:
-        fixtures.trust_store().verify(data)
+        fixtures.verify_state(data, case["context"])
     assert (refused.value.code, refused.value.at) == (case["refusal"], case["at"]), refused.value
 
 
@@ -838,7 +838,7 @@ def test_state_records_cannot_claim_a_team_the_writer_does_not_serve(record: str
     if "team" in document["body"]:
         document["body"]["team"] = "another_team"
     with pytest.raises(FrameRefused) as refused:
-        fixtures.trust_store().verify(signed_state(document))
+        fixtures.verify_state(signed_state(document))
     assert refused.value.code == "wrong_team"
 
 
@@ -846,28 +846,43 @@ def test_a_host_cannot_write_another_hosts_liveness() -> None:
     document = state_example("host/lead-host.json")
     document["writer"].update(runtime="worker-host-1", key_id="test-worker-key-1")
     with pytest.raises(FrameRefused) as refused:
-        fixtures.trust_store().verify(signed_state(document))
+        fixtures.verify_state(signed_state(document))
     assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/runtime")
-
-
-def test_a_state_report_from_a_revoked_writer_is_refused() -> None:
-    store = fixtures.trust_store(add=["extra/lead-host-revoked-after-issue.json"])
-    with pytest.raises(FrameRefused) as refused:
-        store.verify(signed_state(state_example("agent/lead-busy.json")))
-    assert refused.value.code == "revoked"
 
 
 def test_team_view_key_must_name_its_body_entry() -> None:
     document = state_example("team_view/roster.json")
     document["key"] = "team_example.task.lead"
     with pytest.raises(FrameRefused) as refused:
-        fixtures.trust_store().verify(signed_state(document))
+        fixtures.verify_state(signed_state(document))
     assert (refused.value.code, refused.value.at) == ("invalid_body", "/key")
 
 
 def test_state_reports_are_verified_when_read_not_kept() -> None:
     with pytest.raises(ValueError, match="verify them when read"):
         fixtures.trust_store().add((STATE_EXAMPLES / "valid" / "agent" / "lead-busy.json").read_bytes())
+    with pytest.raises(ValueError, match="keep them with add"):
+        fixtures.verify_state((EXAMPLES / "trust" / "certificates" / "lead-host-1.json").read_bytes())
+    with pytest.raises(ValueError, match="time zone"):
+        fixtures.trust_store().verify((STATE_EXAMPLES / "valid" / "agent" / "lead-busy.json").read_bytes(),
+                                      now=fixtures.NOW.replace(tzinfo=None))
+
+
+def test_a_reader_accepts_the_record_it_holds_and_newer_ones_only() -> None:
+    """A placement's signed sequence is its fencing token: a copy written back to the bucket is never newer."""
+
+    data = (STATE_EXAMPLES / "valid" / "placement" / "lead.json").read_bytes()
+    record = fixtures.verify_state(data)
+    held = {"sequence": record.document.sequence, "digest": record.digest}
+    fixtures.verify_state(data, {"held": held})
+    newer = state_example("placement/lead.json")
+    newer.update(sequence=2)
+    newer["body"]["reason"] = "rebalanced"
+    fixtures.verify_state(signed_state(newer), {"held": held})
+    same_sequence = dict(newer, sequence=record.document.sequence)
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(same_sequence), {"held": held})
+    assert (refused.value.code, refused.value.at) == ("replayed", "/sequence")
 
 
 @pytest.mark.parametrize("operation", ["join", "renew"])

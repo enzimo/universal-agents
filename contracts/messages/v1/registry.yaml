@@ -142,13 +142,17 @@ host_roles:
   installation_authority: issues and revokes certificates and authority keys
   scheduler: fires schedules
 
-# Signed records that vouch for keys and agents (state.schema.json). Readers verify each
-# one: authority records with the installation's authority keys (their own, or a peer's
-# from an agreement), host records with the writer's certificate that was valid when the
-# record was written, unless that certificate is revoked. Where a record is stored adds
-# no trust. Fields: bucket and key form; signer (authority | host); writers, the host
-# roles that may store it (the edge adapter stores unchanged copies of a peer's records
-# under the peer's installation id); body; write_rule.
+# Signed records (state.schema.json). Readers verify each one: authority records with the
+# installation's authority keys (their own, or a peer's from an agreement), host records
+# with the writer's certificate that was valid when the record was written, unless that
+# certificate is revoked. The first four vouch for keys and agents and are kept by the trust
+# store; the others report state, are written only by this installation's hosts, and are
+# checked again whenever they are read: expiry, issue time, minimum epochs and sequence
+# (README, "State records"). Where a record is stored adds no trust. Fields: bucket and key
+# form; signer (authority | host); signer_roles, the roles whose certificates may sign it;
+# writers, the host roles that may store it (the edge adapter stores unchanged copies of a
+# peer's records under the peer's installation id); body; ttl_seconds, the bucket's per-key
+# lifetime, within which each record must expire; write_rule.
 state_records:
   certificate:
     description: A host's membership certificate.
@@ -184,7 +188,7 @@ state_records:
     body: state/agreement.schema.json
     write_rule: rewritten with a higher sequence to change or end it; only the receiver's own authority signs it
   host:
-    description: A runtime host's liveness and capacity, written by the host itself every 20 seconds.
+    description: A runtime host's liveness and capacity, written by the host itself every 20 seconds and naming its certificate.
     bucket: UA1_HOSTS
     key: "<runtime>"
     signer: host
@@ -192,7 +196,7 @@ state_records:
     writers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
     body: state/host.schema.json
     ttl_seconds: 60
-    write_rule: written by the host itself every 20 seconds; a host writes only its own record
+    write_rule: written by the host itself every 20 seconds, expiring within ttl_seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions
   agent:
     description: An agent's state, written by the host it is placed on when the state changes.
     bucket: UA1_AGENTS
@@ -203,14 +207,14 @@ state_records:
     body: state/agent.schema.json
     write_rule: written on change, at most once per 2 seconds; readers accept it only from the placement's host
   placement:
-    description: Which host runs an agent; its key-value revision is the fencing token.
+    description: Which host runs an agent; its signed sequence is the fencing token.
     bucket: UA1_PLACEMENT
     key: "<team>.<agent>"
     signer: host
     signer_roles: [team_services]
     writers: [team_services]
     body: state/placement.schema.json
-    write_rule: compare-and-set on the last revision; the revision is the fencing token
+    write_rule: compare-and-set on the last key-value revision, with the next sequence; the signed sequence, not the unsigned revision, is the fencing token, so a stored copy written back is never newer
   team_view:
     description: One entry of a team's shared view of its members, requests, tasks and Objectives.
     bucket: UA1_TEAM_VIEW
@@ -219,7 +223,7 @@ state_records:
     signer_roles: [team_services]
     writers: [team_services]
     body: state/team_view.schema.json
-    write_rule: deleted when the item closes; each entry at most 4 KiB
+    write_rule: deleted when the item closes or the person it names departs; each entry at most 4 KiB
 
 kinds:
   task.stop:

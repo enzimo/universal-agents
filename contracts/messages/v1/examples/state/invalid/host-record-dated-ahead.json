@@ -1,0 +1,18 @@
+{
+  "description": "A liveness record dated four weeks after the reader's clock.",
+  "refusal": "not_yet_valid",
+  "at": "/issued_at",
+  "base": "host/lead-host.json",
+  "changes": [
+    {
+      "set": "/issued_at",
+      "to": "2026-11-19T04:30:00.000Z"
+    },
+    {
+      "set": "/expires_at",
+      "to": "2026-11-19T04:31:00.000Z"
+    }
+  ],
+  "context": {},
+  "document_text": "{\"record\": \"host\", \"key\": \"lead-host-1\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"lead-host-1\", \"membership_epoch\": 3, \"key_id\": \"test-lead-key-1\"}, \"sequence\": 91, \"issued_at\": \"2026-11-19T04:30:00.000Z\", \"expires_at\": \"2026-11-19T04:31:00.000Z\", \"body\": {\"runtime\": \"lead-host-1\", \"certificate\": {\"certificate_id\": \"cert_lead_host_1\", \"membership_epoch\": 3, \"sha256\": \"j-99KmXNuxFq8YI531Lb7h7FVZVgt0BKiUvOCuAxNeg\"}, \"session_limit\": 4, \"sessions_active\": 1, \"protocol\": \"1.0-pre\", \"state\": \"accepting\", \"health\": \"healthy\", \"components\": [{\"component\": \"nats\", \"state\": \"healthy\"}, {\"component\": \"sandbox\", \"state\": \"degraded\", \"code\": \"slow_start\"}], \"placement_labels\": [\"sandbox:container\"], \"outbox_depth\": 0, \"revocation_epoch_seen\": 2, \"started_at\": \"2026-10-22T04:00:00.000Z\", \"heartbeat_at\": \"2026-10-22T04:30:00.000Z\", \"software\": {\"name\": \"universal-agents\", \"version\": \"0.9.8\"}}, \"algorithm\": \"ed25519\", \"body_digest\": \"0gSW6iu3Az60YN_fap9XOwcVi47Z-RPB3wtlPLd0inc\", \"signature\": \"2eDxT2bU04tLJbAHw3XgLEKjgBDiOYA4PPLVBJDHbWCMWjXoY4o4IEdd9Q7IxYBLpB8lJR2am0pO8JLGQJR9CQ\"}"
+}

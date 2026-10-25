@@ -1549,7 +1549,8 @@
           "$ref": "#/$defs/epoch"
         },
         "sha256": {
-          "$ref": "#/$defs/sha256_digest"
+          "$ref": "#/$defs/sha256_digest",
+          "description": "SHA-256 of the certificate record's signing bytes (its domain prefix and canonical JSON without the signature), as TrustStore.add records it."
         }
       },
       "required": [
@@ -1557,7 +1558,8 @@
         "membership_epoch",
         "sha256"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "A host certificate record: its id, membership epoch and digest."
     },
     "connection_credential": {
       "type": "object",

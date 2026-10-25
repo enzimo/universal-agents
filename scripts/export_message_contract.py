@@ -857,6 +857,9 @@ def check_state_records(registry: dict[str, Any], transport: dict[str, Any], sch
             raise ContractError(f"{where}: host-signed records, and only they, name signer_roles from host_roles")
         if not set(entry["writers"]) <= roles or entry["body"] not in schemas:
             raise ContractError(f"{where}: writers must be host roles and the body schema must exist")
+        bucket_ttl = transport["key_value"][entry["bucket"]]["per_key_ttl_seconds"]
+        if entry.get("ttl_seconds", 0) != bucket_ttl:
+            raise ContractError(f"{where}: ttl_seconds is its bucket's per_key_ttl_seconds ({bucket_ttl}), and only then present")
 
 
 def check_shared_lists(registry: dict[str, Any], transport: dict[str, Any], topologies: dict[str, Any],

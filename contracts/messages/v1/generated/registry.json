@@ -5702,7 +5702,7 @@
     "host": {
       "body": "state/host.schema.json",
       "bucket": "UA1_HOSTS",
-      "description": "A runtime host's liveness and capacity, written by the host itself every 20 seconds.",
+      "description": "A runtime host's liveness and capacity, written by the host itself every 20 seconds and naming its certificate.",
       "key": "<runtime>",
       "signer": "host",
       "signer_roles": [
@@ -5715,7 +5715,7 @@
         "scheduler"
       ],
       "ttl_seconds": 60,
-      "write_rule": "written by the host itself every 20 seconds; a host writes only its own record",
+      "write_rule": "written by the host itself every 20 seconds, expiring within ttl_seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions",
       "writers": [
         "gateway",
         "lead_host",
@@ -5729,13 +5729,13 @@
     "placement": {
       "body": "state/placement.schema.json",
       "bucket": "UA1_PLACEMENT",
-      "description": "Which host runs an agent; its key-value revision is the fencing token.",
+      "description": "Which host runs an agent; its signed sequence is the fencing token.",
       "key": "<team>.<agent>",
       "signer": "host",
       "signer_roles": [
         "team_services"
       ],
-      "write_rule": "compare-and-set on the last revision; the revision is the fencing token",
+      "write_rule": "compare-and-set on the last key-value revision, with the next sequence; the signed sequence, not the unsigned revision, is the fencing token, so a stored copy written back is never newer",
       "writers": [
         "team_services"
       ]
@@ -5761,7 +5761,7 @@
       "signer_roles": [
         "team_services"
       ],
-      "write_rule": "deleted when the item closes; each entry at most 4 KiB",
+      "write_rule": "deleted when the item closes or the person it names departs; each entry at most 4 KiB",
       "writers": [
         "team_services"
       ]

@@ -46,6 +46,8 @@ RENEW_KIND, KEY_ROTATION = "host.renew", "application_key_rotation"
 INVALID_FIELDS = {"description", "refusal", "also", "at", "base", "changes", "signing", "signed_by", "token_signing",
                   "record_signing", "after_signing", "text_changes", "pad_to_bytes", "context", "frame_text"}
 INVALID_STATE_FIELDS = {"description", "refusal", "at", "base", "changes", "signing", "context", "document_text"}
+# A host record names its writer's certificate; the ref's digest is that record's.
+HOST_RECORD = "host"
 SIGNING_MODES = {"after", "before", "stale_digest"}
 BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
@@ -252,15 +254,24 @@ def render_keys() -> tuple[dict[str, dict[str, Any]], dict[Path, str]]:
     return document["keys"], {path: document_text(document)}
 
 
-def render_trust(signer: Signer) -> dict[Path, str]:
-    files = {}
+def render_trust(signer: Signer) -> tuple[dict[str, str], dict[Path, str]]:
+    """The trust records, and each certificate record's digest by its key (host.<installation>.<runtime>.<epoch>).
+
+    The digest is SHA-256 of the record's signing bytes, which a host record's
+    certificate ref names.
+    """
+
+    files, digests = {}, {}
     for path in sorted((EXAMPLES / "trust").rglob("*.json")):
         document = _read(path)
         if path.name == "anchors.json":
             files[path] = document_text(signer.fill_public_keys(document))
-        else:
-            files[path] = document_text(signer.state(document))
-    return files
+            continue
+        signed = signer.state(document)
+        files[path] = document_text(signed)
+        if signed["record"] == "certificate" and path.parent.name != "extra":
+            digests[signed["key"]] = b64url(hashlib.sha256(signer.signing_bytes(signer.state_domain, signed)).digest())
+    return digests, files
 
 
 def render_valid(signer: Signer) -> tuple[dict[str, dict[str, Any]], dict[Path, str]]:
@@ -319,12 +330,20 @@ def render_invalid(signer: Signer, frames: dict[str, dict[str, Any]]) -> dict[Pa
     return files
 
 
-def render_states(signer: Signer) -> dict[Path, str]:
-    """Valid state reports, signed by their writers, and refusal cases built from them."""
+def render_states(signer: Signer, certificates: dict[str, str]) -> dict[Path, str]:
+    """Valid state reports, signed by their writers, and refusal cases built from them.
+
+    A valid host record's certificate ref gets the digest of its writer's certificate record.
+    """
 
     files, records = {}, {}
     for path in sorted((STATES / "valid").rglob("*.json")):
-        document = signer.state(_read(path))
+        document = _read(path)
+        if document["record"] == HOST_RECORD:
+            writer = document["writer"]
+            key = f"host.{writer['installation']}.{writer['runtime']}.{writer['membership_epoch']}"
+            document["body"]["certificate"]["sha256"] = certificates[key]
+        document = signer.state(document)
         records[path.relative_to(STATES / "valid").as_posix()] = document
         files[path] = document_text(document)
     for path in sorted((STATES / "invalid").glob("*.json")):
@@ -391,11 +410,12 @@ def render_examples(registry: dict[str, Any]) -> dict[Path, str]:
 
     keys, files = render_keys()
     signer = Signer(keys, registry)
-    files.update(render_trust(signer))
+    certificates, trust = render_trust(signer)
+    files.update(trust)
     frames, valid = render_valid(signer)
     files.update(valid)
     files.update(render_invalid(signer, frames))
-    files.update(render_states(signer))
+    files.update(render_states(signer, certificates))
     files.update(render_vectors(signer, registry))
     files.update(render_rotation_vector(signer, frames))
     return files

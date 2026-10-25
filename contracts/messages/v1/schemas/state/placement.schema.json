@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/state/placement.schema.json",
   "title": "placement state record body",
-  "description": "Which host runs an agent; its key-value revision is the fencing token.",
+  "description": "Which host runs an agent; its signed sequence is the fencing token.",
   "type": "object",
   "properties": {
     "team": {
@@ -20,7 +20,8 @@
     "host_epoch": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 9007199254740991
+      "maximum": 9007199254740991,
+      "description": "The membership epoch of the host's certificate when the agent was placed. Renewals do not move the agent: a reader accepts the placement while the host's liveness record names a certificate of that runtime at this epoch or later."
     },
     "definition_sha256": {
       "$ref": "../common.schema.json#/$defs/sha256_digest"

@@ -1,0 +1,24 @@
+{
+  "description": "A peer installation's host, certified for its own team services, places this team's lead on a peer host.",
+  "refusal": "wrong_issuer",
+  "at": "/writer/installation",
+  "base": "placement/lead.json",
+  "changes": [
+    {
+      "set": "/writer",
+      "to": {
+        "type": "host",
+        "installation": "install_peer",
+        "runtime": "peer-lead-host-1",
+        "membership_epoch": 1,
+        "key_id": "test-peer-lead-key-1"
+      }
+    },
+    {
+      "set": "/body/host",
+      "to": "peer-lead-host-1"
+    }
+  ],
+  "context": {},
+  "document_text": "{\"record\": \"placement\", \"key\": \"team_example.lead\", \"writer\": {\"type\": \"host\", \"installation\": \"install_peer\", \"runtime\": \"peer-lead-host-1\", \"membership_epoch\": 1, \"key_id\": \"test-peer-lead-key-1\"}, \"sequence\": 1, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"body\": {\"team\": \"team_example\", \"agent\": \"lead\", \"agent_type\": \"TeamArchitect\", \"host\": \"peer-lead-host-1\", \"host_epoch\": 3, \"definition_sha256\": \"CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws\", \"required_labels\": [\"sandbox:container\"], \"placed_at\": \"2026-10-22T04:00:00.000Z\", \"reason\": \"initial\", \"previous_host\": \"lead-host-0\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"UmPEiT37gA0Z4Am_Lq-X4x3PyxinmEItNDcUXmJDDBE\", \"signature\": \"Apns9U8DE5pXeNG394TnwnZynRCEroFhBDpPfpQD-JlO2D3L6nApvZw8y7SaEqgPMHYkL3-hI9qNUJLIjtd2DQ\"}"
+}

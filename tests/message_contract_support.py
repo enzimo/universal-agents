@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from custom_messages.wire.encoding import b64url_decode
 from custom_messages.wire.frame import Receiver, ReplayKey, ReplayLookup, VerifiedFrame, sign_frame, verify_frame
 from custom_messages.wire.models import Frame
-from custom_messages.wire.trust import AuthorityKey, TrustStore
+from custom_messages.wire.trust import AuthorityKey, TrustStore, VerifiedRecord
 from custom_messages.wire.values import parse_timestamp
 
 CONTRACT = Path(__file__).resolve().parents[1] / "contracts" / "messages" / "v1"
@@ -137,11 +137,29 @@ def verify(data: bytes, frame: Mapping[str, Any], context: Optional[Mapping[str,
     )
 
 
+def verify_state(data: bytes, context: Optional[Mapping[str, Any]] = None, *, trust: Optional[TrustStore] = None) -> VerifiedRecord:
+    """Read a state report as a reader does, with the defaults a state example's context overrides.
+
+    The context may add or remove trust records, set minimum epochs, replace the time
+    (``now``) and name the record the reader holds for the key (``held``: sequence and digest).
+    """
+
+    context = context or {}
+    if trust is None:
+        trust = trust_store(**{key: value for key, value in context.get("trust", {}).items() if key in {"add", "remove"}})
+    for minimum in context.get("minimum_epochs", []):
+        trust.require_epochs(minimum["installation"], minimum.get("runtime"),
+                             membership=minimum.get("membership", 0), revocation=minimum.get("revocation", 0))
+    held = context.get("held")
+    return trust.verify(data, now=parse_timestamp(context["now"]) if "now" in context else NOW,
+                        held=(held["sequence"], held["digest"]) if held else None)
+
+
 def example_frame(kind: str, name: str = "basic") -> dict[str, Any]:
     return json.loads((EXAMPLES / "valid" / kind / f"{name}.json").read_text(encoding="utf-8"))
 
 
 __all__ = [
     "CONTRACT", "EXAMPLES", "KEYS", "NOW", "ReplayKey", "anchors", "answered_request", "default_receiver", "example_frame",
-    "private_key", "replay_holding", "resign", "trust_store", "valid_frames", "verify",
+    "private_key", "replay_holding", "resign", "trust_store", "valid_frames", "verify", "verify_state",
 ]
