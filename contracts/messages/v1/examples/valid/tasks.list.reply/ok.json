@@ -1,0 +1,50 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tasks.list.reply",
+  "message_id": "01928f3a-7b2c-7408-8000-000000000408",
+  "idempotency_key": "tasks.list.reply:vobw7qehu4TR72tH_UrnqW4fVrZv0-k5cBf1tL0gVdk",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7407-8000-000000000407",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "tasks": [
+      {
+        "task_id": "task_id_1",
+        "state": "in_progress",
+        "problem_statement": "Example problem statement",
+        "is_current": true,
+        "queue_position": 0,
+        "last_updated_at": "2026-10-22T04:30:00.000Z",
+        "blocker": {
+          "type": "inline",
+          "text": "Waiting for the requested source."
+        },
+        "latest_activity": "Checking the source."
+      }
+    ],
+    "total": 3,
+    "queued_count": 3,
+    "current_count": 3,
+    "queue_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "causation_id": "01928f3a-7b2c-7407-8000-000000000407",
+  "body_digest": "T2KGNssiNj6j7CxVhC_fagd-xfY4_oYtTy3dQBs516I",
+  "signature": "1pe8W3KTqek2NijSlXR0rDkBQV1i7z4kfJa4bGpPjyorkTIpr-VsnGx58nlTJakOtLTnt_Fw3H0b2gofNKS5Dw"
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/tasks.progress.schema.json",
+  "title": "tasks.progress request",
+  "description": "Where the person's request in one conversation stands.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "conversation_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "delivery_ref": {
+      "$ref": "../common.schema.json#/$defs/delivery_ref"
+    }
+  },
+  "required": [
+    "request_id",
+    "conversation_id"
+  ],
+  "additionalProperties": false
+}

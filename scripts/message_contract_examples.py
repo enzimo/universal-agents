@@ -12,7 +12,10 @@ values:
   signing bytes.
 
 This module fills in public keys, idempotency keys, body digests, signatures and
-each invalid example's ``frame_text``. It signs and derives keys with RFC 8785,
+each invalid example's ``frame_text``. Tokens are signed wherever a frame carries
+them: its authority token, an authority token in its body (``body.authority``, the
+scheduler's answer to ``run_context.sign``) and a change-conflict decision token
+(``body.decision_token``). It signs and derives keys with RFC 8785,
 SHA-256 and Ed25519 directly, not with ``custom_messages.wire``, so the tests
 compare two implementations of the signing and key rules. ``scripts/export_message_contract.py`` runs it before writing its manifest;
 ``--check`` there fails when a file here is not what this module renders.
@@ -158,12 +161,14 @@ class Signer:
 
     def frame(self, frame: dict[str, Any], *, key_id: str | None = None, digest: str | None = None,
               sign_token: bool = True) -> dict[str, Any]:
-        """Sign a frame: its authority token first, then the body digest, then the frame."""
+        """Sign a frame: its tokens first (the frame's and those its body carries), then the body digest, then the frame."""
 
         frame = dict(frame)
         if "authority" in frame and sign_token:
             frame["authority"] = self.token(frame["authority"])
         body = frame.get("body")
+        if isinstance(body, dict) and isinstance(body.get("authority"), dict) and sign_token:
+            body = frame["body"] = dict(body, authority=self.token(body["authority"]))
         if isinstance(body, dict) and isinstance(body.get("decision_token"), dict) and sign_token:
             decision = dict(body["decision_token"], algorithm="ed25519")
             decision["signature"] = self.sign(self.decision_domain, decision, decision["issuer"]["key_id"])

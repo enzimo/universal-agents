@@ -474,6 +474,65 @@ async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_per
 
 
 @pytest.mark.asyncio
+async def test_the_scheduler_signs_a_run_token_for_a_worker_that_asks(isolated_broker) -> None:
+    """Only a scheduler signs a run's token, so it answers run_context.sign (README, "On behalf of a person").
+
+    The scheduler serves that one team-services address; the team services may not
+    listen there, and the token in the answer is the scheduler's.
+    """
+
+    async with AsyncExitStack() as stack:
+        worker = await connect(stack, isolated_broker, "worker")
+        scheduler = await connect(stack, isolated_broker, "scheduler")
+        services = await connect(stack, isolated_broker, "services")
+        request = fixtures.example_frame("run_context.sign", "full")
+
+        async def respond(message):
+            verified = fixtures.verify(message.data, request, arrived(request, message))
+            reply = fixtures.example_frame("run_context.sign.reply", "ok")
+            reply.update(subject=message.reply, causation_id=verified.frame.message_id)
+            await scheduler.nc.publish(message.reply, fixtures.resign(reply), headers=headers(reply))
+
+        await services.subscribe_refused(request["subject"])
+        await subscribe_ready(scheduler, request["subject"], respond)
+        response = await worker.nc.request(request["subject"], json.dumps(request).encode(), timeout=2, headers=headers(request))
+        answer = json.loads(response.data)
+        verified = fixtures.verify(response.data, answer, arrived(answer, response))
+        token = verified.body.authority
+        assert verified.certificate.roles == frozenset({"scheduler"}) and token.issuer.runtime == "scheduler-1"
+        assert token.schedule_id == request["body"]["scheduled_job_id"] and verified.body.system_work is False
+        assert worker.errors.empty() and scheduler.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_the_team_services_pass_a_queue_request_on_to_the_agent_that_holds_the_queue(isolated_broker) -> None:
+    """The gateway asks the team services, which relay the command, token unchanged, to the holder (plan 13A.4)."""
+
+    async with AsyncExitStack() as stack:
+        gateway = await connect(stack, isolated_broker, "gateway")
+        services = await connect(stack, isolated_broker, "services")
+        worker = await connect(stack, isolated_broker, "worker")
+        relay = fixtures.example_frame("tasks.list", "relayed-to-the-holder")
+        assert relay["authority"] == fixtures.example_frame("tasks.list", "full")["authority"]
+        await gateway.publish_refused(f"ua.v1.{TEAM}.gateway-1.ctl.agent.researcher-2.tasks.list")
+
+        async def respond(message):
+            verified = fixtures.verify(message.data, relay, arrived(relay, message))
+            assert verified.authority is not None and verified.authority.certificate.runtime == "gateway-1"
+            reply = fixtures.example_frame("tasks.list.reply", "from-the-holder")
+            reply.update(subject=message.reply)
+            await worker.nc.publish(message.reply, fixtures.resign(reply), headers=headers(reply))
+
+        await subscribe_ready(worker, relay["subject"], respond)
+        response = await services.nc.request(relay["subject"], json.dumps(relay).encode(), timeout=2, headers=headers(relay))
+        answer = json.loads(response.data)
+        verified = fixtures.verify(response.data, answer, arrived(answer, response))
+        assert verified.frame.causation_id == relay["message_id"] and verified.frame.issuer.agent == "researcher-2"
+        assert verified.body.outcome == "ok"
+        assert services.errors.empty() and worker.errors.empty()
+
+
+@pytest.mark.asyncio
 async def test_an_outside_agents_adapter_cannot_put_work_into_a_worker_pool(isolated_broker) -> None:
     async with AsyncExitStack() as stack:
         edge = await connect(stack, isolated_broker, "edge")

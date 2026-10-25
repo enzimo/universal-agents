@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.authorize_access.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a035",
+  "idempotency_key": "schedules.authorize_access.reply:qk-mn-IXr5o_gTs01ag9-yJgkJpHUqcMXUBLr0ibM58",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7000-8000-00000000a02c",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "schedule_worker_policy_revision_conflict",
+    "message": "The worker policy changed. Inspect its current revision before saving.",
+    "current_policy_revision": 3
+  },
+  "causation_id": "01928f3a-7b2c-7000-8000-00000000a02c",
+  "body_digest": "9M79YW16ffGF2ufrPkqnmusyKP9BmjxL9GQ4I9Ag7iA",
+  "signature": "QW6QYuul6O8KvW0XqQNLbszoHpSH1L_RnyC5epG7HdTSC4nF4t8kvBE4PfjqKvk0yJaSJLmhr1VOpsyVs88iAg"
+}

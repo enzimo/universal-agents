@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/tasks.inventory.reply.schema.json",
+  "title": "tasks.inventory reply",
+  "description": "The person's running work and schedules.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "roots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "root_task_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "state": {
+                "$ref": "../common.schema.json#/$defs/progress_state"
+              },
+              "conversation_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "objective_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "objective_work_session_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "plan_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "latest_activity_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              },
+              "latest_activity": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "blocker": {
+                "$ref": "../common.schema.json#/$defs/text_content"
+              },
+              "children": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "task_id": {
+                      "$ref": "../common.schema.json#/$defs/record_id"
+                    },
+                    "state": {
+                      "$ref": "../common.schema.json#/$defs/progress_state"
+                    },
+                    "last_updated_at": {
+                      "$ref": "../common.schema.json#/$defs/timestamp"
+                    },
+                    "agent_id": {
+                      "$ref": "../common.schema.json#/$defs/agent_id"
+                    },
+                    "agent_type": {
+                      "$ref": "../common.schema.json#/$defs/agent_type"
+                    }
+                  },
+                  "required": [
+                    "task_id",
+                    "state"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 200
+              },
+              "children_total": {
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "next_child_offset": {
+                "$ref": "../common.schema.json#/$defs/count"
+              }
+            },
+            "required": [
+              "root_task_id",
+              "state",
+              "children",
+              "children_total"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100
+        },
+        "schedules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "schedule_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "next_fire_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "objective_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              }
+            },
+            "required": [
+              "schedule_id",
+              "enabled"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100
+        },
+        "total": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "next_offset": {
+          "$ref": "../common.schema.json#/$defs/count"
+        }
+      },
+      "required": [
+        "outcome",
+        "roots",
+        "schedules",
+        "total"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

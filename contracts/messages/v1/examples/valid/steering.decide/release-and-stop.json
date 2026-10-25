@@ -1,0 +1,73 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "steering.decide",
+  "message_id": "01928f3a-7b2c-7a0c-8000-000000000a0c",
+  "idempotency_key": "steering.decide:q4w5zaZePN54W0j_LjDb4WSRBdP3IgAotct2FkcorOM",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.steering.decide",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7179-9000-000000000179",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "AuzPT_uyUIZEkfo-sKEhT8U4ofEQV4ZK6RKIJ0AGJMdmyX1S4WPlkh21YVwUPLrRxJXKlvuH--emXp_p-jm0Cg"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_id_3",
+    "person_steering_id": "person_steering_id_1",
+    "root_task_id": "task_root_7f",
+    "decision": {
+      "type": "decided",
+      "actions": [
+        {
+          "task_id": "task_id_1",
+          "action": {
+            "type": "release"
+          }
+        },
+        {
+          "task_id": "task_id_2",
+          "action": {
+            "type": "stop",
+            "reason": "The person no longer needs the EU part."
+          }
+        }
+      ]
+    }
+  },
+  "body_digest": "xRUuiUtWujSbtLFoQwxqmbVP3NQ2Fra71YvdgCCB1HQ",
+  "signature": "HM3t-e7iV7tH2LsM-Xujwm0YKEoWG1qDibKqVzicdNVJGGPMCyp8MNoe5zV86BvBNfmxzhPrrq__8-am1BhoCQ"
+}

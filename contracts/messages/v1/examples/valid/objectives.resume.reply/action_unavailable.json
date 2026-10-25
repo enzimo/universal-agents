@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.resume.reply",
+  "message_id": "7dc7256c-9c69-76ce-9483-515ffaaaf1f0",
+  "idempotency_key": "objectives.resume.reply:MszYquhcwqCzrnBZgdNljcbIl-Ky5hxSIpyj_4KC5vg",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.238a5051-22c7-7a72-8149-098d7119b7b3",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "action_unavailable",
+    "current_status": "satisfied",
+    "message": "A satisfied Objective cannot be resumed."
+  },
+  "causation_id": "238a5051-22c7-7a72-8149-098d7119b7b3",
+  "body_digest": "0IneA73_D4F28Ln_yD5l8gk-yFZubHnVurqN3QsLD8E",
+  "signature": "HhOKOdSy4ZXk3IfsE2E1BBQq4XKayiEqjGJMw8juDqG4-9t6BHzr5iTQJsZngJ_fMsapJjtaR7tBaFu4wtYAAQ"
+}

@@ -1,0 +1,14 @@
+{
+  "description": "A knowledge.count_contributions body with a field its schema does not define.",
+  "refusal": "invalid_body",
+  "at": "/body/not_in_schema",
+  "base": "knowledge.count_contributions/full.json",
+  "changes": [
+    {
+      "set": "/body/not_in_schema",
+      "to": true
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"knowledge.count_contributions\", \"message_id\": \"01928f3a-7b2c-747c-8000-00000000047c\", \"idempotency_key\": \"knowledge.count_contributions:kX939ySRFI712CvU_8LcLdE7f2CnCJndcs8ME54tGnE\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"revocation_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.gateway-1.svc.team.knowledge.count_contributions\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7129-9000-000000000129\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"command\", \"id\": \"kb_count_contributions_full\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-22T04:34:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"CxtyhFMFb_QpuJj6ydQ740a3BtBAeJjH9smILdnMS-4oscKRgISnqnz0Tr938VV_pmrBM5Gub9vt8X-ls0pYCA\"}, \"algorithm\": \"ed25519\", \"body\": {\"request_id\": \"kb_count_contributions_full\", \"not_in_schema\": true}, \"body_digest\": \"kyEWiRCXJK0f3JVxA1c4IIm3rTWVM6pQDc6Oq9Wopy4\", \"signature\": \"63DcMKhPLYWF_QTshqLOjjw0CmMuZHIXKHsRAx2lZa0Gkq_WWfCZsyTNtMe_LFbsxKF-iwJTDhX0SL1CQTbsBQ\"}"
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/tasks.list.schema.json",
+  "title": "tasks.list request",
+  "description": "One agent's task queue.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "agent": {
+      "$ref": "../common.schema.json#/$defs/agent_id"
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20
+    }
+  },
+  "required": [
+    "request_id",
+    "agent",
+    "offset",
+    "limit"
+  ],
+  "additionalProperties": false
+}

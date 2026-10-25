@@ -1,0 +1,52 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.add_note.reply",
+  "message_id": "01928f3a-7b2c-7e30-8000-000000000001",
+  "idempotency_key": "knowledge.add_note.reply:M2b0otdOsRLVnrOtubaTDP1baspZz9NqERcf515mSkQ",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7000-8000-000000008004",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "page": {
+      "type": "blob",
+      "ref": {
+        "sha256": "QHDup20_NM5-KAgmoN0NBV1P-7bBQ4bAvv6x7COyqJs",
+        "size": 1120,
+        "media_type": "application/json"
+      }
+    },
+    "review_flags": [],
+    "note": {
+      "note_id": "kb_note_01",
+      "content": {
+        "type": "inline",
+        "text": "Check the rollback steps before the release."
+      },
+      "created_at": "2026-10-22T04:30:00.000Z",
+      "created_by": {
+        "kind": "agent",
+        "agent_type": "TeamLeadAgent"
+      }
+    }
+  },
+  "causation_id": "01928f3a-7b2c-7000-8000-000000008004",
+  "body_digest": "K4JpLDqzwTv9BYHjbx6dD6N_MePof9-Gi8nQEI1IiME",
+  "signature": "EA6D-yW6OeWqRs_wvhZy50UEUwdXMXmipXyF9NTRqALqZiYDTeCbnjBZicCqp6JtHhVDlfzLth56mSA2GaHUDA"
+}

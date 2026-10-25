@@ -1,0 +1,13 @@
+{
+  "description": "A replacement must name at least one fact field to change.",
+  "refusal": "invalid_body",
+  "at": "/body",
+  "base": "memory.replace/tags-only.json",
+  "changes": [
+    {
+      "remove": "/body/tags"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"memory.replace\", \"message_id\": \"e3f69f5f-619b-72a7-b1ab-cedf540cf1d5\", \"idempotency_key\": \"memory.replace:3bbAWS55wPlgjZnjJQ3Hwyhx7SnAXvD-kWfTWzfDbME\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.lead-host-1.svc.team.memory.replace\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"58799d45-2bf7-77a8-a50b-7aa795358154\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"root_task\", \"id\": \"task_root_7f\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-22T04:34:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"oDmUBo9dE3L9HIbnzFWEsP4AtY-3w_iKgNwS4EXGieDNQNG5MnL_CFxUBsAyYcGIQpFHOrISLC71nIRnNVoxDg\"}, \"algorithm\": \"ed25519\", \"body\": {\"bank\": \"coremem\", \"memory_id\": 3, \"seen_version\": \"85c8ca789a0caf0a4d6e33cbd583ca10879683806898c53b262d6aa06597d50d\", \"request_id\": \"cmd_memory_replace_tags_only\"}, \"body_digest\": \"-Mpjc2kH1WAvrqmIg77V-PAU0lhCf-XYbVgqqwjbh38\", \"signature\": \"RG_w9LrGPBlakhy5D8ytb_sGJ0RBc_uPTl4qxQQsyTonTypvwx69uENo1yn71bnFmCnBXyKWTTUBxT3fhEC-Ag\"}"
+}

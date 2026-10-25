@@ -1,0 +1,146 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.record_checkpoint",
+  "message_id": "00a624c4-6076-74bb-ae7f-ad36c03131e8",
+  "idempotency_key": "objectives.record_checkpoint:CutHRO6-6SZoYwmHSR07CdmEEJ8RoGRPxn1zfzEdo2M",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.objectives.record_checkpoint",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7154-9000-000000000154",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "6rG0DjDSHQrjmwz_useUIS7iIPZRmOlgpf0OjA58FlrkQQVynbxDCAWq6-NIwa1yz3fF6wjU8pU4Rsyn8I2DAw"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_objectives_record_checkpoint_long_text",
+    "session_id": "session_dependency_watch",
+    "task_id": "task_root_7f",
+    "observe": {
+      "type": "blob",
+      "ref": {
+        "sha256": "gmW1pxH1lws8fo8opaofzepj_hk8-0NwiPjvS49R8oM",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "orient": {
+      "type": "blob",
+      "ref": {
+        "sha256": "5k5--XL2uQ1G4WTMxoJzeTyOTxPsW8_tLEfhBJKRrJw",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "decide": {
+      "type": "blob",
+      "ref": {
+        "sha256": "nmxFoTDslFtdTWznXkne2Jt0L17qpXXt4WGLBr6nuK8",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "act": {
+      "type": "blob",
+      "ref": {
+        "sha256": "YRkNhrBoTmVQ0sryMXnYOsfQCDzpIaeEYbrIyojy1h0",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "next_subgoal": {
+      "type": "blob",
+      "ref": {
+        "sha256": "t4TkhDA_0Oa8ox7ZD8xXZGTNiWbJiOcMz5DiEgso2N8",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "health": "on_track",
+    "evidence_delta": [
+      {
+        "type": "blob",
+        "ref": {
+          "sha256": "-xEGrdfKVst6iXVBHyaXe5j0Nod6miNma6z3zEt-9hI",
+          "size": 4096,
+          "media_type": "text/plain"
+        }
+      }
+    ],
+    "completed_subgoals": [
+      {
+        "type": "blob",
+        "ref": {
+          "sha256": "6FYPmTxSyMHVoJjutWVN3oWdMOyF40WOj96Tv3bdWc8",
+          "size": 4096,
+          "media_type": "text/plain"
+        }
+      }
+    ],
+    "blockers": [
+      {
+        "type": "blob",
+        "ref": {
+          "sha256": "6FYPmTxSyMHVoJjutWVN3oWdMOyF40WOj96Tv3bdWc8",
+          "size": 4096,
+          "media_type": "text/plain"
+        }
+      }
+    ],
+    "in_flight_effects": [
+      {
+        "type": "blob",
+        "ref": {
+          "sha256": "6FYPmTxSyMHVoJjutWVN3oWdMOyF40WOj96Tv3bdWc8",
+          "size": 4096,
+          "media_type": "text/plain"
+        }
+      }
+    ],
+    "artifacts": [
+      {
+        "type": "blob",
+        "ref": {
+          "sha256": "6FYPmTxSyMHVoJjutWVN3oWdMOyF40WOj96Tv3bdWc8",
+          "size": 4096,
+          "media_type": "text/plain"
+        }
+      }
+    ]
+  },
+  "body_digest": "qyLlpEf02zoUg_sx8x1NVi4y71ha7bH2Rgfkag2hqyg",
+  "signature": "VJ7JRc9KlJnflZnHxX8mbeoccGlTUQO6ML2bONyEJPG_AUaVEXy9aHqEM70X_0dUFYKPKPIe1KZEIcaS8KAYBg"
+}

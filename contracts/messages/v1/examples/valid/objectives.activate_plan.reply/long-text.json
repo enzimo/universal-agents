@@ -1,0 +1,43 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.activate_plan.reply",
+  "message_id": "77983bad-b32c-73cb-b7b9-5f7947e9a45e",
+  "idempotency_key": "objectives.activate_plan.reply:N8xjIO-FvlUTiM9mkHMyAP_QTZnO701NiEy5tIls6lA",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.f483e608-bd61-7736-86ce-275e48eea1df",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "plan_execution_started": true,
+    "step_count": 2,
+    "metadata_hidden": true,
+    "ids_available_to_model": false,
+    "next_action": {
+      "type": "blob",
+      "ref": {
+        "sha256": "BqxE0EuheIuoAQ-i9Z05QoX-IQsfxPlQFy9w8ODATdE",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    }
+  },
+  "causation_id": "f483e608-bd61-7736-86ce-275e48eea1df",
+  "body_digest": "0bgQ1m9M-mPtAO3D9E16SFv6eT7NGOiLxc3MKsMYcFI",
+  "signature": "We_JTmKfxbXAaP-8T_7W6_hGIaHvPkiYLVz49Q69TvGUSgXbr95lO8DWQd_nVnTcI7RM5-DekOpQjiGCrQF1Cw"
+}

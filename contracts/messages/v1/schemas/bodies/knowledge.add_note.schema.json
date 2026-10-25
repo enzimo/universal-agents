@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/knowledge.add_note.schema.json",
+  "title": "knowledge.add_note request",
+  "description": "Add a note to a knowledge page.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "space": {
+      "type": "string",
+      "enum": [
+        "team",
+        "personal"
+      ]
+    },
+    "page": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "note": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "confirm_review": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "request_id",
+    "space",
+    "page",
+    "note",
+    "confirm_review"
+  ],
+  "additionalProperties": false
+}

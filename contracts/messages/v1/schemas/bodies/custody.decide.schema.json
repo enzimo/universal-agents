@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/custody.decide.schema.json",
+  "title": "custody.decide request",
+  "description": "The lead reassigns a task or adopts late work.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "seen_custody_token": {
+      "$ref": "../common.schema.json#/$defs/custody_token"
+    },
+    "decision": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "reassign"
+            },
+            "to": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "target": {
+                      "const": "agent"
+                    },
+                    "agent": {
+                      "$ref": "../common.schema.json#/$defs/agent_id"
+                    }
+                  },
+                  "required": [
+                    "target",
+                    "agent"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "target": {
+                      "const": "pool"
+                    },
+                    "pool": {
+                      "$ref": "../common.schema.json#/$defs/agent_type"
+                    }
+                  },
+                  "required": [
+                    "target",
+                    "pool"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "from_checkpoint": {
+              "$ref": "../common.schema.json#/$defs/blob_ref"
+            }
+          },
+          "required": [
+            "type",
+            "to"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "adopt_late_work"
+            },
+            "late_message_id": {
+              "$ref": "../common.schema.json#/$defs/message_id"
+            },
+            "stop_current": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "late_message_id",
+            "stop_current"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "request_id",
+    "task_id",
+    "seen_custody_token",
+    "decision"
+  ],
+  "additionalProperties": false
+}

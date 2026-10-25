@@ -1,4 +1,8 @@
 {
+  "allow_responses": {
+    "expires": "38s",
+    "max": 1
+  },
   "publish": [
     "ua.v1.{team}.{self}.work.agent.*",
     "ua.v1.{team}.{self}.work.pool.*",
@@ -6,6 +10,7 @@
   ],
   "role": "scheduler",
   "subscribe": [
-    "_INBOX.{self}.>"
+    "_INBOX.{self}.>",
+    "ua.v1.{team}.*.svc.team.run_context.sign"
   ]
 }

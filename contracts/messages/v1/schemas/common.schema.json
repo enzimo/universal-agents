@@ -24,6 +24,12 @@
       "description": "An agent's stable id. It stays the same when the agent restarts or moves to another host.",
       "$ref": "#/$defs/token_id"
     },
+    "durable_owner_id": {
+      "description": "The stored owner of an Objective or its work records, including manager_scope:<team>:<role>. This is data, never a routing or certificate agent id.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384
+    },
     "agent_type": {
       "$ref": "#/$defs/token_id"
     },
@@ -200,7 +206,7 @@
       "additionalProperties": false
     },
     "authority_token": {
-      "description": "Proof that work acts for a person, issued by a gateway or scheduler host and bound to one root task or one command. It names the team the person asked (its audience), and only that team presents it, copied unchanged down a delegation tree. The signature covers the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/authority-token/v1 and a newline.",
+      "description": "Proof that work acts for a person, issued by a gateway or scheduler host and bound to one root task, one command or one access request. It names the team the person asked (its audience), and only that team presents it, copied unchanged down a delegation tree. System work, which a schedule runs for no person, carries a scheduler's token that names its schedule and no person. The token names no roles: receivers read the person's current roles and standing from the team's people records. The signature covers the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/authority-token/v1 and a newline.",
       "type": "object",
       "properties": {
         "token_id": {
@@ -249,6 +255,7 @@
           "description": "The team the person asked; only that team presents the token. Its installation is the issuer's."
         },
         "person": {
+          "description": "The person the work is for. Absent only in system work: a scheduler's token that names its schedule_id (README, \"On behalf of a person\").",
           "$ref": "#/$defs/person_ref"
         },
         "bound_to": {
@@ -293,7 +300,6 @@
         "token_id",
         "issuer",
         "audience",
-        "person",
         "bound_to",
         "issued_at",
         "expires_at",
@@ -1368,6 +1374,140 @@
         "assumptions",
         "held_actions",
         "counters"
+      ],
+      "additionalProperties": false
+    },
+    "record_version": {
+      "description": "The version of a stored record that a writer saw, as the store reports it.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
+    "progress_state": {
+      "type": "string",
+      "enum": [
+        "abandoned",
+        "accepted",
+        "cancelled",
+        "completed",
+        "finalizing_plan",
+        "failed",
+        "in_progress",
+        "not_started",
+        "partial",
+        "paused",
+        "preparing",
+        "retrying",
+        "undefined",
+        "waiting"
+      ]
+    },
+    "text_content": {
+      "description": "UTF-8 plain text, inline or held in the object store. Use a blob when the whole serialized frame would exceed its size limit.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "inline"
+            },
+            "text": {
+              "$ref": "#/$defs/long_text"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "blob"
+            },
+            "ref": {
+              "$ref": "#/$defs/blob_ref"
+            }
+          },
+          "required": [
+            "type",
+            "ref"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "knowledge_editor": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "agent"
+            },
+            "agent_type": {
+              "$ref": "#/$defs/agent_type"
+            }
+          },
+          "required": [
+            "kind",
+            "agent_type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "person"
+            },
+            "person": {
+              "$ref": "#/$defs/person_ref"
+            }
+          },
+          "required": [
+            "kind",
+            "person"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "system"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "knowledge_note": {
+      "description": "An open note whose id can be passed to knowledge.resolve_note.",
+      "type": "object",
+      "properties": {
+        "note_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "content": {
+          "$ref": "#/$defs/text_content"
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "created_by": {
+          "$ref": "#/$defs/knowledge_editor"
+        }
+      },
+      "required": [
+        "note_id",
+        "content",
+        "created_at",
+        "created_by"
       ],
       "additionalProperties": false
     }

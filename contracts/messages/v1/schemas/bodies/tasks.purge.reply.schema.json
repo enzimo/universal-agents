@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/tasks.purge.reply.schema.json",
+  "title": "tasks.purge reply",
+  "description": "Remove every queued task that is not running from an agent's queue.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "receipts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "root_task_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "cancelled_task_count": {
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "stop_signals_sent": {
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "unconfirmed_worker_count": {
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "confirmed",
+                  "barrier_not_saved",
+                  "failed"
+                ]
+              }
+            },
+            "required": [
+              "root_task_id",
+              "cancelled_task_count",
+              "stop_signals_sent",
+              "unconfirmed_worker_count",
+              "state"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100
+        },
+        "removed": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "queue_digest": {
+          "$ref": "../common.schema.json#/$defs/record_version"
+        },
+        "all_confirmed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "outcome",
+        "receipts",
+        "removed",
+        "queue_digest",
+        "all_confirmed"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "queue_changed"
+        },
+        "current_digest": {
+          "$ref": "../common.schema.json#/$defs/record_version"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "current_digest"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_found"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

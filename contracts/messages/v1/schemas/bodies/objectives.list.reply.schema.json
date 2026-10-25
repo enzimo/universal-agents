@@ -1,0 +1,288 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/objectives.list.reply.schema.json",
+  "title": "objectives.list reply",
+  "description": "The person's Objectives.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "objectives": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "objective_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "seen_version": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 16384
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "proposed",
+                  "active",
+                  "paused",
+                  "blocked",
+                  "satisfied",
+                  "failed",
+                  "cancelled",
+                  "abandoned",
+                  "deleting",
+                  "deleted"
+                ]
+              },
+              "horizon": {
+                "type": "string",
+                "enum": [
+                  "finite",
+                  "long_horizon",
+                  "recurring",
+                  "standing"
+                ]
+              },
+              "priority": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "normal",
+                  "high",
+                  "critical"
+                ]
+              },
+              "desired_outcome": {
+                "$ref": "../common.schema.json#/$defs/text_content"
+              },
+              "progress_summary": {
+                "$ref": "../common.schema.json#/$defs/text_content"
+              },
+              "subgoals": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "step_id": {
+                      "$ref": "../common.schema.json#/$defs/record_id"
+                    },
+                    "title": {
+                      "$ref": "../common.schema.json#/$defs/text_content"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "planned",
+                        "in_progress",
+                        "blocked",
+                        "completed",
+                        "dropped"
+                      ]
+                    },
+                    "status_detail": {
+                      "$ref": "../common.schema.json#/$defs/text_content"
+                    },
+                    "result_summary": {
+                      "$ref": "../common.schema.json#/$defs/text_content"
+                    }
+                  },
+                  "required": [
+                    "step_id",
+                    "title",
+                    "status"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 0,
+                "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+              },
+              "success_criteria": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "criterion_id": {
+                      "$ref": "../common.schema.json#/$defs/record_id"
+                    },
+                    "description": {
+                      "$ref": "../common.schema.json#/$defs/text_content"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "open",
+                        "met",
+                        "failed",
+                        "dropped"
+                      ]
+                    },
+                    "evidence_summary": {
+                      "$ref": "../common.schema.json#/$defs/text_content"
+                    },
+                    "updated_at": {
+                      "$ref": "../common.schema.json#/$defs/timestamp"
+                    }
+                  },
+                  "required": [
+                    "criterion_id",
+                    "description",
+                    "status",
+                    "updated_at"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 0,
+                "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+              },
+              "schedule_ids": {
+                "type": "array",
+                "items": {
+                  "$ref": "../common.schema.json#/$defs/record_id"
+                },
+                "minItems": 0,
+                "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+              },
+              "heartbeat_item_ids": {
+                "type": "array",
+                "items": {
+                  "$ref": "../common.schema.json#/$defs/record_id"
+                },
+                "minItems": 0,
+                "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+              },
+              "available_actions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "pause",
+                    "resume",
+                    "stop",
+                    "abandon",
+                    "delete"
+                  ]
+                },
+                "maxItems": 5
+              },
+              "objective_version": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "The agent-update digest, objective_version, distinct from the whole-record seen_version used by person controls."
+              },
+              "current_focus": {
+                "$ref": "../common.schema.json#/$defs/text_content"
+              },
+              "plan_summary": {
+                "$ref": "../common.schema.json#/$defs/text_content"
+              },
+              "deletion_summary": {
+                "$ref": "../common.schema.json#/$defs/text_content"
+              },
+              "current_plan_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "work_policy_status": {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "paused",
+                  "disabled"
+                ]
+              },
+              "updated_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              },
+              "deletion_requested_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              },
+              "deleted_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              },
+              "owner_agent_id": {
+                "$ref": "../common.schema.json#/$defs/durable_owner_id"
+              },
+              "root_conversation_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "created_by_task_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "promoted_from_task_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "owner_agent_name": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 16384
+              },
+              "owner_person": {
+                "$ref": "../common.schema.json#/$defs/person_ref"
+              },
+              "team_id": {
+                "$ref": "../common.schema.json#/$defs/team_id"
+              },
+              "owner_named_agent_type": {
+                "$ref": "../common.schema.json#/$defs/agent_type"
+              },
+              "created_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              },
+              "details_file": {
+                "$ref": "../common.schema.json#/$defs/blob_ref",
+                "description": "UTF-8 application/json containing this full summary, with all subgoals, criteria and links, when its inline fields would exceed the frame budget."
+              }
+            },
+            "required": [
+              "objective_id",
+              "seen_version",
+              "title",
+              "status",
+              "horizon",
+              "priority",
+              "available_actions",
+              "objective_version",
+              "updated_at"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100
+        },
+        "total": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "next_offset": {
+          "$ref": "../common.schema.json#/$defs/count"
+        }
+      },
+      "required": [
+        "outcome",
+        "objectives",
+        "total"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

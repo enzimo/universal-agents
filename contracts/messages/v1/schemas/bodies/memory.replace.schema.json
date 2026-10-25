@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/memory.replace.schema.json",
+  "title": "memory.replace request",
+  "description": "Change only the supplied fields of a memory fact.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "bank": {
+      "type": "string",
+      "enum": [
+        "coremem",
+        "usermem"
+      ]
+    },
+    "memory_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "seen_version": {
+      "$ref": "../common.schema.json#/$defs/record_version",
+      "description": "The fact's version as the writer read it. Agents must send it; a person's own command may leave it out and then acts on the fact the number names (README, \"Covered changes\")."
+    },
+    "fact_text": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "maxItems": 100
+    },
+    "valid_from": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "expires": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "metadata_json": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 16384,
+      "description": "JSON text encoding a metadata object. Apply the bank's max_metadata_chars and exclude reserved import provenance from public replies."
+    },
+    "clear_expiry": {
+      "const": true,
+      "description": "Clear the expiry, as invalid_after_utc=never does today. Do not also send expires."
+    }
+  },
+  "required": [
+    "request_id",
+    "bank",
+    "memory_id"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "topics.find_threads.reply",
+  "message_id": "01928f3a-7b2c-7460-8000-000000000460",
+  "idempotency_key": "topics.find_threads.reply:ZwkNriTp_57cnQx1wkG6XJoznLv2aoop-85gA6dOvDM",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-745e-8000-00000000045e",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "invalid_request",
+    "message": "The supplied values are not valid for this operation."
+  },
+  "causation_id": "01928f3a-7b2c-745e-8000-00000000045e",
+  "body_digest": "DCWApkhsi_ZEB5-VA9txkNuj8IFpFrLzfNp5hupW0LQ",
+  "signature": "DDULfd_DeKnMHG1ZB9hXKyBfunewtF0doYZJt7-0si5B5Hx7qBYIjIJvj5RRixtCTSCCushMeJvt0Nh2hSvSAA"
+}

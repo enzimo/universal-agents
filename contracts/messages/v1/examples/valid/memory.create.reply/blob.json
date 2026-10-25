@@ -1,0 +1,50 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "memory.create.reply",
+  "message_id": "9d1d5b67-8901-739e-a321-32bb0933f1e4",
+  "idempotency_key": "memory.create.reply:yXx1iX_uvQ5ZutaVZMDss5BUkEPJhzVGKLL3zt8uBP8",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.ed7cc918-b982-7e4c-9f3f-44b4ec668247",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "fact": {
+      "memory_id": 3,
+      "fact_text": {
+        "type": "blob",
+        "ref": {
+          "sha256": "68z63E__ScIzx_1N-jf8qn7EUMm-Ru6xXtX-iu3WDDk",
+          "size": 41000,
+          "media_type": "text/plain"
+        }
+      },
+      "valid_from": "2026-10-22T04:30:00.000Z",
+      "tags": [],
+      "metadata_json": "{\"resume_section\":\"deployment\"}",
+      "created_at": "2026-10-22T04:30:00.000Z",
+      "updated_at": "2026-10-22T04:30:00.000Z",
+      "seen_version": "2362cd12f9375d435c9f1568c042e2de180039efc42b7c76bb1fc1bdbd26439e",
+      "expires": "2026-10-23T04:30:00.000Z"
+    },
+    "event_id": "mem_event_create_3"
+  },
+  "causation_id": "ed7cc918-b982-7e4c-9f3f-44b4ec668247",
+  "body_digest": "fcWnPSiDoT5SyyAtaL-r1TbT4GaWqdam1SvfucpBFU8",
+  "signature": "AMn7OqL1S8n1USc-G15avuoH2X2oiDxsTrmRVBzr7LDzWCsgLn-aBowHX8Stx3ivgxu7HCfNF2P3Qyh_7JTlDA"
+}

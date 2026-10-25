@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/objectives.record_checkpoint.schema.json",
+  "title": "objectives.record_checkpoint request",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "session_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "observe": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "orient": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "decide": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "act": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "next_subgoal": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "health": {
+      "type": "string",
+      "enum": [
+        "on_track",
+        "at_risk",
+        "blocked",
+        "needs_human",
+        "complete"
+      ]
+    },
+    "evidence_delta": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/text_content"
+      },
+      "minItems": 0,
+      "maxItems": 1000
+    },
+    "completed_subgoals": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/text_content"
+      },
+      "minItems": 0,
+      "maxItems": 1000
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/text_content"
+      },
+      "minItems": 0,
+      "maxItems": 1000
+    },
+    "in_flight_effects": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/text_content"
+      },
+      "minItems": 0,
+      "maxItems": 1000
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/text_content"
+      },
+      "minItems": 0,
+      "maxItems": 1000
+    }
+  },
+  "required": [
+    "request_id",
+    "session_id",
+    "task_id",
+    "observe",
+    "orient",
+    "decide",
+    "act",
+    "health"
+  ],
+  "additionalProperties": false
+}

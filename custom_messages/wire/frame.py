@@ -32,6 +32,7 @@ from custom_messages.wire.encoding import b64url, b64url_decode, body_digest, fo
 from custom_messages.wire.kinds import (
     AUTHORITY_TOKEN_DOMAIN,
     AUTHORITY_TOKEN_MAX_SECONDS,
+    COMMAND_TOKEN_MAX_SECONDS,
     DECISION_TOKEN_DOMAIN,
     BETWEEN_INSTALLATIONS,
     FRAME_SHAPE,
@@ -53,14 +54,19 @@ __all__ = [
     "FrameRefused", "Receiver", "ReplayKey", "ReplayLookup", "VerifiedAuthority", "VerifiedFrame",
     "b64url", "b64url_decode", "body_digest", "body_model", "expected_idempotency_key", "format_timestamp",
     "frame_digest", "idempotency_key", "sign_authority_token", "sign_decision_token", "sign_frame", "signing_bytes",
-    "verify_frame",
+    "verify_authority_token", "verify_frame",
 ]
 
 REPLY_SUFFIX = ".reply"
 # Hosts whose certificates may sign authority tokens (README, "On behalf of a person").
 AUTHORITY_ISSUER_ROLES = frozenset({"gateway", "scheduler"})
-# The only role whose certificate may sign a token naming a schedule.
+# The only role whose certificate may sign a token naming a schedule, and so the only
+# one that signs a token naming no person: system work, which a schedule runs.
 SCHEDULE_ISSUER_ROLE = "scheduler"
+# Where a frame carries its authority token.
+AUTHORITY_AT = "/authority"
+# The token type bound to one command; it lasts at most COMMAND_TOKEN_MAX_SECONDS.
+COMMAND_BINDING = "command"
 # The role whose certificate signs change-conflict decision tokens (README, "What bodies carry").
 DECISION_ISSUER_ROLE = "team_services"
 DECISION_TOKEN_AT = "/body/decision_token"
@@ -207,7 +213,12 @@ class VerifiedAuthority:
     certificate: HostCertificate
 
     def require_bound_to(self, bound_type: str, record_id: str) -> None:
-        """The handler's last authority check: the token is bound to the root task or command it holds."""
+        """The token is bound to this record, or the frame is refused as ``bad_authority``.
+
+        The receiver calls it for bindings with ``at`` (the body names the record).
+        For a binding without ``at`` the handler calls it with the root task it holds
+        for the frame, before its access decision.
+        """
 
         if (self.token.bound_to.type, self.token.bound_to.id) != (bound_type, record_id):
             raise FrameRefused("bad_authority", f"the token is not bound to the {bound_type} {record_id}",
@@ -468,15 +479,17 @@ def _verify_time(frame: Frame, spec: Optional[KindSpec], now: datetime, issued_a
 
 
 def _verify_authority(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, is_reply: bool,
-                      trust: TrustStore) -> Optional[VerifiedAuthority]:
+                      trust: TrustStore, sender: HostCertificate) -> Optional[VerifiedAuthority]:
+    """The frame's token, if any: allowed on the kind, valid on its own, and of a type this sender may present here."""
+
     mode = "none" if is_reply else spec.authority
     token = frame.authority
     if token is MISSING:
         if mode == "required":
-            raise FrameRefused("bad_authority", f"{frame.kind} requires an authority token", at="/authority")
+            raise FrameRefused("bad_authority", f"{frame.kind} requires an authority token", at=AUTHORITY_AT)
         return None
     if mode == "none":
-        raise FrameRefused("bad_authority", f"{frame.kind} takes no authority token", at="/authority")
+        raise FrameRefused("bad_authority", f"{frame.kind} takes no authority token", at=AUTHORITY_AT)
     issuer, audience = token.issuer, token.audience
     if not issuer.installation == audience.installation == frame.issuer.installation:
         raise FrameRefused("bad_authority", "a token travels only within the installation that issued it",
@@ -484,12 +497,35 @@ def _verify_authority(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, is_r
     if audience.team != frame.issuer.team:
         raise FrameRefused("bad_authority", "only the team the person asked presents the token", at="/authority/audience/team")
     # Over the token as received: a newer minor's unknown fields are signed too.
-    signed = _SignedToken("/authority", raw["authority"], authority_signing_bytes(raw["authority"]))
-    certificate = _token_certificate(signed, trust, AUTHORITY_ISSUER_ROLES, audience.team, "a gateway or scheduler")
+    verified = verify_authority_token(token, raw["authority"], trust, valid_at=parse_timestamp(frame.issued_at))
+    return _verify_binding(raw, frame, spec, sender, verified)
+
+
+def verify_authority_token(token: AuthorityToken, fields: Mapping[str, Any], trust: TrustStore, *,
+                           valid_at: datetime, at: str = AUTHORITY_AT) -> VerifiedAuthority:
+    """Check an authority token on its own; raise ``FrameRefused`` (``bad_authority``) at ``at`` when it fails.
+
+    ``token`` is the validated token and ``fields`` its JSON object as received,
+    which its signature covers. ``valid_at`` is when it must be valid: the issue
+    time of the frame that carries it. The checks (README, "On behalf of a person"):
+    an unrevoked gateway or scheduler certificate of its audience team signed it;
+    only a scheduler names a schedule; a token names its person, unless it is
+    system work, which names its schedule instead; it lasts at most
+    ``AUTHORITY_TOKEN_MAX_SECONDS``, or ``COMMAND_TOKEN_MAX_SECONDS`` when bound to
+    a command. ``verify_frame`` adds the checks that depend on the frame: who
+    presents the token, on which kind, and the record the body names.
+    """
+
+    signed = _SignedToken(at, fields, authority_signing_bytes(fields))
+    certificate = _token_certificate(signed, trust, AUTHORITY_ISSUER_ROLES, token.audience.team, "a gateway or scheduler")
     if token.schedule_id is not MISSING and SCHEDULE_ISSUER_ROLE not in certificate.roles:
-        raise FrameRefused("bad_authority", "only a scheduler names the schedule a run belongs to", at="/authority/schedule_id")
-    _verify_token_signature_and_time(signed, certificate, frame)
-    return _verify_binding(raw, spec, VerifiedAuthority(token=token, certificate=certificate))
+        raise FrameRefused("bad_authority", "only a scheduler names the schedule a run belongs to", at=at + "/schedule_id")
+    if token.person is MISSING and token.schedule_id is MISSING:
+        raise FrameRefused("bad_authority", "a token names its person, or for system work its schedule", at=at + "/person")
+    command = token.bound_to.type == COMMAND_BINDING
+    _verify_token_signature_and_time(signed, certificate, valid_at,
+                                     COMMAND_TOKEN_MAX_SECONDS if command else AUTHORITY_TOKEN_MAX_SECONDS)
+    return VerifiedAuthority(token=token, certificate=certificate)
 
 
 @dataclass(frozen=True)
@@ -523,26 +559,42 @@ def _token_certificate(token: _SignedToken, trust: TrustStore, roles: frozenset[
     return certificate
 
 
-def _verify_token_signature_and_time(token: _SignedToken, certificate: HostCertificate, frame: Frame) -> None:
+def _verify_token_signature_and_time(token: _SignedToken, certificate: HostCertificate, valid_at: datetime,
+                                     max_seconds: int = AUTHORITY_TOKEN_MAX_SECONDS) -> None:
+    """The signature verifies, the token lasts at most ``max_seconds``, and it was valid at ``valid_at``."""
+
     try:
         certificate.public_key.verify(b64url_decode(token.fields["signature"]), token.signing_bytes)
     except (InvalidSignature, ValueError) as error:
         raise FrameRefused("bad_authority", "the token's signature does not verify", at=token.at + "/signature") from error
-    if token.expires_at - token.issued_at > timedelta(seconds=AUTHORITY_TOKEN_MAX_SECONDS):
-        raise FrameRefused("bad_authority", "the token lasts too long", at=token.at + "/expires_at")
-    if not within(token.issued_at, token.expires_at, parse_timestamp(frame.issued_at)):
+    if token.expires_at - token.issued_at > timedelta(seconds=max_seconds):
+        raise FrameRefused("bad_authority", f"the token lasts longer than {max_seconds} seconds", at=token.at + "/expires_at")
+    if not within(token.issued_at, token.expires_at, valid_at):
         raise FrameRefused("bad_authority", "the token was not valid when the frame was issued", at=token.at + "/expires_at")
 
 
-def _verify_binding(raw: Mapping[str, Any], spec: KindSpec, verified: VerifiedAuthority) -> VerifiedAuthority:
-    """Where the body names the record the token is bound to (registry authority_binding ``at``), they agree.
+def _verify_binding(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, sender: HostCertificate,
+                    verified: VerifiedAuthority) -> VerifiedAuthority:
+    """The token is of a type the kind takes, from a host that may present it, and bound to the record its body names.
 
-    The handler still checks that it holds that record.
+    ``sender`` is the frame issuer's certificate. A binding's senders narrow, within
+    the senders of the frame's address, which hosts present that type: a gateway's
+    command token is not accepted from an agent host that received it. Where the
+    binding names no body field (``at``), the handler checks the record it holds.
     """
 
-    bound_type, at = spec.authority_binding or ("", None)
-    if at is not None:
-        verified.require_bound_to(bound_type, str(_pointed(raw, at)))
+    bound = verified.token.bound_to
+    binding = next((item for item in spec.authority_binding if item.type == bound.type), None)
+    if binding is None:
+        raise FrameRefused("bad_authority", f"{spec.name} takes no token bound to a {bound.type}", at="/authority/bound_to/type")
+    if binding.senders is not None:
+        presenters = set(binding.senders) & set(spec.senders_by_target.get(frame.audience.target, spec.senders))
+        if not sender.roles & presenters:
+            allowed = f"only {', '.join(sorted(presenters))} hosts present" if presenters else "no host presents"
+            raise FrameRefused("bad_authority", f"{allowed} a token bound to a {bound.type} here",
+                               at="/authority/bound_to/type")
+    if binding.at is not None:
+        verified.require_bound_to(binding.type, str(_pointed(raw, binding.at)))
     return verified
 
 
@@ -589,7 +641,7 @@ def _verify_decision_token(raw: Mapping[str, Any], frame: Frame, trust: TrustSto
                            at=DECISION_TOKEN_AT + "/issuer")
     signed = _SignedToken(DECISION_TOKEN_AT, token, decision_signing_bytes(token))
     certificate = _token_certificate(signed, trust, frozenset({DECISION_ISSUER_ROLE}), issuer["team"], "a team-services host")
-    _verify_token_signature_and_time(signed, certificate, frame)
+    _verify_token_signature_and_time(signed, certificate, parse_timestamp(frame.issued_at))
 
 
 def verify_frame(
@@ -653,7 +705,7 @@ def verify_frame(
     if frame.idempotency_key != expected_idempotency_key(raw, spec, is_reply, answering):
         raise FrameRefused("invalid_body", "the idempotency key is not the one the kind's key parts give",
                            at="/idempotency_key")
-    authority = _verify_authority(raw, frame, spec, is_reply, trust)
+    authority = _verify_authority(raw, frame, spec, is_reply, trust, certificate)
     if not is_reply:
         _verify_decision_token(raw, frame, trust)
     return VerifiedFrame(frame=frame, body=body, certificate=certificate, session=session, authority=authority,

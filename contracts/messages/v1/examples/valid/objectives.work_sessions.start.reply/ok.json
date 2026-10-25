@@ -1,0 +1,70 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.work_sessions.start.reply",
+  "message_id": "a36433a8-e06e-72f7-8a28-7e19eeff0c2d",
+  "idempotency_key": "objectives.work_sessions.start.reply:HqhoVcGiGCdR_DesNhyeorLKlIfsBzoLaDtqqOmk8y8",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.0fca8339-2901-74bd-9c13-fc4280078452",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "session": {
+      "type": "inline",
+      "value": {
+        "session_id": "session_dependency_watch",
+        "policy_id": "policy_dependency_watch",
+        "objective_id": "objective_dependency_watch",
+        "owner_agent_id": "manager_scope:team_example:TeamArchitect",
+        "task_id": "task_root_7f",
+        "status": "running",
+        "budget": {
+          "active_seconds": 1200,
+          "checkpoint_reserve_seconds": 120,
+          "checkpoint_reserve_turns": 2,
+          "checkpoint_reserve_tokens": 10000,
+          "checkpoint_reserve_tool_calls": 2,
+          "turns": 20,
+          "total_tokens": 50000,
+          "tool_calls": 30
+        },
+        "required_skills": [
+          "long-horizon-plan-execution"
+        ],
+        "activated_skills": [
+          "long-horizon-plan-execution"
+        ],
+        "started_at": "2026-10-22T04:30:00.000Z",
+        "active_ms_used": 187500,
+        "turns_used": 3,
+        "input_tokens_used": 1800,
+        "output_tokens_used": 450,
+        "total_tokens_used": 2250,
+        "cache_read_input_tokens_used": 0,
+        "cache_write_input_tokens_used": 0,
+        "tool_calls_used": 4,
+        "checkpoint_id": "checkpoint_dependency_watch",
+        "created_at": "2026-10-21T04:30:00.000Z",
+        "updated_at": "2026-10-22T04:30:00.000Z"
+      }
+    }
+  },
+  "causation_id": "0fca8339-2901-74bd-9c13-fc4280078452",
+  "body_digest": "KBVpQBrr1mTnfvut64ou2fe05d4siSiZ00Em9vQhgWY",
+  "signature": "WMRZIcme9sB90VUwFwO_jBMSpAJbcvLieEeMVKfSvsbICsRMaBiqCFZf7ugIHKjRtyCAvyqNOUvr0yj5vsMqAA"
+}

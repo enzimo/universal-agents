@@ -1,0 +1,14 @@
+{
+  "description": "A schedule detail read with an invalid body.",
+  "refusal": "invalid_body",
+  "at": "/body/unexpected",
+  "base": "schedules.get.reply/ok.json",
+  "changes": [
+    {
+      "set": "/body/unexpected",
+      "to": true
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"schedules.get.reply\", \"message_id\": \"01928f3a-7b2c-7e60-8000-000000000006\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"edge\", \"id\": \"web\", \"runtime\": \"gateway-1\"}, \"subject\": \"_INBOX.gateway-1.01928f3a-7b2c-7e60-8000-000000000002\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"outcome\": \"ok\", \"schedule_id\": \"schedule_id_1\", \"seen_version\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"detail\": {\"text\": \"{\\\"assigned_agent_type\\\": \\\"WebResearchAgent\\\", \\\"cron_expression\\\": null, \\\"cron_timezone\\\": null, \\\"enabled\\\": true, \\\"expires_at_utc\\\": null, \\\"interval_ms\\\": 86400000, \\\"management_class\\\": \\\"user\\\", \\\"next_fire_at\\\": \\\"2026-10-23T04:30:00+00:00\\\", \\\"objective_id\\\": null, \\\"owner_canonical_user_id\\\": \\\"person_7c1\\\", \\\"paused_until\\\": null, \\\"problem_statement\\\": \\\"Review the build and its saved result.\\\", \\\"record_digest\\\": \\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\", \\\"repeat_count\\\": 0, \\\"schedule_id\\\": \\\"schedule_id_1\\\", \\\"schedule_memory\\\": {\\\"ledger\\\": {\\\"recent_runs\\\": [{\\\"result\\\": \\\"Build R2 is saved.\\\", \\\"task_id\\\": \\\"run_r2\\\"}], \\\"total_runs\\\": 9}, \\\"policy\\\": {\\\"notify\\\": \\\"on_change\\\"}, \\\"schedule_kind\\\": \\\"build_review\\\", \\\"state\\\": {\\\"summary\\\": \\\"Build R2 is saved.\\\"}}, \\\"schedule_name\\\": \\\"Build review\\\", \\\"system_schedule_kind\\\": null}\", \"offset\": 0, \"total_chars\": 811, \"sha256\": \"2fcc0f0f4b54b93cf5080c8a59c506b8ac3ec8b13f9b2db0a2fa2d55af196a4a\"}, \"delivery_ref\": \"dr_Wm9vbVJvb21XZWJDaGF0\", \"conversation_id\": \"conversation_1\", \"unexpected\": true}, \"causation_id\": \"01928f3a-7b2c-7e60-8000-000000000002\", \"idempotency_key\": \"schedules.get.reply:JVlk4waxSryhA1XuuUf3DNd37weMckR3GkrT5yQqxKc\", \"body_digest\": \"A0aXGxK2X1Z323kMZE0_qyGWin1Nx4KVyJFxQSi_qsE\", \"signature\": \"xizHwlER5lIaYebx2luWicar6IABc3vCMh-Nv1lBLYgPoTp4UEVHgSXB9ndqry_idh7MASQ5bJ4fi8UG0Z2-BA\"}"
+}

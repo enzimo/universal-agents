@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.activate_plan.reply",
+  "message_id": "0588fa17-61e5-767e-8805-728e4798d236",
+  "idempotency_key": "objectives.activate_plan.reply:N8xjIO-FvlUTiM9mkHMyAP_QTZnO701NiEy5tIls6lA",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.f483e608-bd61-7736-86ce-275e48eea1df",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "request_closed",
+    "request_state": "closed",
+    "message": "This request has ended and can no longer save changes."
+  },
+  "causation_id": "f483e608-bd61-7736-86ce-275e48eea1df",
+  "body_digest": "JhZp1rozMKEx62RwY4N2EnZ6g4Us0m834GM53VM-AZc",
+  "signature": "ZHeyGTcC7B8WPmDz1TtxT077VoDwpMZ4aLokRkrgnACl2XhmKBhpcSqwAs78Cwg6tP11khOqdf5ttfUeXnJ_CQ"
+}

@@ -1,0 +1,55 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tasks.progress.reply",
+  "message_id": "01928f3a-7b2c-749b-8000-00000000049b",
+  "idempotency_key": "tasks.progress.reply:UxvdZrURqwJ0pm-y1N8XH0R8JRzSfd9TOl5ZLIyERTg",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-749a-8000-00000000049a",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "state": "active",
+    "root_task_id": "root_task_id_1",
+    "root_state": "abandoned",
+    "plan_phase": "Example plan phase",
+    "plan_status": "Example plan status",
+    "children": [
+      {
+        "task_id": "task_id_1",
+        "agent_type": "token_id_1",
+        "state": "abandoned",
+        "queue_status": "queued",
+        "holder": "token_id_1",
+        "last_updated_at": "2026-10-22T04:30:00.000Z"
+      }
+    ],
+    "last_activity_at": "2026-10-22T04:30:00.000Z",
+    "last_activity": "Example last activity",
+    "blocker": "Example blocker",
+    "steering": {
+      "state": "with_lead",
+      "held": 3,
+      "reached": 3,
+      "total": 3
+    }
+  },
+  "causation_id": "01928f3a-7b2c-749a-8000-00000000049a",
+  "body_digest": "gkZQzAhl-nwg3olxsqNy7GXXoy0uR9875Ie4F7mBp6A",
+  "signature": "pf8AG-38yf_MZzeGi6NLO5qQ7OkLsLwFDnvjmwOGMBj4xbIt6xP7t5eTAF-jKNq6kHnKJvZT6I-U2QGmdkrBDA"
+}

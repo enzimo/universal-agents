@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/objectives.list.schema.json",
+  "title": "objectives.list request",
+  "description": "The person's Objectives.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    },
+    "statuses": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "proposed",
+          "active",
+          "paused",
+          "blocked",
+          "satisfied",
+          "failed",
+          "cancelled",
+          "abandoned",
+          "deleting",
+          "deleted"
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 10
+    },
+    "horizons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "finite",
+          "long_horizon",
+          "recurring",
+          "standing"
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 4
+    },
+    "include_closed": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "request_id",
+    "offset",
+    "limit"
+  ],
+  "additionalProperties": false
+}

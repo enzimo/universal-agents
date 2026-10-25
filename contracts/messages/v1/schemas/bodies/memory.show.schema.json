@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/memory.show.schema.json",
+  "title": "memory.show request",
+  "description": "Show one memory fact.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "bank": {
+      "type": "string",
+      "enum": [
+        "coremem",
+        "usermem"
+      ]
+    },
+    "memory_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    }
+  },
+  "required": [
+    "request_id",
+    "bank",
+    "memory_id"
+  ],
+  "additionalProperties": false
+}

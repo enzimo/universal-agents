@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/schedules.prepare_access.schema.json",
+  "title": "schedules.prepare_access",
+  "description": "Preview a schedule's worker requirements without saving policy, granting access or starting work.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "schedule_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "target_agent_type": {
+      "$ref": "../common.schema.json#/$defs/agent_type"
+    },
+    "capabilities": {
+      "$ref": "schedules.set_worker.schema.json#/$defs/schedule_worker_capabilities"
+    }
+  },
+  "required": [
+    "request_id",
+    "schedule_id"
+  ],
+  "additionalProperties": false
+}

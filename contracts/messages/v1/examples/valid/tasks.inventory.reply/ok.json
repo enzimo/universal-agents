@@ -1,0 +1,67 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tasks.inventory.reply",
+  "message_id": "01928f3a-7b2c-7402-8000-000000000402",
+  "idempotency_key": "tasks.inventory.reply:arWXh8WhCI6HwuQ0_q8l60h9gcCV_zNBjmpuEJmZ9wE",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7401-8000-000000000401",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "roots": [
+      {
+        "root_task_id": "root_task_id_1",
+        "state": "in_progress",
+        "conversation_id": "conversation_id_1",
+        "objective_id": "objective_id_1",
+        "objective_work_session_id": "objective_work_session_id_1",
+        "plan_id": "plan_id_1",
+        "latest_activity_at": "2026-10-22T04:30:00.000Z",
+        "latest_activity": "Example latest activity",
+        "blocker": {
+          "type": "inline",
+          "text": "Example blocker"
+        },
+        "children": [
+          {
+            "task_id": "task_id_1",
+            "state": "in_progress",
+            "last_updated_at": "2026-10-22T04:30:00.000Z",
+            "agent_id": "researcher-2",
+            "agent_type": "ResearcherAgent"
+          }
+        ],
+        "children_total": 1
+      }
+    ],
+    "schedules": [
+      {
+        "schedule_id": "schedule_id_1",
+        "name": "Example name",
+        "next_fire_at": "2026-10-22T04:30:00.000Z",
+        "enabled": true,
+        "objective_id": "objective_research"
+      }
+    ],
+    "total": 2
+  },
+  "causation_id": "01928f3a-7b2c-7401-8000-000000000401",
+  "body_digest": "gWGAdevoUrTUdgo8h-orA8w4XfzwQjpAOcUk3oY0S2w",
+  "signature": "Ft5qq9lFaJlx-otcgI921qxX-45PQMrZrUO8mHM0h4FGs3h3wtYSN8GI9cRK9XAEbmbesVfLceUosEdIvlXbAQ"
+}

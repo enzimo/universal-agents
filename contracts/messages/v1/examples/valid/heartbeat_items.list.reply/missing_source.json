@@ -1,0 +1,58 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "heartbeat_items.list.reply",
+  "message_id": "a18c5b0a-476e-7e3e-9632-9aeaf0fc033e",
+  "idempotency_key": "heartbeat_items.list.reply:-hjLaNkjgdiy-EVKyqTdR_DGp45l9a7kYcNvJ_BS-Go",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.a40087db-1e56-7c55-a1b2-684ed2c3adf1",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "status": "missing_source",
+    "source_exists": false,
+    "source_id": "heartbeat_team",
+    "heartbeat_runtime": {
+      "source_id": "heartbeat_team",
+      "config_available": true,
+      "heartbeat_enabled": true,
+      "configured_source_id": "heartbeat_team",
+      "configured_schedule_id": "heartbeat_launcher",
+      "launcher_schedule_installed": true,
+      "notes": [
+        {
+          "type": "inline",
+          "text": "Heartbeat source and launcher settings are available."
+        }
+      ]
+    },
+    "items": [],
+    "total": 0,
+    "warning": {
+      "type": "blob",
+      "ref": {
+        "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    }
+  },
+  "causation_id": "a40087db-1e56-7c55-a1b2-684ed2c3adf1",
+  "body_digest": "Ne6v7zh0mTnqfHm7JA8HXUfEtSz5wHzF4ELc_wsPJvM",
+  "signature": "xQ4QebYRjhXBrFPc8eY5RGjHByNTJOfNVOEgna0FbYSAJ8fYhATAz3tc_YonYHTuxMW5eP8ZzkEFnOdMqmj9Dw"
+}

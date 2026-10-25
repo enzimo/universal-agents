@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "run_context.sign.reply",
+  "message_id": "01928f3a-7b2c-7e10-8000-000000000002",
+  "idempotency_key": "run_context.sign.reply:XleOoLYeNCquup8MfHo5CIbWq7MCGNPM3XPt74ip7j8",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "scheduler-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-scheduler-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "researcher-2",
+    "runtime": "worker-host-1"
+  },
+  "subject": "_INBOX.worker-host-1.01928f3a-7b2c-7446-8000-000000000446",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "claim_not_held",
+    "message": "The verified agent does not hold this claim."
+  },
+  "causation_id": "01928f3a-7b2c-7446-8000-000000000446",
+  "body_digest": "Dh4JEXotunsUyRqU4vyJzRbx7slfa6t-b7fLjGJAwL4",
+  "signature": "hnahd6P6if17PKvPjNp7gWQ1Ry7CQQXLcpUB4Ixf9sm2L-BCx1ttRC_WiTDZ72PTthh6XR48XjByUkJyYynPBw"
+}

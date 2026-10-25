@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/objectives.delete.schema.json",
+  "title": "objectives.delete request",
+  "description": "Delete one of the person's Objectives.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "objective_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "seen_version": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    }
+  },
+  "required": [
+    "request_id",
+    "objective_id",
+    "seen_version"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,43 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "topics.find_threads.reply",
+  "message_id": "01928f3a-7b2c-745f-8000-00000000045f",
+  "idempotency_key": "topics.find_threads.reply:ZwkNriTp_57cnQx1wkG6XJoznLv2aoop-85gA6dOvDM",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-745e-8000-00000000045e",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "matches": [
+      {
+        "conversation_id": "conversation_ops_7f",
+        "latest_task_id": "task_deploy_7f",
+        "status": "active",
+        "subject_preview": "Prepare the deployment checklist",
+        "updated_at": "2026-10-22T04:30:00.000Z",
+        "matched_tags": [
+          "deployment"
+        ]
+      }
+    ]
+  },
+  "causation_id": "01928f3a-7b2c-745e-8000-00000000045e",
+  "body_digest": "95fEl-CZNyaxC2kDx-WVfsLGXf30LX2QBvOdLFF-0LE",
+  "signature": "o4hHN4ihbFaXXVPo_GVw5LVRV6Crwh8WlzTomClEnXDrLbYoX94zFAVpMZ3UI2yEf7GpDuWkXNLnRMz5p91sDA"
+}

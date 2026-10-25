@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.install.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a043",
+  "idempotency_key": "schedules.install.reply:roUjRR04DScKpTKxHAlHPicgKcAwBsXjOovk1Gv6ToI",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-743d-8000-00000000043d",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "invalid_request",
+    "message": "The requested combination is not valid for this schedule."
+  },
+  "causation_id": "01928f3a-7b2c-743d-8000-00000000043d",
+  "body_digest": "M52RjiM24fmcwA1gg37MJZKfd-q9XTxKVz15dmj7r_A",
+  "signature": "Hswa4y1AKdyoq1gmicPFx0ZnlRre1BtCnAj3OINmv_1XP2BGd71b3UCW2_DesG8NeuFqqgGGl-g2KdiHp72LBw"
+}

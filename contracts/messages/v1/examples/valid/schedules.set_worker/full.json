@@ -1,0 +1,86 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.set_worker",
+  "message_id": "01928f3a-7b2c-7443-8000-000000000443",
+  "idempotency_key": "schedules.set_worker:7Ge6ZQK8DBkpZcWQytet6PWZDSmLaYNvD3TAkOROdHQ",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.schedules.set_worker",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7000-9000-00000000c028",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "VAG9WO1WL1DvHwu3JxAmjyb82CszwFjFz5Z8XdqxAyttHnkFjVsYjVY4_uViLKsUeMY11F8fPYHQgQhjGTWcDw"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "req_schedules_set_worker_full",
+    "schedule_id": "schedule_id_1",
+    "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+    "target_agent_type": "WebResearchAgent",
+    "seen_policy_revision": 2,
+    "policy": {
+      "enabled": true,
+      "profile_id": "local",
+      "expires_at_utc": "2026-11-22T09:00:00.000Z",
+      "rules": {
+        "claim_wait_ms": 1250,
+        "startup_timeout_ms": 60000,
+        "admission_timeout_ms": 30000,
+        "max_launch_attempts_per_occurrence": 3,
+        "retry_backoff_ms": 2500,
+        "launch_when_busy": false,
+        "idle_ttl_ms": 300000,
+        "interrupted_run_skip_window_ms": 60000
+      }
+    },
+    "capabilities": {
+      "requirements": [
+        {
+          "capability_id": "fn:web_research",
+          "operation": "exa_search",
+          "necessity": "required",
+          "resource_constraints_json": "{\"domain\":\"example.invalid\"}",
+          "source": "declared"
+        }
+      ],
+      "runtime_discovery": true
+    },
+    "activate_schedule": true,
+    "convert_exact_target": true
+  },
+  "body_digest": "-vKNGPZkbRZBf4Z51o8zZWfffidAoKvBdjSSvn1aNqo",
+  "signature": "jsseF05s7c-vr3TiksLary7oJ0kkBmJDaovf57j9NUn6jEaCjE1qHQLtUsIZhp7wdbH-RVQ3AOmR80kQgtU-BQ"
+}

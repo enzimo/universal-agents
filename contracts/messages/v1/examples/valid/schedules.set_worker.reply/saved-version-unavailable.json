@@ -1,0 +1,95 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.set_worker.reply",
+  "message_id": "01928f3a-7b2c-7e60-8000-00000000001f",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7443-8000-000000000443",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "state": "applied",
+    "schedule_id": "schedule_id_1",
+    "policy_revision": 3,
+    "pending_current_claim": false,
+    "enabled": true,
+    "automation_enabled": true,
+    "worker_policy": {
+      "enabled": true,
+      "profile_id": "local",
+      "expires_at_utc": "2026-11-22T09:00:00.000Z",
+      "rules": {
+        "claim_wait_ms": 1250,
+        "startup_timeout_ms": 60000,
+        "admission_timeout_ms": 30000,
+        "max_launch_attempts_per_occurrence": 3,
+        "retry_backoff_ms": 2500,
+        "launch_when_busy": false,
+        "idle_ttl_ms": 300000,
+        "interrupted_run_skip_window_ms": 60000
+      }
+    },
+    "saved_requirements": {
+      "requirements": [
+        {
+          "capability_id": "fn:web_research",
+          "operation": "exa_search",
+          "necessity": "required",
+          "resource_constraints_json": "{\"domain\":\"example.invalid\"}",
+          "source": "declared"
+        }
+      ],
+      "runtime_discovery": true
+    },
+    "readiness": {
+      "status": "ready",
+      "checks": [
+        {
+          "capability_id": "fn:web_research",
+          "operation": "exa_search",
+          "status": "ready",
+          "reason": "The worker type and schedule owner hold the required access.",
+          "required": true,
+          "tool_id": "fn:web_research",
+          "access_operation": "exa_search",
+          "access_level": "read",
+          "missing_access_for": []
+        }
+      ],
+      "checked_at_utc": "2026-10-22T04:30:00.000Z",
+      "execution_digest": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+      "policy_snapshot_digest": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc"
+    },
+    "missing_access": [],
+    "summary": {
+      "type": "inline",
+      "text": "Saved the documentation review requirements. The schedule is ready and automatic startup is on."
+    },
+    "version": {
+      "state": "unavailable"
+    },
+    "warnings": {
+      "type": "inline",
+      "text": "The change to schedule_id_1 was saved, but reading the saved schedule failed. Do not repeat the change; inspect the saved record before taking further action."
+    }
+  },
+  "causation_id": "01928f3a-7b2c-7443-8000-000000000443",
+  "idempotency_key": "schedules.set_worker.reply:0OMJ88GO2I1JrJ-E3kdhLyejExElTitV6cT61Al6qUo",
+  "body_digest": "duavwKkhyqKPkG77dz4qAWKnR3j9jTlLEvWaIuc4-E4",
+  "signature": "fOOzeQZyzTeaMCIcIHtk0Y6OUr4Z3IHyNqoItAwTyhtJM8sPq0F9nXBhqow29Ufwav-w4lUq5hGDWZgwZLLbCQ"
+}

@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.abandon.reply",
+  "message_id": "3bfdd5b9-5a03-796d-9eee-447e3ba1bad8",
+  "idempotency_key": "objectives.abandon.reply:2jCc64lcI9zW-SSl_cL9eZCMHWjCukJZ02k5qSm2ous",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.e17b0394-8089-73ed-8247-1ddf496e85ce",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "not_found",
+    "message": "The record is missing or unavailable to this task."
+  },
+  "causation_id": "e17b0394-8089-73ed-8247-1ddf496e85ce",
+  "body_digest": "Vz5UXJDMhmJC_Td-LvIlWsFnFbXaqD3HJ1YHlHtzwcs",
+  "signature": "yCbuTeollurnxSgrwNoaAbih9JfIY-wOIimtFOLXkQWzomSeNCRfM_ZaiJuVoNukA8TBndesPGeJ8BH8CisgAg"
+}

@@ -1,0 +1,769 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/objectives.work_profiles.apply.reply.schema.json",
+  "title": "objectives.work_profiles.apply.reply",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "objective"
+                },
+                "proposal": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "inline"
+                        },
+                        "value": {
+                          "$ref": "objectives.work_profiles.apply.reply.schema.json#/$defs/objective_profile_proposal"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "blob"
+                        },
+                        "ref": {
+                          "$ref": "../common.schema.json#/$defs/blob_ref"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "ref"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "policy": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "inline"
+                        },
+                        "value": {
+                          "$ref": "objectives.work_sessions.enable.reply.schema.json#/$defs/objective_work_policy"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "blob"
+                        },
+                        "ref": {
+                          "$ref": "../common.schema.json#/$defs/blob_ref"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "ref"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "proposal",
+                "policy"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "reusable"
+                },
+                "proposal": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "inline"
+                        },
+                        "value": {
+                          "$ref": "objectives.work_profiles.apply.reply.schema.json#/$defs/objective_profile_proposal"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "blob"
+                        },
+                        "ref": {
+                          "$ref": "../common.schema.json#/$defs/blob_ref"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "ref"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "installed_profile": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "inline"
+                        },
+                        "value": {
+                          "$ref": "objectives.work_profiles.apply.reply.schema.json#/$defs/objective_installed_profile"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "blob"
+                        },
+                        "ref": {
+                          "$ref": "../common.schema.json#/$defs/blob_ref"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "ref"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "proposal",
+                "installed_profile"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "already_applied"
+                },
+                "proposal": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "inline"
+                        },
+                        "value": {
+                          "$ref": "objectives.work_profiles.apply.reply.schema.json#/$defs/objective_profile_proposal"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "blob"
+                        },
+                        "ref": {
+                          "$ref": "../common.schema.json#/$defs/blob_ref"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "ref"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "proposal"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/text_content"
+          },
+          "maxItems": 1000
+        }
+      },
+      "required": [
+        "outcome",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_found"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "feature_off"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "invalid_request"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "direct_user_request_required"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "confirmation_required"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "missing_skills"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "missing_skills": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 16384
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        }
+      },
+      "required": [
+        "outcome",
+        "missing_skills"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "change_conflict"
+        },
+        "case_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "brief": {
+          "$ref": "../common.schema.json#/$defs/blob_ref"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "case_id",
+        "brief"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "request_closed"
+        },
+        "request_state": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "needs_person_decision"
+        },
+        "case_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "record_busy"
+        },
+        "retry_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "retry_at"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "objective_profile_proposal": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "proposal_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "owner_agent_id": {
+          "$ref": "../common.schema.json#/$defs/durable_owner_id"
+        },
+        "owner_person": {
+          "$ref": "../common.schema.json#/$defs/person_ref"
+        },
+        "source_task_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "objective",
+            "reusable"
+          ]
+        },
+        "objective_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "profile_name": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "profile": {
+          "type": "object",
+          "properties": {
+            "cadence_cron": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 16384
+            },
+            "cadence_timezone": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 16384
+            },
+            "budget": {
+              "type": "object",
+              "properties": {
+                "active_seconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "checkpoint_reserve_seconds": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "checkpoint_reserve_turns": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "checkpoint_reserve_tokens": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "checkpoint_reserve_tool_calls": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "turns": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "total_tokens": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "tool_calls": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "active_seconds",
+                "checkpoint_reserve_seconds",
+                "checkpoint_reserve_turns",
+                "checkpoint_reserve_tokens",
+                "checkpoint_reserve_tool_calls",
+                "turns",
+                "total_tokens",
+                "tool_calls"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "cadence_cron",
+            "cadence_timezone",
+            "budget"
+          ],
+          "additionalProperties": false
+        },
+        "rationale": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "replace_existing": {
+          "type": "boolean"
+        },
+        "replaces_installed_profile_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "replaces_installed_profile_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "expected_policy_state_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "proposal_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "applied"
+          ]
+        },
+        "created_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "expires_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "applied_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "applied_by_task_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "acceptance_summary": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "installed_profile_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "applied_policy_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        }
+      },
+      "required": [
+        "schema_version",
+        "proposal_id",
+        "owner_agent_id",
+        "owner_person",
+        "source_task_id",
+        "scope",
+        "profile_name",
+        "profile",
+        "rationale",
+        "replace_existing",
+        "proposal_digest",
+        "status",
+        "created_at",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "objective_installed_profile": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "installed_profile_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "owner_agent_id": {
+          "$ref": "../common.schema.json#/$defs/durable_owner_id"
+        },
+        "owner_person": {
+          "$ref": "../common.schema.json#/$defs/person_ref"
+        },
+        "profile_name": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "profile": {
+          "type": "object",
+          "properties": {
+            "cadence_cron": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 16384
+            },
+            "cadence_timezone": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 16384
+            },
+            "budget": {
+              "type": "object",
+              "properties": {
+                "active_seconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "checkpoint_reserve_seconds": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "checkpoint_reserve_turns": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "checkpoint_reserve_tokens": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "checkpoint_reserve_tool_calls": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "turns": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "total_tokens": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "tool_calls": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "active_seconds",
+                "checkpoint_reserve_seconds",
+                "checkpoint_reserve_turns",
+                "checkpoint_reserve_tokens",
+                "checkpoint_reserve_tool_calls",
+                "turns",
+                "total_tokens",
+                "tool_calls"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "cadence_cron",
+            "cadence_timezone",
+            "budget"
+          ],
+          "additionalProperties": false
+        },
+        "source_proposal_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "proposal_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "installed_by_task_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "acceptance_summary": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "removed"
+          ]
+        },
+        "created_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "updated_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "schema_version",
+        "installed_profile_id",
+        "owner_agent_id",
+        "owner_person",
+        "profile_name",
+        "profile",
+        "source_proposal_id",
+        "proposal_digest",
+        "installed_by_task_id",
+        "acceptance_summary",
+        "status",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "run_context.sign.reply",
+  "message_id": "01928f3a-7b2c-7b05-8000-000000000b05",
+  "idempotency_key": "run_context.sign.reply:CRbsuC482O1SRSfOtUy7DxHfbabto6pvQFvXafea7Z0",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "scheduler-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-scheduler-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "researcher-2",
+    "runtime": "worker-host-1"
+  },
+  "subject": "_INBOX.worker-host-1.01928f3a-7b2c-7b04-8000-000000000b04",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "system_work": true,
+    "authority": {
+      "token_id": "01928f3a-7b2c-7b06-8000-000000000b06",
+      "issuer": {
+        "installation": "install_example",
+        "runtime": "scheduler-1",
+        "membership_epoch": 1,
+        "key_id": "test-scheduler-key-1"
+      },
+      "audience": {
+        "installation": "install_example",
+        "team": "team_example"
+      },
+      "bound_to": {
+        "type": "root_task",
+        "id": "run_scheduled_job_id_2_0430"
+      },
+      "schedule_id": "scheduled_job_id_2",
+      "issued_at": "2026-10-22T04:30:00.000Z",
+      "expires_at": "2026-10-23T04:30:00.000Z",
+      "algorithm": "ed25519",
+      "signature": "Ca_vuqWINXyUhNPhcXoC9lUQwM_iFrRp2xe9Svc0v6aiTULdWQht6so_pDE7i2o-ukZdUWTZmlFnRtsJ2FZNCg"
+    }
+  },
+  "causation_id": "01928f3a-7b2c-7b04-8000-000000000b04",
+  "body_digest": "03NzZloXzR5Cr2TX7A44ndIBve7Y8mqgQWMEFJbWI1o",
+  "signature": "SKE0ZSylAUSuYr9CcJGHK7nmzvn_U1MVyv_ZY8p7wjnQWTHSdKSQIUs--zqUUDx_ODtu_8Ha_TJpZCe6tZQIAw"
+}

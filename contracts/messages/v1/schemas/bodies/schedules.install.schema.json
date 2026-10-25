@@ -1,0 +1,596 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/schedules.install.schema.json",
+  "title": "schedules.install request",
+  "description": "Install a schedule: create, replace, ensure or refresh it.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "schedule_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "create",
+            "replace",
+            "ensure",
+            "refresh"
+          ]
+        },
+        "seen_version": {
+          "$ref": "../common.schema.json#/$defs/record_version",
+          "description": "The schedule's version as the writer read it. An agent that changes a stored schedule must send it; an install that only creates one has none (README, \"Covered changes\")."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "management_class": {
+          "const": "user"
+        },
+        "objective_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "worker": {
+          "type": "object",
+          "properties": {
+            "agent_type": {
+              "$ref": "../common.schema.json#/$defs/agent_type"
+            },
+            "agent_id": {
+              "$ref": "../common.schema.json#/$defs/agent_id"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "timing": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "interval"
+                },
+                "interval_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "kind",
+                "interval_ms"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "cron"
+                },
+                "expression": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": "Cron text, including @ shorthands and # expressions; the receiver validates it with croniter."
+                },
+                "time_zone": {
+                  "$ref": "../common.schema.json#/$defs/time_zone"
+                }
+              },
+              "required": [
+                "kind",
+                "expression",
+                "time_zone"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "once"
+                },
+                "at": {
+                  "$ref": "../common.schema.json#/$defs/timestamp"
+                }
+              },
+              "required": [
+                "kind",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "repeat_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Zero means unlimited repeats. A one-time schedule runs once."
+        },
+        "expires_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "paused_until": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "action": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "task"
+                },
+                "instruction": {
+                  "$ref": "../common.schema.json#/$defs/text_content"
+                },
+                "attachments": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "../common.schema.json#/$defs/attachment"
+                  },
+                  "maxItems": 20
+                }
+              },
+              "required": [
+                "type",
+                "instruction"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "fixed_message"
+                },
+                "text": {
+                  "$ref": "../common.schema.json#/$defs/text_content"
+                },
+                "attachments": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "../common.schema.json#/$defs/attachment"
+                  },
+                  "maxItems": 20
+                }
+              },
+              "required": [
+                "type",
+                "text"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "run_notes": {
+          "type": "object",
+          "properties": {
+            "schedule_kind": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 16384
+            },
+            "policy": {
+              "type": "object",
+              "properties": {
+                "notify": {
+                  "type": "string",
+                  "enum": [
+                    "on_change",
+                    "always",
+                    "never"
+                  ]
+                },
+                "notify_on_failure": {
+                  "type": "boolean"
+                },
+                "evidence_required": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 16384
+                },
+                "custom_json": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 16384,
+                  "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "state": {
+              "type": "object",
+              "properties": {
+                "summary": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 16384
+                },
+                "confidence": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 16384
+                },
+                "last_observed_at": {
+                  "$ref": "../common.schema.json#/$defs/timestamp"
+                },
+                "last_changed_at": {
+                  "$ref": "../common.schema.json#/$defs/timestamp"
+                },
+                "domain_json": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 16384,
+                  "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "domain_schema_hint_json": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 16384,
+              "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "decisions_ahead": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/decision_ahead"
+          },
+          "maxItems": 8
+        },
+        "deliver_to": {
+          "type": "object",
+          "properties": {
+            "delivery_ref": {
+              "$ref": "../common.schema.json#/$defs/delivery_ref"
+            },
+            "conversation_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            },
+            "time_zone": {
+              "$ref": "../common.schema.json#/$defs/time_zone"
+            }
+          },
+          "required": [
+            "delivery_ref"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "request_id",
+        "schedule_id",
+        "mode",
+        "management_class",
+        "timing",
+        "enabled",
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "schedule_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "create",
+            "replace",
+            "ensure",
+            "refresh"
+          ]
+        },
+        "seen_version": {
+          "$ref": "../common.schema.json#/$defs/record_version",
+          "description": "The schedule's version as the writer read it. An agent that changes a stored schedule must send it; an install that only creates one has none (README, \"Covered changes\")."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "management_class": {
+          "const": "system"
+        },
+        "system_schedule_kind": {
+          "type": "string",
+          "enum": [
+            "unclassified",
+            "heartbeat_launcher",
+            "memory_review_coremem",
+            "memory_review_usermem",
+            "memory_review_stale_conversations",
+            "internal_improvement",
+            "after_action_report_review",
+            "delegation_assurance",
+            "isolated_recovery_checkpoint",
+            "provider_overload_retry",
+            "objective_work_session",
+            "knowledge_curation_person",
+            "knowledge_curation_team"
+          ]
+        },
+        "objective_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "worker": {
+          "type": "object",
+          "properties": {
+            "agent_type": {
+              "$ref": "../common.schema.json#/$defs/agent_type"
+            },
+            "agent_id": {
+              "$ref": "../common.schema.json#/$defs/agent_id"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "timing": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "interval"
+                },
+                "interval_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "kind",
+                "interval_ms"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "cron"
+                },
+                "expression": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": "Cron text, including @ shorthands and # expressions; the receiver validates it with croniter."
+                },
+                "time_zone": {
+                  "$ref": "../common.schema.json#/$defs/time_zone"
+                }
+              },
+              "required": [
+                "kind",
+                "expression",
+                "time_zone"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "once"
+                },
+                "at": {
+                  "$ref": "../common.schema.json#/$defs/timestamp"
+                }
+              },
+              "required": [
+                "kind",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "repeat_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Zero means unlimited repeats. A one-time schedule runs once."
+        },
+        "expires_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "paused_until": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "action": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "task"
+                },
+                "instruction": {
+                  "$ref": "../common.schema.json#/$defs/text_content"
+                },
+                "attachments": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "../common.schema.json#/$defs/attachment"
+                  },
+                  "maxItems": 20
+                }
+              },
+              "required": [
+                "type",
+                "instruction"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "fixed_message"
+                },
+                "text": {
+                  "$ref": "../common.schema.json#/$defs/text_content"
+                },
+                "attachments": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "../common.schema.json#/$defs/attachment"
+                  },
+                  "maxItems": 20
+                }
+              },
+              "required": [
+                "type",
+                "text"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "run_notes": {
+          "type": "object",
+          "properties": {
+            "schedule_kind": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 16384
+            },
+            "policy": {
+              "type": "object",
+              "properties": {
+                "notify": {
+                  "type": "string",
+                  "enum": [
+                    "on_change",
+                    "always",
+                    "never"
+                  ]
+                },
+                "notify_on_failure": {
+                  "type": "boolean"
+                },
+                "evidence_required": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 16384
+                },
+                "custom_json": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 16384,
+                  "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "state": {
+              "type": "object",
+              "properties": {
+                "summary": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 16384
+                },
+                "confidence": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 16384
+                },
+                "last_observed_at": {
+                  "$ref": "../common.schema.json#/$defs/timestamp"
+                },
+                "last_changed_at": {
+                  "$ref": "../common.schema.json#/$defs/timestamp"
+                },
+                "domain_json": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 16384,
+                  "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "domain_schema_hint_json": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 16384,
+              "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "decisions_ahead": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/decision_ahead"
+          },
+          "maxItems": 8
+        },
+        "deliver_to": {
+          "type": "object",
+          "properties": {
+            "delivery_ref": {
+              "$ref": "../common.schema.json#/$defs/delivery_ref"
+            },
+            "conversation_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            },
+            "time_zone": {
+              "$ref": "../common.schema.json#/$defs/time_zone"
+            }
+          },
+          "required": [
+            "delivery_ref"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "request_id",
+        "schedule_id",
+        "mode",
+        "management_class",
+        "timing",
+        "enabled",
+        "action"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

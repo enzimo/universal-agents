@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/conflicts.list.schema.json",
+  "title": "conflicts.list request",
+  "description": "Open and recent change conflicts, for administrators.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "open",
+        "decided",
+        "withdrawn",
+        "expired",
+        "cancelled"
+      ]
+    }
+  },
+  "required": [
+    "request_id",
+    "offset",
+    "limit"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,134 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.record_checkpoint.reply",
+  "message_id": "873d8b75-8450-72af-b94e-c7d39c27d8af",
+  "idempotency_key": "objectives.record_checkpoint.reply:D_Sbajnf06Kj7DE4BxdetqOpLb7nB3D1OnFNl_bQ2YA",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.790ab1c7-09cf-7893-ad11-423314c99fbe",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "checkpoint": {
+      "type": "inline",
+      "value": {
+        "checkpoint_id": "checkpoint_dependency_watch",
+        "session_id": "session_dependency_watch",
+        "policy_id": "policy_dependency_watch",
+        "objective_id": "objective_dependency_watch",
+        "owner_agent_id": "manager_scope:team_example:TeamArchitect",
+        "health": "on_track",
+        "observe": {
+          "type": "blob",
+          "ref": {
+            "sha256": "gmW1pxH1lws8fo8opaofzepj_hk8-0NwiPjvS49R8oM",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "orient": {
+          "type": "blob",
+          "ref": {
+            "sha256": "5k5--XL2uQ1G4WTMxoJzeTyOTxPsW8_tLEfhBJKRrJw",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "decide": {
+          "type": "blob",
+          "ref": {
+            "sha256": "nmxFoTDslFtdTWznXkne2Jt0L17qpXXt4WGLBr6nuK8",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "act": {
+          "type": "blob",
+          "ref": {
+            "sha256": "YRkNhrBoTmVQ0sryMXnYOsfQCDzpIaeEYbrIyojy1h0",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "evidence_delta": [
+          {
+            "type": "blob",
+            "ref": {
+              "sha256": "-xEGrdfKVst6iXVBHyaXe5j0Nod6miNma6z3zEt-9hI",
+              "size": 4096,
+              "media_type": "text/plain"
+            }
+          }
+        ],
+        "completed_subgoals": [
+          {
+            "type": "blob",
+            "ref": {
+              "sha256": "6FYPmTxSyMHVoJjutWVN3oWdMOyF40WOj96Tv3bdWc8",
+              "size": 4096,
+              "media_type": "text/plain"
+            }
+          }
+        ],
+        "next_subgoal": {
+          "type": "blob",
+          "ref": {
+            "sha256": "t4TkhDA_0Oa8ox7ZD8xXZGTNiWbJiOcMz5DiEgso2N8",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "blockers": [
+          {
+            "type": "blob",
+            "ref": {
+              "sha256": "6FYPmTxSyMHVoJjutWVN3oWdMOyF40WOj96Tv3bdWc8",
+              "size": 4096,
+              "media_type": "text/plain"
+            }
+          }
+        ],
+        "in_flight_effects": [
+          {
+            "type": "blob",
+            "ref": {
+              "sha256": "6FYPmTxSyMHVoJjutWVN3oWdMOyF40WOj96Tv3bdWc8",
+              "size": 4096,
+              "media_type": "text/plain"
+            }
+          }
+        ],
+        "artifacts": [
+          {
+            "type": "blob",
+            "ref": {
+              "sha256": "6FYPmTxSyMHVoJjutWVN3oWdMOyF40WOj96Tv3bdWc8",
+              "size": 4096,
+              "media_type": "text/plain"
+            }
+          }
+        ],
+        "degraded": false,
+        "created_at": "2026-10-21T04:30:00.000Z"
+      }
+    }
+  },
+  "causation_id": "790ab1c7-09cf-7893-ad11-423314c99fbe",
+  "body_digest": "1ASg3yB4IfG9RYnhngNLNLVM9C0LX-qTSNtakDBzHow",
+  "signature": "DMr0EsUSKHuU5fj5-MoptvPYJ-4jUBwaCSHVklzsMw8fKFHyAVfxBN_SfI6VVqSBNqv40NQFYUXrrKWAmiwGAw"
+}

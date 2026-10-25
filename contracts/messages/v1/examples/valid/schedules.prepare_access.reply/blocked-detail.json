@@ -1,0 +1,71 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.prepare_access.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a02b",
+  "idempotency_key": "schedules.prepare_access.reply:EJ_Vx6ZJ8DUgx_Qeqpa0qh6XxNk8Rc81lcuLmkdS54Y",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7000-8000-00000000a028",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "readiness": {
+      "status": "blocked",
+      "checks": [
+        {
+          "capability_id": "fn:web_research",
+          "operation": "exa_search",
+          "status": "blocked",
+          "reason": "owner_lacks_access",
+          "required": true,
+          "tool_id": "fn:web_research",
+          "access_operation": "exa_search",
+          "access_level": "read",
+          "missing_access_for": [
+            "owner"
+          ],
+          "detail": {
+            "type": "inline",
+            "text": "A team administrator must give the owner access before this job is ready."
+          },
+          "suggestions": [
+            "fn:web_research"
+          ]
+        }
+      ],
+      "checked_at_utc": "2026-10-22T04:30:00.000Z",
+      "execution_digest": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+      "policy_snapshot_digest": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc"
+    },
+    "missing_access": [
+      {
+        "tool_id": "fn:web_research",
+        "operation": "exa_search",
+        "level": "read",
+        "missing_for": [
+          "owner"
+        ],
+        "required": true,
+        "capability_id": "fn:web_research"
+      }
+    ]
+  },
+  "causation_id": "01928f3a-7b2c-7000-8000-00000000a028",
+  "body_digest": "ieB-3zRSklZCfJHJ6S3NGYlgKGjOUEoHkKRF589zK5U",
+  "signature": "h_OvrAvCcNxwA5MV_6GaRPHl92YeMHFjECaTM3H9T_-KeIgkGOwxaosNfpgdC4RCgRN0LkMT876U7x7RnrgqCQ"
+}

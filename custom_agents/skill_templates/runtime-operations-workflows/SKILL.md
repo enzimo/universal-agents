@@ -1093,10 +1093,13 @@ schedule is reported as not found.
 
 Every change names the version of the schedule you read: pass the schedule's
 `record_digest` as `expected_record_digest`. `list_scheduled_jobs` shows it for
-each schedule, and `create_scheduled_job` and every change that went through
-return the new one; use that for your next change instead of the old one. Read
-the schedule in this task before changing it, and never invent or reuse a
-digest from another schedule.
+each schedule. Use the new digest returned by a successful create or change
+for the next change instead of the old one. If a later read fails, a saved
+change can return warnings without a digest. Treat it as saved and do not
+repeat it; inspect the schedule before another change and use its fresh digest.
+If expiry removed the schedule, report that removal; there is no current digest.
+Read the schedule in this task before changing it, and never invent or reuse
+a digest from another schedule.
 
 - **The person's own schedule** changes at once.
 - **A schedule the runtime manages** (memory review, heartbeat, Objective work

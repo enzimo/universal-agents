@@ -1,0 +1,60 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.update",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a01b",
+  "idempotency_key": "schedules.update:zjfah7--nl8bVdeV-FNF7JjFGjXpiCgo6IGYTd6Lr7I",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.schedules.update",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7000-9000-00000000c02c",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "9_4RmhkZ3mn0qGuDvkU9K2KsXB0HSNiZapd_mL9lmHfW6gkOy24aihzZRIjLrvD8oRpjeiVEscRiq3Q4dJKjBQ"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "schedule_id": "schedule_id_1",
+    "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+    "timing": {
+      "kind": "cron",
+      "expression": "0 9 * * 1#2",
+      "time_zone": "Europe/Berlin"
+    },
+    "request_id": "req_schedules_update_cron"
+  },
+  "body_digest": "8h44m3J33RB5aSSe0E9f6D3pflZyw9GoMwMq0vuWN4I",
+  "signature": "0ThnyUu6zZk4CGSmdc7OyjrySKtmGIwSFlq7hA5Z6QNuIzFpuYCbb1v6NEIL-Pp58KN6FIP-445XyfD1tkDiBg"
+}

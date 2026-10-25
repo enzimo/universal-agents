@@ -1,0 +1,40 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "staged_changes.apply.reply",
+  "message_id": "01928f3a-7b2c-74d0-8000-0000000004d0",
+  "idempotency_key": "staged_changes.apply.reply:o7et_zgBJd02zZTFep9mLIy-Ulv865Q3XOYm0qLL-PU",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-74cf-8000-0000000004cf",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "state": "applied",
+    "approval": {
+      "mode": "person_approval",
+      "approved_by": "person_7c1",
+      "approved_at": "2026-10-22T04:30:00.000Z",
+      "access_request_id": "access_change_7f"
+    },
+    "note": "Use these settings for the next tasks.",
+    "result_json": "{\"status\":\"applied\",\"change_id\":\"runtime_settings:change_7f\",\"restart_required\":false}"
+  },
+  "causation_id": "01928f3a-7b2c-74cf-8000-0000000004cf",
+  "body_digest": "E2kYwWlTstajdSORVWXO82NQsFyS5laf0hl2DZnGpWw",
+  "signature": "_t4Uxotsq66DOhaebVaLc7TKdPOYlhje8b11Bt6Aps_S-TBIS-ymavtOdzqZmq5U6VwcaImaMan_o6fHh1xvAQ"
+}

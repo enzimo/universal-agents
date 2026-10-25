@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.archive.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-000000005015",
+  "idempotency_key": "knowledge.archive.reply:izz14vkcv35ZxTH3GBtWeREPGumjr1uBNhqGgQTnrcw",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7473-8000-000000000473",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "merged",
+    "message": "This page was merged into the release guide.",
+    "merged_into": "team/release-guide"
+  },
+  "causation_id": "01928f3a-7b2c-7473-8000-000000000473",
+  "body_digest": "Q4nY48EQWzMkC0w7-ZeseJwxh6fcZvo7C737Uql_69U",
+  "signature": "U-yfWoh_av3KrnompyeuRq0CKK7bbrjkBgeTPDBn0O0SJVnazjw-tvhbmwOjnIz8O9ouzoRILDLVraK1M-2wAQ"
+}

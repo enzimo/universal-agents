@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "memory.delete.reply",
+  "message_id": "91842378-a4f0-754d-ae34-849a3722006b",
+  "idempotency_key": "memory.delete.reply:I3FOvRsPxQr99yiw_kW131FcXl4aaTeK_GtuVfYn-Y0",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7455-8000-000000000455",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "changed_since_read",
+    "message": "The record changed after this read. Read it again before deciding.",
+    "current_version": "2362cd12f9375d435c9f1568c042e2de180039efc42b7c76bb1fc1bdbd26439e"
+  },
+  "causation_id": "01928f3a-7b2c-7455-8000-000000000455",
+  "body_digest": "myr6b9GHksqsDnRXghIRjolnsqqVveFr4ix4CrjIt1U",
+  "signature": "hS0NJ1Zwx_VuMRynjJFNBDJSB4Og49tZrqNdqTuJJBwKVhIiDvkQEOOJs0jKi4fHLva-dbeEUZ1OwZnQTHOaDw"
+}

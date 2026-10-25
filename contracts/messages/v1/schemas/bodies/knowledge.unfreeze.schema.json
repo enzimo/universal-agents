@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/knowledge.unfreeze.schema.json",
+  "title": "knowledge.unfreeze request",
+  "description": "A curator unfreezes a page.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "space": {
+      "type": "string",
+      "enum": [
+        "team",
+        "personal"
+      ]
+    },
+    "page": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    }
+  },
+  "required": [
+    "request_id",
+    "space",
+    "page"
+  ],
+  "additionalProperties": false
+}

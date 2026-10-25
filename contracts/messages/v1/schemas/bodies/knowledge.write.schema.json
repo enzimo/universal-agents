@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/knowledge.write.schema.json",
+  "title": "knowledge.write request",
+  "description": "Create or edit a knowledge page.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "space": {
+      "type": "string",
+      "enum": [
+        "team",
+        "personal"
+      ]
+    },
+    "page": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "seen_version": {
+      "$ref": "../common.schema.json#/$defs/record_version",
+      "description": "The page revision the writer read, as a decimal string. Absent creates a new page; given, it edits the page while it still has this revision (README, \"Covered changes\")."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 4000
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+      },
+      "maxItems": 100
+    },
+    "page_type": {
+      "type": "string",
+      "enum": [
+        "concept",
+        "how-to",
+        "decision",
+        "lesson",
+        "reference",
+        "source"
+      ]
+    },
+    "change_summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "confirm_review": {
+      "type": "boolean"
+    },
+    "content": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    }
+  },
+  "required": [
+    "request_id",
+    "space",
+    "confirm_review"
+  ],
+  "additionalProperties": false
+}
