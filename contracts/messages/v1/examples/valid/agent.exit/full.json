@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "agent.exit",
   "message_id": "01928f3a-7b2c-74d5-8000-0000000004d5",
-  "idempotency_key": "agent.exit:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "agent.exit:B6wc1A0yDVsZPofO0N7Pw84CRn0b9DKEPCYGj9aF92w",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -28,5 +28,5 @@
     "reason": "Example reason"
   },
   "body_digest": "1kALOl9nlkMYLoqmYWYI-4ceMNA4eNzsp-Rc2NDmY8c",
-  "signature": "fLf7FkN5FAFhhOxN7qfWAMOCHbJqWDs3tlHC9K6sv7O1yyy-o0BXcKZaUoLzn6qip_aWJopZlRIv7LURse30Bw"
+  "signature": "8AQTsyw3Wu6kGWVy_x6jF9hJPGzbZS05Q-aqtQ61Ii6iNQBZrMDGUWhc7mgDpMdbiMG7Py8ZLRhLM9ikSiPkBA"
 }

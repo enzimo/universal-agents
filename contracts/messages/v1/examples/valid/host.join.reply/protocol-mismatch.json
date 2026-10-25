@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "host.join.reply",
+  "message_id": "01928f3a-7b2c-7712-8000-000000000712",
+  "issuer": {
+    "installation": "install_example",
+    "team": "_install",
+    "runtime": "authority-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-authority-host-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "_install",
+    "target": "installation_service",
+    "id": "new-host-1",
+    "runtime": "new-host-1"
+  },
+  "subject": "_INBOX.new-host-1.01928f3a-7b2c-7701-8000-000000000701",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "protocol_mismatch",
+    "accepted": "1.0-pre",
+    "install": "Install Universal Agents 0.10.0 or later, which runs protocol 1.0-pre."
+  },
+  "causation_id": "01928f3a-7b2c-7701-8000-000000000701",
+  "idempotency_key": "host.join.reply:PYjK7an0R1r9B27ETn7hCqhjdGBTHyhv-B8tugEdiRE",
+  "body_digest": "IAa4ncHP2G_oK6FeKSsOJBulp5xAYhEdfsmWIKiS2NY",
+  "signature": "JPAaIuVqyRMP9d4Wj-sxR1N4C9A9AEGaCEFJwRfN2ZLiza__RfGNPBgMqq_J_NIrERLuEnVozu_9LWWDLVVyBQ"
+}

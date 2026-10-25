@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.inspect_worker.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a042",
+  "idempotency_key": "schedules.inspect_worker.reply:UTfCBtxs11yYNb1Q93W9NOMFftj2P1UzGPNLLXuL0RE",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7000-8000-00000000a024",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "runtime_error",
+    "message": "The write failed and changed nothing. Retry with the same request id."
+  },
+  "causation_id": "01928f3a-7b2c-7000-8000-00000000a024",
+  "body_digest": "whXYy0ycCsJLflIeDH38BKumiKeOJFhXH7C7sXtPrBc",
+  "signature": "SUywtCih1MonPbh4kDTtUHA1pUvO1wyEyzXAacCfxQ_vK69XLfeTn91ZnSoKwQ9CbOZxjDk8yXq261UJRwdFDg"
+}

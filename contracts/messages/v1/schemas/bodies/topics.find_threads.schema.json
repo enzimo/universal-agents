@@ -5,6 +5,9 @@
   "description": "Threads with the given tags.",
   "type": "object",
   "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
     "tags": {
       "type": "array",
       "items": {
@@ -16,6 +19,7 @@
     }
   },
   "required": [
+    "request_id",
     "tags"
   ],
   "additionalProperties": false

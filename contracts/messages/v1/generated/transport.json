@@ -25,7 +25,8 @@
       "scheduler"
     ],
     "team_services": [
-      "team_services"
+      "team_services",
+      "scheduler"
     ]
   },
   "classes": {
@@ -65,7 +66,7 @@
         "ctl.agent.{agent}.{operation}"
       ],
       "between_installations": false,
-      "description": "answered at once or \"no responders\"; mutations carry an idempotency key and the receiver stores the outcome before replying",
+      "description": "answered at once or \"no responders\"; changes carry an idempotency key, and the receiver stores the final outcome with the change before replying, except outcomes that ask for a retry (README, \"Stored outcomes\")",
       "installation_addresses": [
         "_install.{sender}.svc.{operation}"
       ],

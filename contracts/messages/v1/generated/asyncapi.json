@@ -1,6 +1,25 @@
 {
   "asyncapi": "3.1.0",
   "channels": {
+    "ctl_agent_debug_dump": {
+      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.debug.dump",
+      "messages": {
+        "debug_dump": {
+          "$ref": "#/components/messages/debug_dump"
+        }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
     "ctl_agent_exit": {
       "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.exit",
       "messages": {
@@ -275,6 +294,9 @@
         "heartbeat_items_enable_reply": {
           "$ref": "#/components/messages/heartbeat_items_enable_reply"
         },
+        "heartbeat_items_list_reply": {
+          "$ref": "#/components/messages/heartbeat_items_list_reply"
+        },
         "heartbeat_items_remove_reply": {
           "$ref": "#/components/messages/heartbeat_items_remove_reply"
         },
@@ -362,11 +384,17 @@
         "objectives_abandon_reply": {
           "$ref": "#/components/messages/objectives_abandon_reply"
         },
+        "objectives_activate_plan_reply": {
+          "$ref": "#/components/messages/objectives_activate_plan_reply"
+        },
         "objectives_create_reply": {
           "$ref": "#/components/messages/objectives_create_reply"
         },
         "objectives_delete_reply": {
           "$ref": "#/components/messages/objectives_delete_reply"
+        },
+        "objectives_get_reply": {
+          "$ref": "#/components/messages/objectives_get_reply"
         },
         "objectives_list_reply": {
           "$ref": "#/components/messages/objectives_list_reply"
@@ -374,8 +402,14 @@
         "objectives_pause_reply": {
           "$ref": "#/components/messages/objectives_pause_reply"
         },
+        "objectives_record_checkpoint_reply": {
+          "$ref": "#/components/messages/objectives_record_checkpoint_reply"
+        },
         "objectives_resume_reply": {
           "$ref": "#/components/messages/objectives_resume_reply"
+        },
+        "objectives_start_task_reply": {
+          "$ref": "#/components/messages/objectives_start_task_reply"
         },
         "objectives_stop_reply": {
           "$ref": "#/components/messages/objectives_stop_reply"
@@ -385,6 +419,30 @@
         },
         "objectives_update_status_reply": {
           "$ref": "#/components/messages/objectives_update_status_reply"
+        },
+        "objectives_work_profiles_apply_reply": {
+          "$ref": "#/components/messages/objectives_work_profiles_apply_reply"
+        },
+        "objectives_work_profiles_list_reply": {
+          "$ref": "#/components/messages/objectives_work_profiles_list_reply"
+        },
+        "objectives_work_profiles_propose_reply": {
+          "$ref": "#/components/messages/objectives_work_profiles_propose_reply"
+        },
+        "objectives_work_profiles_remove_reply": {
+          "$ref": "#/components/messages/objectives_work_profiles_remove_reply"
+        },
+        "objectives_work_sessions_disable_reply": {
+          "$ref": "#/components/messages/objectives_work_sessions_disable_reply"
+        },
+        "objectives_work_sessions_enable_reply": {
+          "$ref": "#/components/messages/objectives_work_sessions_enable_reply"
+        },
+        "objectives_work_sessions_start_reply": {
+          "$ref": "#/components/messages/objectives_work_sessions_start_reply"
+        },
+        "objectives_work_sessions_status_reply": {
+          "$ref": "#/components/messages/objectives_work_sessions_status_reply"
         },
         "people_set_standing_reply": {
           "$ref": "#/components/messages/people_set_standing_reply"
@@ -398,8 +456,17 @@
         "run_context_sign_reply": {
           "$ref": "#/components/messages/run_context_sign_reply"
         },
+        "schedules_authorize_access_reply": {
+          "$ref": "#/components/messages/schedules_authorize_access_reply"
+        },
         "schedules_disable_reply": {
           "$ref": "#/components/messages/schedules_disable_reply"
+        },
+        "schedules_get_reply": {
+          "$ref": "#/components/messages/schedules_get_reply"
+        },
+        "schedules_inspect_worker_reply": {
+          "$ref": "#/components/messages/schedules_inspect_worker_reply"
         },
         "schedules_install_reply": {
           "$ref": "#/components/messages/schedules_install_reply"
@@ -409,6 +476,9 @@
         },
         "schedules_pause_reply": {
           "$ref": "#/components/messages/schedules_pause_reply"
+        },
+        "schedules_prepare_access_reply": {
+          "$ref": "#/components/messages/schedules_prepare_access_reply"
         },
         "schedules_remove_reply": {
           "$ref": "#/components/messages/schedules_remove_reply"
@@ -610,6 +680,22 @@
       "messages": {
         "heartbeat_items_enable": {
           "$ref": "#/components/messages/heartbeat_items_enable"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "svc_team_heartbeat_items_list": {
+      "address": "ua.v1.{team}.{sender}.svc.team.heartbeat_items.list",
+      "messages": {
+        "heartbeat_items_list": {
+          "$ref": "#/components/messages/heartbeat_items_list"
         }
       },
       "parameters": {
@@ -1053,6 +1139,22 @@
         }
       }
     },
+    "svc_team_objectives_activate_plan": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.activate_plan",
+      "messages": {
+        "objectives_activate_plan": {
+          "$ref": "#/components/messages/objectives_activate_plan"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
     "svc_team_objectives_create": {
       "address": "ua.v1.{team}.{sender}.svc.team.objectives.create",
       "messages": {
@@ -1074,6 +1176,22 @@
       "messages": {
         "objectives_delete": {
           "$ref": "#/components/messages/objectives_delete"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "svc_team_objectives_get": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.get",
+      "messages": {
+        "objectives_get": {
+          "$ref": "#/components/messages/objectives_get"
         }
       },
       "parameters": {
@@ -1117,11 +1235,43 @@
         }
       }
     },
+    "svc_team_objectives_record_checkpoint": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.record_checkpoint",
+      "messages": {
+        "objectives_record_checkpoint": {
+          "$ref": "#/components/messages/objectives_record_checkpoint"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
     "svc_team_objectives_resume": {
       "address": "ua.v1.{team}.{sender}.svc.team.objectives.resume",
       "messages": {
         "objectives_resume": {
           "$ref": "#/components/messages/objectives_resume"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "svc_team_objectives_start_task": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.start_task",
+      "messages": {
+        "objectives_start_task": {
+          "$ref": "#/components/messages/objectives_start_task"
         }
       },
       "parameters": {
@@ -1170,6 +1320,134 @@
       "messages": {
         "objectives_update_status": {
           "$ref": "#/components/messages/objectives_update_status"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "svc_team_objectives_work_profiles_apply": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_profiles.apply",
+      "messages": {
+        "objectives_work_profiles_apply": {
+          "$ref": "#/components/messages/objectives_work_profiles_apply"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "svc_team_objectives_work_profiles_list": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_profiles.list",
+      "messages": {
+        "objectives_work_profiles_list": {
+          "$ref": "#/components/messages/objectives_work_profiles_list"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "svc_team_objectives_work_profiles_propose": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_profiles.propose",
+      "messages": {
+        "objectives_work_profiles_propose": {
+          "$ref": "#/components/messages/objectives_work_profiles_propose"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "svc_team_objectives_work_profiles_remove": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_profiles.remove",
+      "messages": {
+        "objectives_work_profiles_remove": {
+          "$ref": "#/components/messages/objectives_work_profiles_remove"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "svc_team_objectives_work_sessions_disable": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_sessions.disable",
+      "messages": {
+        "objectives_work_sessions_disable": {
+          "$ref": "#/components/messages/objectives_work_sessions_disable"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "svc_team_objectives_work_sessions_enable": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_sessions.enable",
+      "messages": {
+        "objectives_work_sessions_enable": {
+          "$ref": "#/components/messages/objectives_work_sessions_enable"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "svc_team_objectives_work_sessions_start": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_sessions.start",
+      "messages": {
+        "objectives_work_sessions_start": {
+          "$ref": "#/components/messages/objectives_work_sessions_start"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "svc_team_objectives_work_sessions_status": {
+      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_sessions.status",
+      "messages": {
+        "objectives_work_sessions_status": {
+          "$ref": "#/components/messages/objectives_work_sessions_status"
         }
       },
       "parameters": {
@@ -1245,11 +1523,59 @@
         }
       }
     },
+    "svc_team_schedules_authorize_access": {
+      "address": "ua.v1.{team}.{sender}.svc.team.schedules.authorize_access",
+      "messages": {
+        "schedules_authorize_access": {
+          "$ref": "#/components/messages/schedules_authorize_access"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
     "svc_team_schedules_disable": {
       "address": "ua.v1.{team}.{sender}.svc.team.schedules.disable",
       "messages": {
         "schedules_disable": {
           "$ref": "#/components/messages/schedules_disable"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "svc_team_schedules_get": {
+      "address": "ua.v1.{team}.{sender}.svc.team.schedules.get",
+      "messages": {
+        "schedules_get": {
+          "$ref": "#/components/messages/schedules_get"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "svc_team_schedules_inspect_worker": {
+      "address": "ua.v1.{team}.{sender}.svc.team.schedules.inspect_worker",
+      "messages": {
+        "schedules_inspect_worker": {
+          "$ref": "#/components/messages/schedules_inspect_worker"
         }
       },
       "parameters": {
@@ -1298,6 +1624,22 @@
       "messages": {
         "schedules_pause": {
           "$ref": "#/components/messages/schedules_pause"
+        }
+      },
+      "parameters": {
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "svc_team_schedules_prepare_access": {
+      "address": "ua.v1.{team}.{sender}.svc.team.schedules.prepare_access",
+      "messages": {
+        "schedules_prepare_access": {
+          "$ref": "#/components/messages/schedules_prepare_access"
         }
       },
       "parameters": {
@@ -2566,6 +2908,49 @@
           ]
         }
       },
+      "heartbeat_items_list": {
+        "name": "heartbeat_items.list",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/heartbeat_items.list.schema.json"
+                },
+                "kind": {
+                  "const": "heartbeat_items.list"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "The lead reads heartbeat items and their versions."
+      },
+      "heartbeat_items_list_reply": {
+        "name": "heartbeat_items.list.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/heartbeat_items.list.reply.schema.json"
+                },
+                "kind": {
+                  "const": "heartbeat_items.list.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
       "heartbeat_items_remove": {
         "name": "heartbeat_items.remove",
         "payload": {
@@ -3683,7 +4068,7 @@
             }
           ]
         },
-        "summary": "Replace a memory fact's text or tags."
+        "summary": "Change only the supplied fields of a memory fact."
       },
       "memory_replace_reply": {
         "name": "memory.replace.reply",
@@ -3835,6 +4220,49 @@
           ]
         }
       },
+      "objectives_activate_plan": {
+        "name": "objectives.activate_plan",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.activate_plan.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.activate_plan"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Start runtime-owned execution of the active task's semantic plan steps."
+      },
+      "objectives_activate_plan_reply": {
+        "name": "objectives.activate_plan.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.activate_plan.reply.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.activate_plan.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
       "objectives_create": {
         "name": "objectives.create",
         "payload": {
@@ -3914,6 +4342,49 @@
                 },
                 "kind": {
                   "const": "objectives.delete.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "objectives_get": {
+        "name": "objectives.get",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.get.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.get"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "The lead reads an Objective's full record and agent-update version."
+      },
+      "objectives_get_reply": {
+        "name": "objectives.get.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.get.reply.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.get.reply"
                 }
               },
               "type": "object"
@@ -4007,6 +4478,49 @@
           ]
         }
       },
+      "objectives_record_checkpoint": {
+        "name": "objectives.record_checkpoint",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.record_checkpoint.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.record_checkpoint"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Save a continuation checkpoint for the active Objective work session."
+      },
+      "objectives_record_checkpoint_reply": {
+        "name": "objectives.record_checkpoint.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.record_checkpoint.reply.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.record_checkpoint.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
       "objectives_resume": {
         "name": "objectives.resume",
         "payload": {
@@ -4043,6 +4557,49 @@
                 },
                 "kind": {
                   "const": "objectives.resume.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "objectives_start_task": {
+        "name": "objectives.start_task",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.start_task.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.start_task"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Queue a continuation task for an Objective and its current plan."
+      },
+      "objectives_start_task_reply": {
+        "name": "objectives.start_task.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.start_task.reply.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.start_task.reply"
                 }
               },
               "type": "object"
@@ -4172,6 +4729,350 @@
                 },
                 "kind": {
                   "const": "objectives.update_status.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "objectives_work_profiles_apply": {
+        "name": "objectives.work_profiles.apply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_profiles.apply.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_profiles.apply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Apply the exact Objective work-profile proposal the person accepted."
+      },
+      "objectives_work_profiles_apply_reply": {
+        "name": "objectives.work_profiles.apply.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_profiles.apply.reply.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_profiles.apply.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "objectives_work_profiles_list": {
+        "name": "objectives.work_profiles.list",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_profiles.list.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_profiles.list"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Read configured profiles, the person's installed profiles and latest proposals."
+      },
+      "objectives_work_profiles_list_reply": {
+        "name": "objectives.work_profiles.list.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_profiles.list.reply.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_profiles.list.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "objectives_work_profiles_propose": {
+        "name": "objectives.work_profiles.propose",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_profiles.propose.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_profiles.propose"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Persist an inert exact Objective work-profile proposal for the person."
+      },
+      "objectives_work_profiles_propose_reply": {
+        "name": "objectives.work_profiles.propose.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_profiles.propose.reply.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_profiles.propose.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "objectives_work_profiles_remove": {
+        "name": "objectives.work_profiles.remove",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_profiles.remove.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_profiles.remove"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Remove the person's reusable profile after explicit confirmation."
+      },
+      "objectives_work_profiles_remove_reply": {
+        "name": "objectives.work_profiles.remove.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_profiles.remove.reply.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_profiles.remove.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "objectives_work_sessions_disable": {
+        "name": "objectives.work_sessions.disable",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_sessions.disable.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_sessions.disable"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Disable bounded work sessions after the person agrees."
+      },
+      "objectives_work_sessions_disable_reply": {
+        "name": "objectives.work_sessions.disable.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_sessions.disable.reply.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_sessions.disable.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "objectives_work_sessions_enable": {
+        "name": "objectives.work_sessions.enable",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_sessions.enable.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_sessions.enable"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Enable explicitly accepted bounded work sessions on an Objective."
+      },
+      "objectives_work_sessions_enable_reply": {
+        "name": "objectives.work_sessions.enable.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_sessions.enable.reply.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_sessions.enable.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "objectives_work_sessions_start": {
+        "name": "objectives.work_sessions.start",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_sessions.start.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_sessions.start"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Open a requested work session on the active Objective-linked task."
+      },
+      "objectives_work_sessions_start_reply": {
+        "name": "objectives.work_sessions.start.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_sessions.start.reply.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_sessions.start.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "objectives_work_sessions_status": {
+        "name": "objectives.work_sessions.status",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_sessions.status.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_sessions.status"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Read an owned Objective's policy, recent sessions, checkpoints and tuning observations."
+      },
+      "objectives_work_sessions_status_reply": {
+        "name": "objectives.work_sessions.status.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/objectives.work_sessions.status.reply.schema.json"
+                },
+                "kind": {
+                  "const": "objectives.work_sessions.status.reply"
                 }
               },
               "type": "object"
@@ -4372,7 +5273,7 @@
             }
           ]
         },
-        "summary": "A worker running a scheduled job asks for the run's authority token."
+        "summary": "A worker running a scheduled job asks the scheduler for the run's authority token."
       },
       "run_context_sign_reply": {
         "name": "run_context.sign.reply",
@@ -4388,6 +5289,49 @@
                 },
                 "kind": {
                   "const": "run_context.sign.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "schedules_authorize_access": {
+        "name": "schedules.authorize_access",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/schedules.authorize_access.schema.json"
+                },
+                "kind": {
+                  "const": "schedules.authorize_access"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Hand on access for a saved schedule policy and end obsolete setup grants."
+      },
+      "schedules_authorize_access_reply": {
+        "name": "schedules.authorize_access.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/schedules.authorize_access.reply.schema.json"
+                },
+                "kind": {
+                  "const": "schedules.authorize_access.reply"
                 }
               },
               "type": "object"
@@ -4431,6 +5375,92 @@
                 },
                 "kind": {
                   "const": "schedules.disable.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "schedules_get": {
+        "name": "schedules.get",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/schedules.get.schema.json"
+                },
+                "kind": {
+                  "const": "schedules.get"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Read complete safe details of one visible schedule, in JSON text pages."
+      },
+      "schedules_get_reply": {
+        "name": "schedules.get.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/schedules.get.reply.schema.json"
+                },
+                "kind": {
+                  "const": "schedules.get.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "schedules_inspect_worker": {
+        "name": "schedules.inspect_worker",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/schedules.inspect_worker.schema.json"
+                },
+                "kind": {
+                  "const": "schedules.inspect_worker"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Inspect worker assignment and startup diagnostics for a schedule."
+      },
+      "schedules_inspect_worker_reply": {
+        "name": "schedules.inspect_worker.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/schedules.inspect_worker.reply.schema.json"
+                },
+                "kind": {
+                  "const": "schedules.inspect_worker.reply"
                 }
               },
               "type": "object"
@@ -4567,6 +5597,49 @@
           ]
         }
       },
+      "schedules_prepare_access": {
+        "name": "schedules.prepare_access",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/schedules.prepare_access.schema.json"
+                },
+                "kind": {
+                  "const": "schedules.prepare_access"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Preview worker readiness and missing access without starting the job."
+      },
+      "schedules_prepare_access_reply": {
+        "name": "schedules.prepare_access.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/schedules.prepare_access.reply.schema.json"
+                },
+                "kind": {
+                  "const": "schedules.prepare_access.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
       "schedules_remove": {
         "name": "schedules.remove",
         "payload": {
@@ -4673,7 +5746,7 @@
             }
           ]
         },
-        "summary": "Choose which worker runs a schedule."
+        "summary": "Save a schedule's worker type, startup policy and capability requirements."
       },
       "schedules_set_worker_reply": {
         "name": "schedules.set_worker.reply",
@@ -4716,7 +5789,7 @@
             }
           ]
         },
-        "summary": "Change a schedule's instruction, timing or delivery."
+        "summary": "Change a schedule's name, instruction, timing, controls or run notes."
       },
       "schedules_update_reply": {
         "name": "schedules.update.reply",
@@ -5977,6 +7050,27 @@
         }
       ]
     },
+    "receive_debug_dump_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/ctl_agent_debug_dump"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/ctl_agent_debug_dump/messages/debug_dump"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/debug_dump_reply"
+          }
+        ]
+      }
+    },
     "receive_debug_dump_team_services": {
       "action": "receive",
       "channel": {
@@ -6112,6 +7206,27 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/heartbeat_items_enable_reply"
+          }
+        ]
+      }
+    },
+    "receive_heartbeat_items_list_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_heartbeat_items_list"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_heartbeat_items_list/messages/heartbeat_items_list"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/heartbeat_items_list_reply"
           }
         ]
       }
@@ -6736,6 +7851,27 @@
         ]
       }
     },
+    "receive_objectives_activate_plan_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_activate_plan"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_activate_plan/messages/objectives_activate_plan"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_activate_plan_reply"
+          }
+        ]
+      }
+    },
     "receive_objectives_create_team_services": {
       "action": "receive",
       "channel": {
@@ -6774,6 +7910,27 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/objectives_delete_reply"
+          }
+        ]
+      }
+    },
+    "receive_objectives_get_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_get"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_get/messages/objectives_get"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_get_reply"
           }
         ]
       }
@@ -6820,6 +7977,27 @@
         ]
       }
     },
+    "receive_objectives_record_checkpoint_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_record_checkpoint"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_record_checkpoint/messages/objectives_record_checkpoint"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_record_checkpoint_reply"
+          }
+        ]
+      }
+    },
     "receive_objectives_resume_team_services": {
       "action": "receive",
       "channel": {
@@ -6837,6 +8015,27 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/objectives_resume_reply"
+          }
+        ]
+      }
+    },
+    "receive_objectives_start_task_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_start_task"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_start_task/messages/objectives_start_task"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_start_task_reply"
           }
         ]
       }
@@ -6900,6 +8099,174 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/objectives_update_status_reply"
+          }
+        ]
+      }
+    },
+    "receive_objectives_work_profiles_apply_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_profiles_apply"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_profiles_apply/messages/objectives_work_profiles_apply"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_profiles_apply_reply"
+          }
+        ]
+      }
+    },
+    "receive_objectives_work_profiles_list_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_profiles_list"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_profiles_list/messages/objectives_work_profiles_list"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_profiles_list_reply"
+          }
+        ]
+      }
+    },
+    "receive_objectives_work_profiles_propose_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_profiles_propose"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_profiles_propose/messages/objectives_work_profiles_propose"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_profiles_propose_reply"
+          }
+        ]
+      }
+    },
+    "receive_objectives_work_profiles_remove_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_profiles_remove"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_profiles_remove/messages/objectives_work_profiles_remove"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_profiles_remove_reply"
+          }
+        ]
+      }
+    },
+    "receive_objectives_work_sessions_disable_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_sessions_disable"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_sessions_disable/messages/objectives_work_sessions_disable"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_sessions_disable_reply"
+          }
+        ]
+      }
+    },
+    "receive_objectives_work_sessions_enable_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_sessions_enable"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_sessions_enable/messages/objectives_work_sessions_enable"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_sessions_enable_reply"
+          }
+        ]
+      }
+    },
+    "receive_objectives_work_sessions_start_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_sessions_start"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_sessions_start/messages/objectives_work_sessions_start"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_sessions_start_reply"
+          }
+        ]
+      }
+    },
+    "receive_objectives_work_sessions_status_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_sessions_status"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_sessions_status/messages/objectives_work_sessions_status"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_sessions_status_reply"
           }
         ]
       }
@@ -7021,6 +8388,27 @@
         ]
       }
     },
+    "receive_schedules_authorize_access_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_schedules_authorize_access"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_schedules_authorize_access/messages/schedules_authorize_access"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/schedules_authorize_access_reply"
+          }
+        ]
+      }
+    },
     "receive_schedules_disable_team_services": {
       "action": "receive",
       "channel": {
@@ -7038,6 +8426,48 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/schedules_disable_reply"
+          }
+        ]
+      }
+    },
+    "receive_schedules_get_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_schedules_get"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_schedules_get/messages/schedules_get"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/schedules_get_reply"
+          }
+        ]
+      }
+    },
+    "receive_schedules_inspect_worker_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_schedules_inspect_worker"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_schedules_inspect_worker/messages/schedules_inspect_worker"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/schedules_inspect_worker_reply"
           }
         ]
       }
@@ -7101,6 +8531,27 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/schedules_pause_reply"
+          }
+        ]
+      }
+    },
+    "receive_schedules_prepare_access_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team_schedules_prepare_access"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_schedules_prepare_access/messages/schedules_prepare_access"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/schedules_prepare_access_reply"
           }
         ]
       }
@@ -8174,6 +9625,27 @@
         }
       ]
     },
+    "send_debug_dump_agent": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/ctl_agent_debug_dump"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/ctl_agent_debug_dump/messages/debug_dump"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/debug_dump_reply"
+          }
+        ]
+      }
+    },
     "send_debug_dump_team_services": {
       "action": "send",
       "channel": {
@@ -8309,6 +9781,27 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/heartbeat_items_enable_reply"
+          }
+        ]
+      }
+    },
+    "send_heartbeat_items_list_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_heartbeat_items_list"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_heartbeat_items_list/messages/heartbeat_items_list"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/heartbeat_items_list_reply"
           }
         ]
       }
@@ -8933,6 +10426,27 @@
         ]
       }
     },
+    "send_objectives_activate_plan_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_activate_plan"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_activate_plan/messages/objectives_activate_plan"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_activate_plan_reply"
+          }
+        ]
+      }
+    },
     "send_objectives_create_team_services": {
       "action": "send",
       "channel": {
@@ -8971,6 +10485,27 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/objectives_delete_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_get_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_get"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_get/messages/objectives_get"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_get_reply"
           }
         ]
       }
@@ -9017,6 +10552,27 @@
         ]
       }
     },
+    "send_objectives_record_checkpoint_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_record_checkpoint"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_record_checkpoint/messages/objectives_record_checkpoint"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_record_checkpoint_reply"
+          }
+        ]
+      }
+    },
     "send_objectives_resume_team_services": {
       "action": "send",
       "channel": {
@@ -9034,6 +10590,27 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/objectives_resume_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_start_task_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_start_task"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_start_task/messages/objectives_start_task"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_start_task_reply"
           }
         ]
       }
@@ -9097,6 +10674,174 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/objectives_update_status_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_work_profiles_apply_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_profiles_apply"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_profiles_apply/messages/objectives_work_profiles_apply"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_profiles_apply_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_work_profiles_list_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_profiles_list"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_profiles_list/messages/objectives_work_profiles_list"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_profiles_list_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_work_profiles_propose_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_profiles_propose"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_profiles_propose/messages/objectives_work_profiles_propose"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_profiles_propose_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_work_profiles_remove_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_profiles_remove"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_profiles_remove/messages/objectives_work_profiles_remove"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_profiles_remove_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_work_sessions_disable_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_sessions_disable"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_sessions_disable/messages/objectives_work_sessions_disable"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_sessions_disable_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_work_sessions_enable_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_sessions_enable"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_sessions_enable/messages/objectives_work_sessions_enable"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_sessions_enable_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_work_sessions_start_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_sessions_start"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_sessions_start/messages/objectives_work_sessions_start"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_sessions_start_reply"
+          }
+        ]
+      }
+    },
+    "send_objectives_work_sessions_status_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_objectives_work_sessions_status"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_objectives_work_sessions_status/messages/objectives_work_sessions_status"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/objectives_work_sessions_status_reply"
           }
         ]
       }
@@ -9218,6 +10963,27 @@
         ]
       }
     },
+    "send_schedules_authorize_access_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_schedules_authorize_access"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_schedules_authorize_access/messages/schedules_authorize_access"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/schedules_authorize_access_reply"
+          }
+        ]
+      }
+    },
     "send_schedules_disable_team_services": {
       "action": "send",
       "channel": {
@@ -9235,6 +11001,48 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/schedules_disable_reply"
+          }
+        ]
+      }
+    },
+    "send_schedules_get_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_schedules_get"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_schedules_get/messages/schedules_get"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/schedules_get_reply"
+          }
+        ]
+      }
+    },
+    "send_schedules_inspect_worker_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_schedules_inspect_worker"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_schedules_inspect_worker/messages/schedules_inspect_worker"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/schedules_inspect_worker_reply"
           }
         ]
       }
@@ -9298,6 +11106,27 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/schedules_pause_reply"
+          }
+        ]
+      }
+    },
+    "send_schedules_prepare_access_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team_schedules_prepare_access"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team_schedules_prepare_access/messages/schedules_prepare_access"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/schedules_prepare_access_reply"
           }
         ]
       }

@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.disable.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a037",
+  "idempotency_key": "schedules.disable.reply:RxfdysVyBlrcuwtWgjOaqiG35kvnFeo0vv3mBTq8NLc",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7437-8000-000000000437",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "not_found",
+    "message": "The schedule no longer exists."
+  },
+  "causation_id": "01928f3a-7b2c-7437-8000-000000000437",
+  "body_digest": "FtEcpBDCz4XHcIr3JdiBAaiZykQSA5TmHZwT4g8D2ko",
+  "signature": "SlvG21n_2VM53OvxE2isEiE_Q9qTftYOPbXnt56Hr5UIT5I7h_lfyZ5uFkIwTU5L_gVFR-5lqxtU9XfwZEQkAg"
+}

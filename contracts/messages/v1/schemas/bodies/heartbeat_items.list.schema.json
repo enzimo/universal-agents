@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/heartbeat_items.list.schema.json",
+  "title": "heartbeat_items.list request",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "source_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384
+    },
+    "include_disabled": {
+      "type": "boolean"
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    }
+  },
+  "required": [
+    "request_id",
+    "offset",
+    "limit"
+  ],
+  "additionalProperties": false
+}

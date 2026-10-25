@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "memory.undo",
   "message_id": "01928f3a-7b2c-7458-8000-000000000458",
-  "idempotency_key": "memory.undo:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "memory.undo:DI_bTGuzFga-NY3x5en_GvIiOwLbvg1KSN9yKxoWlIE",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -35,19 +35,19 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000152"
+      "id": "cmd_memory_undo"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "hyC-6MY3OoGnggKj2WPaTal7C2vxbxMMf6ElWpySAwqiuN3NLIVKGdw3yX_k4Cxu-hYLUKNkO-oQIWp-bs_9BQ"
+    "signature": "qc_D6hvyk0eACpDlXr6JQmr2GWtaxnqZjZUYh3O2Ge0foOq90fWqvHjpqKrXPS1YQffGpN7X6hF9x46Z8IeeBA"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
+    "request_id": "cmd_memory_undo",
     "bank": "coremem",
-    "event_id": "event_id_1"
+    "event_id": "mem_event_replace_3"
   },
-  "body_digest": "an3c2ey6q8_LeKz2ufQKaReWOYL7gm0cWk3Whs_7zIs",
-  "signature": "80Sr0wnG1kwPAvjCUBWr3GvPYrO9rMHdAZAWgLwdK6vpWOwHzUwPqWF8u8hprqgfThhm2-2ctOyKFxzCToYIDg"
+  "body_digest": "8m2VglqT9e3aPD4b6E8B_JZAAmtPPwLW01DbidWghRw",
+  "signature": "spmEU-p1Kqmy6VClBwJs8-42r4QKMgmunuUELRFQhUVewjYT4JHw4S7hsJw-l01TOTpOnMnqU5bmgMAj_rotBA"
 }

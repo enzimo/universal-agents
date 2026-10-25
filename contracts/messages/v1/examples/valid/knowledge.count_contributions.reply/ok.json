@@ -1,7 +1,7 @@
 {
   "protocol": "1.0-pre",
   "kind": "knowledge.count_contributions.reply",
-  "message_id": "01928f3a-7b2c-747d-8000-00000000047d",
+  "message_id": "01928f3a-7b2c-7000-8000-000000005025",
   "idempotency_key": "knowledge.count_contributions.reply:NNVUSHUIPbTbLCqD9i6Eb1mUtFp0sGZpiv8OSNbIXAQ",
   "issuer": {
     "installation": "install_example",
@@ -24,9 +24,9 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "ok",
-    "total": 3
+    "total": 1
   },
   "causation_id": "01928f3a-7b2c-747c-8000-00000000047c",
-  "body_digest": "F8GSyUbMZzCl0QILOnG2kLVmGGLJKren3N768_sXgz0",
-  "signature": "ONCSyku7e8KTQng_Fv8oerQUbQ--1S1cTsTk4TZ1HO3gus2xhHRwAZLcDNeBIaIlyFsRcGh5sCOcupwdqih2Bw"
+  "body_digest": "GQvwulcfLumjizwiHLWEOR7Az39NlLOYY68ZXv148uM",
+  "signature": "Mcv7wfbIf-mIoeejxI0rUMCcWkrCHVvLBFKu5HWuKm49WsdtwJc7NxEQSNpodnitH2kB2vmgTGytBVWjf5EcBg"
 }

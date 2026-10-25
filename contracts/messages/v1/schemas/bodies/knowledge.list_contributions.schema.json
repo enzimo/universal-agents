@@ -5,6 +5,9 @@
   "description": "Contributions waiting for a curator.",
   "type": "object",
   "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
     "offset": {
       "type": "integer",
       "minimum": 0,
@@ -13,10 +16,11 @@
     "limit": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 20
+      "maximum": 100
     }
   },
   "required": [
+    "request_id",
     "offset",
     "limit"
   ],

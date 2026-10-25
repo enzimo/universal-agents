@@ -48,7 +48,7 @@
   "body": {
     "request_id": "request_id_3",
     "person_steering_id": "person_steering_id_1",
-    "root_task_id": "root_task_id_1",
+    "root_task_id": "task_root_7f",
     "decision": {
       "type": "decided",
       "actions": [
@@ -68,6 +68,6 @@
       ]
     }
   },
-  "body_digest": "LCwaaXjUElI9iuvo4DeNoKu4Da22ep9dP257Eifa1JI",
-  "signature": "ZTJvSwyrs0R5lj1gvwsj7OUXSDxqsWcc6-L4vhz6eH9TA1a_-fi33PYolfUUFwCO2X8CtMeNncpgeiNly1mwAw"
+  "body_digest": "xRUuiUtWujSbtLFoQwxqmbVP3NQ2Fra71YvdgCCB1HQ",
+  "signature": "HM3t-e7iV7tH2LsM-Xujwm0YKEoWG1qDibKqVzicdNVJGGPMCyp8MNoe5zV86BvBNfmxzhPrrq__8-am1BhoCQ"
 }

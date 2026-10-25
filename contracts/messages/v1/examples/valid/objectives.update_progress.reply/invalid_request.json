@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.update_progress.reply",
+  "message_id": "2e9d2e6e-49b0-798d-b1ce-5268c11f2bfc",
+  "idempotency_key": "objectives.update_progress.reply:k10iPbSW0dhruvqmDkwE-2Ar1w0Oufm5xt-rOyrEeQ4",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.3d740b60-fe89-7263-b4b0-0be545af1070",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "invalid_request",
+    "message": "The supplied task context or change inputs are invalid."
+  },
+  "causation_id": "3d740b60-fe89-7263-b4b0-0be545af1070",
+  "body_digest": "0QfcwyPq1fH1-2irAaCMn1LcoQlM4tgbHb6b4_K7VLQ",
+  "signature": "H39ln_78ju2gHazpGzzBhjnKUQoeEGlQyJyPUlrPqY24PNtf-6Gm95TCZmM55OqML7FrGaJWXrqAfTnrUohjDw"
+}

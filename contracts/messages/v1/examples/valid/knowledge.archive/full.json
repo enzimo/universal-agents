@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.archive",
   "message_id": "01928f3a-7b2c-7473-8000-000000000473",
-  "idempotency_key": "knowledge.archive:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "knowledge.archive:NlfOPs0swjBJZj8pe5waJp8m29V7_Q-Cy56Dsb3Wzj8",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -35,21 +35,21 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000128"
+      "id": "kb_archive_full"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "COtUc57OgqamcurXJvK2r25uoviUTWASs9j9AAQbJNVsmka_8hmMoRA564Pd1es8EWCPIKlzxTs01iEMpnP7AQ"
+    "signature": "JTaBuUfOmE_QXdS0197pvNRLzc_uLLEZYcyRpqBsYwsfrkyZ3oEcoxjQOqXIUmIiFeqtMZC0la7kxktwJ64XCg"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
+    "request_id": "kb_archive_full",
     "space": "team",
-    "page": "Example page",
-    "seen_version": "v3",
-    "reason": "These instructions have been replaced."
+    "page": "deployment-guide",
+    "seen_version": "3",
+    "reason": "Archived on the Web Chat Knowledge page"
   },
-  "body_digest": "6aQ_CbAuOi-orCDjHHVsjJrddKftTckfqOb-3i9MpSI",
-  "signature": "O5VqAhsr-cM8ioON9WBAs3R4go1iAUJkojChzw3gD8E9etTE0Rofmvvq-kGXNZASv1orVCw6yQL1VJd7NwgZCw"
+  "body_digest": "nTNO3HAJj2t8wnxQSQ4rdT0iJnVfQ7kEovfUHvAW8fg",
+  "signature": "OhnCKgNNWYBGiqotb4KyyEJkJ7Ps6iseXAXNCw_aL3UWsrpe1TQrYU_PK88fpZdVbYB1xu55_UYdWZ6PTMBqDQ"
 }

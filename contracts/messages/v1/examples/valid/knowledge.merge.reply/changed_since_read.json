@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.merge.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000503e",
+  "idempotency_key": "knowledge.merge.reply:Hi37DH-S3NcF8c2rLrMV4DXCVGQUWIpsqCNXyqdqNtc",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7494-8000-000000000494",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "changed_since_read",
+    "message": "This page changed after it was read. Read revision 4 before trying again.",
+    "current_version": "4"
+  },
+  "causation_id": "01928f3a-7b2c-7494-8000-000000000494",
+  "body_digest": "jiJZgmeL3qBcc4-D5bBVyRmQZTnqvZDjvyIli3siUxo",
+  "signature": "6pwcTkQt5tI9KjAhO4gYl9Q4bU74wMvGJZrCgvimm2xIGsYBa1NjLSvsMJowN9-M8QY1TYfx8Uy0geU76iNhCQ"
+}

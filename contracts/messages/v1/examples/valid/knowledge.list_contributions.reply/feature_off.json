@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.list_contributions.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-000000005039",
+  "idempotency_key": "knowledge.list_contributions.reply:GGUqfmvlg7YLUACTzz1x6fa_eGyo-RDiE62ruRolRU8",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7479-8000-000000000479",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "feature_off",
+    "message": "The knowledge base is turned off."
+  },
+  "causation_id": "01928f3a-7b2c-7479-8000-000000000479",
+  "body_digest": "Rw5tTRllfMGBx_-yqUaAmYCLZ_65lO4xH9TXp8UFl1g",
+  "signature": "SfV0Dldt7cTtK1JwmZyrIypku5CLohx0_a_oGlPrWx5M0pHWwmB94gFceddGBgSc-3eVWVvspVjI-SFzqAG4Dw"
+}

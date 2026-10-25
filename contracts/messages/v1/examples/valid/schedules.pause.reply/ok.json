@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.pause.reply",
   "message_id": "01928f3a-7b2c-7432-8000-000000000432",
-  "idempotency_key": "schedules.pause.reply:-yCHIY59eY2MacxxD0qE9ab5UHTZnYhdqpoW_UxHtYA",
+  "idempotency_key": "schedules.pause.reply:LQiDPVp5RsHzLW_FFf4c4deh8Ky55lwrNgwG1q3sHXs",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -26,9 +26,12 @@
     "outcome": "ok",
     "state": "paused",
     "schedule_id": "schedule_id_1",
-    "seen_version": "v3"
+    "version": {
+      "state": "available",
+      "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc"
+    }
   },
   "causation_id": "01928f3a-7b2c-7431-8000-000000000431",
-  "body_digest": "41_ZrYCU-Qsz4EI0iEVDA1E599QcP3TiAed-HH_R5E0",
-  "signature": "CsEnBEcl7f0czvQYSGtd30qcAskARJavjZ1IFv-DIR8RF5vgRn7_rmqoPeH55N7KE284VHghPle_0-2K5p2kAQ"
+  "body_digest": "vH-Z1fGLuItSNBC90SMJhzbaVvMvhVZ101xWui1n91g",
+  "signature": "7fsQhrpnyJ6cfx35-KWM51VYBkm24gaCsHB-a6PHhD8VGFy6ABKuM1EQUyY_8r5lDaBBvCQFhcU6AibVuVy9Ag"
 }

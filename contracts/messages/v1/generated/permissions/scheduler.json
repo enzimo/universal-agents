@@ -1,4 +1,8 @@
 {
+  "allow_responses": {
+    "expires": "38s",
+    "max": 1
+  },
   "publish": [
     "ua.v1._install.{self}.svc.host.join",
     "ua.v1._install.{self}.svc.host.renew",
@@ -10,6 +14,7 @@
   ],
   "role": "scheduler",
   "subscribe": [
-    "_INBOX.{self}.>"
+    "_INBOX.{self}.>",
+    "ua.v1.{team}.*.svc.team.run_context.sign"
   ]
 }

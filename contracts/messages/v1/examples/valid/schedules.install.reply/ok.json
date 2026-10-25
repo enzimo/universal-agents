@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.install.reply",
   "message_id": "01928f3a-7b2c-743e-8000-00000000043e",
-  "idempotency_key": "schedules.install.reply:LWblt63rLEr4T9SOrHefR68purxwUSxYu8EdkxVRfJA",
+  "idempotency_key": "schedules.install.reply:roUjRR04DScKpTKxHAlHPicgKcAwBsXjOovk1Gv6ToI",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -26,11 +26,14 @@
     "outcome": "ok",
     "state": "installed",
     "schedule_id": "schedule_id_1",
-    "seen_version": "v3",
     "timing_revision": 3,
-    "next_fire_at": "2026-10-22T04:30:00.000Z"
+    "next_fire_at": "2026-10-23T09:00:00.000Z",
+    "version": {
+      "state": "available",
+      "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc"
+    }
   },
   "causation_id": "01928f3a-7b2c-743d-8000-00000000043d",
-  "body_digest": "4GipA4-bJ5ooZH595zQSrcOYseMILxDX0JZbgC4ZDoo",
-  "signature": "JHdgfYKD9w919JRdFlEb6spu__5xvx1c4YYzJvYFAucmOl7Z909xNrBNXBoXUFVVzP5qDLKMFbat4J_9O_BxAA"
+  "body_digest": "9zbmgHvp1PzcCfMRECsjp3Qoewb45SzzfykmKTgzv1I",
+  "signature": "iNCezQD6HXCPf3Jg92tLkrCOQeoZWyDObtRAMGavsz1-lHdlwmP87_IUSVpY9YQiGz0herLfs8rCFyYH8Hm1AA"
 }

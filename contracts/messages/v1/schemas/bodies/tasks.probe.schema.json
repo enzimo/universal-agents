@@ -5,11 +5,15 @@
   "description": "Whether a task the person owns is still known.",
   "type": "object",
   "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
     "task_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
     }
   },
   "required": [
+    "request_id",
     "task_id"
   ],
   "additionalProperties": false

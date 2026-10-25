@@ -1,0 +1,52 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "memory.undo.reply",
+  "message_id": "be6bb370-fcb0-74b1-bc83-6683add10492",
+  "idempotency_key": "memory.undo.reply:Fl7LgHoc1FO_wE8iMcF7rEofMdtx4gM04NYjKISAL3Y",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.285bc801-fab7-7d9c-be30-3994b98f8b56",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "event_id": "mem_event_undo_3",
+    "undone_event_id": "mem_event_expire_3",
+    "undone_event_type": "expire",
+    "fact": {
+      "memory_id": 3,
+      "fact_text": {
+        "type": "inline",
+        "text": "Use UTC when recording deployment times."
+      },
+      "valid_from": "2026-10-21T04:30:00.000Z",
+      "tags": [
+        "operations",
+        "deployment"
+      ],
+      "metadata_json": "{\"resume_section\":\"deployment\"}",
+      "created_at": "2026-10-21T04:30:00.000Z",
+      "updated_at": "2026-10-22T04:30:00.000Z",
+      "seen_version": "2362cd12f9375d435c9f1568c042e2de180039efc42b7c76bb1fc1bdbd26439e",
+      "expires": "2026-10-22T04:29:00.000Z"
+    },
+    "deleted": false
+  },
+  "causation_id": "285bc801-fab7-7d9c-be30-3994b98f8b56",
+  "body_digest": "_ZhfyU3ARIvCvjBMi6sPkFPz6AhBfzxCQPUJEGg9gFg",
+  "signature": "VdPFD44hrMC3LWcMq8bCziM5wVlMbfEi4XJ2aaghrTyTOJo1ErVj9Rf4gymOV0vq9ry9pjn133inOMzS-LMjBw"
+}

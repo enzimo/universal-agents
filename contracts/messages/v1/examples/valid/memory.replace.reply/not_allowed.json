@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "memory.replace.reply",
   "message_id": "01928f3a-7b2c-7454-8000-000000000454",
-  "idempotency_key": "memory.replace.reply:z8FIgiByAaO-Ruxl1VUzbdUcWlFoE6wBKN8CBuULs8c",
+  "idempotency_key": "memory.replace.reply:gAXERhIXrOTTSQEEYEJNwsHT90PVC48szIhD5NAEXX8",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -24,9 +24,9 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "not_allowed",
-    "message": "Example short text"
+    "message": "This task cannot change this memory bank."
   },
   "causation_id": "01928f3a-7b2c-7452-8000-000000000452",
-  "body_digest": "ndygni9OJ0mKj0moIMNE8d_WpJsDHbcv-NSrk03DUfg",
-  "signature": "A2ZBUrCj0fVkX25g3p10A4VSS0VmWx-v0nbcmlxMpEiSoBGwEYuLC-1zHXwK2EsvTSYxlWac9ORfl8NNU8NBDQ"
+  "body_digest": "4A_txQeZ-LukNFKjQUB4MbjA5PerbYaKR_QnObNzTYE",
+  "signature": "tHSXJ6xQxorRJUJGP9VVAtWxQoVb-Wy9fOGLk5CPcamYd4LJOJqPGQ5I-xrxqj72SfmNfWKP7yx-q9KBkz0QBA"
 }

@@ -58,7 +58,8 @@
             "fill_per_mille": {
               "type": "integer",
               "minimum": 0,
-              "maximum": 1000
+              "maximum": 1000000,
+              "description": "Estimated tokens divided by window tokens, multiplied by 1000 and rounded; may exceed 1000."
             },
             "pressure": {
               "type": "string",
@@ -77,17 +78,20 @@
             "fill_per_mille",
             "pressure"
           ],
-          "additionalProperties": false
+          "additionalProperties": false,
+          "description": "Present only when the agent has a current context measurement. An idle agent need not invent token estimates."
         },
         "tool_call_budget_per_mille": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 1000
+          "maximum": 1000000,
+          "description": "Ratio multiplied by 1000 and rounded to the nearest integer; may exceed 1000."
         },
         "tool_result_budget_per_mille": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 1000
+          "maximum": 1000000,
+          "description": "Ratio multiplied by 1000 and rounded to the nearest integer; may exceed 1000."
         },
         "tools": {
           "type": "array",
@@ -118,10 +122,9 @@
               "severity": {
                 "type": "string",
                 "enum": [
-                  "info",
+                  "problem",
                   "warning",
-                  "error",
-                  "critical"
+                  "note"
                 ]
               },
               "title": {
@@ -179,11 +182,7 @@
         "exiting",
         "queued",
         "waiting",
-        "deferred",
-        "context",
-        "tools",
-        "skills",
-        "findings"
+        "deferred"
       ],
       "additionalProperties": false
     },

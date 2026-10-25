@@ -1,0 +1,67 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.publish_contribution",
+  "message_id": "01928f3a-7b2c-7000-8000-0000000050aa",
+  "idempotency_key": "knowledge.publish_contribution:esKvkX-0mmcVHlouRR1v96ISyboYcuB7ZKZefQMHdFE",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.knowledge.publish_contribution",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7000-8000-0000000050ab",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "command",
+      "id": "kb_command_0000000050aa"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "6dvd8vrH1TJ7c4F83FJUUK25Nn2YcsW4Cvvq58b-xZg1wQueAo5H8Lxn8uiOzRh6clkYh1abg-3Z5xdmrHJzCA"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "kb_command_0000000050aa",
+    "contribution_id": "kb_contrib_7f",
+    "seen_version": "3",
+    "edited": true,
+    "title": "Deployment guide",
+    "summary": "Steps to review and deploy a release.",
+    "tags": [
+      "releases"
+    ],
+    "content": {
+      "type": "blob",
+      "ref": {
+        "sha256": "MxyxSXdOhwdXCOqhAPTHkPhDNcowarb5sdIkSWMXc8I",
+        "size": 81,
+        "media_type": "text/plain"
+      }
+    }
+  },
+  "body_digest": "ob9ysw6t_B7ilqWtOY_QF0GKKxhslmdZRO74ZbsNEW0",
+  "signature": "03t96JfB9b765S4P_bhdQ7xASrKjHeR2Byog5Se6L4i-D6I0GiBCN3je5TMIgXfa_66WPG3yIxJfq17rxMfTDQ"
+}

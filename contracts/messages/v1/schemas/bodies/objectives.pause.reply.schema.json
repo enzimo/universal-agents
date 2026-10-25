@@ -29,7 +29,8 @@
           ]
         },
         "seen_version": {
-          "$ref": "../common.schema.json#/$defs/record_version"
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         },
         "incomplete": {
           "type": "array",
@@ -143,14 +144,16 @@
           "const": "changed_since_read"
         },
         "current_version": {
-          "$ref": "../common.schema.json#/$defs/record_version"
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         },
         "message": {
           "$ref": "../common.schema.json#/$defs/short_text"
         }
       },
       "required": [
-        "outcome"
+        "outcome",
+        "current_version"
       ],
       "additionalProperties": false
     },

@@ -42,9 +42,7 @@
                 "maxLength": 500
               },
               "blocker": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 2000
+                "$ref": "../common.schema.json#/$defs/text_content"
               },
               "children": {
                 "type": "array",
@@ -74,12 +72,19 @@
                   "additionalProperties": false
                 },
                 "maxItems": 200
+              },
+              "children_total": {
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "next_child_offset": {
+                "$ref": "../common.schema.json#/$defs/count"
               }
             },
             "required": [
               "root_task_id",
               "state",
-              "children"
+              "children",
+              "children_total"
             ],
             "additionalProperties": false
           },
@@ -103,22 +108,31 @@
               },
               "enabled": {
                 "type": "boolean"
+              },
+              "objective_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
               }
             },
             "required": [
               "schedule_id",
-              "name",
               "enabled"
             ],
             "additionalProperties": false
           },
           "maxItems": 100
+        },
+        "total": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "next_offset": {
+          "$ref": "../common.schema.json#/$defs/count"
         }
       },
       "required": [
         "outcome",
         "roots",
-        "schedules"
+        "schedules",
+        "total"
       ],
       "additionalProperties": false
     },

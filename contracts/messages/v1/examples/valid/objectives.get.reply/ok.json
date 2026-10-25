@@ -1,0 +1,146 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.get.reply",
+  "message_id": "8ca6309b-2486-7f5a-80c8-7fe77dcdec19",
+  "idempotency_key": "objectives.get.reply:K8ghpJAFDVsIcqUwIUuUtSn0yvxHO9afgzJM-MArF-M",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.f97acc24-19ba-709d-b590-27cffadad8bd",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "objective_id": "objective_dependency_watch",
+    "seen_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+    "objective": {
+      "type": "inline",
+      "value": {
+        "objective_id": "objective_dependency_watch",
+        "title": {
+          "type": "inline",
+          "text": "Track recurring dependency checks"
+        },
+        "desired_outcome": {
+          "type": "inline",
+          "text": "Keep the dependency report current and notify the person about actionable changes."
+        },
+        "why": {
+          "type": "inline",
+          "text": "The person needs to notice changes before the next release."
+        },
+        "status": "active",
+        "horizon": "recurring",
+        "priority": "normal",
+        "completion_policy": "recurring_indefinite",
+        "success_criteria": [
+          {
+            "criterion_id": "criterion_sources_verified",
+            "description": {
+              "type": "inline",
+              "text": "The report lists each affected dependency and its advisory source."
+            },
+            "status": "open",
+            "evidence_summary": {
+              "type": "inline",
+              "text": "The saved report includes a source and checked version for each dependency."
+            },
+            "updated_at": "2026-10-22T04:30:00.000Z"
+          }
+        ],
+        "constraints": [
+          {
+            "type": "inline",
+            "text": "The remaining advisory needs a verified affected-version range."
+          }
+        ],
+        "non_goals": [
+          {
+            "type": "inline",
+            "text": "The remaining advisory needs a verified affected-version range."
+          }
+        ],
+        "progress_summary": {
+          "type": "inline",
+          "text": "The initial report is saved; the next run will compare new advisories."
+        },
+        "current_focus": {
+          "type": "inline",
+          "text": "Verify the two advisories added since the previous checkpoint."
+        },
+        "owner_agent_id": "manager_scope:team_example:TeamArchitect",
+        "owner_agent_name": "Team lead",
+        "owner_person": "person_7c1",
+        "team_id": "team_example",
+        "owner_named_agent_type": "TeamArchitect",
+        "root_conversation_id": "conversation_dependency_watch",
+        "created_by_task_id": "task_root_7f",
+        "promoted_from_task_id": "task_root_7f",
+        "current_plan_id": "plan_dependency_watch",
+        "plan_ids": [
+          "plan_dependency_watch"
+        ],
+        "related_task_ids": [
+          "task_root_7f"
+        ],
+        "recovery_task_ids": [],
+        "schedule_links": [
+          {
+            "schedule_id": "schedule_dependency_watch",
+            "managed_by_objective": true,
+            "disabled_by_objective_pause": false,
+            "linked_at": "2026-10-22T04:30:00.000Z"
+          }
+        ],
+        "heartbeat_links": [
+          {
+            "heartbeat_item_id": "heartbeat_dependency_watch",
+            "managed_by_objective": true,
+            "disabled_by_objective_pause": false,
+            "linked_at": "2026-10-22T04:30:00.000Z"
+          }
+        ],
+        "event_log": [
+          {
+            "event_id": "event_dependency_watch",
+            "event_type": "progress_updated",
+            "summary": {
+              "type": "inline",
+              "text": "The person asked to pause this work until the next release window."
+            },
+            "task_id": "task_root_7f",
+            "plan_id": "plan_dependency_watch",
+            "schedule_id": "schedule_dependency_watch",
+            "heartbeat_item_id": "heartbeat_dependency_watch",
+            "user_visible": true,
+            "details_json": "{\"checked_dependencies\": 12, \"new_advisories\": 2}",
+            "created_at": "2026-10-21T04:30:00.000Z"
+          }
+        ],
+        "requires_user_confirmation": false,
+        "created_at": "2026-10-21T04:30:00.000Z",
+        "updated_at": "2026-10-22T04:30:00.000Z"
+      }
+    },
+    "markdown": {
+      "type": "inline",
+      "text": "# Track recurring dependency checks\n\nThe initial report is saved. Next, verify two new advisories."
+    }
+  },
+  "causation_id": "f97acc24-19ba-709d-b590-27cffadad8bd",
+  "body_digest": "rc-nzDfHHFqbTvmbV2YZrcLknmpQTzVVkNe9u5ruvhc",
+  "signature": "3cFibdeODrKCY5M1OOnX5qnD4BZtR7xj13nmFV7AEDE9x3YKlZIxe0jYaYTvr0Ac2QMzq-b_imbrEq5mRebGBQ"
+}

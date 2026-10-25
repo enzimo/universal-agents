@@ -24,9 +24,9 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "invalid_request",
-    "message": "Example short text"
+    "message": "The supplied values are not valid for this operation."
   },
   "causation_id": "01928f3a-7b2c-745e-8000-00000000045e",
-  "body_digest": "Wb7pwT_XEZMJ0bZaiqTqRGC9zbnVYfR8Cpz0le0MVnU",
-  "signature": "whg6v6p0J5HmZgHPj7hFE75yxHhoOEa6n5VEiZaTNqdwsoCmUx4B_DOg_IyujIbGcsXSf2djCXeZjsaYqArSCQ"
+  "body_digest": "DCWApkhsi_ZEB5-VA9txkNuj8IFpFrLzfNp5hupW0LQ",
+  "signature": "DDULfd_DeKnMHG1ZB9hXKyBfunewtF0doYZJt7-0si5B5Hx7qBYIjIJvj5RRixtCTSCCushMeJvt0Nh2hSvSAA"
 }

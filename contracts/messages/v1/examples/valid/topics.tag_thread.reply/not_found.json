@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "topics.tag_thread.reply",
   "message_id": "01928f3a-7b2c-7463-8000-000000000463",
-  "idempotency_key": "topics.tag_thread.reply:m7QbPK9czwdQqjalc0nGefQPG4U7s0mCB2xokw9XG6E",
+  "idempotency_key": "topics.tag_thread.reply:sXUyz6Lhuppo_B0_vhqip9z-ku65lEuJngThLeP0r38",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -24,9 +24,9 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "not_found",
-    "message": "Example short text"
+    "message": "The named record no longer exists."
   },
   "causation_id": "01928f3a-7b2c-7461-8000-000000000461",
-  "body_digest": "kjF9c_l0diFRNuvYGjQmkStmu5fcSEld8Fzu2xnpRcU",
-  "signature": "9Kt7UMgU75rZUbrT60sbQ9fGjRs7QWY6ezRuOvFJY8VKYT5x88NdksPlIHdGKXOZBWZ2wK6CDoMAXbpE5AGVDw"
+  "body_digest": "iMGS3JzlC67jiHbH7dsCnNHKgm3LJgDWOB9T1RtBUeM",
+  "signature": "IfPYn1-UZZJBV02K7pQZdB0LOcEG-ZSaQq0C-CELhaXzWgJ4J45TqePhw_hTnkNAB7fGdkKk13dMY_jyZ2BaCg"
 }

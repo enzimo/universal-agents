@@ -26,31 +26,601 @@
     "outcome": "ok",
     "schedules": [
       {
-        "schedule_id": "schedule_id_1",
-        "name": "Example name",
+        "schedule_id": "sched_user_interval_inline",
         "management_class": "user",
-        "system_schedule_kind": "unclassified",
         "objective_id": "objective_id_1",
-        "instruction_preview": "Example instruction preview",
+        "instruction_preview": "Review documentation and report material changes.",
         "timing": {
           "kind": "interval",
-          "interval_ms": 1000
+          "interval_ms": 86400000
         },
-        "next_fire_at": "2026-10-22T04:30:00.000Z",
-        "paused_until": "2026-10-22T04:30:00.000Z",
-        "expires_at": "2026-10-22T04:30:00.000Z",
+        "next_fire_at": "2026-10-23T09:00:00.000Z",
+        "paused_until": "2026-10-23T09:00:00.000Z",
+        "expires_at": "2026-11-22T09:00:00.000Z",
         "enabled": true,
         "timing_revision": 3,
-        "seen_version": "v3",
+        "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
         "worker": {
-          "agent_type": "token_id_1",
-          "agent_id": "token_id_1"
+          "automatic_creation": "not_configured",
+          "upgrade_required": false,
+          "reassignment_pending": true,
+          "desired_agent_type": "WebResearchAgent",
+          "not_running_since": "2026-10-22T04:30:00.000Z",
+          "not_running_explanation": {
+            "type": "inline",
+            "text": "The assigned worker is unavailable. Inspect this schedule before enabling automatic startup."
+          }
+        },
+        "repeat_count": 0,
+        "run_notes": {
+          "schedule_kind": "product documentation / weekly review",
+          "policy": {
+            "notify": "on_change",
+            "notify_on_failure": true,
+            "evidence_required": "fresh authoritative source",
+            "custom_json": "{\"product\":\"example\",\"only_material_changes\":true}"
+          },
+          "state": {
+            "summary": "No material changes in the latest review.",
+            "confidence": "high",
+            "last_observed_at": "2026-10-22T04:30:00.000Z",
+            "last_changed_at": "2026-10-15T09:00:00.000Z",
+            "domain_json": "{\"last_release\":\"0.9.8\"}"
+          },
+          "domain_schema_hint_json": "{\"last_release\":\"string\"}"
         }
+      },
+      {
+        "schedule_id": "sched_user_interval_blob",
+        "management_class": "user",
+        "objective_id": "objective_id_1",
+        "instruction_preview": "Review documentation and report material changes.",
+        "timing": {
+          "kind": "interval",
+          "interval_ms": 86400000
+        },
+        "next_fire_at": "2026-10-23T09:00:00.000Z",
+        "paused_until": "2026-10-23T09:00:00.000Z",
+        "expires_at": "2026-11-22T09:00:00.000Z",
+        "enabled": true,
+        "timing_revision": 3,
+        "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+        "worker": {
+          "automatic_creation": "not_configured",
+          "upgrade_required": false,
+          "reassignment_pending": true,
+          "desired_agent_type": "WebResearchAgent",
+          "not_running_since": "2026-10-22T04:30:00.000Z",
+          "not_running_explanation": {
+            "type": "blob",
+            "ref": {
+              "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+              "size": 40960,
+              "media_type": "text/plain",
+              "name": "review-instructions.txt"
+            }
+          }
+        },
+        "repeat_count": 0,
+        "run_notes": {
+          "schedule_kind": "product documentation / weekly review",
+          "policy": {
+            "notify": "on_change",
+            "notify_on_failure": true,
+            "evidence_required": "fresh authoritative source",
+            "custom_json": "{\"product\":\"example\",\"only_material_changes\":true}"
+          },
+          "state": {
+            "summary": "No material changes in the latest review.",
+            "confidence": "high",
+            "last_observed_at": "2026-10-22T04:30:00.000Z",
+            "last_changed_at": "2026-10-15T09:00:00.000Z",
+            "domain_json": "{\"last_release\":\"0.9.8\"}"
+          },
+          "domain_schema_hint_json": "{\"last_release\":\"string\"}"
+        }
+      },
+      {
+        "schedule_id": "sched_user_cron_inline",
+        "management_class": "user",
+        "objective_id": "objective_id_1",
+        "instruction_preview": "Review documentation and report material changes.",
+        "timing": {
+          "kind": "cron",
+          "expression": "0 9 * * 1#2",
+          "time_zone": "Europe/Berlin"
+        },
+        "next_fire_at": "2026-10-23T09:00:00.000Z",
+        "paused_until": "2026-10-23T09:00:00.000Z",
+        "expires_at": "2026-11-22T09:00:00.000Z",
+        "enabled": true,
+        "timing_revision": 3,
+        "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+        "worker": {
+          "automatic_creation": "not_configured",
+          "upgrade_required": false,
+          "reassignment_pending": true,
+          "desired_agent_type": "WebResearchAgent",
+          "not_running_since": "2026-10-22T04:30:00.000Z",
+          "not_running_explanation": {
+            "type": "inline",
+            "text": "The assigned worker is unavailable. Inspect this schedule before enabling automatic startup."
+          }
+        },
+        "repeat_count": 0,
+        "run_notes": {
+          "schedule_kind": "product documentation / weekly review",
+          "policy": {
+            "notify": "on_change",
+            "notify_on_failure": true,
+            "evidence_required": "fresh authoritative source",
+            "custom_json": "{\"product\":\"example\",\"only_material_changes\":true}"
+          },
+          "state": {
+            "summary": "No material changes in the latest review.",
+            "confidence": "high",
+            "last_observed_at": "2026-10-22T04:30:00.000Z",
+            "last_changed_at": "2026-10-15T09:00:00.000Z",
+            "domain_json": "{\"last_release\":\"0.9.8\"}"
+          },
+          "domain_schema_hint_json": "{\"last_release\":\"string\"}"
+        }
+      },
+      {
+        "schedule_id": "sched_user_cron_blob",
+        "management_class": "user",
+        "objective_id": "objective_id_1",
+        "instruction_preview": "Review documentation and report material changes.",
+        "timing": {
+          "kind": "cron",
+          "expression": "0 9 * * 1#2",
+          "time_zone": "Europe/Berlin"
+        },
+        "next_fire_at": "2026-10-23T09:00:00.000Z",
+        "paused_until": "2026-10-23T09:00:00.000Z",
+        "expires_at": "2026-11-22T09:00:00.000Z",
+        "enabled": true,
+        "timing_revision": 3,
+        "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+        "worker": {
+          "automatic_creation": "not_configured",
+          "upgrade_required": false,
+          "reassignment_pending": true,
+          "desired_agent_type": "WebResearchAgent",
+          "not_running_since": "2026-10-22T04:30:00.000Z",
+          "not_running_explanation": {
+            "type": "blob",
+            "ref": {
+              "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+              "size": 40960,
+              "media_type": "text/plain",
+              "name": "review-instructions.txt"
+            }
+          }
+        },
+        "repeat_count": 0,
+        "run_notes": {
+          "schedule_kind": "product documentation / weekly review",
+          "policy": {
+            "notify": "on_change",
+            "notify_on_failure": true,
+            "evidence_required": "fresh authoritative source",
+            "custom_json": "{\"product\":\"example\",\"only_material_changes\":true}"
+          },
+          "state": {
+            "summary": "No material changes in the latest review.",
+            "confidence": "high",
+            "last_observed_at": "2026-10-22T04:30:00.000Z",
+            "last_changed_at": "2026-10-15T09:00:00.000Z",
+            "domain_json": "{\"last_release\":\"0.9.8\"}"
+          },
+          "domain_schema_hint_json": "{\"last_release\":\"string\"}"
+        }
+      },
+      {
+        "schedule_id": "sched_user_once_inline",
+        "management_class": "user",
+        "objective_id": "objective_id_1",
+        "instruction_preview": "Review documentation and report material changes.",
+        "timing": {
+          "kind": "once",
+          "at": "2026-10-23T09:00:00.000Z"
+        },
+        "next_fire_at": "2026-10-23T09:00:00.000Z",
+        "paused_until": "2026-10-23T09:00:00.000Z",
+        "expires_at": "2026-11-22T09:00:00.000Z",
+        "enabled": true,
+        "timing_revision": 3,
+        "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+        "worker": {
+          "automatic_creation": "not_configured",
+          "upgrade_required": false,
+          "reassignment_pending": true,
+          "desired_agent_type": "WebResearchAgent",
+          "not_running_since": "2026-10-22T04:30:00.000Z",
+          "not_running_explanation": {
+            "type": "inline",
+            "text": "The assigned worker is unavailable. Inspect this schedule before enabling automatic startup."
+          }
+        },
+        "repeat_count": 0,
+        "run_notes": {
+          "schedule_kind": "product documentation / weekly review",
+          "policy": {
+            "notify": "on_change",
+            "notify_on_failure": true,
+            "evidence_required": "fresh authoritative source",
+            "custom_json": "{\"product\":\"example\",\"only_material_changes\":true}"
+          },
+          "state": {
+            "summary": "No material changes in the latest review.",
+            "confidence": "high",
+            "last_observed_at": "2026-10-22T04:30:00.000Z",
+            "last_changed_at": "2026-10-15T09:00:00.000Z",
+            "domain_json": "{\"last_release\":\"0.9.8\"}"
+          },
+          "domain_schema_hint_json": "{\"last_release\":\"string\"}"
+        }
+      },
+      {
+        "schedule_id": "sched_user_once_blob",
+        "management_class": "user",
+        "objective_id": "objective_id_1",
+        "instruction_preview": "Review documentation and report material changes.",
+        "timing": {
+          "kind": "once",
+          "at": "2026-10-23T09:00:00.000Z"
+        },
+        "next_fire_at": "2026-10-23T09:00:00.000Z",
+        "paused_until": "2026-10-23T09:00:00.000Z",
+        "expires_at": "2026-11-22T09:00:00.000Z",
+        "enabled": true,
+        "timing_revision": 3,
+        "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+        "worker": {
+          "automatic_creation": "not_configured",
+          "upgrade_required": false,
+          "reassignment_pending": true,
+          "desired_agent_type": "WebResearchAgent",
+          "not_running_since": "2026-10-22T04:30:00.000Z",
+          "not_running_explanation": {
+            "type": "blob",
+            "ref": {
+              "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+              "size": 40960,
+              "media_type": "text/plain",
+              "name": "review-instructions.txt"
+            }
+          }
+        },
+        "repeat_count": 0,
+        "run_notes": {
+          "schedule_kind": "product documentation / weekly review",
+          "policy": {
+            "notify": "on_change",
+            "notify_on_failure": true,
+            "evidence_required": "fresh authoritative source",
+            "custom_json": "{\"product\":\"example\",\"only_material_changes\":true}"
+          },
+          "state": {
+            "summary": "No material changes in the latest review.",
+            "confidence": "high",
+            "last_observed_at": "2026-10-22T04:30:00.000Z",
+            "last_changed_at": "2026-10-15T09:00:00.000Z",
+            "domain_json": "{\"last_release\":\"0.9.8\"}"
+          },
+          "domain_schema_hint_json": "{\"last_release\":\"string\"}"
+        }
+      },
+      {
+        "schedule_id": "sched_system_interval_inline",
+        "name": "Review product documentation",
+        "management_class": "system",
+        "objective_id": "objective_id_1",
+        "instruction_preview": "Review documentation and report material changes.",
+        "timing": {
+          "kind": "interval",
+          "interval_ms": 86400000
+        },
+        "next_fire_at": "2026-10-23T09:00:00.000Z",
+        "paused_until": "2026-10-23T09:00:00.000Z",
+        "expires_at": "2026-11-22T09:00:00.000Z",
+        "enabled": true,
+        "timing_revision": 3,
+        "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+        "worker": {
+          "agent_type": "TeamArchitect",
+          "automatic_creation": "default_policy",
+          "upgrade_required": true,
+          "reassignment_pending": false,
+          "review_agent_type": "MemReviewAgent",
+          "not_running_since": "2026-10-22T04:30:00.000Z",
+          "not_running_explanation": {
+            "type": "inline",
+            "text": "The assigned worker is unavailable. Inspect this schedule before enabling automatic startup."
+          }
+        },
+        "repeat_count": 0,
+        "run_notes": {
+          "schedule_kind": "product documentation / weekly review",
+          "policy": {
+            "notify": "on_change",
+            "notify_on_failure": true,
+            "evidence_required": "fresh authoritative source",
+            "custom_json": "{\"product\":\"example\",\"only_material_changes\":true}"
+          },
+          "state": {
+            "summary": "No material changes in the latest review.",
+            "confidence": "high",
+            "last_observed_at": "2026-10-22T04:30:00.000Z",
+            "last_changed_at": "2026-10-15T09:00:00.000Z",
+            "domain_json": "{\"last_release\":\"0.9.8\"}"
+          },
+          "domain_schema_hint_json": "{\"last_release\":\"string\"}"
+        },
+        "system_schedule_kind": "memory_review_coremem"
+      },
+      {
+        "schedule_id": "sched_system_interval_blob",
+        "name": "Review product documentation",
+        "management_class": "system",
+        "objective_id": "objective_id_1",
+        "instruction_preview": "Review documentation and report material changes.",
+        "timing": {
+          "kind": "interval",
+          "interval_ms": 86400000
+        },
+        "next_fire_at": "2026-10-23T09:00:00.000Z",
+        "paused_until": "2026-10-23T09:00:00.000Z",
+        "expires_at": "2026-11-22T09:00:00.000Z",
+        "enabled": true,
+        "timing_revision": 3,
+        "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+        "worker": {
+          "agent_type": "TeamArchitect",
+          "automatic_creation": "default_policy",
+          "upgrade_required": true,
+          "reassignment_pending": false,
+          "review_agent_type": "MemReviewAgent",
+          "not_running_since": "2026-10-22T04:30:00.000Z",
+          "not_running_explanation": {
+            "type": "blob",
+            "ref": {
+              "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+              "size": 40960,
+              "media_type": "text/plain",
+              "name": "review-instructions.txt"
+            }
+          }
+        },
+        "repeat_count": 0,
+        "run_notes": {
+          "schedule_kind": "product documentation / weekly review",
+          "policy": {
+            "notify": "on_change",
+            "notify_on_failure": true,
+            "evidence_required": "fresh authoritative source",
+            "custom_json": "{\"product\":\"example\",\"only_material_changes\":true}"
+          },
+          "state": {
+            "summary": "No material changes in the latest review.",
+            "confidence": "high",
+            "last_observed_at": "2026-10-22T04:30:00.000Z",
+            "last_changed_at": "2026-10-15T09:00:00.000Z",
+            "domain_json": "{\"last_release\":\"0.9.8\"}"
+          },
+          "domain_schema_hint_json": "{\"last_release\":\"string\"}"
+        },
+        "system_schedule_kind": "memory_review_coremem"
+      },
+      {
+        "schedule_id": "sched_system_cron_inline",
+        "name": "Review product documentation",
+        "management_class": "system",
+        "objective_id": "objective_id_1",
+        "instruction_preview": "Review documentation and report material changes.",
+        "timing": {
+          "kind": "cron",
+          "expression": "0 9 * * 1#2",
+          "time_zone": "Europe/Berlin"
+        },
+        "next_fire_at": "2026-10-23T09:00:00.000Z",
+        "paused_until": "2026-10-23T09:00:00.000Z",
+        "expires_at": "2026-11-22T09:00:00.000Z",
+        "enabled": true,
+        "timing_revision": 3,
+        "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+        "worker": {
+          "agent_type": "TeamArchitect",
+          "automatic_creation": "default_policy",
+          "upgrade_required": true,
+          "reassignment_pending": false,
+          "review_agent_type": "MemReviewAgent",
+          "not_running_since": "2026-10-22T04:30:00.000Z",
+          "not_running_explanation": {
+            "type": "inline",
+            "text": "The assigned worker is unavailable. Inspect this schedule before enabling automatic startup."
+          }
+        },
+        "repeat_count": 0,
+        "run_notes": {
+          "schedule_kind": "product documentation / weekly review",
+          "policy": {
+            "notify": "on_change",
+            "notify_on_failure": true,
+            "evidence_required": "fresh authoritative source",
+            "custom_json": "{\"product\":\"example\",\"only_material_changes\":true}"
+          },
+          "state": {
+            "summary": "No material changes in the latest review.",
+            "confidence": "high",
+            "last_observed_at": "2026-10-22T04:30:00.000Z",
+            "last_changed_at": "2026-10-15T09:00:00.000Z",
+            "domain_json": "{\"last_release\":\"0.9.8\"}"
+          },
+          "domain_schema_hint_json": "{\"last_release\":\"string\"}"
+        },
+        "system_schedule_kind": "memory_review_coremem"
+      },
+      {
+        "schedule_id": "sched_system_cron_blob",
+        "name": "Review product documentation",
+        "management_class": "system",
+        "objective_id": "objective_id_1",
+        "instruction_preview": "Review documentation and report material changes.",
+        "timing": {
+          "kind": "cron",
+          "expression": "0 9 * * 1#2",
+          "time_zone": "Europe/Berlin"
+        },
+        "next_fire_at": "2026-10-23T09:00:00.000Z",
+        "paused_until": "2026-10-23T09:00:00.000Z",
+        "expires_at": "2026-11-22T09:00:00.000Z",
+        "enabled": true,
+        "timing_revision": 3,
+        "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+        "worker": {
+          "agent_type": "TeamArchitect",
+          "automatic_creation": "default_policy",
+          "upgrade_required": true,
+          "reassignment_pending": false,
+          "review_agent_type": "MemReviewAgent",
+          "not_running_since": "2026-10-22T04:30:00.000Z",
+          "not_running_explanation": {
+            "type": "blob",
+            "ref": {
+              "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+              "size": 40960,
+              "media_type": "text/plain",
+              "name": "review-instructions.txt"
+            }
+          }
+        },
+        "repeat_count": 0,
+        "run_notes": {
+          "schedule_kind": "product documentation / weekly review",
+          "policy": {
+            "notify": "on_change",
+            "notify_on_failure": true,
+            "evidence_required": "fresh authoritative source",
+            "custom_json": "{\"product\":\"example\",\"only_material_changes\":true}"
+          },
+          "state": {
+            "summary": "No material changes in the latest review.",
+            "confidence": "high",
+            "last_observed_at": "2026-10-22T04:30:00.000Z",
+            "last_changed_at": "2026-10-15T09:00:00.000Z",
+            "domain_json": "{\"last_release\":\"0.9.8\"}"
+          },
+          "domain_schema_hint_json": "{\"last_release\":\"string\"}"
+        },
+        "system_schedule_kind": "memory_review_coremem"
+      },
+      {
+        "schedule_id": "sched_system_once_inline",
+        "name": "Review product documentation",
+        "management_class": "system",
+        "objective_id": "objective_id_1",
+        "instruction_preview": "Review documentation and report material changes.",
+        "timing": {
+          "kind": "once",
+          "at": "2026-10-23T09:00:00.000Z"
+        },
+        "next_fire_at": "2026-10-23T09:00:00.000Z",
+        "paused_until": "2026-10-23T09:00:00.000Z",
+        "expires_at": "2026-11-22T09:00:00.000Z",
+        "enabled": true,
+        "timing_revision": 3,
+        "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+        "worker": {
+          "agent_type": "TeamArchitect",
+          "automatic_creation": "default_policy",
+          "upgrade_required": true,
+          "reassignment_pending": false,
+          "review_agent_type": "MemReviewAgent",
+          "not_running_since": "2026-10-22T04:30:00.000Z",
+          "not_running_explanation": {
+            "type": "inline",
+            "text": "The assigned worker is unavailable. Inspect this schedule before enabling automatic startup."
+          }
+        },
+        "repeat_count": 0,
+        "run_notes": {
+          "schedule_kind": "product documentation / weekly review",
+          "policy": {
+            "notify": "on_change",
+            "notify_on_failure": true,
+            "evidence_required": "fresh authoritative source",
+            "custom_json": "{\"product\":\"example\",\"only_material_changes\":true}"
+          },
+          "state": {
+            "summary": "No material changes in the latest review.",
+            "confidence": "high",
+            "last_observed_at": "2026-10-22T04:30:00.000Z",
+            "last_changed_at": "2026-10-15T09:00:00.000Z",
+            "domain_json": "{\"last_release\":\"0.9.8\"}"
+          },
+          "domain_schema_hint_json": "{\"last_release\":\"string\"}"
+        },
+        "system_schedule_kind": "memory_review_coremem"
+      },
+      {
+        "schedule_id": "sched_system_once_blob",
+        "name": "Review product documentation",
+        "management_class": "system",
+        "objective_id": "objective_id_1",
+        "instruction_preview": "Review documentation and report material changes.",
+        "timing": {
+          "kind": "once",
+          "at": "2026-10-23T09:00:00.000Z"
+        },
+        "next_fire_at": "2026-10-23T09:00:00.000Z",
+        "paused_until": "2026-10-23T09:00:00.000Z",
+        "expires_at": "2026-11-22T09:00:00.000Z",
+        "enabled": true,
+        "timing_revision": 3,
+        "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+        "worker": {
+          "agent_type": "TeamArchitect",
+          "automatic_creation": "default_policy",
+          "upgrade_required": true,
+          "reassignment_pending": false,
+          "review_agent_type": "MemReviewAgent",
+          "not_running_since": "2026-10-22T04:30:00.000Z",
+          "not_running_explanation": {
+            "type": "blob",
+            "ref": {
+              "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+              "size": 40960,
+              "media_type": "text/plain",
+              "name": "review-instructions.txt"
+            }
+          }
+        },
+        "repeat_count": 0,
+        "run_notes": {
+          "schedule_kind": "product documentation / weekly review",
+          "policy": {
+            "notify": "on_change",
+            "notify_on_failure": true,
+            "evidence_required": "fresh authoritative source",
+            "custom_json": "{\"product\":\"example\",\"only_material_changes\":true}"
+          },
+          "state": {
+            "summary": "No material changes in the latest review.",
+            "confidence": "high",
+            "last_observed_at": "2026-10-22T04:30:00.000Z",
+            "last_changed_at": "2026-10-15T09:00:00.000Z",
+            "domain_json": "{\"last_release\":\"0.9.8\"}"
+          },
+          "domain_schema_hint_json": "{\"last_release\":\"string\"}"
+        },
+        "system_schedule_kind": "memory_review_coremem"
       }
     ],
-    "total": 3
+    "total": 12
   },
   "causation_id": "01928f3a-7b2c-742e-8000-00000000042e",
-  "body_digest": "3wiPMudvSR1iabbnnmvROrRSpTW7z1-eHjwkTX9wTv8",
-  "signature": "ILzYpv8V9tK_VH8CCjXKzSs2WHmGSR5lvotFDuQ4yu-B5D4MsZ5bVsc_Yj-m6gunp7zreE5I13aVf0oSumxfBw"
+  "body_digest": "VOGr53jt-XKXZJ_SFuybf6XctvYUAjP-oteeejb44h0",
+  "signature": "iPsvM28pQM5ahvmaZ7Bm2FdiRtIDYNEgS-B2p8VTGznvDikaJMAVk_W037SU02OibJAD17rUpgue0CZ7Rr-1CA"
 }

@@ -1,0 +1,40 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "staged_changes.apply.reply",
+  "message_id": "7afc0dc9-a346-7447-9273-70695b39b58c",
+  "idempotency_key": "staged_changes.apply.reply:o7et_zgBJd02zZTFep9mLIy-Ulv865Q3XOYm0qLL-PU",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-74cf-8000-0000000004cf",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "failed",
+    "state": "failed",
+    "approval": {
+      "mode": "person_approval",
+      "approved_by": "person_7c1",
+      "approved_at": "2026-10-22T04:30:00.000Z",
+      "access_request_id": "access_change_7f"
+    },
+    "note": "Use these settings for the next tasks.",
+    "result_json": "{\"error\":\"The settings file changed before application.\",\"applied\":false}"
+  },
+  "causation_id": "01928f3a-7b2c-74cf-8000-0000000004cf",
+  "body_digest": "4smurfdQc_o_lnk2Yp8rZH7G6E4W7MtrJt9fEGwGjAo",
+  "signature": "5eAd7ZpDX1znFNjcyP5PUMuvSXIP4xlxUSX3vcA9cjZWjsDDRoWJwMI2CdJ4LA2HJAsqeCSm0xHgrMgCnfn0AA"
+}

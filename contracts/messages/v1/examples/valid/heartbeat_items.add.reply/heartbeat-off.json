@@ -1,0 +1,75 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "heartbeat_items.add.reply",
+  "message_id": "8f722cab-0b07-7ae4-81bc-747073164532",
+  "idempotency_key": "heartbeat_items.add.reply:dJ9CJOHnwek5bLuZ_3x0-q0AWUUCAhuUr41e87OQ-uo",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.5071ee3b-d019-7cb0-99d9-b29c2e3132ff",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "item": {
+      "heartbeat_item_id": "heartbeat_dependency_watch",
+      "title": "Track recurring dependency checks",
+      "instruction": {
+        "type": "inline",
+        "text": "Compare the report with new advisories and report actionable changes."
+      },
+      "target_agent_type": "TeamArchitect",
+      "objective_id": "objective_dependency_watch",
+      "enabled": true,
+      "seen_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+      "source_id": "heartbeat_team",
+      "conversation_id": "conversation_dependency_watch",
+      "created_at": "2026-10-21T04:30:00.000Z",
+      "updated_at": "2026-10-22T04:30:00.000Z",
+      "last_run_at": "2026-10-22T04:30:00.000Z",
+      "last_success_at": "2026-10-22T04:30:00.000Z",
+      "last_failure_at": "2026-10-22T04:30:00.000Z"
+    },
+    "heartbeat_runtime": {
+      "source_id": "heartbeat_team",
+      "config_available": true,
+      "heartbeat_enabled": false,
+      "configured_source_id": "heartbeat_team",
+      "configured_schedule_id": "heartbeat_launcher",
+      "launcher_schedule_installed": true,
+      "notes": [
+        {
+          "type": "inline",
+          "text": "Heartbeat is disabled; saved items will run after the launcher is enabled."
+        }
+      ]
+    },
+    "warning": "heartbeat_off",
+    "warning_message": {
+      "type": "inline",
+      "text": "The item was saved while heartbeat is disabled; it will run after heartbeat is enabled."
+    },
+    "warnings": [
+      {
+        "type": "inline",
+        "text": "The item was saved, but checking the heartbeat launcher failed. Do not repeat the change; inspect the saved item."
+      }
+    ]
+  },
+  "causation_id": "5071ee3b-d019-7cb0-99d9-b29c2e3132ff",
+  "body_digest": "Ulai7avP9ymwo8UwaSnwUE4E8a1rsrINQRGUe3qTReI",
+  "signature": "cTGltysU4bItvbImV07-3nhYrjI9qrScJwa7lB0A4DBU1121yQx2Ybn1NgmDrwAmczPHBZ6jgMgTZZ6Mzg7YCw"
+}

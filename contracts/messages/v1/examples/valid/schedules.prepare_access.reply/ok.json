@@ -1,0 +1,51 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.prepare_access.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a029",
+  "idempotency_key": "schedules.prepare_access.reply:EJ_Vx6ZJ8DUgx_Qeqpa0qh6XxNk8Rc81lcuLmkdS54Y",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7000-8000-00000000a028",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "readiness": {
+      "status": "ready",
+      "checks": [
+        {
+          "capability_id": "fn:web_research",
+          "operation": "exa_search",
+          "status": "ready",
+          "reason": "The worker type and schedule owner hold the required access.",
+          "required": true,
+          "tool_id": "fn:web_research",
+          "access_operation": "exa_search",
+          "access_level": "read",
+          "missing_access_for": []
+        }
+      ],
+      "checked_at_utc": "2026-10-22T04:30:00.000Z",
+      "execution_digest": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+      "policy_snapshot_digest": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc"
+    },
+    "missing_access": []
+  },
+  "causation_id": "01928f3a-7b2c-7000-8000-00000000a028",
+  "body_digest": "p6Mbshsdmlkr-yetxUssIYcRMwkEvlSaQOZYnIgQdik",
+  "signature": "0vEywPXD-fLNZYYy701TQ3cQzAB_EKLtoZbpEUzuJ-YMe4Celmf8PzDCgy4dPC9saVo7xxfibmWgMitl8EIBDw"
+}

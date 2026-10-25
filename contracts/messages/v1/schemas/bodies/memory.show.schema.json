@@ -5,6 +5,9 @@
   "description": "Show one memory fact.",
   "type": "object",
   "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
     "bank": {
       "type": "string",
       "enum": [
@@ -19,6 +22,7 @@
     }
   },
   "required": [
+    "request_id",
     "bank",
     "memory_id"
   ],

@@ -1,0 +1,45 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.get.reply",
+  "message_id": "27a60904-2f5a-7ef4-8f96-63785cde2a77",
+  "idempotency_key": "objectives.get.reply:K8ghpJAFDVsIcqUwIUuUtSn0yvxHO9afgzJM-MArF-M",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.f97acc24-19ba-709d-b590-27cffadad8bd",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "objective_id": "objective_dependency_watch",
+    "seen_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+    "objective": {
+      "type": "blob",
+      "ref": {
+        "sha256": "2c0FB-Tl-Uu-RyWumNNreK7J3wDtEL84rb5mvmyAy1Y",
+        "size": 4096,
+        "media_type": "application/json"
+      }
+    },
+    "markdown": {
+      "type": "inline",
+      "text": "# Track recurring dependency checks\n\nThe initial report is saved. Next, verify two new advisories."
+    }
+  },
+  "causation_id": "f97acc24-19ba-709d-b590-27cffadad8bd",
+  "body_digest": "30zyZ4NoHJtJO6Pz8ihXVhRZy8uiZZtIndTMb6E_5HM",
+  "signature": "Ey1RkcZIQgZ6ST1h3Dd62PfUxxYfMyBnTaiFmmE4mZGNQeHrIOMkV94rhT7CbVtXtdlJ0vsny-J3O_MrUPoJBQ"
+}

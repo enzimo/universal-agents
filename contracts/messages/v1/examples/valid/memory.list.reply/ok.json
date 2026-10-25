@@ -27,20 +27,24 @@
     "facts": [
       {
         "memory_id": 3,
-        "fact_text": "Example fact text",
-        "valid_from": "2026-10-22T04:30:00.000Z",
-        "expires": "2026-10-22T04:30:00.000Z",
+        "fact_text": {
+          "type": "inline",
+          "text": "Use UTC when recording deployment times."
+        },
+        "valid_from": "2026-10-21T04:30:00.000Z",
         "tags": [
-          "Example tags"
+          "operations",
+          "deployment"
         ],
-        "created_at": "2026-10-22T04:30:00.000Z",
+        "metadata_json": "{\"resume_section\":\"deployment\"}",
+        "created_at": "2026-10-21T04:30:00.000Z",
         "updated_at": "2026-10-22T04:30:00.000Z",
-        "seen_version": "v3"
+        "seen_version": "2362cd12f9375d435c9f1568c042e2de180039efc42b7c76bb1fc1bdbd26439e"
       }
     ],
-    "total": 3
+    "total": 1
   },
   "causation_id": "01928f3a-7b2c-7449-8000-000000000449",
-  "body_digest": "D5---PUL0IM5pxLL_fK7WSxtqK_APXqX69eO4fqmRmE",
-  "signature": "D6U_6eyi08U4lxJGJN71Bc2xbgSYUasq9FBQhw_Qrq0tDNLVdQllaDRIUyHj7InoPb5o3mSFqpEhKgjZvvpYAw"
+  "body_digest": "dT_kBF1KqjM0jB2-Ylp-WsKLkGqiJ3pb3mRXhxmP_Yg",
+  "signature": "0TY9NwwDqyRTul_7KkZ3chVLIZm8LiALWGtjNhSQBUP3YEOYvlAyKCm7A02EJDfp0-49RTIkyjLKywGScwySDw"
 }

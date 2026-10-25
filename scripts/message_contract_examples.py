@@ -14,7 +14,10 @@ values:
   signing bytes, and ``key-rotation.json``: a renewal's new-key proof.
 
 This module fills in public keys, idempotency keys, body digests, signatures and
-each invalid example's ``frame_text``. It signs and derives keys with RFC 8785,
+each invalid example's ``frame_text``. Tokens are signed wherever a frame carries
+them: its authority token, an authority token in its body (``body.authority``, the
+scheduler's answer to ``run_context.sign``) and a change-conflict decision token
+(``body.decision_token``). It signs and derives keys with RFC 8785,
 SHA-256 and Ed25519 directly, not with ``custom_messages.wire``, so the tests
 compare two implementations of the signing and key rules. ``scripts/export_message_contract.py`` runs it before writing its manifest;
 ``--check`` there fails when a file here is not what this module renders.
@@ -145,7 +148,7 @@ class Signer:
         if kind.endswith(".reply") and kind.removesuffix(".reply") in self.kinds:
             request = self.requests.get(frame.get("causation_id", ""))
             if request is None:
-                return frame["idempotency_key"]  # a reply without its request is refused before its key matters
+                return str(frame["idempotency_key"])  # a reply without its request is refused before its key matters
             parts = [request["idempotency_key"]]
         elif kind in self.kinds:
             entry = self.kinds[kind]
@@ -154,7 +157,7 @@ class Signer:
             if frame["audience"]["target"] in copies:
                 parts.append(frame["audience"]["target"])
         else:
-            return frame["idempotency_key"]
+            return str(frame["idempotency_key"])
         digest = hashlib.sha256(rfc8785.dumps(parts)).digest()
         return f"{kind}:{b64url(digest)}"
 
@@ -165,7 +168,7 @@ class Signer:
 
     def frame(self, frame: dict[str, Any], *, key_id: str | None = None, digest: str | None = None,
               sign_token: bool = True) -> dict[str, Any]:
-        """Sign a frame: its authority token first, then the body digest, then the frame."""
+        """Sign a frame: its tokens first (the frame's and those its body carries), then the body digest, then the frame."""
 
         frame = dict(frame)
         frame["body"] = self.sign_nested_records(self.fill_public_keys(frame["body"]))
@@ -174,6 +177,8 @@ class Signer:
         if "authority" in frame and sign_token:
             frame["authority"] = self.token(frame["authority"])
         body = frame.get("body")
+        if isinstance(body, dict) and isinstance(body.get("authority"), dict) and sign_token:
+            body = frame["body"] = dict(body, authority=self.token(body["authority"]))
         if isinstance(body, dict) and isinstance(body.get("decision_token"), dict) and sign_token:
             decision = dict(body["decision_token"], algorithm="ed25519")
             decision["signature"] = self.sign(self.decision_domain, decision, decision["issuer"]["key_id"])

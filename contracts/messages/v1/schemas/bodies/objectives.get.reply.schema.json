@@ -1,0 +1,453 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/objectives.get.reply.schema.json",
+  "title": "objectives.get.reply",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "objective_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "seen_version": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "objective": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "inline"
+                },
+                "value": {
+                  "$ref": "#/$defs/objective_read_record"
+                }
+              },
+              "required": [
+                "type",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "blob"
+                },
+                "ref": {
+                  "$ref": "../common.schema.json#/$defs/blob_ref"
+                }
+              },
+              "required": [
+                "type",
+                "ref"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "markdown": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        }
+      },
+      "required": [
+        "outcome",
+        "objective_id",
+        "seen_version",
+        "objective",
+        "markdown"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_found"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "objective_read_record": {
+      "type": "object",
+      "properties": {
+        "objective_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "title": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "desired_outcome": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "why": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "proposed",
+            "active",
+            "paused",
+            "blocked",
+            "satisfied",
+            "failed",
+            "cancelled",
+            "abandoned",
+            "deleting",
+            "deleted"
+          ]
+        },
+        "horizon": {
+          "type": "string",
+          "enum": [
+            "finite",
+            "long_horizon",
+            "recurring",
+            "standing"
+          ]
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "low",
+            "normal",
+            "high",
+            "critical"
+          ]
+        },
+        "completion_policy": {
+          "type": "string",
+          "enum": [
+            "manager_decides",
+            "user_confirms",
+            "success_criteria_met",
+            "recurring_indefinite"
+          ]
+        },
+        "success_criteria": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "criterion_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "description": {
+                "$ref": "../common.schema.json#/$defs/text_content"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "open",
+                  "met",
+                  "failed",
+                  "dropped"
+                ]
+              },
+              "evidence_summary": {
+                "$ref": "../common.schema.json#/$defs/text_content"
+              },
+              "updated_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              }
+            },
+            "required": [
+              "criterion_id",
+              "description",
+              "status",
+              "updated_at"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/text_content"
+          },
+          "minItems": 0,
+          "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+        },
+        "non_goals": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/text_content"
+          },
+          "minItems": 0,
+          "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+        },
+        "progress_summary": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "current_focus": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "owner_agent_id": {
+          "$ref": "../common.schema.json#/$defs/durable_owner_id"
+        },
+        "owner_agent_name": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "owner_person": {
+          "$ref": "../common.schema.json#/$defs/person_ref"
+        },
+        "team_id": {
+          "$ref": "../common.schema.json#/$defs/team_id"
+        },
+        "owner_named_agent_type": {
+          "$ref": "../common.schema.json#/$defs/agent_type"
+        },
+        "root_conversation_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "created_by_task_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "promoted_from_task_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "current_plan_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "plan_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/record_id"
+          },
+          "minItems": 0,
+          "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+        },
+        "related_task_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/record_id"
+          },
+          "minItems": 0,
+          "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+        },
+        "recovery_task_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/record_id"
+          },
+          "minItems": 0,
+          "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+        },
+        "schedule_links": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "schedule_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "managed_by_objective": {
+                "type": "boolean"
+              },
+              "disabled_by_objective_pause": {
+                "type": "boolean"
+              },
+              "linked_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              }
+            },
+            "required": [
+              "schedule_id",
+              "managed_by_objective",
+              "disabled_by_objective_pause",
+              "linked_at"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+        },
+        "heartbeat_links": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "heartbeat_item_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "managed_by_objective": {
+                "type": "boolean"
+              },
+              "disabled_by_objective_pause": {
+                "type": "boolean"
+              },
+              "linked_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              }
+            },
+            "required": [
+              "heartbeat_item_id",
+              "managed_by_objective",
+              "disabled_by_objective_pause",
+              "linked_at"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+        },
+        "event_log": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "event_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "event_type": {
+                "type": "string",
+                "enum": [
+                  "created",
+                  "promoted_from_task",
+                  "plan_linked",
+                  "task_linked",
+                  "schedule_linked",
+                  "heartbeat_linked",
+                  "progress_updated",
+                  "status_changed",
+                  "user_confirmation_recorded",
+                  "review_requested",
+                  "review_completed",
+                  "work_session_policy_enabled",
+                  "work_session_policy_disabled",
+                  "work_session_started",
+                  "work_session_checkpointed",
+                  "work_session_completed"
+                ]
+              },
+              "summary": {
+                "$ref": "../common.schema.json#/$defs/text_content"
+              },
+              "task_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "plan_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "schedule_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "heartbeat_item_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "user_visible": {
+                "type": "boolean"
+              },
+              "details_json": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 16384
+              },
+              "created_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              }
+            },
+            "required": [
+              "event_id",
+              "event_type",
+              "summary",
+              "user_visible",
+              "details_json",
+              "created_at"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+        },
+        "requires_user_confirmation": {
+          "type": "boolean"
+        },
+        "user_confirmation_summary": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "satisfied_by_task_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "satisfied_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "deletion_operation_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "deletion_requested_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "deleted_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "deletion_summary": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "created_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "updated_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "objective_id",
+        "title",
+        "desired_outcome",
+        "why",
+        "status",
+        "horizon",
+        "priority",
+        "completion_policy",
+        "success_criteria",
+        "constraints",
+        "non_goals",
+        "plan_ids",
+        "related_task_ids",
+        "recovery_task_ids",
+        "schedule_links",
+        "heartbeat_links",
+        "event_log",
+        "requires_user_confirmation",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

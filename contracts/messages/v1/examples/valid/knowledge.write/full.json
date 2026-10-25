@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.write",
   "message_id": "01928f3a-7b2c-746d-8000-00000000046d",
-  "idempotency_key": "knowledge.write:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "knowledge.write:XgcZoMfAdiBAf-B2tkOGC4At7W0FaUWowz2adINe8XQ",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -35,35 +35,32 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000143"
+      "id": "kb_write_full"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "wqIQrvXGwOzpKXdfih-xCG1kDt7SAtiFZZIq_j5dIk0eGUf7ds1Rsbmicv5Sb7tejqWefvXkLvsEJykUOF7AAQ"
+    "signature": "CK9Mv27RR9qDrlhbndIVXKJFMnOF2uZah1ETQZ4NwhD37dzWvC71Z4K6mIstCQh1poHg_PLLv_-hJsKL_06WAA"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
+    "request_id": "kb_write_full",
     "space": "team",
-    "page": "Example page",
-    "seen_version": "v3",
-    "title": "Example title",
-    "summary": "Example summary",
-    "body": "Example body",
-    "body_ref": {
-      "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
-      "size": 3,
-      "media_type": "application/pdf",
-      "name": "Example name"
-    },
+    "page": "deployment-guide",
+    "seen_version": "3",
+    "title": "Deployment guide",
+    "summary": "Steps to review and deploy a release.",
     "tags": [
-      "Example tags"
+      "releases"
     ],
-    "page_type": "page_type_1",
-    "change_summary": "Example change summary",
-    "confirm_review": true
+    "page_type": "how-to",
+    "change_summary": "Add the release checklist.",
+    "confirm_review": false,
+    "content": {
+      "type": "inline",
+      "text": "Review the release checklist, then run the deployment. See [[release-checklist]]."
+    }
   },
-  "body_digest": "R1Q1S78kXfrd30WvJefLmRlsmk2KHfO8ic-Z5SRbNGw",
-  "signature": "dx8-elWwkC_4XYi0Lb6AASR6VDWpz9OiaeP4kUtvjRefaFhH2K6ze3js-_SPaG7nUWU3ySbfwHF9WzzS-dkgAw"
+  "body_digest": "-uDX3ppYFf9lf9nLsK0u_3eAfdjJ4uWNA_1_2my9plw",
+  "signature": "jpGODpdT6uiD8VFccSHRQV7EcwWYihaFO39iDedTFzM9JbSIzZ-VzFT6y6qSqPWc3HHGT74uMVBNqEFTSDahDQ"
 }

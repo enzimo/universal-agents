@@ -1,0 +1,85 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.work_profiles.apply.reply",
+  "message_id": "9abfec3a-3d4a-78b3-95b6-75867c5a7282",
+  "idempotency_key": "objectives.work_profiles.apply.reply:9Bo5eezAK2thBR63Sqzu-n5SW4Lblj65F6rApyngIME",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.2f54b9fc-6c96-79bc-ac1a-16695249ebbe",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "result": {
+      "type": "already_applied",
+      "proposal": {
+        "type": "inline",
+        "value": {
+          "schema_version": 1,
+          "proposal_id": "proposal_dependency_watch",
+          "owner_agent_id": "manager_scope:team_example:TeamArchitect",
+          "owner_person": "person_7c1",
+          "source_task_id": "task_root_7f",
+          "scope": "objective",
+          "objective_id": "objective_dependency_watch",
+          "profile_name": "daily",
+          "profile": {
+            "cadence_cron": "0 9 * * *",
+            "cadence_timezone": "owner",
+            "budget": {
+              "active_seconds": 1200,
+              "checkpoint_reserve_seconds": 120,
+              "checkpoint_reserve_turns": 2,
+              "checkpoint_reserve_tokens": 10000,
+              "checkpoint_reserve_tool_calls": 2,
+              "turns": 20,
+              "total_tokens": 50000,
+              "tool_calls": 30
+            }
+          },
+          "rationale": {
+            "type": "blob",
+            "ref": {
+              "sha256": "5vr8d1nNLl31cvDu4zarjlDwvePZln9_E5fX-SGcS1Q",
+              "size": 4096,
+              "media_type": "text/plain"
+            }
+          },
+          "replace_existing": false,
+          "proposal_digest": "6775b70da276eb02baae3e88f4f7d62118acf67ff27812b0e9eadad81b1efd22",
+          "status": "applied",
+          "created_at": "2026-10-21T04:30:00.000Z",
+          "expires_at": "2026-10-23T04:30:00.000Z",
+          "applied_at": "2026-10-22T04:30:00.000Z",
+          "applied_by_task_id": "task_root_7f",
+          "acceptance_summary": {
+            "type": "blob",
+            "ref": {
+              "sha256": "F0osveqjF_33nBXOfYifR3AAPCFs4g2OvmpyEEF2CVY",
+              "size": 4096,
+              "media_type": "text/plain"
+            }
+          },
+          "applied_policy_id": "policy_dependency_watch"
+        }
+      }
+    }
+  },
+  "causation_id": "2f54b9fc-6c96-79bc-ac1a-16695249ebbe",
+  "body_digest": "jzUWZxsaggNGwj4ARY9jl2esWUR10a1AroQTOnZckec",
+  "signature": "8g9YFVHsfvXfATmOHeuoj8YCpE0dnViGz1tLivvJqBxl_4r80dUv9qTiOLcyC6POZNAHNN5_fv25T3OyZWLMBQ"
+}

@@ -24,10 +24,10 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "changed_since_read",
-    "current_version": "v3",
+    "current_version": 3,
     "message": "Example short text"
   },
   "causation_id": "01928f3a-7b2c-74b1-8000-0000000004b1",
-  "body_digest": "mwwZA7vJlzwnTKc2NrDFsCkUFXwWp2P2FWgqNmQpjwU",
-  "signature": "Yk4kV7iIwTpaCrjf2-DD5lJCFvlGtrWOt2MR3yFOA9aO3_t00rc00Aonhijk9UyEbxTwjkEaYJgN2LSpge7ZCQ"
+  "body_digest": "LLXhNG1VhX4VND3c9grd4WECrYanqv4MMx_TVEOJhSU",
+  "signature": "AauRbVuUAlAgBe8FSiWKy16RpVvspYS4KdrYeLc7f6Xvo8kczk2GNTRhzmMQcioJEMMYHljIroCRJar7wONjDA"
 }

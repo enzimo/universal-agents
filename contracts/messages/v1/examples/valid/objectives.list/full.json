@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "objectives.list",
-  "message_id": "01928f3a-7b2c-7413-8000-000000000413",
-  "idempotency_key": "objectives.list:OW7iMbIvzSUs4GelLnbrpxhW1b1TNoJd3BTTLz_hz9U",
+  "message_id": "4201abd6-e71b-7e29-b0af-82ec9e1feace",
+  "idempotency_key": "objectives.list:eF2JWtqWCJoapvhqDgTFjjz6JHoESLZrEUgJeEv-Mgs",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -35,15 +35,26 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000156"
+      "id": "request_objectives_list"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "NXiEsFY4Gl7X7CckgyYGvSGnPs5xQwsXnjYKeCD-FwC3yvIi-qPNe06nnCqZ9eEQkV5fl43cqkZAq9rjosAkAQ"
+    "signature": "mMMqsOiE_egxyPq2q2MFOCInXoKTynq7hkQrlg6iSI2HTIIvakL84Mtljql62a5d-MDNkkTVj4Bg7Lxr0Gc9CQ"
   },
   "algorithm": "ed25519",
-  "body": {},
-  "body_digest": "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o",
-  "signature": "4L5TGeTd0CQA1WMT3n_SsrH0cAEan0w5ElHgdOBDoAIKWlTxBVDSL5rQWNp6ec1XZ-tlyY_ncVCwE1c_JAzdBA"
+  "body": {
+    "request_id": "request_objectives_list",
+    "offset": 0,
+    "limit": 20,
+    "statuses": [
+      "proposed"
+    ],
+    "horizons": [
+      "recurring"
+    ],
+    "include_closed": true
+  },
+  "body_digest": "Wt5wFv52qulDV75ghflbPLs44QljprPBQ2ozMetPw9A",
+  "signature": "2k8DKx0uBNoFOar0ggpCQDRzZPVF052Z7Ns4kUkC7kq3mXZZY7vOr7U6qm9meiX3CYHLbK_LEmV-FLhyz0yQBQ"
 }

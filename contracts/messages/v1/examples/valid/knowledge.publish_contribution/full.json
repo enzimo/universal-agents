@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.publish_contribution",
   "message_id": "01928f3a-7b2c-7482-8000-000000000482",
-  "idempotency_key": "knowledge.publish_contribution:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "knowledge.publish_contribution:F2gBb3PXuAn_vtPvvhv5_4AUdr9gwMkwdoItYwkVDTg",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -35,26 +35,29 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000135"
+      "id": "kb_publish_contribution_full"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "tbKvZzL4TBnuqDEv6J5G6rpr3mgz1LzJzjNMgt-SZO6IuHQCsK_6_Dexch5N4LxbYuPj-ZyM6rWSguuT6t-3BQ"
+    "signature": "lEXQ2b2uMUYeZ87qfejMqQ7Y3VXqTEzZ76h5_cYmmB80O0a8535sIwSLFbR34kZzoA9f4bQ-4LMHLKLLz23pAA"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
-    "contribution_id": "Example contribution id",
-    "seen_version": "v3",
+    "request_id": "kb_publish_contribution_full",
+    "contribution_id": "kb_contrib_7f",
+    "seen_version": "3",
     "edited": true,
-    "title": "Example title",
-    "summary": "Example summary",
-    "body": "Example body",
+    "title": "Deployment guide",
+    "summary": "Steps to review and deploy a release.",
     "tags": [
-      "Example tags"
-    ]
+      "releases"
+    ],
+    "content": {
+      "type": "inline",
+      "text": "Review the release checklist, then run the deployment. See [[release-checklist]]."
+    }
   },
-  "body_digest": "M0w1SsHmH3qcpjfMCfMY0W2cyr2qTSS9a4w3EQ4PgJE",
-  "signature": "9XyTtUYv5VWptc2xTVBoaHEZRmCm5MmWoKzaWr9LpkXCaCa8_p40XTGjOD0w-3jWX8-ZfaSR1r4hpXzN7cgTCQ"
+  "body_digest": "Lq24_a-uXyobK3510aFsvE7hwcGgL2w1PTuOUB55dOE",
+  "signature": "zKTaNg_wvqi5SVU7YoHc61wFYQSkFFlt8rZVPv7KnkucyX2QpwZNxSUGZyOJVLc0Aytb2Jrprn_DIvJHXwK6Dg"
 }

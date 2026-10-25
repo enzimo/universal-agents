@@ -1,0 +1,39 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.unfreeze.reply",
+  "message_id": "01928f3a-7b2c-7e30-8000-00000000000b",
+  "idempotency_key": "knowledge.unfreeze.reply:pCiz7nf3FlkaL0tzfcKDxbJ8Auu2sAA6otYEclDsC8s",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7491-8000-000000000491",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "page": {
+      "type": "blob",
+      "ref": {
+        "sha256": "EHKMy4ZkVLxzj65qXaPpVk1pHCcb2-j5d1QiWKhWnaE",
+        "size": 1754,
+        "media_type": "application/json"
+      }
+    }
+  },
+  "causation_id": "01928f3a-7b2c-7491-8000-000000000491",
+  "body_digest": "QOFmbBTcatT3Yx78Sjo_nCSwyO4b2PZACyB8qnwnd_w",
+  "signature": "uaM_6w50RP3BPX4lYL83wEpm8aqbzcD9oE9hXBq6uFsNTKPT1tcn2X-gsNl9xMPfiJIXCo_U_jqai0JKM2sICw"
+}

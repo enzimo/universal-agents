@@ -1,0 +1,406 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/objectives.work_sessions.start.reply.schema.json",
+  "title": "objectives.work_sessions.start.reply",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "session": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "inline"
+                },
+                "value": {
+                  "type": "object",
+                  "properties": {
+                    "session_id": {
+                      "$ref": "../common.schema.json#/$defs/record_id"
+                    },
+                    "policy_id": {
+                      "$ref": "../common.schema.json#/$defs/record_id"
+                    },
+                    "objective_id": {
+                      "$ref": "../common.schema.json#/$defs/record_id"
+                    },
+                    "owner_agent_id": {
+                      "$ref": "../common.schema.json#/$defs/durable_owner_id"
+                    },
+                    "task_id": {
+                      "$ref": "../common.schema.json#/$defs/record_id"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "scheduled",
+                        "running",
+                        "yield_requested",
+                        "checkpointing",
+                        "checkpointed",
+                        "overrun",
+                        "completed",
+                        "failed",
+                        "cancelled"
+                      ]
+                    },
+                    "budget": {
+                      "type": "object",
+                      "properties": {
+                        "active_seconds": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        },
+                        "checkpoint_reserve_seconds": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "checkpoint_reserve_turns": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "checkpoint_reserve_tokens": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "checkpoint_reserve_tool_calls": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "turns": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        },
+                        "total_tokens": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        },
+                        "tool_calls": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "active_seconds",
+                        "checkpoint_reserve_seconds",
+                        "checkpoint_reserve_turns",
+                        "checkpoint_reserve_tokens",
+                        "checkpoint_reserve_tool_calls",
+                        "turns",
+                        "total_tokens",
+                        "tool_calls"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "required_skills": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 16384
+                      },
+                      "minItems": 0,
+                      "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+                    },
+                    "activated_skills": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 16384
+                      },
+                      "minItems": 0,
+                      "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+                    },
+                    "started_at": {
+                      "$ref": "../common.schema.json#/$defs/timestamp"
+                    },
+                    "safe_deadline_at": {
+                      "$ref": "../common.schema.json#/$defs/timestamp"
+                    },
+                    "hard_deadline_at": {
+                      "$ref": "../common.schema.json#/$defs/timestamp"
+                    },
+                    "ended_at": {
+                      "$ref": "../common.schema.json#/$defs/timestamp"
+                    },
+                    "active_ms_used": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "turns_used": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "input_tokens_used": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "output_tokens_used": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "total_tokens_used": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "cache_read_input_tokens_used": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "cache_write_input_tokens_used": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "tool_calls_used": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "yield_reason": {
+                      "type": "string",
+                      "minLength": 0,
+                      "maxLength": 16384
+                    },
+                    "checkpoint_id": {
+                      "$ref": "../common.schema.json#/$defs/record_id"
+                    },
+                    "created_at": {
+                      "$ref": "../common.schema.json#/$defs/timestamp"
+                    },
+                    "updated_at": {
+                      "$ref": "../common.schema.json#/$defs/timestamp"
+                    }
+                  },
+                  "required": [
+                    "session_id",
+                    "policy_id",
+                    "objective_id",
+                    "owner_agent_id",
+                    "task_id",
+                    "status",
+                    "budget",
+                    "required_skills",
+                    "activated_skills",
+                    "active_ms_used",
+                    "turns_used",
+                    "input_tokens_used",
+                    "output_tokens_used",
+                    "total_tokens_used",
+                    "cache_read_input_tokens_used",
+                    "cache_write_input_tokens_used",
+                    "tool_calls_used",
+                    "created_at",
+                    "updated_at"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "type",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "blob"
+                },
+                "ref": {
+                  "$ref": "../common.schema.json#/$defs/blob_ref"
+                }
+              },
+              "required": [
+                "type",
+                "ref"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "outcome",
+        "session"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_found"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "feature_off"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "invalid_request"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "direct_user_request_required"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "change_conflict"
+        },
+        "case_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "brief": {
+          "$ref": "../common.schema.json#/$defs/blob_ref"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "case_id",
+        "brief"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "request_closed"
+        },
+        "request_state": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "needs_person_decision"
+        },
+        "case_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "record_busy"
+        },
+        "retry_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "retry_at"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

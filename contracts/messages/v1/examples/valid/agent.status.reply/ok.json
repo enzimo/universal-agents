@@ -26,47 +26,26 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "ok",
-    "agent_type": "token_id_1",
-    "is_lead": true,
-    "paused": true,
+    "agent_type": "ResearcherAgent",
+    "is_lead": false,
+    "paused": false,
     "executing": true,
-    "has_capacity": true,
-    "accepting_work": true,
-    "exiting": true,
-    "queued": 3,
-    "waiting": 3,
-    "deferred": 3,
-    "current_task_id": "current_task_id_1",
-    "current_task_age_seconds": 3,
+    "has_capacity": false,
+    "accepting_work": false,
+    "exiting": false,
+    "queued": 1,
+    "waiting": 0,
+    "deferred": 0,
+    "current_task_id": "task_research",
+    "current_task_age_seconds": 30,
     "context": {
-      "window_tokens": 3,
-      "estimated_tokens": 3,
-      "fill_per_mille": 3,
-      "pressure": "low"
-    },
-    "tool_call_budget_per_mille": 3,
-    "tool_result_budget_per_mille": 3,
-    "tools": [
-      "fn:file_read"
-    ],
-    "skills": [
-      "Example skills"
-    ],
-    "findings": [
-      {
-        "finding_id": "Example finding id",
-        "severity": "info",
-        "title": "Example title",
-        "summary": "Example summary",
-        "action": "Example action",
-        "source": "Example source",
-        "since": "2026-10-22T04:30:00.000Z",
-        "details": "Example details"
-      }
-    ],
-    "diagnostic_json": "Example diagnostic json"
+      "window_tokens": 128000,
+      "estimated_tokens": 64000,
+      "fill_per_mille": 500,
+      "pressure": "moderate"
+    }
   },
   "causation_id": "01928f3a-7b2c-74d7-8000-0000000004d7",
-  "body_digest": "SIVAa88_YUiRQPoCYlLhmB3cCYB_Ol2CcmM485QJRhA",
-  "signature": "dbJp8TG1PmTm2I6K3mZXYQ09AeHdT-aYNb09J2gzFRn_14GHu98KsAW2FGB0gsQPfIWyPb0ZxvxzZOr_EZXjAg"
+  "body_digest": "Y0D-c_TScSdWXo-dwTnAEhb90d7gv9Pmd1o424ivC_E",
+  "signature": "Uek28GP7iNVjwyb1qriLZufcCgvUsbX1blNSdiEeICvvNrfrVjka9FJO01XCeUdXzzG-L52K_GXPE7N28DvjDw"
 }

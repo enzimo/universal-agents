@@ -1,0 +1,71 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.work_profiles.remove.reply",
+  "message_id": "01928f3a-7b2c-7e50-8000-00000000001d",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7e50-8000-00000000000b",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "installed_profile": {
+      "type": "inline",
+      "value": {
+        "schema_version": 1,
+        "installed_profile_id": "profile_dependency_watch",
+        "owner_agent_id": "manager_scope:team_example:TeamArchitect",
+        "owner_person": "person_7c1",
+        "profile_name": "daily",
+        "profile": {
+          "cadence_cron": "0 9 * * *",
+          "cadence_timezone": "owner",
+          "budget": {
+            "active_seconds": 1200,
+            "checkpoint_reserve_seconds": 120,
+            "checkpoint_reserve_turns": 2,
+            "checkpoint_reserve_tokens": 10000,
+            "checkpoint_reserve_tool_calls": 2,
+            "turns": 20,
+            "total_tokens": 50000,
+            "tool_calls": 30
+          }
+        },
+        "source_proposal_id": "proposal_dependency_watch",
+        "proposal_digest": "883c0d22a1901c801cbe67c5ad43420dbe3091ec5b6bec4ce59d0b3700597bf9",
+        "installed_by_task_id": "task_root_7f",
+        "acceptance_summary": {
+          "type": "inline",
+          "text": "The person accepted daily work sessions with this exact budget."
+        },
+        "status": "removed",
+        "created_at": "2026-10-21T04:30:00.000Z",
+        "updated_at": "2026-10-22T04:30:00.000Z",
+        "removed_at": "2026-10-22T04:30:00.000Z",
+        "removed_by_task_id": "task_root_7f",
+        "removal_summary": {
+          "type": "inline",
+          "text": "The person removed the reusable profile."
+        }
+      }
+    }
+  },
+  "causation_id": "01928f3a-7b2c-7e50-8000-00000000000b",
+  "idempotency_key": "objectives.work_profiles.remove.reply:PZauxPfsSiVqHg65ZLMb5aRHd2pJr8P-uKBQtjCFwCY",
+  "body_digest": "BzV19W6SG5u_4HQUVLPh3LAJtIQVebrwskYLuQJW_vs",
+  "signature": "GI6KbIjnNNIeJcDaq1_P2_e6XbjpOnCUVqRco4cx_S_TAiKplYSIlT6LPQrckgwemeNGF3Aeh4gbTW2-9EovBw"
+}

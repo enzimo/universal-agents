@@ -10,54 +10,17 @@
         "outcome": {
           "const": "ok"
         },
-        "item": {
-          "type": "object",
-          "properties": {
-            "heartbeat_item_id": {
-              "$ref": "../common.schema.json#/$defs/record_id"
-            },
-            "title": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 500
-            },
-            "instruction": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 32768
-            },
-            "target_agent_type": {
-              "$ref": "../common.schema.json#/$defs/agent_type"
-            },
-            "objective_id": {
-              "$ref": "../common.schema.json#/$defs/record_id"
-            },
-            "enabled": {
-              "type": "boolean"
-            },
-            "seen_version": {
-              "$ref": "../common.schema.json#/$defs/record_version"
-            }
-          },
-          "required": [
-            "heartbeat_item_id",
-            "instruction",
-            "enabled",
-            "seen_version"
-          ],
-          "additionalProperties": false
+        "heartbeat_item_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
         },
-        "warning": {
-          "type": "string",
-          "enum": [
-            "heartbeat_off",
-            "launcher_missing"
-          ]
+        "removed": {
+          "const": true
         }
       },
       "required": [
         "outcome",
-        "item"
+        "heartbeat_item_id",
+        "removed"
       ],
       "additionalProperties": false
     },
@@ -98,14 +61,16 @@
           "const": "changed_since_read"
         },
         "current_version": {
-          "$ref": "../common.schema.json#/$defs/record_version"
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         },
         "message": {
           "$ref": "../common.schema.json#/$defs/short_text"
         }
       },
       "required": [
-        "outcome"
+        "outcome",
+        "current_version"
       ],
       "additionalProperties": false
     },

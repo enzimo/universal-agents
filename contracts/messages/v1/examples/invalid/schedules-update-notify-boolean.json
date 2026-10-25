@@ -1,0 +1,14 @@
+{
+  "description": "schedules update notify boolean.",
+  "refusal": "invalid_body",
+  "at": "/body/run_notes/policy/notify",
+  "base": "schedules.update/full.json",
+  "changes": [
+    {
+      "set": "/body/run_notes/policy/notify",
+      "to": true
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"schedules.update\", \"message_id\": \"01928f3a-7b2c-7440-8000-000000000440\", \"idempotency_key\": \"schedules.update:4A2ZpcEM08K3nIh1AfhRtV9_8JO0u6ygmaCEnI364uE\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"revocation_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.gateway-1.svc.team.schedules.update\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7000-9000-00000000c02d\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"command\", \"id\": \"req_schedules_update_full\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-22T04:34:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"66UymN14HTxpRTH7Y8Hpm3_fSsx36C1yT4vc2eQ1puSPgg01WcnH6yndTAmLoDMY9tMJVVKKqJHc1Yj7bt3ZCA\"}, \"algorithm\": \"ed25519\", \"body\": {\"request_id\": \"req_schedules_update_full\", \"schedule_id\": \"schedule_id_1\", \"seen_version\": \"82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc\", \"name\": \"Review product documentation\", \"instruction\": {\"type\": \"inline\", \"text\": \"Review the documentation and include source links for changes.\"}, \"timing\": {\"kind\": \"interval\", \"interval_ms\": 1000}, \"expires_at\": \"2026-11-22T09:00:00.000Z\", \"repeat_count\": 0, \"run_notes\": {\"policy\": {\"notify\": true, \"evidence_required\": \"fresh_source\", \"notify_on_failure\": true}}}, \"body_digest\": \"EZ40gSYEHfUgdwxkso8Z0eTvX3z3JiO2fnsYfLFHtAA\", \"signature\": \"wd0WbBl790jF9ns1RsM2HaVrQ1di9LHo5wzhZaQW2hjV2XO0i8QcOjXygvh_-EgF__AXdOmOBYXqyTyvFwwDCg\"}"
+}

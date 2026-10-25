@@ -28,30 +28,6 @@
         "tasks_stopped": {
           "$ref": "../common.schema.json#/$defs/count"
         },
-        "schedules_paused": {
-          "$ref": "../common.schema.json#/$defs/count"
-        },
-        "schedules_moved": {
-          "$ref": "../common.schema.json#/$defs/count"
-        },
-        "grants_revoked": {
-          "$ref": "../common.schema.json#/$defs/count"
-        },
-        "requests_closed": {
-          "$ref": "../common.schema.json#/$defs/count"
-        },
-        "memory_kept": {
-          "$ref": "../common.schema.json#/$defs/count"
-        },
-        "pages_kept": {
-          "$ref": "../common.schema.json#/$defs/count"
-        },
-        "threads_closed": {
-          "$ref": "../common.schema.json#/$defs/count"
-        },
-        "forms_closed": {
-          "$ref": "../common.schema.json#/$defs/count"
-        },
         "team_schedules_moved": {
           "type": "array",
           "items": {
@@ -62,7 +38,7 @@
               },
               "schedule_name": {
                 "type": "string",
-                "minLength": 1,
+                "minLength": 0,
                 "maxLength": 500
               },
               "new_owner": {
@@ -85,6 +61,30 @@
             "maxLength": 2000
           },
           "maxItems": 50
+        },
+        "task_records_deleted": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "objectives_stopped": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "objectives_deleted": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "schedules_deleted": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "memory_review_jobs_deleted": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "held_record_count": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "restored_record_count": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "sandbox_deleted": {
+          "type": "boolean"
         }
       },
       "required": [

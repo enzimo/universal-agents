@@ -11,12 +11,10 @@
     "title": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 500
+      "maxLength": 16384
     },
     "desired_outcome": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 32768
+      "$ref": "../common.schema.json#/$defs/text_content"
     },
     "horizon": {
       "type": "string",
@@ -39,11 +37,124 @@
     "success_criteria": {
       "type": "array",
       "items": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 2000
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "inline"
+              },
+              "text": {
+                "$ref": "../common.schema.json#/$defs/long_text"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "blob"
+              },
+              "ref": {
+                "$ref": "../common.schema.json#/$defs/blob_ref"
+              }
+            },
+            "required": [
+              "type",
+              "ref"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "criterion"
+              },
+              "criterion_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "description": {
+                "$ref": "../common.schema.json#/$defs/text_content"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "open",
+                  "met",
+                  "failed",
+                  "dropped"
+                ]
+              },
+              "evidence_summary": {
+                "$ref": "../common.schema.json#/$defs/text_content"
+              },
+              "updated_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              }
+            },
+            "required": [
+              "type",
+              "description"
+            ],
+            "additionalProperties": false
+          }
+        ]
       },
-      "maxItems": 50
+      "minItems": 0,
+      "maxItems": 1000
+    },
+    "why": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "current_focus": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "progress_summary": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "completion_policy": {
+      "type": "string",
+      "enum": [
+        "manager_decides",
+        "user_confirms",
+        "success_criteria_met",
+        "recurring_indefinite"
+      ]
+    },
+    "requires_user_confirmation": {
+      "type": "boolean"
+    },
+    "creation_mode": {
+      "type": "string",
+      "enum": [
+        "promote_task",
+        "spawn_task"
+      ]
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/text_content"
+      },
+      "minItems": 0,
+      "maxItems": 1000
+    },
+    "non_goals": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/text_content"
+      },
+      "minItems": 0,
+      "maxItems": 1000
     }
   },
   "required": [
@@ -51,7 +162,8 @@
     "title",
     "desired_outcome",
     "horizon",
-    "priority"
+    "priority",
+    "why"
   ],
   "additionalProperties": false
 }

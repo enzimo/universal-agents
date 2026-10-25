@@ -21,7 +21,8 @@
       "maxLength": 240
     },
     "seen_version": {
-      "$ref": "../common.schema.json#/$defs/record_version"
+      "$ref": "../common.schema.json#/$defs/record_version",
+      "description": "The page revision the writer read, as a decimal string. Absent creates a new page; given, it edits the page while it still has this revision (README, \"Covered changes\")."
     },
     "title": {
       "type": "string",
@@ -33,40 +34,41 @@
       "minLength": 0,
       "maxLength": 4000
     },
-    "body": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 32768
-    },
-    "body_ref": {
-      "$ref": "../common.schema.json#/$defs/blob_ref"
-    },
     "tags": {
       "type": "array",
       "items": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 64
+        "maxLength": 80
       },
       "maxItems": 100
     },
     "page_type": {
       "type": "string",
-      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      "enum": [
+        "concept",
+        "how-to",
+        "decision",
+        "lesson",
+        "reference",
+        "source"
+      ]
     },
     "change_summary": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 500
+      "maxLength": 4000
     },
     "confirm_review": {
       "type": "boolean"
+    },
+    "content": {
+      "$ref": "../common.schema.json#/$defs/text_content"
     }
   },
   "required": [
     "request_id",
     "space",
-    "title",
     "confirm_review"
   ],
   "additionalProperties": false

@@ -1,0 +1,424 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/objectives.work_sessions.enable.reply.schema.json",
+  "title": "objectives.work_sessions.enable.reply",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "policy": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "inline"
+                },
+                "value": {
+                  "$ref": "objectives.work_sessions.enable.reply.schema.json#/$defs/objective_work_policy"
+                }
+              },
+              "required": [
+                "type",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "blob"
+                },
+                "ref": {
+                  "$ref": "../common.schema.json#/$defs/blob_ref"
+                }
+              },
+              "required": [
+                "type",
+                "ref"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/text_content"
+          },
+          "maxItems": 1000
+        }
+      },
+      "required": [
+        "outcome",
+        "policy"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_found"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "feature_off"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "invalid_request"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "direct_user_request_required"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "confirmation_required"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "missing_skills"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "missing_skills": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 16384
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        }
+      },
+      "required": [
+        "outcome",
+        "missing_skills"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "change_conflict"
+        },
+        "case_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "brief": {
+          "$ref": "../common.schema.json#/$defs/blob_ref"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "case_id",
+        "brief"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "request_closed"
+        },
+        "request_state": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "needs_person_decision"
+        },
+        "case_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "record_busy"
+        },
+        "retry_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "retry_at"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "objective_work_policy": {
+      "type": "object",
+      "properties": {
+        "policy_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "objective_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "owner_agent_id": {
+          "$ref": "../common.schema.json#/$defs/durable_owner_id"
+        },
+        "profile_name": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "profile_source": {
+          "type": "string",
+          "enum": [
+            "configured",
+            "installed",
+            "one_time"
+          ]
+        },
+        "profile_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "owner_person": {
+          "$ref": "../common.schema.json#/$defs/person_ref"
+        },
+        "installed_profile_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "profile_proposal_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "paused",
+            "disabled"
+          ]
+        },
+        "disabled_by_objective_control": {
+          "type": "boolean"
+        },
+        "cadence_cron": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "cadence_timezone": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "required_skills": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          },
+          "minItems": 0,
+          "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+        },
+        "budget": {
+          "type": "object",
+          "properties": {
+            "active_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "checkpoint_reserve_seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "checkpoint_reserve_turns": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "checkpoint_reserve_tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "checkpoint_reserve_tool_calls": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "turns": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "total_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "tool_calls": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "active_seconds",
+            "checkpoint_reserve_seconds",
+            "checkpoint_reserve_turns",
+            "checkpoint_reserve_tokens",
+            "checkpoint_reserve_tool_calls",
+            "turns",
+            "total_tokens",
+            "tool_calls"
+          ],
+          "additionalProperties": false
+        },
+        "accepted_by_task_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "acceptance_summary": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "schedule_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "next_run_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "created_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "updated_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "policy_id",
+        "objective_id",
+        "owner_agent_id",
+        "profile_name",
+        "profile_source",
+        "status",
+        "disabled_by_objective_control",
+        "cadence_cron",
+        "cadence_timezone",
+        "required_skills",
+        "budget",
+        "accepted_by_task_id",
+        "acceptance_summary",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

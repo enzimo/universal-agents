@@ -47,9 +47,9 @@
   "algorithm": "ed25519",
   "body": {
     "request_id": "request_id_1",
-    "root_task_id": "root_task_id_1",
+    "root_task_id": "task_root_7f",
     "reason": "Example reason"
   },
-  "body_digest": "_EEbD085x1FPnbZVGCY6CZ26cIMMLS6LNi0aAIm58qg",
-  "signature": "a077adzBg3t0evag1GTiCQbkAJ7lB84nVPRIQh1gu57SL4n-SP7kH2GUmxPQZ3SLwtOc2tq1Cht8uAOaWfxJAg"
+  "body_digest": "uUXOLfnWCLa0-4c2nObDmw3JN1pwLfmmrcsnGQMIDKY",
+  "signature": "3t1VBvtujm8SCz70AzuXlIMSf0YcgSITlHOaZS6QqfnMqNMs0HafhVd9BJdbaG7Miq0YMAlbeOVUaBV8xSEQAA"
 }

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from pydantic import TypeAdapter
 
@@ -28,6 +28,22 @@ def prune(value: Any, shape: Any) -> Any:
     return value
 
 
+class TokenBinding(NamedTuple):
+    """One type of authority token a kind takes (registry ``authority_binding``; README, "On behalf of a person").
+
+    ``type`` is what the token is bound to (``root_task``, ``command`` or
+    ``access_request``). ``at`` is the JSON pointer to the body field naming that
+    record: the receiver compares the two ids. Without it the handler checks the
+    token against the task it holds (``VerifiedAuthority.require_bound_to``).
+    ``senders`` are the host roles that may present a token of this type, within
+    the senders of the frame's address; None means every sender of that address.
+    """
+
+    type: str
+    at: Optional[str]
+    senders: Optional[tuple[str, ...]]
+
+
 @dataclass(frozen=True)
 class KindSpec:
     name: str
@@ -49,9 +65,9 @@ class KindSpec:
     receivers: tuple[str, ...]
     expiry_seconds: int
     authority: str
-    # What a token on this kind is bound to: (type, JSON pointer to the body field
-    # holding the id), or (type, None) when the handler checks the task it holds.
-    authority_binding: Optional[tuple[str, Optional[str]]]
+    # The token types this kind takes, one binding per type; empty when it takes no
+    # token. A token of any other type is refused.
+    authority_binding: tuple[TokenBinding, ...]
     # What the schema cannot say, checked after it (README, "What bodies carry").
     body_rules: tuple[dict[str, Any], ...]
     execution_slot: bool

@@ -5,6 +5,9 @@
   "description": "The schedules the caller may see.",
   "type": "object",
   "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
     "offset": {
       "type": "integer",
       "minimum": 0,
@@ -20,6 +23,7 @@
     }
   },
   "required": [
+    "request_id",
     "offset",
     "limit"
   ],

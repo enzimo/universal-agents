@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "heartbeat_items.enable",
-  "message_id": "01928f3a-7b2c-74c9-8000-0000000004c9",
-  "idempotency_key": "heartbeat_items.enable:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "message_id": "296b41ec-b0b9-7b29-a65b-e2e831b476f6",
+  "idempotency_key": "heartbeat_items.enable:6H3yasO3zQV1lRRgYi5JLx78voIzzcOR165j_TICLLw",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -46,10 +46,10 @@
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
-    "heartbeat_item_id": "heartbeat_item_id_1",
-    "seen_version": "v3"
+    "request_id": "request_heartbeat_items_enable",
+    "heartbeat_item_id": "heartbeat_dependency_watch",
+    "seen_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f"
   },
-  "body_digest": "q0xT3upGyH0ZA4FMJwig0GiouDIBoKbvOi239e8symQ",
-  "signature": "Vif3I9qZLlGDZWfVgbfTWP0cjr5Evuh-2wITw_Hs8T_2Cj96QsqW78ed4TSp5u2Ds1GA_mn7aRH1zM3TaJxZDg"
+  "body_digest": "-uEMblOlr1sSr260Loww7sHFSysZbkxlIREIN_0bq3c",
+  "signature": "DOrEwvA9-Bv0O7DS5FpRuMltHwyokmqTYlw6uCOXM9yQOr6DMzJf8t4nRksYOUuliqhB7SrU2Gz6yTb9gLdCBw"
 }

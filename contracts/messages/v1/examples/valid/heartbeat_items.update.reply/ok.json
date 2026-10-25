@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "heartbeat_items.update.reply",
-  "message_id": "01928f3a-7b2c-74c4-8000-0000000004c4",
-  "idempotency_key": "heartbeat_items.update.reply:Wew4t2yDGg9EGx0ooBE-wW_xXpHQ_4kFBUf149MAYl8",
+  "message_id": "8edfea10-fff7-7250-8a2c-dc3659d7897d",
+  "idempotency_key": "heartbeat_items.update.reply:4OiJ5NCjFyN4m_fgHcY8GuKfHAKWMSaMnmJrAU-eD_w",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -18,24 +18,33 @@
     "id": "lead",
     "runtime": "lead-host-1"
   },
-  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-74c3-8000-0000000004c3",
+  "subject": "_INBOX.lead-host-1.e41a2412-43fc-7d11-9aad-21662a5ba542",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
   "body": {
     "outcome": "ok",
     "item": {
-      "heartbeat_item_id": "heartbeat_item_id_1",
-      "title": "Example title",
-      "instruction": "Example instruction",
-      "target_agent_type": "token_id_1",
-      "objective_id": "objective_id_1",
+      "heartbeat_item_id": "heartbeat_dependency_watch",
+      "title": "Track recurring dependency checks",
+      "instruction": {
+        "type": "inline",
+        "text": "Compare the report with new advisories and report actionable changes."
+      },
+      "target_agent_type": "TeamArchitect",
+      "objective_id": "objective_dependency_watch",
       "enabled": true,
-      "seen_version": "v3"
-    },
-    "warning": "heartbeat_off"
+      "seen_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+      "source_id": "heartbeat_team",
+      "conversation_id": "conversation_dependency_watch",
+      "created_at": "2026-10-21T04:30:00.000Z",
+      "updated_at": "2026-10-22T04:30:00.000Z",
+      "last_run_at": "2026-10-22T04:30:00.000Z",
+      "last_success_at": "2026-10-22T04:30:00.000Z",
+      "last_failure_at": "2026-10-22T04:30:00.000Z"
+    }
   },
-  "causation_id": "01928f3a-7b2c-74c3-8000-0000000004c3",
-  "body_digest": "6xUBaBUqWArMF6RYPoSSrLk2AMZj_55QceRXw6TG_To",
-  "signature": "ABg8R7PEIZvvyBpTrNRTeuVLkJ-jYXH2gmIecZf-tklYAnK9XQj4Y1o0xtc_ZEqaV3XHQOmh1oO5gWNqjpP_Dw"
+  "causation_id": "e41a2412-43fc-7d11-9aad-21662a5ba542",
+  "body_digest": "0hVMjezao296Mpibhd_jwxEvhwM5KhrEy7VKjHtodYA",
+  "signature": "fjEyOcCO5DHt40525jMnfCZhRb5xGYSpW56vvko7pnEmwQMtQAUueOpfkUL7Rng4PQglUiN2EYIEJvMMupqVAg"
 }

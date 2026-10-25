@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "knowledge.add_note.reply",
-  "message_id": "01928f3a-7b2c-7c01-8000-000000000c01",
-  "idempotency_key": "knowledge.add_note.reply:NsNNz90BaUVvjMp7SHF3HQHzLmCAQELMBGokIOecEjw",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a201",
+  "idempotency_key": "knowledge.add_note.reply:ZF3NaGWxh9jv87yoCrwS1hfw3dOqWRHf9z3jIncbwFo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -14,19 +14,23 @@
   "audience": {
     "installation": "install_example",
     "team": "team_example",
-    "target": "edge",
-    "id": "web",
-    "runtime": "gateway-1"
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
   },
-  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7470-8000-000000000470",
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7000-8000-00000000a001",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
   "body": {
     "outcome": "pending_review",
-    "contribution_id": "contribution_1"
+    "contribution_id": "kb_contrib_7f",
+    "page": "team/deployment-guide",
+    "kind": "note",
+    "review_flags": [],
+    "message": "The proposed team change is saved for review by the person or curator."
   },
-  "causation_id": "01928f3a-7b2c-7470-8000-000000000470",
-  "body_digest": "Vr16VA3nmNwv10B-dNXYitNcqXkW7QVmgiekn7lU7VQ",
-  "signature": "vNvLx3qG1tMBC3nYgOKN__WUcmKmCbvGI6SPzTvr2JhU6MW4XLx3k44isiYFHDMt6l-SsrtR7qJB4XPORY0LBw"
+  "causation_id": "01928f3a-7b2c-7000-8000-00000000a001",
+  "body_digest": "qCrx6srUuWWF10VujjynlMjC7ha772FZOMFDfqE47hA",
+  "signature": "t-NF8mLL8gbVBSGX4HZz-zVkBeSmvLTKY_W_4CviBQdR0-_aHGEd9KWkcQ1_0qQmVvbSg0qvyNwtaYQIFk_GCQ"
 }

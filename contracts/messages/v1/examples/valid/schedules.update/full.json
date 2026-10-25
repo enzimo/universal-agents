@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.update",
   "message_id": "01928f3a-7b2c-7440-8000-000000000440",
-  "idempotency_key": "schedules.update:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "schedules.update:4A2ZpcEM08K3nIh1AfhRtV9_8JO0u6ygmaCEnI364uE",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -21,7 +21,7 @@
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
-    "token_id": "01928f3a-7b2c-7176-9000-000000000176",
+    "token_id": "01928f3a-7b2c-7000-9000-00000000c02d",
     "issuer": {
       "installation": "install_example",
       "runtime": "gateway-1",
@@ -35,27 +35,37 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000176"
+      "id": "req_schedules_update_full"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "h7H3o45qN24MrpwJ9MrZFIg5OP8UNb8UryQn8gAMklBVAmsop8deymrp_ASIhqAwqwdYpzyyYRAIUnWI48CDCQ"
+    "signature": "66UymN14HTxpRTH7Y8Hpm3_fSsx36C1yT4vc2eQ1puSPgg01WcnH6yndTAmLoDMY9tMJVVKKqJHc1Yj7bt3ZCA"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
+    "request_id": "req_schedules_update_full",
     "schedule_id": "schedule_id_1",
-    "seen_version": "v3",
-    "name": "Example name",
-    "instruction": "Example instruction",
+    "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+    "name": "Review product documentation",
+    "instruction": {
+      "type": "inline",
+      "text": "Review the documentation and include source links for changes."
+    },
     "timing": {
       "kind": "interval",
       "interval_ms": 1000
     },
-    "expires_at": "2026-10-22T04:30:00.000Z",
-    "repeat_count": 3
+    "expires_at": "2026-11-22T09:00:00.000Z",
+    "repeat_count": 0,
+    "run_notes": {
+      "policy": {
+        "notify": "never",
+        "evidence_required": "fresh_source",
+        "notify_on_failure": true
+      }
+    }
   },
-  "body_digest": "il9joaKwTsWFx7YiwAV8bgKKnGMZPXY6kvjmpnq6ZY4",
-  "signature": "k0p7wOWGSE_hI6VyMuLbffraYYA_Ng61Ir08n_TFs3W5M47Lz07o2T14ln74JgN4jm2VzZpwB_xAKzER-DkADw"
+  "body_digest": "TrUvuwHpTjYPs5ZXuNDvsQnEiQQ0W5Bz9rCpuq1W-AE",
+  "signature": "xtjvzR-QPR-ZhpnpWsnRS3LR3lVtdyRKupVH9w_9rxzMevYpcQ0kd5ChWLzy7F9phUjcK-TEWjM2gxsEYU6SDw"
 }

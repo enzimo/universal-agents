@@ -1,7 +1,7 @@
 {
   "protocol": "1.0-pre",
   "kind": "knowledge.read_contribution.reply",
-  "message_id": "01928f3a-7b2c-7481-8000-000000000481",
+  "message_id": "01928f3a-7b2c-7000-8000-000000005065",
   "idempotency_key": "knowledge.read_contribution.reply:WS2VIzcbcvocJFG4HZBCKAGpOPKKUbn2viuDokuds2E",
   "issuer": {
     "installation": "install_example",
@@ -24,9 +24,9 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "not_found",
-    "message": "Example short text"
+    "message": "The requested page, revision, note or contribution was not found."
   },
   "causation_id": "01928f3a-7b2c-747f-8000-00000000047f",
-  "body_digest": "kjF9c_l0diFRNuvYGjQmkStmu5fcSEld8Fzu2xnpRcU",
-  "signature": "dKMbY8nMR5TtbOL3TzduX_yNk8tTC--dJQBoFLhvSMf1oOpoEUVuBkGUT0R6TIIDxEBb7CNr8gLMPTv5wSQ4DQ"
+  "body_digest": "D32h1Y8tDHiciQc7Rob3bs-oWzKJVXDTwPLTf0pz4c0",
+  "signature": "fYXZySo9Yewylq58O-6j05tu6o_yhTG7ZlII-qjDoHrevuAK_QRBRy3POJG3olKjVQjFSNCGKzcvTrgaRhQ2BQ"
 }

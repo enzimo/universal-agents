@@ -16,15 +16,18 @@
         "schedule_id": {
           "$ref": "../common.schema.json#/$defs/record_id"
         },
-        "seen_version": {
-          "$ref": "../common.schema.json#/$defs/record_version"
+        "version": {
+          "$ref": "#/$defs/updated_schedule_version"
+        },
+        "warnings": {
+          "$ref": "../common.schema.json#/$defs/text_content"
         }
       },
       "required": [
         "outcome",
         "state",
         "schedule_id",
-        "seen_version"
+        "version"
       ],
       "additionalProperties": false
     },
@@ -91,7 +94,8 @@
         }
       },
       "required": [
-        "outcome"
+        "outcome",
+        "current_version"
       ],
       "additionalProperties": false
     },
@@ -189,6 +193,104 @@
         "outcome"
       ],
       "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "invalid_request"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4096
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "reason"
+      ],
+      "additionalProperties": false
     }
-  ]
+  ],
+  "$defs": {
+    "updated_schedule_version": {
+      "description": "The current version after an update, an unreadable version, or confirmed removal by expiry cleanup.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "available"
+            },
+            "seen_version": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "description": "The surviving schedule's listing digest, read after the save."
+            }
+          },
+          "required": ["state", "seen_version"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "unavailable"
+            }
+          },
+          "required": ["state"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "The update committed and expiration cleanup removed the schedule. No current version exists.",
+          "properties": {
+            "state": {
+              "const": "removed_by_expiration"
+            }
+          },
+          "required": ["state"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "saved_schedule_version": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "available"
+            },
+            "seen_version": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "description": "The surviving schedule's listing digest, read after the save."
+            }
+          },
+          "required": [
+            "state",
+            "seen_version"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "unavailable"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
 }

@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "objectives.abandon.reply",
-  "message_id": "01928f3a-7b2c-7420-8000-000000000420",
-  "idempotency_key": "objectives.abandon.reply:PioX1f5pNQqfXSZmx6wloEiYgYc9cfLBY9Eb5toSyoA",
+  "message_id": "9b82812e-5868-7b15-baf3-73c5c9f24703",
+  "idempotency_key": "objectives.abandon.reply:2jCc64lcI9zW-SSl_cL9eZCMHWjCukJZ02k5qSm2ous",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -18,32 +18,19 @@
     "id": "web",
     "runtime": "gateway-1"
   },
-  "subject": "_INBOX.gateway-1.01928f3a-7b2c-741f-8000-00000000041f",
+  "subject": "_INBOX.gateway-1.e17b0394-8089-73ed-8247-1ddf496e85ce",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
   "body": {
     "outcome": "ok",
-    "objective_id": "objective_id_1",
-    "status": "proposed",
-    "seen_version": "v3",
-    "incomplete": [
-      {
-        "part": "schedule",
-        "id": "id_1"
-      }
-    ],
-    "receipts": [
-      {
-        "root_task_id": "root_task_id_1",
-        "cancelled_task_count": 3,
-        "stop_signals_sent": 3,
-        "unconfirmed_worker_count": 3,
-        "state": "confirmed"
-      }
-    ]
+    "objective_id": "objective_dependency_watch",
+    "status": "abandoned",
+    "seen_version": "eac0262b551d1bc798fc673af3ed02cac7e6d26d80538f216c706a860a763747",
+    "incomplete": [],
+    "receipts": []
   },
-  "causation_id": "01928f3a-7b2c-741f-8000-00000000041f",
-  "body_digest": "_7AiY4PnGodXu9dWaFQsf0WBy-zmI4y3kScYk3atP6Q",
-  "signature": "oZ5agHj_4jExhPPfZBCGH9hHeLyERKt9b2oKGPS0GMXNWbhPLPbBXwChOwQezaFHbMFQhaiKGqWZAmeM_OewCg"
+  "causation_id": "e17b0394-8089-73ed-8247-1ddf496e85ce",
+  "body_digest": "dMUeerTUClLU5TNKZkQ-hyw2zmzMtwUhhaSZcaP5qTY",
+  "signature": "v0pTLsH4SEU7--Guh2gSsIQ8WXp8HA1kYZPw7AiUJ-W6xDtNKt_5FAvyk2EpdvdJUNTqWCFCnOcSOXKtj9ZYCA"
 }

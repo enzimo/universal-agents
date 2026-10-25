@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.withdraw_contribution",
   "message_id": "01928f3a-7b2c-7485-8000-000000000485",
-  "idempotency_key": "knowledge.withdraw_contribution:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "knowledge.withdraw_contribution:Hn5wiEJoI3lTp28Lup4pBourItmsjVeesO-0aAO7fbc",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -35,18 +35,18 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000142"
+      "id": "kb_withdraw_contribution_full"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "wuujMEQFSkU2Px3ct3vy0_VprfHeHKeMD0ZLI6IAiAXSgRbP0UfxVMIcuXI6Pr7taYO-RjfsSZZbzqBJ_LQpBA"
+    "signature": "rl9YieqRBxjQVjYWf7xYWx9RevKhzSp1ysmgaGtUMh8fhF75uR5-eWQ6fOgsmvSUF7UEr5vDCFwFoxDiTGIpDQ"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
-    "contribution_id": "Example contribution id"
+    "request_id": "kb_withdraw_contribution_full",
+    "contribution_id": "kb_contrib_7f"
   },
-  "body_digest": "EDAkmYOM5hHx5jMpSOqmzXhF4UlxGBHgQp8Og8X6hko",
-  "signature": "Va1kIFJ6mlPvjzs4wapONg8S7NNXo8V-6W_lBBSfGuTgblUarcQ44lE2OmAV5kkZ3pTE4KzuW4ebtW5zqaFYAg"
+  "body_digest": "4RLbROu_jfGjz0JPX2g-nCtVm_zH80Zx3oWIf8uqaPQ",
+  "signature": "tAQvv9XrUXe-ntqioV7Y1n26iSFVp65SxFSqdjtRPvkOWuCC7a-Wz2AHQUHR6OWtIW1K2US1pYAQUMr87lmpCQ"
 }

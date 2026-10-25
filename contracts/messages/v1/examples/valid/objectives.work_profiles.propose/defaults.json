@@ -1,0 +1,72 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.work_profiles.propose",
+  "message_id": "01928f3a-7b2c-7e50-8000-000000000005",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.objectives.work_profiles.propose",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7e50-8000-000000000006",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "TQhwfxPMVZuQ2HGDoIRoW1fTfKsRN6PeOi2-dtcu82Vl-bWzHwg1McqnUpUGwTdDC59x5kl_c6Ylp5Hals9VCQ"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_root_7f",
+    "profile_name": "dependency-watch",
+    "profile": {
+      "cadence_cron": "0 9 * * *",
+      "budget": {
+        "active_seconds": 1200,
+        "checkpoint_reserve_seconds": 120,
+        "checkpoint_reserve_turns": 2,
+        "checkpoint_reserve_tokens": 10000,
+        "checkpoint_reserve_tool_calls": 1,
+        "turns": 20,
+        "total_tokens": 50000,
+        "tool_calls": 30
+      }
+    },
+    "rationale": {
+      "type": "inline",
+      "text": "Run bounded checks while the report remains active."
+    },
+    "request_id": "request_01928f3a-7b2c-7e50-8000-000000000005"
+  },
+  "idempotency_key": "objectives.work_profiles.propose:0F_PvhAyYaAin3rDQdY5yOrI4SA3e7Uoi9p8I1eejDA",
+  "body_digest": "RDu284CVfLhCZLdFps8ltI8bSGlCVKu1T-dvygW08Po",
+  "signature": "z09b-O2Es7Q_gG-9jctm2_GGfYiJDHiJvigQEyNiuKKuWqSjyWPQofqFn_MTGGWlGCJcBAReoRaMZJ86wt5tCQ"
+}

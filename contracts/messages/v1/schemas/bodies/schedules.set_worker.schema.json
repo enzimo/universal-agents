@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/schedules.set_worker.schema.json",
-  "title": "schedules.set_worker request",
-  "description": "Choose which worker runs a schedule.",
+  "title": "schedules.set_worker",
+  "description": "Save a schedule's worker type, startup policy and capability requirements.",
   "type": "object",
   "properties": {
     "request_id": {
@@ -14,27 +14,318 @@
     "seen_version": {
       "$ref": "../common.schema.json#/$defs/record_version"
     },
-    "worker": {
-      "type": "object",
-      "properties": {
-        "agent_type": {
-          "$ref": "../common.schema.json#/$defs/agent_type"
-        },
-        "agent_id": {
-          "$ref": "../common.schema.json#/$defs/agent_id"
-        }
-      },
-      "required": [
-        "agent_type"
-      ],
-      "additionalProperties": false
+    "target_agent_type": {
+      "$ref": "../common.schema.json#/$defs/agent_type"
+    },
+    "seen_policy_revision": {
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "policy": {
+      "$ref": "schedules.set_worker.schema.json#/$defs/schedule_worker_policy"
+    },
+    "capabilities": {
+      "$ref": "schedules.set_worker.schema.json#/$defs/schedule_worker_capabilities"
+    },
+    "activate_schedule": {
+      "type": "boolean"
+    },
+    "convert_exact_target": {
+      "type": "boolean"
     }
   },
   "required": [
     "request_id",
     "schedule_id",
     "seen_version",
-    "worker"
+    "target_agent_type",
+    "seen_policy_revision"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "schedule_worker_rules": {
+      "type": "object",
+      "properties": {
+        "claim_wait_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "startup_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000
+        },
+        "admission_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000
+        },
+        "max_launch_attempts_per_occurrence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "retry_backoff_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300000
+        },
+        "launch_when_busy": {
+          "type": "boolean"
+        },
+        "idle_ttl_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        },
+        "interrupted_run_skip_window_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "schedule_worker_policy": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "profile_id": {
+          "const": "local"
+        },
+        "expires_at_utc": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "rules": {
+          "$ref": "schedules.set_worker.schema.json#/$defs/schedule_worker_rules"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "schedule_worker_requirement": {
+      "type": "object",
+      "properties": {
+        "capability_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "necessity": {
+          "type": "string",
+          "enum": [
+            "required",
+            "conditional"
+          ]
+        },
+        "resource_constraints_json": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384,
+          "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "declared",
+            "observed",
+            "approved"
+          ]
+        }
+      },
+      "required": [
+        "capability_id",
+        "operation"
+      ],
+      "additionalProperties": false
+    },
+    "schedule_worker_capabilities": {
+      "type": "object",
+      "properties": {
+        "requirements": {
+          "type": "array",
+          "items": {
+            "$ref": "schedules.set_worker.schema.json#/$defs/schedule_worker_requirement"
+          },
+          "maxItems": 64
+        },
+        "runtime_discovery": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "schedule_worker_readiness_check": {
+      "type": "object",
+      "properties": {
+        "capability_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ready",
+            "deferred",
+            "blocked"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4096
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "tool_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "access_operation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "access_level": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "full"
+          ]
+        },
+        "missing_access_for": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "worker_type",
+              "owner"
+            ]
+          },
+          "maxItems": 2
+        },
+        "detail": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "suggestions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 240
+          },
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "capability_id",
+        "operation",
+        "status",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "schedule_worker_readiness": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "ready",
+            "provisional",
+            "blocked"
+          ]
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "schedules.set_worker.schema.json#/$defs/schedule_worker_readiness_check"
+          },
+          "maxItems": 64
+        },
+        "checked_at_utc": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "execution_digest": {
+          "$ref": "../common.schema.json#/$defs/record_version"
+        },
+        "policy_snapshot_digest": {
+          "$ref": "../common.schema.json#/$defs/record_version"
+        }
+      },
+      "required": [
+        "status",
+        "checks",
+        "checked_at_utc",
+        "execution_digest"
+      ],
+      "additionalProperties": false
+    },
+    "schedule_worker_missing_access": {
+      "type": "object",
+      "properties": {
+        "tool_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "level": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "full"
+          ]
+        },
+        "missing_for": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "worker_type",
+              "owner"
+            ]
+          },
+          "maxItems": 2
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "capability_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        }
+      },
+      "required": [
+        "missing_for",
+        "required",
+        "capability_id"
+      ],
+      "additionalProperties": false
+    }
+  }
 }

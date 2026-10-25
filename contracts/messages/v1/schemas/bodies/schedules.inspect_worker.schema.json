@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/schedules.inspect_worker.schema.json",
+  "title": "schedules.inspect_worker",
+  "description": "Inspect a schedule's assignment, startup and access diagnostics. A worker may omit its current schedule id.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "schedule_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    }
+  },
+  "required": [
+    "request_id"
+  ],
+  "additionalProperties": false
+}
