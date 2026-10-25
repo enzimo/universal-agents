@@ -524,8 +524,7 @@ def check_entry_receivers(where: str, entry: dict[str, Any], transport: dict[str
     own_targets = {audience_target(address) for address in own_addresses(entry)}
     idle = [role for role in entry["receivers"]
             if not any(role in transport["audience_targets"][target] for target in own_targets)]
-    # Dead-letter readers read the stream with their own grants, not through one address.
-    if idle and entry["class"] != "dead_letter":
+    if idle:
         raise ContractError(f"{where}: receivers {idle} serve none of its addresses")
     for address, senders in entry.get("senders_by_address", {}).items():
         if address not in own_addresses(entry) or not senders or not set(senders) <= set(entry["senders"]):
@@ -866,6 +865,14 @@ def check_shared_lists(registry: dict[str, Any], transport: dict[str, Any], topo
                        schemas: dict[str, dict[str, Any]]) -> None:
     """Lists the schemas repeat must match the registry and topologies they come from."""
 
+    refusals = {item["code"] for item in registry["verification_refusals"]}
+    for entry in registry["kinds"].values():
+        if entry["class"] == "dead_letter":
+            reasons = set(schemas[entry["body"]]["properties"]["reason"]["enum"])
+            if not refusals <= reasons:
+                raise ContractError(f"{entry['body']}: a notice's reason names every verification refusal; missing "
+                                    f"{sorted(refusals - reasons)}")
+
     common = schemas["common.schema.json"]["$defs"]
     if set(common["host_role"]["enum"]) != set(registry["host_roles"]):
         raise ContractError("common.schema.json host_role must list registry.yaml host_roles")
@@ -1045,7 +1052,9 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
                     continue
                 if entry["class"] == "durable":
                     publish.update(consumer_permissions(address, transport))
-                elif entry["class"] != "dead_letter":  # dead-letter readers get stream grants later
+                elif entry["class"] != "dead_letter":
+                    # Dead letters wait in UA1_DLQ; its read grants come with the services
+                    # that read it (message contract plan 13A.9), not as a subscription.
                     subscribe.add(full_subject(address, "*"))
                 answers_requests = answers_requests or entry["class"] == "request_reply"
         document: dict[str, Any] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}

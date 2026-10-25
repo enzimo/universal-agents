@@ -2819,15 +2819,15 @@ kinds:
     rendering: none
 
   dlq.notice:
-    description: A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only.
+    description: A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only. The team services tell administrators.
     class: dead_letter
     address: dlq.notice.{copy}
     body: bodies/dlq.notice.schema.json
     senders: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
-    receivers: [team_services, installation_authority]
+    receivers: [team_services]
     expiry_seconds: 2592000
     authority: none
-    idempotency: [/body/copy_id]
+    idempotency: [/issuer/runtime, /body/copy_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
     topology_edge: none

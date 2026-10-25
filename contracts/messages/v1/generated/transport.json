@@ -156,6 +156,7 @@
   "streams": {
     "UA1_DLQ": {
       "max_age_seconds": 2592060,
+      "max_message_bytes": 262144,
       "retention": "limits",
       "storage": "file",
       "subjects": [

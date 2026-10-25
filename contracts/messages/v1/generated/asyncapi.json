@@ -2777,7 +2777,7 @@
             }
           ]
         },
-        "summary": "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only."
+        "summary": "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only. The team services tell administrators."
       },
       "heartbeat_items_add": {
         "name": "heartbeat_items.add",

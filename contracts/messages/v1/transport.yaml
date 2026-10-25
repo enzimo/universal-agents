@@ -91,6 +91,7 @@ streams:
     retention: limits
     storage: file
     max_age_seconds: 2592060    # the dead-letter class's expiry plus a minute
+    max_message_bytes: 262144   # a raw copy is kept only up to max_frame_bytes; a larger message gets a notice with raw.stored false
 
 # Consumer names join ids with ~, which ids cannot contain: with _ (allowed in ids),
 # team "team_example" with agent "researcher-2" and team "team" with agent

@@ -1414,6 +1414,8 @@ class DlqNoticeBodyClaimed(WireModel):
 
 
 class DlqNoticeBodyRaw(WireModel):
+    "The set-aside bytes: whether they were stored at dlq.raw.<copy> (only messages of at most max_frame_bytes are), their size, and their SHA-256 in unpadded base64url."
+
     stored: bool
     size: Count
     sha256: Sha256Digest
@@ -1424,9 +1426,8 @@ class DlqNoticeBody(WireModel):
 
     copy_id: Annotated[str, StringConstraints(pattern='^[0-9a-f]{64}$')]
     stage: Literal['verification', 'handler', 'delivery_limit', 'upgrade']
-    reason: Literal['too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'access_denied', 'handler_failed', 'delivery_limit', 'upgrade_drain']
+    reason: Literal['too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_issuer', 'wrong_sender', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'bad_authority', 'access_denied', 'handler_failed', 'delivery_limit', 'upgrade_drain']
     pointer: Union[Annotated[str, StringConstraints(min_length=1, max_length=512)], MISSING] = Field(default=MISSING)
-    detail: Union[ShortText, MISSING] = Field(default=MISSING)
     original: DlqNoticeBodyOriginal
     claimed: Union[DlqNoticeBodyClaimed, MISSING] = Field(default=MISSING)
     raw: DlqNoticeBodyRaw

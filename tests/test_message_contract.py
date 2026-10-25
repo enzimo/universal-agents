@@ -476,6 +476,56 @@ def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change
         EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
 
 
+def drop_notice_reason(_registry: dict, _transport: dict, schemas: dict) -> None:
+    schemas["bodies/dlq.notice.schema.json"]["properties"]["reason"]["enum"].remove("bad_authority")
+
+
+def host_ttl(ttl: int | None):
+    def change(registry: dict, _transport: dict, _schemas: dict) -> None:
+        registry["state_records"]["host"].pop("ttl_seconds")
+        if ttl is not None:
+            registry["state_records"]["host"]["ttl_seconds"] = ttl
+    return change
+
+
+def proof_of_possession_on(kind: str):
+    def change(registry: dict, _transport: dict, _schemas: dict) -> None:
+        registry["kinds"][kind]["verification"] = "proof_of_possession"
+    return change
+
+
+def overlap(seconds: int):
+    def change(registry: dict, _transport: dict, _schemas: dict) -> None:
+        registry["certificate_overlap_seconds"] = seconds
+    return change
+
+
+def scope_pattern(_registry: dict, _transport: dict, schemas: dict) -> None:
+    schemas["common.schema.json"]["$defs"]["scope_id"]["pattern"] = "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+
+
+def notice_reader(registry: dict, _transport: dict, _schemas: dict) -> None:
+    registry["kinds"]["dlq.notice"]["receivers"] = ["team_services", "installation_authority"]
+
+
+@pytest.mark.parametrize(("change", "problem"), [
+    (drop_notice_reason, "names every verification refusal"),
+    (host_ttl(None), "ttl_seconds is its bucket's"),
+    (host_ttl(30), "ttl_seconds is its bucket's"),
+    (proof_of_possession_on("agent.pause"), "proves possession"),
+    (overlap(0), "certificate_overlap_seconds"),
+    (overlap(86400), "certificate_overlap_seconds"),
+    (scope_pattern, "scope_id must allow"),
+    (notice_reader, "serve none of its addresses"),
+])
+def test_the_generator_refuses_records_and_notices_that_break_the_contract(change, problem: str) -> None:
+    registry, transport, schemas = (copy.deepcopy(EXPORT.load_yaml("registry.yaml")), copy.deepcopy(TRANSPORT),
+                                    copy.deepcopy(EXPORT.load_schemas()))
+    change(registry, transport, schemas)
+    with pytest.raises(EXPORT.ContractError, match=problem):
+        EXPORT.check_registry(registry, transport, EXPORT.load_yaml("team-topologies.yaml"), schemas)
+
+
 def reply_variant(schemas: dict, kind: str, outcome: str) -> dict:
     """The alternative of a kind's reply schema with this outcome."""
 
@@ -959,6 +1009,10 @@ def test_queued_work_is_judged_by_its_certificate_not_the_epoch_minimum() -> Non
     fixtures.verify(json.dumps(frame).encode(), frame, minimum)
     pause = fixtures.example_frame("agent.pause")
     assert refusal(json.dumps(pause).encode(), pause, minimum).code == "epoch_too_old"
+    # A dead-letter notice waits in UA1_DLQ like queued work.
+    notice = fixtures.example_frame("dlq.notice", "bad-signature")
+    worker_minimum = {"minimum_epochs": [{"installation": "install_example", "runtime": "worker-host-1", "membership": 9}]}
+    fixtures.verify(json.dumps(notice).encode(), notice, worker_minimum)
 
 
 def test_renewal_rotation_signing_vector() -> None:

@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "dlq.notice",
   "message_id": "01928f3a-7b2c-7707-8000-000000000707",
-  "idempotency_key": "dlq.notice:bXeWDLlDIfDQIqJa4-qHRKn9OilGJtRZEBoRT9eCMgA",
+  "idempotency_key": "dlq.notice:BPTZmfB7d_HUt6wEirkoFjjXQDTprqXkn6Edrt7VYE8",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -26,7 +26,6 @@
     "stage": "verification",
     "reason": "bad_signature",
     "pointer": "/signature",
-    "detail": "The signature did not verify.",
     "original": {
       "subject": "ua.v1.team_example.lead-host-1.work.agent.researcher-2",
       "stream": "UA1_WORK",
@@ -47,6 +46,6 @@
     },
     "release": "0.9.8"
   },
-  "body_digest": "GeR8XjITcqE2mTe_GyM9aHgMfmmJmc8-5lEPFrO1mus",
-  "signature": "OxfFy7Y3VsD2cWRbc7luWDpao_MT9UKfGAKhX3Db1PN0Oqg470XlOLQOOVk5ZIn74iEqNqmFdamaZUAgWP1lCw"
+  "body_digest": "-B9g8UhN6eHGS7dNkp9ZaNZnJgTEYn0DVFGB0K7hHZY",
+  "signature": "5f9Sbc9M4p6RDoy-wYDJOFXRTeB4RqG7cAbM8_1NWyP21cDJi8qneQl1e_emI1F-9B-nwau3TyjzkG4Vu9uhDQ"
 }

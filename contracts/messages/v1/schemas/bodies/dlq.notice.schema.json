@@ -7,7 +7,8 @@
   "properties": {
     "copy_id": {
       "type": "string",
-      "pattern": "^[0-9a-f]{64}$"
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "An id the receiver chooses at random for each copy it sets aside (256 bits as lowercase hexadecimal). It names the copy's subjects, dlq.raw.<copy> and dlq.notice.<copy>."
     },
     "stage": {
       "type": "string",
@@ -28,6 +29,8 @@
         "bad_digest",
         "revoked",
         "epoch_too_old",
+        "wrong_issuer",
+        "wrong_sender",
         "wrong_team",
         "wrong_audience",
         "subject_mismatch",
@@ -36,19 +39,19 @@
         "replayed",
         "unknown_kind",
         "invalid_body",
+        "bad_authority",
         "access_denied",
         "handler_failed",
         "delivery_limit",
         "upgrade_drain"
-      ]
+      ],
+      "description": "A verification refusal code (registry verification_refusals), or why a handler or delivery set the message aside."
     },
     "pointer": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 512
-    },
-    "detail": {
-      "$ref": "../common.schema.json#/$defs/short_text"
+      "maxLength": 512,
+      "description": "The JSON pointer the refusal names, as in the refusal itself."
     },
     "original": {
       "type": "object",
@@ -116,7 +119,8 @@
         "size",
         "sha256"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "The set-aside bytes: whether they were stored at dlq.raw.<copy> (only messages of at most max_frame_bytes are), their size, and their SHA-256 in unpadded base64url."
     },
     "release": {
       "type": "string",

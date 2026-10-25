@@ -533,17 +533,19 @@ file. It uses public fixture signing keys and no operator credentials.
   `server.minimum_version`.
 - **Settings:** the broker, stream and consumers are created from `transport.yaml`, and
   the test checks that the server reports the same values back.
-- **What it proves:** real publish, pull, acknowledgement and signed inbox replies; a
-  result and its team-services copy both stored and pulled by their own readers; a
-  scheduled run delivered to a worker pool and its result to the person's gateway route;
-  an outside agent's adapter refused when it publishes into a worker pool; a new host
-  that holds only the pre-join permissions joining and checking the authority's reply
-  from its bootstrap records;
-  separate consumers for ids that an `_` separator would have merged; and refusals of
-  other consumers' fetches and acknowledgements, consumer creation and deletion, stream
-  reads, publishing under another runtime's id, subscribing to another runtime's inbox,
-  to stream subjects or to another agent's requests, and writing into another runtime's
-  inbox except to answer a request once.
+- **What it proves:**
+  - real publish, pull, acknowledgement and signed inbox replies;
+  - a result and its team-services copy both stored and pulled by their own readers;
+  - a scheduled run delivered to a worker pool, and its result to the person's gateway route;
+  - a new host that holds only the pre-join permissions joins, and checks the authority's
+    reply from its bootstrap records;
+  - dead-letter raw copies and notices stored under the receiver's own id;
+  - separate consumers for ids that an `_` separator would have merged;
+  - refusals of: an outside agent's adapter publishing into a worker pool; other
+    consumers' fetches and acknowledgements; consumer creation and deletion; stream
+    reads; publishing under another runtime's id, dead-letter copies included;
+    subscribing to another runtime's inbox, to stream subjects or to another agent's
+    requests; writing into another runtime's inbox except to answer a request once.
 
 A team `config.yaml` or `debug.env` cannot supply this isolated authorization fixture.
 
@@ -637,19 +639,18 @@ What each record says, and what `TrustStore.verify` checks about it:
 
 ## Dead letters
 
-A receiver that sets a message aside keeps the exact bytes at `dlq.raw.<copy>` and sends a `dlq.notice`. The notice holds identifiers only: the stage, the reason (a verification refusal or a handler failure) and the set-aside message's unverified claims. It never holds the content.
+A receiver that sets a message aside picks a copy id at random (256 bits, written as 64 lowercase hexadecimal characters). It keeps the exact bytes at `dlq.raw.<copy>` under its own runtime id, and sends a `dlq.notice` to its team's services, which tell administrators. Both wait in `UA1_DLQ` for 30 days.
+- **The notice holds identifiers only:**
+  - the copy id, which its subject also names;
+  - the stage, and the reason: a verification refusal code, or why a handler or delivery gave up (the generator checks that the list names every refusal code);
+  - the refusal's JSON pointer, and where the message sat in its stream;
+  - the set-aside message's own unverified claims: kind, message id, issuer team and runtime, protocol;
+  - the raw copy's size and SHA-256.
 
-Raw copies have no frame kind: they preserve the refused bytes exactly. Generated
-permissions therefore include the dead-letter class addresses for each notice
-sender, bound to its own runtime id. They do not permit publishing copies under
-another runtime's id.
-
-Contract validation should combine schema and cryptographic tests with live NATS
-permission tests. The former cover writer binding, certificate types and key
-proofs; the latter prove that the generated subjects and permissions let a host
-join and retain raw dead letters while refusing another sender's identity. The
-live contract test starts an isolated authenticated NATS server, version 2.15.1
-or later. It does not use a team's live broker or credentials.
+  It has no free text, because a refusal's details can quote the content.
+- **Raw copies** have no frame kind: they keep the refused bytes exactly, so a person can inspect what arrived. Generated permissions let each notice sender publish copies under its own runtime id only. A receiver keeps a copy only when it is at most `max_frame_bytes` (the stream's message limit); for a larger message the notice says `raw.stored: false`.
+- **People's content.** A raw copy can hold a person's message. Only the team services read `UA1_DLQ`; its read grants come with them (message contract plan 13A.9). Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies whose frames name that person, in an authority token or a person reference.
+- **Retry keys** name the receiver's runtime and the copy id, so two receivers' notices never share one.
 
 ## Versions
 
