@@ -1,0 +1,71 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.work_sessions.disable.reply",
+  "message_id": "a2ba9357-cd9a-7a39-94e7-df128e308432",
+  "idempotency_key": "objectives.work_sessions.disable.reply:-Ev4b0NOkx4G30PSS8Ha2ip0uVKT4mTVeCJneRCS9jQ",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.f6ffa5f7-da79-7f1f-9ffa-eeaf7ab8b446",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "policy": {
+      "type": "inline",
+      "value": {
+        "policy_id": "policy_dependency_watch",
+        "objective_id": "objective_dependency_watch",
+        "owner_agent_id": "manager_scope:team_example:TeamArchitect",
+        "profile_name": "daily",
+        "profile_source": "configured",
+        "profile_digest": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+        "owner_person": "person_7c1",
+        "installed_profile_id": "profile_dependency_watch",
+        "profile_proposal_id": "proposal_dependency_watch",
+        "status": "disabled",
+        "disabled_by_objective_control": false,
+        "cadence_cron": "0 9 * * *",
+        "cadence_timezone": "owner",
+        "required_skills": [
+          "long-horizon-plan-execution"
+        ],
+        "budget": {
+          "active_seconds": 1200,
+          "checkpoint_reserve_seconds": 120,
+          "checkpoint_reserve_turns": 2,
+          "checkpoint_reserve_tokens": 10000,
+          "checkpoint_reserve_tool_calls": 2,
+          "turns": 20,
+          "total_tokens": 50000,
+          "tool_calls": 30
+        },
+        "accepted_by_task_id": "task_root_7f",
+        "acceptance_summary": {
+          "type": "inline",
+          "text": "The person accepted daily work sessions with this exact budget."
+        },
+        "schedule_id": "schedule_dependency_watch",
+        "next_run_at": "2026-10-23T04:30:00.000Z",
+        "created_at": "2026-10-21T04:30:00.000Z",
+        "updated_at": "2026-10-22T04:30:00.000Z"
+      }
+    }
+  },
+  "causation_id": "f6ffa5f7-da79-7f1f-9ffa-eeaf7ab8b446",
+  "body_digest": "Xln_tNQ-EUx8saA6qTLwEXmB94gDyCGeoPDsenDWiKw",
+  "signature": "yGByIoix9d-AiHPwstXH0pa24xpyqrOXlnn4EIg8x6StuZKQt_L2IcRBNQTXdESF7LrMMG-Zfwk9YCjkOeRrBg"
+}

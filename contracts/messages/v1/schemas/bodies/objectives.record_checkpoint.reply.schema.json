@@ -1,0 +1,304 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/objectives.record_checkpoint.reply.schema.json",
+  "title": "objectives.record_checkpoint.reply",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "checkpoint": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "inline"
+                },
+                "value": {
+                  "type": "object",
+                  "properties": {
+                    "checkpoint_id": {
+                      "$ref": "../common.schema.json#/$defs/record_id"
+                    },
+                    "session_id": {
+                      "$ref": "../common.schema.json#/$defs/record_id"
+                    },
+                    "policy_id": {
+                      "$ref": "../common.schema.json#/$defs/record_id"
+                    },
+                    "objective_id": {
+                      "$ref": "../common.schema.json#/$defs/record_id"
+                    },
+                    "owner_agent_id": {
+                      "$ref": "../common.schema.json#/$defs/durable_owner_id"
+                    },
+                    "health": {
+                      "type": "string",
+                      "enum": [
+                        "on_track",
+                        "at_risk",
+                        "blocked",
+                        "needs_human",
+                        "complete"
+                      ]
+                    },
+                    "observe": {
+                      "$ref": "../common.schema.json#/$defs/text_content"
+                    },
+                    "orient": {
+                      "$ref": "../common.schema.json#/$defs/text_content"
+                    },
+                    "decide": {
+                      "$ref": "../common.schema.json#/$defs/text_content"
+                    },
+                    "act": {
+                      "$ref": "../common.schema.json#/$defs/text_content"
+                    },
+                    "evidence_delta": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "../common.schema.json#/$defs/text_content"
+                      },
+                      "minItems": 0,
+                      "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+                    },
+                    "completed_subgoals": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "../common.schema.json#/$defs/text_content"
+                      },
+                      "minItems": 0,
+                      "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+                    },
+                    "next_subgoal": {
+                      "$ref": "../common.schema.json#/$defs/text_content"
+                    },
+                    "blockers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "../common.schema.json#/$defs/text_content"
+                      },
+                      "minItems": 0,
+                      "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+                    },
+                    "in_flight_effects": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "../common.schema.json#/$defs/text_content"
+                      },
+                      "minItems": 0,
+                      "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+                    },
+                    "artifacts": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "../common.schema.json#/$defs/text_content"
+                      },
+                      "minItems": 0,
+                      "description": "Preserve the complete stored collection. Use the complete JSON file representation when the signed frame would exceed its byte limit."
+                    },
+                    "degraded": {
+                      "type": "boolean"
+                    },
+                    "created_at": {
+                      "$ref": "../common.schema.json#/$defs/timestamp"
+                    }
+                  },
+                  "required": [
+                    "checkpoint_id",
+                    "session_id",
+                    "policy_id",
+                    "objective_id",
+                    "owner_agent_id",
+                    "health",
+                    "observe",
+                    "orient",
+                    "decide",
+                    "act",
+                    "evidence_delta",
+                    "completed_subgoals",
+                    "blockers",
+                    "in_flight_effects",
+                    "artifacts",
+                    "degraded",
+                    "created_at"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "type",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "blob"
+                },
+                "ref": {
+                  "$ref": "../common.schema.json#/$defs/blob_ref"
+                }
+              },
+              "required": [
+                "type",
+                "ref"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "outcome",
+        "checkpoint"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_found"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "feature_off"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "invalid_request"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "change_conflict"
+        },
+        "case_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "brief": {
+          "$ref": "../common.schema.json#/$defs/blob_ref"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "case_id",
+        "brief"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "request_closed"
+        },
+        "request_state": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "needs_person_decision"
+        },
+        "case_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "record_busy"
+        },
+        "retry_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "retry_at"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

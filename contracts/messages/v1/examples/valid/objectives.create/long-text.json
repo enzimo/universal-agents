@@ -1,0 +1,122 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.create",
+  "message_id": "8e867839-d6d6-713f-8b96-d1f9baf80a08",
+  "idempotency_key": "objectives.create:4TPyh20R8MwnrpahVkRqQuyCLDVTNjNIy_HcqXfqR58",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.objectives.create",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7154-9000-000000000154",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "6rG0DjDSHQrjmwz_useUIS7iIPZRmOlgpf0OjA58FlrkQQVynbxDCAWq6-NIwa1yz3fF6wjU8pU4Rsyn8I2DAw"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_objectives_create_long_text",
+    "title": "Track recurring dependency checks",
+    "desired_outcome": {
+      "type": "blob",
+      "ref": {
+        "sha256": "bVkH4jeyC20tYmhn0O5It9nabNQjNQxexbb8QJq1AQs",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "horizon": "recurring",
+    "priority": "normal",
+    "success_criteria": [
+      {
+        "type": "blob",
+        "ref": {
+          "sha256": "6FYPmTxSyMHVoJjutWVN3oWdMOyF40WOj96Tv3bdWc8",
+          "size": 4096,
+          "media_type": "text/plain"
+        }
+      }
+    ],
+    "why": {
+      "type": "blob",
+      "ref": {
+        "sha256": "zWCmzBrk5bEe36bmSZkWWEL9yrUB65dgItEDnJ-K_Pw",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "current_focus": {
+      "type": "blob",
+      "ref": {
+        "sha256": "CNM3qiNAQ4_IejUzNMdE2UGoMlVUbOVrUm1u8KkIYT8",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "progress_summary": {
+      "type": "blob",
+      "ref": {
+        "sha256": "inL5Yfukb_VC4iWMxd7ObEb3Fx9zctgVm-c-neZUVqE",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    },
+    "completion_policy": "recurring_indefinite",
+    "requires_user_confirmation": false,
+    "creation_mode": "promote_task",
+    "task_id": "task_root_7f",
+    "constraints": [
+      {
+        "type": "blob",
+        "ref": {
+          "sha256": "6FYPmTxSyMHVoJjutWVN3oWdMOyF40WOj96Tv3bdWc8",
+          "size": 4096,
+          "media_type": "text/plain"
+        }
+      }
+    ],
+    "non_goals": [
+      {
+        "type": "blob",
+        "ref": {
+          "sha256": "6FYPmTxSyMHVoJjutWVN3oWdMOyF40WOj96Tv3bdWc8",
+          "size": 4096,
+          "media_type": "text/plain"
+        }
+      }
+    ]
+  },
+  "body_digest": "BUIk29N9jftIEAe67IEgJTWK_hAGjToBvYsGN9chR28",
+  "signature": "-Td0p_PeZlr75xHVCptyKew-UDYEn9-p_grr9JELLrY_cEeguNx1dauNwNtwMiLchUn7uk6175GeG8HLIHuUDA"
+}

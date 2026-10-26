@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.publish_contribution.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-000000005051",
+  "idempotency_key": "knowledge.publish_contribution.reply:zEcNVTnhpY1YyozXTawjZBfVmZ5zYIv4UOHwD41E-Bo",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7482-8000-000000000482",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "invalid_request",
+    "message": "A new page needs a title and body."
+  },
+  "causation_id": "01928f3a-7b2c-7482-8000-000000000482",
+  "body_digest": "r2N0iqG4445IwxCujxflMtu6KL7i6x4ZSKXJUygw0PM",
+  "signature": "3QpPacywZ-AkpMugoWpHh8GWOSBBA1GTatau8nSNJ4h_b8uPmPduhLbb_De0hgB4wjaeLwjIwKzWdSo3QOeFCg"
+}

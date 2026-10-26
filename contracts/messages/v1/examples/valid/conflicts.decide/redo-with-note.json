@@ -1,0 +1,58 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "conflicts.decide",
+  "message_id": "01928f3a-7b2c-7a01-8000-000000000a01",
+  "idempotency_key": "conflicts.decide:4RNuq8HektIF_yDh3jz_D5JLGZZUYvhMonK53jFVVt0",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.conflicts.decide",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7111-9001-000000000111",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "command",
+      "id": "conflict_decision_3"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "7KtBAH047DJw2ElTqFByoWE-8UqCK6zEe3IcRBmkzb-G-GKpqO0VNSK27590E4SpCVf8fGvXKQN_TVXOLVMHAw"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "case_id": "case_id_1",
+    "question_id": "question_id_1",
+    "values_digest": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+    "choice": {
+      "type": "redo_with_note",
+      "note": "Keep the old title, change the date."
+    },
+    "request_id": "conflict_decision_3"
+  },
+  "body_digest": "MhxCgXse67cIYLIQgX40E1_wf2oEF402xQ1W6_iqTDw",
+  "signature": "bdCXcEGkug-U9zSQmq-DE7yrN1yBdeTlmbJBhI-hNDCzaTNdhT5J3WtQ3NSYSDwsDkbIbrk8zKEqD90tX05gCQ"
+}

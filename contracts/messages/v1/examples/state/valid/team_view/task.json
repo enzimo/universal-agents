@@ -1,0 +1,29 @@
+{
+  "record": "team_view",
+  "protocol": "1.0-pre",
+  "key": "team_example.task.t1",
+  "writer": {
+    "type": "host",
+    "installation": "install_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "key_id": "test-services-key-1"
+  },
+  "sequence": 4,
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "body": {
+    "entry": "task",
+    "task_id": "task_sub_1",
+    "request_id": "req_1",
+    "number": 2,
+    "holder": "researcher-2",
+    "requester": "lead",
+    "state": "in_progress",
+    "custody_token": 3,
+    "since": "2026-10-22T04:10:00.000Z",
+    "objective_id": "obj_1"
+  },
+  "algorithm": "ed25519",
+  "body_digest": "syyHCObaHAaLn7hi7CelQ9E9EyDBi7RVMAvOu6m84v8",
+  "signature": "xWQaz4l7POPiMztwcoQTB6-JxeBYb21VkwDt7tPdrM-E8nh-EQFJYqcr7dGMDUrDTzA0EHfAv6vW-hvgVhBKBQ"
+}

@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.work_sessions.start.reply",
+  "message_id": "a3342b76-3a90-7c9b-b519-8855adbd980b",
+  "idempotency_key": "objectives.work_sessions.start.reply:HqhoVcGiGCdR_DesNhyeorLKlIfsBzoLaDtqqOmk8y8",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.0fca8339-2901-74bd-9c13-fc4280078452",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "direct_user_request_required",
+    "message": "Enable work sessions in the authenticated request where the person accepted them."
+  },
+  "causation_id": "0fca8339-2901-74bd-9c13-fc4280078452",
+  "body_digest": "bLK3y6dB6SnX1d4VZ1LKLrZIumrPlBHakavWv3jHy6o",
+  "signature": "zgbIpcv8FqRXPlCbVhdPw6LB_WUzxlRQSQG-Yx9YZ1dgrOlKFORfeR67iukWPv3stLUDVfubP6zF3tzBw8V6Cw"
+}

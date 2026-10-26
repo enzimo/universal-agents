@@ -1,0 +1,463 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/staged_changes.apply.reply.schema.json",
+  "title": "staged_changes.apply reply",
+  "description": "The lead applies a staged change the person reviewed.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "state": {
+          "const": "applied"
+        },
+        "approval": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "person_approval",
+                "held_access",
+                "agreement",
+                "operator_configuration"
+              ]
+            },
+            "approved_by": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            "approved_at": {
+              "$ref": "../common.schema.json#/$defs/timestamp"
+            },
+            "access_request_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          },
+          "required": [
+            "mode",
+            "approved_by",
+            "approved_at"
+          ],
+          "additionalProperties": false,
+          "description": "The recorded authority for the application. Only person_approval may carry access_request_id."
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "result_json": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 16384,
+          "description": "JSON text encoding the adapter's result object, including its receipt and error when supplied."
+        }
+      },
+      "required": [
+        "outcome",
+        "state",
+        "approval",
+        "result_json"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "failed"
+        },
+        "state": {
+          "const": "failed"
+        },
+        "approval": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "person_approval",
+                "held_access",
+                "agreement",
+                "operator_configuration"
+              ]
+            },
+            "approved_by": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            "approved_at": {
+              "$ref": "../common.schema.json#/$defs/timestamp"
+            },
+            "access_request_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          },
+          "required": [
+            "mode",
+            "approved_by",
+            "approved_at"
+          ],
+          "additionalProperties": false,
+          "description": "The recorded authority for the application. Only person_approval may carry access_request_id."
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "result_json": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 16384,
+          "description": "JSON text encoding the adapter's result object, including its receipt and error when supplied."
+        }
+      },
+      "required": [
+        "outcome",
+        "state",
+        "approval",
+        "result_json"
+      ],
+      "additionalProperties": false,
+      "description": "The adapter returned an error result after approval. Preserve its receipt; this is a final outcome, not runtime_error."
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "waiting"
+        },
+        "access_request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "outcome",
+        "access_request_id"
+      ],
+      "additionalProperties": false,
+      "description": "Not stored. Retry the same command after the access request is decided."
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "agreement_required"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        },
+        "effect": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "maxItems": 40,
+          "minItems": 1
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "outcome",
+        "title",
+        "effect"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "already_applied"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_found"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "denied"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "access_request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        }
+      },
+      "required": [
+        "outcome",
+        "access_request_id"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "withdrawn"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "access_request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        }
+      },
+      "required": [
+        "outcome",
+        "access_request_id"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "changed_since_read"
+        },
+        "current_version": {
+          "$ref": "../common.schema.json#/$defs/record_version"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "outcome",
+        "current_version"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "change_conflict"
+        },
+        "case_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "brief": {
+          "$ref": "../common.schema.json#/$defs/blob_ref"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "outcome",
+        "case_id",
+        "brief"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "request_closed"
+        },
+        "request_state": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "needs_person_decision"
+        },
+        "case_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "record_busy"
+        },
+        "retry_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "outcome",
+        "retry_at"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "refused"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "outcome",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "description": "The checked plan could no longer apply. Keep the person's decision note, including after approval."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.report",
+  "message_id": "01928f3a-7b2c-7327-8000-000000000327",
+  "idempotency_key": "task.report:7No40lxih2xz5YYlSt2hygWRBgaMd2dWNE3NWX-FtcU",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "report_id": "rep_2",
+    "task_id": "task_sub_1",
+    "sequence": 6,
+    "for_person": false,
+    "summary": "Invoices from one vendor are booked a month late.",
+    "kind": {
+      "type": "worker_result",
+      "text": "The September invoices are in the attached file."
+    }
+  },
+  "body_digest": "9wRq6cvZ3zHohjFhUO70en4SHVa6-LpAdSbuB9iDUEE",
+  "signature": "x48AZGNmFaieJEpAIxoMO3Id3T7_XWU3o9g-Hn2QH8TUOstXGAyJCnVJgmiVszaLptWR7TzrFpUvqhmy7hrMAA"
+}

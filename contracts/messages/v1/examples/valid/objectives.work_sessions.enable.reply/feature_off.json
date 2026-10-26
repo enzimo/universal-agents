@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.work_sessions.enable.reply",
+  "message_id": "b598a71f-4d77-768d-848b-f6212b11c43a",
+  "idempotency_key": "objectives.work_sessions.enable.reply:LSerkF4zFXSrM61B1JYAW8N93TQI8THMaw9Y4ItSP68",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.15b21dbb-4a20-7d8a-86df-e9b5eae852ed",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "feature_off",
+    "message": "Objective work is disabled in this runtime."
+  },
+  "causation_id": "15b21dbb-4a20-7d8a-86df-e9b5eae852ed",
+  "body_digest": "X9yWVVtrjl3WGJ45yBJzZdKcWCPK1XRwA2JyLHsvTQ0",
+  "signature": "_riLZZUVA2-yLjIMJYVCIycNjJ4MCLAWo1bFE-qAPYLRnhXuJSGGiV-JO6Yc6sbf2oxdbGN3wPVAuElaCuM3Dg"
+}

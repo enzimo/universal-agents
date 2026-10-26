@@ -1,0 +1,35 @@
+{
+  "description": "A delivery reference is opaque; a phone number is refused.",
+  "refusal": "invalid_body",
+  "at": "/body/recipient/delivery_ref",
+  "base": "person.notify/agent.json",
+  "changes": [
+    {
+      "set": "/body/notice_id",
+      "to": "notice_9"
+    },
+    {
+      "set": "/body/recipient/delivery_ref",
+      "to": "+1 555 0100"
+    },
+    {
+      "set": "/body/text",
+      "to": "Hello."
+    },
+    {
+      "set": "/body/reason/note",
+      "to": "hi"
+    },
+    {
+      "remove": "/body/task_id"
+    },
+    {
+      "remove": "/body/conversation_id"
+    },
+    {
+      "remove": "/body/attachments"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"person.notify\", \"message_id\": \"01928f3a-7b2c-7118-8000-000000000118\", \"idempotency_key\": \"person.notify:za4AzRkyGjvabi_C1uRbKdbvCTugBWlUl1WWdvel5sU\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"edge\", \"id\": \"web\"}, \"subject\": \"ua.v1.team_example.lead-host-1.work.edge.web\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"notice_id\": \"notice_9\", \"recipient\": {\"type\": \"person\", \"delivery_ref\": \"+1 555 0100\"}, \"text\": \"Hello.\", \"urgency\": \"normal\", \"reason\": {\"source\": \"agent\", \"note\": \"hi\"}}, \"body_digest\": \"yVBBWddx2qkFAEZWXSfaCcG2E-MQPyRkE6UHfkI0PKA\", \"signature\": \"EpFWDQKK8KNitaFeoxau0qGN75ErX5eBHbJjGYpPuESwVLjYLluKEbwcsuvGIAgL3DRUshukF5Zn5f7LQBZ2BA\"}"
+}

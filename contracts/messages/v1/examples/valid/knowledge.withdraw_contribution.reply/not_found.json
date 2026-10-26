@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.withdraw_contribution.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000508e",
+  "idempotency_key": "knowledge.withdraw_contribution.reply:LCXFpehByC2OGm9t4prKuEGXbGILyH68mWrXl4pcnV4",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7485-8000-000000000485",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "not_found",
+    "message": "The requested page, revision, note or contribution was not found."
+  },
+  "causation_id": "01928f3a-7b2c-7485-8000-000000000485",
+  "body_digest": "D32h1Y8tDHiciQc7Rob3bs-oWzKJVXDTwPLTf0pz4c0",
+  "signature": "MZHVnb1hlaFZHCqo65Aw9QfoJ2cunQr75i1haESQ5xk5l_iwkE9xmbdQaUZcXelIrIMXd7Dzrr8EA5uOpWkuCQ"
+}

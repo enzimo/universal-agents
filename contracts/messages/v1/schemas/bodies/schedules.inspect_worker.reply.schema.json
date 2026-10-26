@@ -1,0 +1,308 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/schedules.inspect_worker.reply.schema.json",
+  "title": "schedules.inspect_worker.reply",
+  "description": "Worker registration, readiness, launch and repair diagnostics, scoped to the verified person or the worker's current custody.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "schedule_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "seen_version": {
+          "$ref": "../common.schema.json#/$defs/record_version"
+        },
+        "management_class": {
+          "type": "string",
+          "enum": [
+            "user",
+            "system"
+          ]
+        },
+        "worker_configuration_supported": {
+          "type": "boolean"
+        },
+        "worker_configuration_reason": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4096
+        },
+        "target_agent_type": {
+          "$ref": "../common.schema.json#/$defs/agent_type"
+        },
+        "specific_agent_id": {
+          "$ref": "../common.schema.json#/$defs/agent_id"
+        },
+        "desired_agent_type": {
+          "$ref": "../common.schema.json#/$defs/agent_type"
+        },
+        "policy_revision": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "policy": {
+          "$ref": "schedules.set_worker.schema.json#/$defs/schedule_worker_policy"
+        },
+        "automation_enabled": {
+          "type": "boolean"
+        },
+        "schedule_enabled": {
+          "type": "boolean"
+        },
+        "authority_mode": {
+          "type": "string",
+          "enum": [
+            "held_access",
+            "agreement",
+            "runtime_default"
+          ]
+        },
+        "eligibility": {
+          "type": "object",
+          "properties": {
+            "agent_type": {
+              "$ref": "../common.schema.json#/$defs/agent_type"
+            },
+            "registered": {
+              "type": "boolean"
+            },
+            "listed": {
+              "type": "boolean"
+            },
+            "allowed_by_default_policy": {
+              "type": "boolean"
+            },
+            "explicitly_denied": {
+              "type": "boolean"
+            },
+            "automatic_launch_enabled": {
+              "type": "boolean"
+            },
+            "eligible": {
+              "type": "boolean"
+            },
+            "eligible_agent_types": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/agent_type"
+              },
+              "maxItems": 256
+            },
+            "suggested_settings_change_json": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 16384,
+              "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+            },
+            "next_steps": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/text_content"
+              },
+              "maxItems": 16
+            }
+          },
+          "required": [
+            "registered",
+            "listed",
+            "allowed_by_default_policy",
+            "explicitly_denied",
+            "automatic_launch_enabled",
+            "eligible",
+            "eligible_agent_types",
+            "next_steps"
+          ],
+          "additionalProperties": false
+        },
+        "eligibility_reason": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4096
+        },
+        "effective_rules": {
+          "$ref": "schedules.set_worker.schema.json#/$defs/schedule_worker_rules"
+        },
+        "requested_rules": {
+          "$ref": "schedules.set_worker.schema.json#/$defs/schedule_worker_rules"
+        },
+        "inherited_rules": {
+          "$ref": "schedules.set_worker.schema.json#/$defs/schedule_worker_rules"
+        },
+        "operator_limits_json": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384,
+          "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+        },
+        "readiness": {
+          "$ref": "schedules.set_worker.schema.json#/$defs/schedule_worker_readiness"
+        },
+        "requirements": {
+          "$ref": "schedules.set_worker.schema.json#/$defs/schedule_worker_capabilities"
+        },
+        "observed_requirements": {
+          "type": "array",
+          "items": {
+            "$ref": "schedules.set_worker.schema.json#/$defs/schedule_worker_requirement"
+          },
+          "maxItems": 64
+        },
+        "block_reason": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4096
+        },
+        "next_action_at_utc": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "launch_attempt_json": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384,
+          "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+        },
+        "launch_json": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384,
+          "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+        },
+        "last_occurrence_json": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384,
+          "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+        },
+        "spawn_to_ready_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "due_to_admission_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "blocked_since_utc": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "definition_json": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384,
+          "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+        },
+        "execution_json": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384,
+          "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+        },
+        "suggested_refresh": {
+          "type": "object",
+          "properties": {
+            "schedule_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            },
+            "target_agent_type": {
+              "$ref": "../common.schema.json#/$defs/agent_type"
+            },
+            "seen_policy_revision": {
+              "$ref": "../common.schema.json#/$defs/count"
+            }
+          },
+          "required": [
+            "schedule_id",
+            "target_agent_type",
+            "seen_policy_revision"
+          ],
+          "additionalProperties": false
+        },
+        "repair_instructions": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        }
+      },
+      "required": [
+        "outcome",
+        "schedule_id",
+        "seen_version",
+        "management_class",
+        "worker_configuration_supported",
+        "policy_revision",
+        "automation_enabled",
+        "schedule_enabled",
+        "repair_instructions"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_found"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "invalid_request"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4096
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.install.reply",
+  "message_id": "01928f3a-7b2c-7e60-8000-00000000000c",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-743d-8000-00000000043d",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "state": "installed",
+    "schedule_id": "schedule_id_1",
+    "timing_revision": 3,
+    "next_fire_at": "2026-10-23T09:00:00.000Z",
+    "version": {
+      "state": "available",
+      "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc"
+    },
+    "warnings": {
+      "type": "blob",
+      "ref": {
+        "sha256": "u275MRe1m5h8S6_gb9WexQ_9Qg76yZDZKZJ3nlwOz5M",
+        "size": 217600,
+        "media_type": "text/plain"
+      }
+    }
+  },
+  "causation_id": "01928f3a-7b2c-743d-8000-00000000043d",
+  "idempotency_key": "schedules.install.reply:roUjRR04DScKpTKxHAlHPicgKcAwBsXjOovk1Gv6ToI",
+  "body_digest": "t_i8kANVebKtQU-gjlv8LlDoeymbozNcQa5fT2W4ZuA",
+  "signature": "kOhdpSKQIvHy94P1tNEjbiwOtqPFjFVOFYqvH15da_k0uthpukDKLjiLenzxzsgjpvAy3g5AUPMhr4-WFwHeBA"
+}

@@ -43,9 +43,18 @@ RETENTION = {"workqueue": RetentionPolicy.WORK_QUEUE, "limits": RetentionPolicy.
 STORAGE = {"file": StorageType.FILE, "memory": StorageType.MEMORY}
 # Which host runs which agents in these tests.
 HOSTS = {
-    "lead": {"role": "lead_host", "runtime": "lead-host-1", "agents": ["lead"]},
-    "worker": {"role": "worker_host", "runtime": "worker-host-1", "agents": ["researcher-2"]},
+    "lead": {"role": "lead_host", "runtime": "lead-host-1", "agents": ["lead"], "pools": [], "edges": []},
+    "worker": {"role": "worker_host", "runtime": "worker-host-1", "agents": ["researcher-2"], "pools": ["researcher"], "edges": []},
+    "authority": {"role": "installation_authority", "runtime": "authority-1", "agents": [], "pools": [], "edges": []},
+    "services": {"role": "team_services", "runtime": "team-services-1", "agents": [], "pools": [], "edges": []},
+    "scheduler": {"role": "scheduler", "runtime": "scheduler-1", "agents": [], "pools": [], "edges": []},
+    "gateway": {"role": "gateway", "runtime": "gateway-1", "agents": [], "pools": [], "edges": ["web"]},
+    "edge": {"role": "edge_adapter", "runtime": "edge-adapter-1", "agents": [], "pools": [], "edges": ["a2a_partner"]},
+    # A host that has not joined yet: the bootstrap bundle's pre-join permissions only.
+    "joining": {"role": "joining_host", "runtime": "new-host-1", "agents": [], "pools": [], "edges": []},
 }
+# What a new host's bootstrap bundle carries besides the authority keys (README, "Installation traffic").
+BOOTSTRAP_RECORDS = {"certificates/authority-1.json", "revocations/install_example.json"}
 
 
 def expand(template: str, bindings: dict[str, list[str]]) -> list[str]:
@@ -63,7 +72,7 @@ def expand(template: str, bindings: dict[str, list[str]]) -> list[str]:
 def permissions(user: str) -> dict:
     host = HOSTS[user]
     document = json.loads((CONTRACT / "generated/permissions" / f"{host['role']}.json").read_text())
-    bindings = {"team": [TEAM], "self": [host["runtime"]], "agent": host["agents"]}
+    bindings = {"team": [TEAM], "self": [host["runtime"]], "agent": host["agents"], "pool": host["pools"], "edge": host["edges"]}
     granted = {action: sorted({subject for template in document[action] for subject in expand(template, bindings)})
                for action in ("publish", "subscribe")}
     if "allow_responses" in document:
@@ -349,6 +358,244 @@ async def test_ids_that_once_shared_a_consumer_name_get_separate_consumers(isola
         for team, agent in pairs:
             info = await js.consumer_info("UA1_WORK", spec["name"].format(team=team, agent=agent))
             assert info.config.filter_subject == spec["filter"].format(team=team, agent=agent)
+
+
+@pytest.mark.asyncio
+async def test_a_reassigned_task_is_delivered_again_and_its_retry_is_deduplicated(isolated_broker) -> None:
+    """A handback cannot lose its replacement dispatch to the first dispatch's duplicate record.
+
+    Nats-Msg-Id is the idempotency key, made from the task id and the dispatch's
+    message id, so a new dispatch of the same task gets through and a retry of that
+    dispatch does not.
+    """
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        lead = await connect(stack, isolated_broker, "lead")
+        js = admin.nc.jetstream()
+        await js.add_stream(config=stream_config("UA1_WORK"))
+        await js.add_consumer("UA1_WORK", config=consumer_config("pool", pool="researcher"))
+        pool = await js.pull_subscribe_bind(stream="UA1_WORK", consumer=consumer_name("pool", pool="researcher"))
+        original = fixtures.example_frame("task.request", "to-pool")
+        replacement = fixtures.example_frame("task.request", "reassignment")
+        assert original["body"]["task_id"] == replacement["body"]["task_id"]
+
+        async def dispatch(frame: dict):
+            return await lead.nc.jetstream().publish(frame["subject"], json.dumps(frame).encode(), headers=headers(frame))
+
+        first = await dispatch(original)
+        admitted, = await pool.fetch(1, timeout=2)
+        fixtures.verify(admitted.data, original, arrived(original, admitted))
+        await admitted.ack_sync(timeout=2)
+        second = await dispatch(replacement)
+        retry = await dispatch(replacement)
+        assert not first.duplicate and not second.duplicate and second.seq > first.seq
+        assert retry.duplicate and retry.seq == second.seq
+        received, = await pool.fetch(1, timeout=2)
+        assert fixtures.verify(received.data, replacement, arrived(replacement, received)).frame.message_id == replacement["message_id"]
+        await received.ack_sync(timeout=2)
+        assert (await js.stream_info("UA1_WORK")).state.messages == 0
+        assert lead.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_installation_requests_reach_the_authority_and_dead_letters_keep_raw_copies(isolated_broker) -> None:
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        authority = await connect(stack, isolated_broker, "authority")
+        worker = await connect(stack, isolated_broker, "worker")
+        api = json.loads((CONTRACT / "generated/asyncapi.json").read_text())
+        for operation in ("join", "renew"):
+            received: asyncio.Queue = asyncio.Queue()
+
+            async def take(message, queue=received):
+                await queue.put(message.data)
+
+            await subscribe_ready(authority, f"ua.v1._install.*.svc.host.{operation}", take)
+            await worker.nc.publish(api["channels"][f"install_svc_host_{operation}"]["address"].format(sender="worker-host-1"),
+                                    operation.encode())
+            await worker.nc.flush()
+            assert await asyncio.wait_for(received.get(), timeout=2) == operation.encode()
+
+        js = admin.nc.jetstream()
+        await js.add_stream(config=stream_config("UA1_DLQ"))
+        raw = b"{a refused message stays byte-for-byte identical\x00"
+        raw_subject = "ua.v1.team_example.worker-host-1.dlq.raw." + "c" * 64
+        await worker.nc.jetstream().publish(raw_subject, raw)
+        notice = fixtures.example_frame("dlq.notice", "bad-signature")
+        await worker.nc.jetstream().publish(notice["subject"], json.dumps(notice).encode(), headers=headers(notice))
+        assert (await js.get_last_msg("UA1_DLQ", raw_subject)).data == raw
+        stored = await js.get_last_msg("UA1_DLQ", notice["subject"])
+        fixtures.verify(stored.data, notice)  # a stored frame is verified without its headers
+        other = raw_subject.replace("worker-host-1", "another-host")
+        await worker.publish_refused(other, raw)
+        with pytest.raises(nats.js.errors.NotFoundError):
+            await js.get_last_msg("UA1_DLQ", other)
+        assert worker.errors.empty() and authority.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_a_new_host_joins_with_only_its_pre_join_permissions_and_bootstrap_records(isolated_broker) -> None:
+    async with AsyncExitStack() as stack:
+        authority = await connect(stack, isolated_broker, "authority")
+        joining = await connect(stack, isolated_broker, "joining")
+        request = fixtures.example_frame("host.join", "full")
+
+        async def answer(message):
+            verified = fixtures.verify(message.data, request, arrived(request, message))
+            reply = fixtures.example_frame("host.join.reply", "ok")
+            reply.update(subject=message.reply, causation_id=verified.frame.message_id)
+            await authority.nc.publish(message.reply, fixtures.resign(reply), headers=headers(reply))
+
+        await subscribe_ready(authority, "ua.v1._install.*.svc.host.join", answer)
+        response = await joining.nc.request(request["subject"], json.dumps(request).encode(), timeout=2, headers=headers(request))
+        reply = json.loads(response.data)
+        bootstrap = fixtures.trust_store(remove=[name for name in fixtures.default_records() if name not in BOOTSTRAP_RECORDS])
+        verified = fixtures.verify(response.data, reply, arrived(reply, response), trust=bootstrap)
+        assert verified.body.outcome == "ok" and verified.body.certificate.body.runtime == "new-host-1"
+        await joining.publish_refused("ua.v1._install.new-host-1.svc.host.renew")
+        await joining.publish_refused("ua.v1._install.worker-host-1.svc.host.join")
+        await joining.publish_refused("ua.v1.team_example.new-host-1.work.team")
+        await joining.subscribe_refused("_INBOX.worker-host-1.>")
+        assert joining.errors.empty() and authority.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_a_result_and_its_team_services_copy_both_arrive_and_retries_of_each_are_dropped(isolated_broker) -> None:
+    """The stream drops repeats of one Nats-Msg-Id across all subjects, so a copy carries its own key.
+
+    The worker publishes its result to the lead and the copy to the team services
+    with its own generated grants; each reader pulls with its own grants.
+    """
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        worker = await connect(stack, isolated_broker, "worker")
+        lead = await connect(stack, isolated_broker, "lead")
+        services = await connect(stack, isolated_broker, "services")
+        await create_topology(admin, ["lead"])
+        await admin.nc.jetstream().add_consumer("UA1_WORK", config=consumer_config("team_services"))
+        original = fixtures.example_frame("task.result", "completed")
+        copy_frame = fixtures.example_frame("task.result", "copy-to-team-services")
+
+        async def publish(frame: dict):
+            return await worker.nc.jetstream().publish(frame["subject"], json.dumps(frame).encode(), headers=headers(frame))
+
+        sent = [await publish(original), await publish(copy_frame)]
+        retries = [await publish(original), await publish(copy_frame)]
+        assert not any(ack.duplicate for ack in sent) and all(ack.duplicate for ack in retries)
+        for client, consumer, frame in ((lead, consumer_name("agent_inbox", agent="lead"), original),
+                                        (services, consumer_name("team_services"), copy_frame)):
+            inbox = await client.nc.jetstream().pull_subscribe_bind(stream="UA1_WORK", consumer=consumer)
+            received, = await inbox.fetch(1, timeout=2)
+            verified = fixtures.verify(received.data, frame, arrived(frame, received))
+            assert verified.frame.audience.target == frame["audience"]["target"]
+            await received.ack_sync(timeout=2)
+        assert (await admin.nc.jetstream().stream_info("UA1_WORK")).state.messages == 0
+        assert worker.errors.empty() and lead.errors.empty() and services.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_persons_gateway(isolated_broker) -> None:
+    """The scheduler's task names the person's gateway route as its reply target (README, "Replies").
+
+    Each host publishes and pulls with its own generated grants: the scheduler puts
+    the run into the worker pool, the worker sends its result to the route the task
+    names, and the gateway reads it with the delivery reference it needs.
+    """
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        scheduler = await connect(stack, isolated_broker, "scheduler")
+        worker = await connect(stack, isolated_broker, "worker")
+        gateway = await connect(stack, isolated_broker, "gateway")
+        js = admin.nc.jetstream()
+        await js.add_stream(config=stream_config("UA1_WORK"))
+        await js.add_consumer("UA1_WORK", config=consumer_config("pool", pool="researcher"))
+        await js.add_consumer("UA1_WORK", config=consumer_config("edge", edge="web"))
+        run = fixtures.example_frame("task.request", "scheduled-run")
+        result = fixtures.example_frame("task.result", "scheduled-run-to-person")
+        await scheduler.nc.jetstream().publish(run["subject"], json.dumps(run).encode(), headers=headers(run))
+        pool = await worker.nc.jetstream().pull_subscribe_bind(stream="UA1_WORK", consumer=consumer_name("pool", pool="researcher"))
+        received, = await pool.fetch(1, timeout=2)
+        task = fixtures.verify(received.data, run, arrived(run, received))
+        assert task.authority is not None and task.authority.token.schedule_id == "sched_1"
+        await received.ack_sync(timeout=2)
+        reply_to = task.body.work.reply_to
+        assert (reply_to.target, reply_to.id) == ("edge", "web") and result["audience"]["id"] == reply_to.id
+        await worker.nc.jetstream().publish(result["subject"], json.dumps(result).encode(), headers=headers(result))
+        inbox = await gateway.nc.jetstream().pull_subscribe_bind(stream="UA1_WORK", consumer=consumer_name("edge", edge="web"))
+        delivered, = await inbox.fetch(1, timeout=2)
+        answer = fixtures.verify(delivered.data, result, arrived(result, delivered))
+        assert answer.body.delivery_ref == task.body.work.delivery_ref
+        await delivered.ack_sync(timeout=2)
+        assert scheduler.errors.empty() and worker.errors.empty() and gateway.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_the_scheduler_signs_a_run_token_for_a_worker_that_asks(isolated_broker) -> None:
+    """Only a scheduler signs a run's token, so it answers run_context.sign (README, "On behalf of a person").
+
+    The scheduler serves that one team-services address; the team services may not
+    listen there, and the token in the answer is the scheduler's.
+    """
+
+    async with AsyncExitStack() as stack:
+        worker = await connect(stack, isolated_broker, "worker")
+        scheduler = await connect(stack, isolated_broker, "scheduler")
+        services = await connect(stack, isolated_broker, "services")
+        request = fixtures.example_frame("run_context.sign", "full")
+
+        async def respond(message):
+            verified = fixtures.verify(message.data, request, arrived(request, message))
+            reply = fixtures.example_frame("run_context.sign.reply", "ok")
+            reply.update(subject=message.reply, causation_id=verified.frame.message_id)
+            await scheduler.nc.publish(message.reply, fixtures.resign(reply), headers=headers(reply))
+
+        await services.subscribe_refused(request["subject"])
+        await subscribe_ready(scheduler, request["subject"], respond)
+        response = await worker.nc.request(request["subject"], json.dumps(request).encode(), timeout=2, headers=headers(request))
+        answer = json.loads(response.data)
+        verified = fixtures.verify(response.data, answer, arrived(answer, response))
+        token = verified.body.authority
+        assert verified.certificate.roles == frozenset({"scheduler"}) and token.issuer.runtime == "scheduler-1"
+        assert token.schedule_id == request["body"]["scheduled_job_id"] and verified.body.system_work is False
+        assert worker.errors.empty() and scheduler.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_the_team_services_pass_a_queue_request_on_to_the_agent_that_holds_the_queue(isolated_broker) -> None:
+    """The gateway asks the team services, which relay the command, token unchanged, to the holder (plan 13A.4)."""
+
+    async with AsyncExitStack() as stack:
+        gateway = await connect(stack, isolated_broker, "gateway")
+        services = await connect(stack, isolated_broker, "services")
+        worker = await connect(stack, isolated_broker, "worker")
+        relay = fixtures.example_frame("tasks.list", "relayed-to-the-holder")
+        assert relay["authority"] == fixtures.example_frame("tasks.list", "full")["authority"]
+        await gateway.publish_refused(f"ua.v1.{TEAM}.gateway-1.ctl.agent.researcher-2.tasks.list")
+
+        async def respond(message):
+            verified = fixtures.verify(message.data, relay, arrived(relay, message))
+            assert verified.authority is not None and verified.authority.certificate.runtime == "gateway-1"
+            reply = fixtures.example_frame("tasks.list.reply", "from-the-holder")
+            reply.update(subject=message.reply)
+            await worker.nc.publish(message.reply, fixtures.resign(reply), headers=headers(reply))
+
+        await subscribe_ready(worker, relay["subject"], respond)
+        response = await services.nc.request(relay["subject"], json.dumps(relay).encode(), timeout=2, headers=headers(relay))
+        answer = json.loads(response.data)
+        verified = fixtures.verify(response.data, answer, arrived(answer, response))
+        assert verified.frame.causation_id == relay["message_id"] and verified.frame.issuer.agent == "researcher-2"
+        assert verified.body.outcome == "ok"
+        assert services.errors.empty() and worker.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_an_outside_agents_adapter_cannot_put_work_into_a_worker_pool(isolated_broker) -> None:
+    async with AsyncExitStack() as stack:
+        edge = await connect(stack, isolated_broker, "edge")
+        await edge.publish_refused(f"ua.v1.{TEAM}.edge-adapter-1.work.pool.researcher")
 
 
 @pytest.mark.asyncio

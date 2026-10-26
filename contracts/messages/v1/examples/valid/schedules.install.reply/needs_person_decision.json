@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.install.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a04b",
+  "idempotency_key": "schedules.install.reply:roUjRR04DScKpTKxHAlHPicgKcAwBsXjOovk1Gv6ToI",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-743d-8000-00000000043d",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "needs_person_decision",
+    "message": "The person must decide how to resolve this schedule change."
+  },
+  "causation_id": "01928f3a-7b2c-743d-8000-00000000043d",
+  "body_digest": "bMvxsLu6LJNCyGxgDN96LuFPXv1lBRPHf5RYxnN3inY",
+  "signature": "lIhZX237_Gf_9IwoA-Zp-6y_blfMe6eZlTacyfJk25O5V2-_dmfTvSP3-bBLuOne6zkz4jAQT0l4om6vPutCBA"
+}

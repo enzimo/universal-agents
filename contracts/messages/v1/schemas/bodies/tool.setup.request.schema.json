@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/tool.setup.request.schema.json",
+  "title": "tool.setup.request body",
+  "description": "Ask the gateway to have a person or administrator set a tool up.",
+  "type": "object",
+  "properties": {
+    "setup_request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "root_task_id": {
+      "description": "The root task of the waiting task; the frame's authority token is bound to it.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "delivery_ref": {
+      "$ref": "../common.schema.json#/$defs/delivery_ref"
+    },
+    "tool_id": {
+      "$ref": "../common.schema.json#/$defs/tool_id"
+    },
+    "reason": {
+      "$ref": "../common.schema.json#/$defs/note_text"
+    },
+    "setup": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "sign_in"
+            },
+            "owner": {
+              "const": "person"
+            }
+          },
+          "required": [
+            "type",
+            "owner"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "account_link"
+            },
+            "owner": {
+              "type": "string",
+              "enum": [
+                "team",
+                "person"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "owner"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "team_sign_in_app"
+            },
+            "owner": {
+              "const": "team"
+            }
+          },
+          "required": [
+            "type",
+            "owner"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "external_step"
+            },
+            "owner": {
+              "type": "string",
+              "enum": [
+                "team",
+                "person"
+              ]
+            },
+            "step_id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,39}$"
+            }
+          },
+          "required": [
+            "type",
+            "owner",
+            "step_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "setup_request_id",
+    "task_id",
+    "root_task_id",
+    "tool_id",
+    "reason",
+    "setup"
+  ],
+  "additionalProperties": false
+}

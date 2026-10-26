@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/access.request.schema.json",
+  "title": "access.request body",
+  "description": "A task asks the team services for access; no model decides it.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "reason": {
+      "$ref": "../common.schema.json#/$defs/note_text"
+    },
+    "what": {
+      "$ref": "../common.schema.json#/$defs/access_ask"
+    }
+  },
+  "required": [
+    "request_id",
+    "task_id",
+    "reason",
+    "what"
+  ],
+  "additionalProperties": false
+}

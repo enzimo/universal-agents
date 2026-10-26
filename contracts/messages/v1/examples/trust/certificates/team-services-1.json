@@ -1,5 +1,6 @@
 {
   "record": "certificate",
+  "protocol": "1.0-pre",
   "key": "host.install_example.team-services-1.2",
   "writer": {
     "type": "authority",
@@ -40,5 +41,5 @@
   },
   "algorithm": "ed25519",
   "body_digest": "37Bm3lAh0Tg01xt2UMdX0DadybIGbnT9V4dc5y7oUPM",
-  "signature": "dWD0XhhLM4AjQkukEzz_zw-yAuv_6fsk49MltEAzbrahS-KYFzikI6a1bb2h5nAxny3k7bR_vdcVHY8QXHCWDQ"
+  "signature": "9_TH7ABCDYjnaYidFeAmecyuBI8PaguZ2bExBlBZxOJ1PuAoUL5xf9t1uXlyMwhw00YhZJ9T1Bbea9zkNHvdDg"
 }

@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/tasks.cancel.reply.schema.json",
+  "title": "tasks.cancel reply",
+  "description": "Stop a task, a conversation's work, a delivery's work or all of the person's work.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "receipts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "root_task_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "cancelled_task_count": {
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "stop_signals_sent": {
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "unconfirmed_worker_count": {
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "confirmed",
+                  "barrier_not_saved",
+                  "failed"
+                ]
+              }
+            },
+            "required": [
+              "root_task_id",
+              "cancelled_task_count",
+              "stop_signals_sent",
+              "unconfirmed_worker_count",
+              "state"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100
+        },
+        "all_confirmed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "outcome",
+        "receipts",
+        "all_confirmed"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "no_matching_work"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

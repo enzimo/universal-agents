@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/schedules.authorize_access.schema.json",
+  "title": "schedules.authorize_access",
+  "description": "Give the schedule access the lead may hand on and end obsolete setup grants, checking the saved policy revision.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "schedule_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "seen_policy_revision": {
+      "$ref": "../common.schema.json#/$defs/count"
+    }
+  },
+  "required": [
+    "request_id",
+    "schedule_id",
+    "seen_policy_revision"
+  ],
+  "additionalProperties": false
+}

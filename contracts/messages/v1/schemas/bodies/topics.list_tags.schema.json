@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/topics.list_tags.schema.json",
+  "title": "topics.list_tags request",
+  "description": "The thread tags in use.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    }
+  },
+  "required": [
+    "request_id"
+  ],
+  "additionalProperties": false
+}

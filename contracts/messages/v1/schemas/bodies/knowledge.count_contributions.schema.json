@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/knowledge.count_contributions.schema.json",
+  "title": "knowledge.count_contributions request",
+  "description": "How many contributions wait for a curator.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    }
+  },
+  "required": [
+    "request_id"
+  ],
+  "additionalProperties": false
+}

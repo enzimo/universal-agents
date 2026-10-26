@@ -1,0 +1,17 @@
+{
+  "description": "Access until a time names how many hours.",
+  "refusal": "invalid_body",
+  "at": "/body/what/hours",
+  "base": "access.request/access.json",
+  "changes": [
+    {
+      "set": "/body/what/lifetime",
+      "to": "until"
+    },
+    {
+      "remove": "/body/what/hours"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"access.request\", \"message_id\": \"01928f3a-7b2c-7114-8000-000000000114\", \"idempotency_key\": \"access.request:InBR8teOQa-eLt-nw7csN21bPFCkz3X8mMqGgN4I1HA\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"agent\": \"researcher-2\", \"session\": \"s-researcher-2-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.worker-host-1.work.team\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"request_id\": \"areq_1\", \"task_id\": \"task_sub_1\", \"reason\": \"I need to read the finance folder.\", \"what\": {\"type\": \"access\", \"target\": {\"kind\": \"folder\", \"id\": \"team/finance\"}, \"level\": \"read\", \"lifetime\": \"until\", \"hand_on\": false, \"action_digest\": \"a1b2c3\"}}, \"body_digest\": \"Sgpib0__TO5yxW2JF20b-8dHkudok9vQm13OBX4LK-4\", \"signature\": \"qdt5oMSAuiw9RCxODsDIJ3dYcGQ0o5TUfSSIyk3pZzhvmadpXqPLccwagezwCLHeeGYPyVR97hZgVT2ttpAHBg\"}"
+}

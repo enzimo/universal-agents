@@ -1,0 +1,54 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "heartbeat_items.list.reply",
+  "message_id": "979663e2-6058-7fcf-a207-aa1aafab11d7",
+  "idempotency_key": "heartbeat_items.list.reply:-hjLaNkjgdiy-EVKyqTdR_DGp45l9a7kYcNvJ_BS-Go",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.a40087db-1e56-7c55-a1b2-684ed2c3adf1",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "status": "disabled",
+    "source_exists": false,
+    "source_id": "heartbeat_team",
+    "heartbeat_runtime": {
+      "source_id": "heartbeat_team",
+      "config_available": true,
+      "heartbeat_enabled": false,
+      "configured_source_id": "heartbeat_team",
+      "configured_schedule_id": "heartbeat_launcher",
+      "launcher_schedule_installed": true,
+      "notes": [
+        {
+          "type": "inline",
+          "text": "Heartbeat is disabled; saved items will run after the launcher is enabled."
+        }
+      ]
+    },
+    "items": [],
+    "total": 0,
+    "warning": {
+      "type": "inline",
+      "text": "Heartbeat is disabled in this runtime."
+    }
+  },
+  "causation_id": "a40087db-1e56-7c55-a1b2-684ed2c3adf1",
+  "body_digest": "CPzWu7hyCXRF57aEb7ha2UmIu41yIKuXv0umGFvBZDs",
+  "signature": "fgdmpXRlnME-YxaHksM-y2_UF1kDJp95vQjwux4gKiraMxSP8snV2VDduA8vA9jtBSfxln5kX-iR1ekEUNX4CA"
+}

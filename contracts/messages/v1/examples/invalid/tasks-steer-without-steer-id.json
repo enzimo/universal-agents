@@ -1,0 +1,13 @@
+{
+  "description": "A tasks.steer request without its steer id.",
+  "refusal": "invalid_body",
+  "at": "/body/steer_id",
+  "base": "tasks.steer/full.json",
+  "changes": [
+    {
+      "remove": "/body/steer_id"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"tasks.steer\", \"message_id\": \"01928f3a-7b2c-749d-8000-00000000049d\", \"idempotency_key\": \"tasks.steer:HY_GzrH5TGMm1tVIPSWPyy4XnphpMlskXRBcIhm_af0\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"revocation_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.gateway-1.svc.team.tasks.steer\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7214-9000-000000000214\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"command\", \"id\": \"steer_id_1\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-22T04:34:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"nqwH8eixD5EX0SPtq7bpSu6ucqsJXQVt_N1vUoEM6MpFaPTszrrMjoWxqUaXBq2tdNkPk1_kFOQAaYzpN9i2AA\"}, \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_id_1\", \"text\": \"Example text\", \"attachments\": [{\"attachment_id\": \"attachment_id_1\", \"blob\": {\"sha256\": \"BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU\", \"size\": 3, \"media_type\": \"application/pdf\", \"name\": \"Example name\"}, \"kind\": \"image\", \"caption\": \"Example caption\"}], \"replied_message\": {\"author\": \"assistant\", \"author_name\": \"Example author name\", \"text\": \"Example text\", \"shortened\": true, \"quoted_text\": \"Example quoted text\", \"sent_at\": \"2026-10-22T04:30:00.000Z\"}}, \"body_digest\": \"AhPmCDRj_eZes_LLS4ykAdba2XinZYCeBbMmQDvqOBg\", \"signature\": \"XTku4EOzfThTNCOasr81m4HXiYwyVL-pjkM2ayb8IQw1IVYaxXID4CARlZGTaOPIGCy9b2xPOvQuc8H3rI4IBQ\"}"
+}

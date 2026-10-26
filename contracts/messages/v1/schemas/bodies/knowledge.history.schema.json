@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/knowledge.history.schema.json",
+  "title": "knowledge.history request",
+  "description": "A knowledge page's revisions.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "space": {
+      "type": "string",
+      "enum": [
+        "team",
+        "personal"
+      ]
+    },
+    "page": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "offset": {
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50
+    }
+  },
+  "required": [
+    "request_id",
+    "space",
+    "page",
+    "offset",
+    "limit"
+  ],
+  "additionalProperties": false
+}

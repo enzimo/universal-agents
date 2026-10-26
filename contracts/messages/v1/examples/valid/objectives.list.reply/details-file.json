@@ -1,0 +1,126 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.list.reply",
+  "message_id": "ce1f9699-9760-706e-9bcb-c2ce4a71031c",
+  "idempotency_key": "objectives.list.reply:LWgSSitO58FbcSGEP7ckwPhEs021JvLYY1EOQu4hA9s",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.4201abd6-e71b-7e29-b0af-82ec9e1feace",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "objectives": [
+      {
+        "objective_id": "objective_dependency_watch",
+        "seen_version": "27f3b9c11e04194e2352ffe214bf68d66fc0bd4eec858a585850d952a4d3c5f4",
+        "title": "Track recurring dependency checks",
+        "status": "deleted",
+        "horizon": "recurring",
+        "priority": "normal",
+        "desired_outcome": {
+          "type": "inline",
+          "text": "Keep the dependency report current and notify the person about actionable changes."
+        },
+        "progress_summary": {
+          "type": "inline",
+          "text": "The initial report is saved; the next run will compare new advisories."
+        },
+        "subgoals": [
+          {
+            "step_id": "step_verify_advisories",
+            "title": {
+              "type": "inline",
+              "text": "Track recurring dependency checks"
+            },
+            "status": "in_progress",
+            "status_detail": {
+              "type": "inline",
+              "text": "Checking the remaining advisory against its original source."
+            },
+            "result_summary": {
+              "type": "inline",
+              "text": "All previously identified advisories have a verified source."
+            }
+          }
+        ],
+        "success_criteria": [
+          {
+            "criterion_id": "criterion_sources_verified",
+            "description": {
+              "type": "inline",
+              "text": "The report lists each affected dependency and its advisory source."
+            },
+            "status": "open",
+            "evidence_summary": {
+              "type": "inline",
+              "text": "The saved report includes a source and checked version for each dependency."
+            },
+            "updated_at": "2026-10-22T04:30:00.000Z"
+          }
+        ],
+        "schedule_ids": [
+          "schedule_dependency_watch"
+        ],
+        "heartbeat_item_ids": [
+          "heartbeat_dependency_watch"
+        ],
+        "available_actions": [],
+        "objective_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+        "current_focus": {
+          "type": "inline",
+          "text": "Verify the two advisories added since the previous checkpoint."
+        },
+        "plan_summary": {
+          "type": "inline",
+          "text": "Compare dependencies, check new advisories, and report actionable changes."
+        },
+        "current_plan_id": "plan_dependency_watch",
+        "work_policy_status": "active",
+        "updated_at": "2026-10-22T04:30:00.000Z",
+        "owner_agent_id": "manager_scope:team_example:TeamArchitect",
+        "root_conversation_id": "conversation_dependency_watch",
+        "created_by_task_id": "task_root_7f",
+        "promoted_from_task_id": "task_root_7f",
+        "owner_agent_name": "Team lead",
+        "owner_person": "person_7c1",
+        "team_id": "team_example",
+        "owner_named_agent_type": "TeamArchitect",
+        "created_at": "2026-10-21T04:30:00.000Z",
+        "deletion_requested_at": "2026-10-21T04:30:00.000Z",
+        "deleted_at": "2026-10-22T04:30:00.000Z",
+        "deletion_summary": {
+          "type": "blob",
+          "ref": {
+            "sha256": "V59i8A863dDhmrs2Wry_CCyLNIR4ylCiIDAIN6K0yzA",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "details_file": {
+          "sha256": "tLwJiZcIK5ssYJ04PMNIAWHsPU6OYo3BQeN543jOR1c",
+          "size": 4096,
+          "media_type": "application/json"
+        }
+      }
+    ],
+    "total": 1
+  },
+  "causation_id": "4201abd6-e71b-7e29-b0af-82ec9e1feace",
+  "body_digest": "zPG5YuV6Q0fJold8SmEJoDzXTgFK9tv_NC7mobn9AVU",
+  "signature": "tnl9yHUKafPXGqY52BinyMfykw3exfZN2aJxThQkUeBBPa8ygGWl7ib1BMUud7WDiD1WqEz1bxlpZouLgR8dCg"
+}

@@ -43,6 +43,22 @@ administration permission. A maintainer can receive it through a delegated
 runner administration role while their base organization membership remains
 `member`.
 
+## When CI runs
+
+The test, security, dependency-audit and personal-details workflows run only when
+a release-candidate tag (`vX.Y.Z-rc.N`) is pushed, or when someone starts them by
+hand (`workflow_dispatch`). Pull requests, branch pushes, beta and stable tags
+start none of them, and nothing runs on a schedule except the nightly check of
+`main`. The runner is shared and the full set takes over an hour, so it is spent
+on candidates that are published.
+
+Before pushing, run the tests the change affects and the static checks locally,
+as `AGENTS.md` asks; the git hooks in `.githooks` run the personal-details check
+before every commit and push. A release candidate's run compares it with `main`:
+the personal-details scan reads the commits it adds, and the complexity report
+covers the functions it changes. The documentation workflow builds only for
+stable release tags, and deploys only when started by hand.
+
 ## Toolchains and isolation
 
 Provision RTK 0.48.0, system Python 3.12+, Node.js 22+, Git, Rust 1.95.0,
@@ -254,12 +270,10 @@ track a known release run. Keep this process outside the runner work directory;
 job cleanup removes that directory. Review failures or the final summary instead
 of repeatedly fetching logs. Remove downloaded evidence when it is no longer needed.
 
-Documentation-only commits skip runtime test profiles and native desktop builds;
-the documentation workflows still validate the guides. Runtime documentation CI
-also exercises the served pages, onboarding links, channel references, and guide
-routes before uploading the site, so stale documentation assertions fail in the
-small documentation job rather than waiting for the full runtime profile. Dependency audits run for
-dependency changes and weekly. Native AMD64/ARM64 runtime images build in parallel
+Runtime documentation CI exercises the served pages, onboarding links, channel
+references, and guide routes before uploading the site, so stale documentation
+assertions fail in the small documentation job rather than waiting for the full
+runtime profile. Native AMD64/ARM64 runtime images build in parallel
 on WSL 2 and the Mac. Desktop release tags promote five installers from successful
 main-branch builds of the exact commit, verifying GitHub artifact digests. Tag only
 after those builds succeed and before their seven-day artifact retention expires;
@@ -347,7 +361,7 @@ workflow. Its `--kind` option prints `stable`, `beta`, `rc` or `nightly`.
 | Tag | Made by | GitHub release | Image tags | Docs site |
 |-----|---------|----------------|------------|-----------|
 | `vX.Y.Z` | a person, per the release process | release, may become Latest | `X.Y.Z`, `X.Y`, `X`, `latest` | built |
-| `vX.Y.Z-beta.N`, `vX.Y.Z-rc.N` | a person (signed tag on `main`) | pre-release, never Latest | `X.Y.Z-beta.N` only | not built |
+| `vX.Y.Z-beta.N`, `vX.Y.Z-rc.N` | a person (signed tag on `main`, or on the development branch `release/X.Y` while one is open) | pre-release, never Latest | `X.Y.Z-beta.N` only | not built |
 | `vX.Y.Z-nightly.YYYYMMDDHHMM` | `nightly.yml` | pre-release, never Latest | `X.Y.Z-nightly.…` only | not built |
 
 `N` starts at 1 and has no leading zeros. Generated release notes always start
@@ -359,6 +373,8 @@ but no setup-guide attachment: the tracked guide installs the last stable
 version. Existing pre-releases are marked as pre-releases and removed from
 Latest on a rerun, which also removes any stale setup-guide attachments.
 
+While a development branch is open, `main` stays at the last release, so nightlies stop until
+it is merged; a testing candidate of the branch is a beta or release-candidate tag on it.
 `nightly.yml` runs daily at 03:17 UTC and can be started by hand from `main`.
 When `main` has changed since the newest nightly, it creates the pre-release
 `v{next patch}-nightly.{UTC minute}` on that commit (notes: "Nightly build of main

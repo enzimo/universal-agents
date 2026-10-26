@@ -1,0 +1,55 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.archive",
+  "message_id": "01928f3a-7b2c-7473-8000-000000000473",
+  "idempotency_key": "knowledge.archive:NlfOPs0swjBJZj8pe5waJp8m29V7_Q-Cy56Dsb3Wzj8",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.knowledge.archive",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7128-9000-000000000128",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "command",
+      "id": "kb_archive_full"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "JTaBuUfOmE_QXdS0197pvNRLzc_uLLEZYcyRpqBsYwsfrkyZ3oEcoxjQOqXIUmIiFeqtMZC0la7kxktwJ64XCg"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "kb_archive_full",
+    "space": "team",
+    "page": "deployment-guide",
+    "seen_version": "3",
+    "reason": "Archived on the Web Chat Knowledge page"
+  },
+  "body_digest": "nTNO3HAJj2t8wnxQSQ4rdT0iJnVfQ7kEovfUHvAW8fg",
+  "signature": "OhnCKgNNWYBGiqotb4KyyEJkJ7Ps6iseXAXNCw_aL3UWsrpe1TQrYU_PK88fpZdVbYB1xu55_UYdWZ6PTMBqDQ"
+}

@@ -1,0 +1,41 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.report",
+  "message_id": "01928f3a-7b2c-7112-8000-000000000112",
+  "idempotency_key": "task.report:7No40lxih2xz5YYlSt2hygWRBgaMd2dWNE3NWX-FtcU",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "report_id": "rep_2",
+    "task_id": "task_sub_4",
+    "sequence": 3,
+    "for_person": true,
+    "summary": "Moved the weekly cost check to Mondays.",
+    "kind": {
+      "type": "record_changed",
+      "record_kind": "schedule",
+      "record_id": "sched_1",
+      "summary": "Now runs Mondays at 09:00."
+    }
+  },
+  "body_digest": "mNmDMF2mVQRcPgxPz64dspe2x4ZVtx29IHph9Hs3vDc",
+  "signature": "eXLeO716UPkN8Y6_BgxdxjIROvrHgZasWjzjNneTMiLEyvmn7e91LoIaolCUz98_jEl9iJEIeEF4rulQ9ZO0Ag"
+}

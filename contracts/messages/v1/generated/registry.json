@@ -1,6 +1,7 @@
 {
   "authority_token_domain": "universal-agents/authority-token/v1",
   "authority_token_max_seconds": 604800,
+  "certificate_overlap_seconds": 300,
   "change_refusals": [
     {
       "code": "changed_since_read",
@@ -23,6 +24,17 @@
       "meaning": "another request is writing the file or sign-in; carries when to try again"
     }
   ],
+  "command_token_max_seconds": 300,
+  "covered_record_kinds": [
+    "memory_fact",
+    "knowledge_page",
+    "schedule",
+    "objective",
+    "heartbeat_item",
+    "file",
+    "staged_change"
+  ],
+  "decision_token_domain": "universal-agents/decision-token/v1",
   "frame_schema": "frame.schema.json",
   "host_roles": {
     "edge_adapter": "connects outside agents (A2A)",
@@ -34,6 +46,238 @@
     "worker_host": "runs worker agents"
   },
   "kinds": {
+    "access.decision": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/access.decision.schema.json",
+      "body_rules": [
+        {
+          "requires": "/body/status/expires_at",
+          "when": [
+            {
+              "at": "/body/status/state",
+              "is": "granted"
+            },
+            {
+              "at": "/body/status/lifetime",
+              "is": "until"
+            }
+          ]
+        }
+      ],
+      "class": "durable",
+      "description": "What became of an access request, sent to the waiting task.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/request_id",
+        "/body/status/state"
+      ],
+      "ledger": "access_wait_closed",
+      "receivers": [
+        "worker_host",
+        "lead_host"
+      ],
+      "rendering": "none",
+      "routing": "named",
+      "senders": [
+        "team_services"
+      ],
+      "topology_edge": "none",
+      "wakes_model": {
+        "by": "status.state",
+        "values": {
+          "already_held": "always",
+          "denied": "always",
+          "granted": "always",
+          "handed_down": "always",
+          "refused": "always",
+          "waiting": "never",
+          "withdrawn": "always"
+        }
+      }
+    },
+    "access.request": {
+      "address": "work.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/access.request.schema.json",
+      "body_rules": [
+        {
+          "requires": "/body/what/hours",
+          "when": [
+            {
+              "at": "/body/what/lifetime",
+              "is": "until"
+            }
+          ]
+        }
+      ],
+      "class": "durable",
+      "description": "A task asks the team services for access; no model decides it.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "access_wait_open",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "routing": "team",
+      "senders": [
+        "worker_host",
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "access.resolved": {
+      "address": "work.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "access_request"
+      },
+      "body": "bodies/access.resolved.schema.json",
+      "class": "durable",
+      "description": "A person's decision on an access request, from the gateway to the team services.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "access.review": {
+      "address": "work.edge.{edge}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/access.review.schema.json",
+      "body_rules": [
+        {
+          "unique": "/body/state/choices"
+        }
+      ],
+      "class": "durable",
+      "description": "An access review for the gateway's Inbox, from the team services; a refused decision returns this way too.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/request_id",
+        "/body/state/type",
+        "/body/state/refused_message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "gateway"
+      ],
+      "rendering": "none",
+      "routing": "person",
+      "senders": [
+        "team_services"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "access.withdraw": {
+      "address": "svc.team.access.withdraw",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/access.withdraw.schema.json",
+      "class": "request_reply",
+      "description": "The lead withdraws a task's access request.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/access.withdraw.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_own_request"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "agent.exit": {
+      "address": "ctl.agent.{agent}.exit",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/agent.exit.schema.json",
+      "class": "request_reply",
+      "description": "Stop an agent after its current step.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/audience/id",
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/agent.exit.reply.schema.json",
+        "errors": []
+      },
+      "routing": "named",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "down",
+      "wakes_model": "never"
+    },
     "agent.pause": {
       "address": "ctl.agent.{agent}.pause",
       "admission": {
@@ -46,7 +290,10 @@
       "class": "request_reply",
       "description": "Pause one agent at its next safe point; it keeps its queued work.",
       "expiry_seconds": 30,
-      "idempotency": "agent_pause:<agent>:<request_id>",
+      "idempotency": [
+        "/audience/id",
+        "/body/request_id"
+      ],
       "ledger": "none",
       "receivers": [
         "lead_host",
@@ -67,6 +314,4082 @@
       "topology_edge": "down",
       "wakes_model": "never"
     },
+    "agent.resume": {
+      "address": "ctl.agent.{agent}.resume",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/agent.resume.schema.json",
+      "class": "request_reply",
+      "description": "Resume a paused agent.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/audience/id",
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/agent.resume.reply.schema.json",
+        "errors": [
+          "agent_exiting"
+        ]
+      },
+      "routing": "named",
+      "senders": [
+        "lead_host",
+        "team_services"
+      ],
+      "topology_edge": "down",
+      "wakes_model": "never"
+    },
+    "agent.status": {
+      "address": "ctl.agent.{agent}.status",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/agent.status.schema.json",
+      "class": "request_reply",
+      "description": "An agent's status: basic for anyone allowed, full only for the team's lead.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/agent.status.reply.schema.json",
+        "errors": [
+          "not_allowed"
+        ]
+      },
+      "routing": "named",
+      "senders": [
+        "lead_host",
+        "team_services",
+        "gateway"
+      ],
+      "topology_edge": "down",
+      "wakes_model": "never"
+    },
+    "conflicts.cancel": {
+      "address": "svc.team.conflicts.cancel",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/conflicts.cancel.schema.json",
+      "class": "request_reply",
+      "description": "An administrator cancels a change conflict.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/conflicts.cancel.reply.schema.json",
+        "errors": [
+          "not_found",
+          "administrator_required"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "conflicts.decide": {
+      "address": "svc.team.conflicts.decide",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/conflicts.decide.schema.json",
+      "class": "request_reply",
+      "description": "A person decides a change conflict.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/conflicts.decide.reply.schema.json",
+        "errors": [
+          "not_found",
+          "case_closed",
+          "values_changed",
+          "not_allowed"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "conflicts.list": {
+      "address": "svc.team.conflicts.list",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/conflicts.list.schema.json",
+      "class": "request_reply",
+      "description": "Open and recent change conflicts, for administrators.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/conflicts.list.reply.schema.json",
+        "errors": [
+          "administrator_required"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "credential.form.request": {
+      "address": "work.edge.{edge}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/root_task_id",
+        "type": "root_task"
+      },
+      "body": "bodies/credential.form.request.schema.json",
+      "class": "durable",
+      "description": "Ask the gateway to collect, set up or delete a credential through a secure form.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/form_id"
+      ],
+      "ledger": "form_wait_open",
+      "receivers": [
+        "gateway"
+      ],
+      "rendering": "none",
+      "routing": "person",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": [
+        "person"
+      ],
+      "wakes_model": "never"
+    },
+    "credential.form.result": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": true,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/credential.form.result.schema.json",
+      "class": "durable",
+      "description": "What became of a credential form.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/form_id"
+      ],
+      "ledger": "form_wait_closed",
+      "receivers": [
+        "lead_host"
+      ],
+      "rendering": "summary",
+      "routing": "requester",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "next_turn"
+    },
+    "custody.decide": {
+      "address": "svc.team.custody.decide",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/custody.decide.schema.json",
+      "class": "request_reply",
+      "description": "The lead reassigns a task or adopts late work.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/custody.decide.reply.schema.json",
+        "errors": [
+          "not_found",
+          "stale_custody",
+          "late_work_not_found",
+          "request_closed",
+          "not_own_request"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "custody.moved": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/custody.moved.schema.json",
+      "class": "durable",
+      "description": "Tells a former holder that its task moved; later results are kept as late work.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/task_id",
+        "/body/custody_token"
+      ],
+      "ledger": "custody_lost",
+      "receivers": [
+        "worker_host",
+        "lead_host",
+        "edge_adapter"
+      ],
+      "rendering": "none",
+      "routing": "named",
+      "senders": [
+        "team_services"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "debug.dump": {
+      "address": [
+        "svc.team.debug.dump",
+        "ctl.agent.{agent}.debug.dump"
+      ],
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/debug.dump.schema.json",
+      "class": "request_reply",
+      "description": "Turn an agent's diagnostic context dumps on or off.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services",
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/debug.dump.reply.schema.json",
+        "errors": [
+          "not_allowed"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "team_services"
+      ],
+      "senders_by_address": {
+        "ctl.agent.{agent}.debug.dump": [
+          "team_services"
+        ],
+        "svc.team.debug.dump": [
+          "gateway"
+        ]
+      },
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "delivery.receipt": {
+      "address": "work.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/delivery.receipt.schema.json",
+      "class": "durable",
+      "description": "The gateway delivered an answer or notice to a person.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/receipt_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "delivery.refused": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}",
+        "work.team"
+      ],
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/delivery.refused.schema.json",
+      "class": "durable",
+      "description": "A receiver refused a message; sent back to its sender.",
+      "expiry_seconds": 86400,
+      "idempotency": [
+        "/body/refused_message_id",
+        "/issuer/runtime",
+        "/issuer/agent"
+      ],
+      "ledger": "send_refused",
+      "receivers": [
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "gateway",
+        "edge_adapter"
+      ],
+      "rendering": "summary",
+      "routing": "sender",
+      "senders": [
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "gateway",
+        "edge_adapter"
+      ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host",
+          "team_services"
+        ]
+      },
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "dlq.notice": {
+      "address": "dlq.notice.{copy}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/dlq.notice.schema.json",
+      "class": "dead_letter",
+      "description": "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only. The team services tell administrators.",
+      "expiry_seconds": 2592000,
+      "idempotency": [
+        "/issuer/runtime",
+        "/body/copy_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "installation_authority",
+        "scheduler"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "heartbeat_items.add": {
+      "address": "svc.team.heartbeat_items.add",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/heartbeat_items.add.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "heartbeat_item",
+        "seen_version": "none"
+      },
+      "description": "The lead adds a heartbeat item.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/heartbeat_items.add.reply.schema.json",
+        "errors": [
+          "not_found",
+          "objective_link_refused",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "heartbeat_items.disable": {
+      "address": "svc.team.heartbeat_items.disable",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/heartbeat_items.disable.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "heartbeat_item",
+        "seen_version": "required"
+      },
+      "description": "The lead disables a heartbeat item.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/heartbeat_items.disable.reply.schema.json",
+        "errors": [
+          "not_found",
+          "objective_link_refused",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "heartbeat_items.enable": {
+      "address": "svc.team.heartbeat_items.enable",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/heartbeat_items.enable.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "heartbeat_item",
+        "seen_version": "required"
+      },
+      "description": "The lead enables a heartbeat item.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/heartbeat_items.enable.reply.schema.json",
+        "errors": [
+          "not_found",
+          "objective_link_refused",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "heartbeat_items.list": {
+      "address": "svc.team.heartbeat_items.list",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/heartbeat_items.list.schema.json",
+      "class": "request_reply",
+      "description": "The lead reads heartbeat items and their versions.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/heartbeat_items.list.reply.schema.json",
+        "errors": [
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "heartbeat_items.remove": {
+      "address": "svc.team.heartbeat_items.remove",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/heartbeat_items.remove.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "heartbeat_item",
+        "seen_version": "required"
+      },
+      "description": "The lead removes a heartbeat item.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/heartbeat_items.remove.reply.schema.json",
+        "errors": [
+          "not_found",
+          "objective_link_refused",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "heartbeat_items.update": {
+      "address": "svc.team.heartbeat_items.update",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/heartbeat_items.update.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "heartbeat_item",
+        "seen_version": "required"
+      },
+      "description": "The lead changes a heartbeat item.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/heartbeat_items.update.reply.schema.json",
+        "errors": [
+          "not_found",
+          "objective_link_refused",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "host.join": {
+      "address": "_install.{sender}.svc.host.join",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/host.join.schema.json",
+      "class": "request_reply",
+      "description": "A new host asks to join the installation; the frame is signed with the key it presents.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/issuer/runtime",
+        "/issuer/key_id",
+        "/body/join_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "installation_authority"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/host.join.reply.schema.json",
+        "errors": [
+          "pending",
+          "denied",
+          "protocol_mismatch",
+          "not_allowed"
+        ]
+      },
+      "routing": "named",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "scheduler"
+      ],
+      "topology_edge": "none",
+      "verification": "proof_of_possession",
+      "wakes_model": "never"
+    },
+    "host.renew": {
+      "address": "_install.{sender}.svc.host.renew",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/host.renew.schema.json",
+      "class": "request_reply",
+      "description": "A host renews its certificate and connection credential, or rotates its keys.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/issuer/runtime",
+        "/body/renew_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "installation_authority"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/host.renew.reply.schema.json",
+        "errors": [
+          "revoked",
+          "needs_approval",
+          "protocol_mismatch",
+          "not_allowed"
+        ]
+      },
+      "routing": "named",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "scheduler"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "intent.set": {
+      "address": "svc.team.intent.set",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/intent.set.schema.json",
+      "class": "request_reply",
+      "description": "The lead states a request's current intent.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/intent.set.reply.schema.json",
+        "errors": [
+          "changed_since_read",
+          "not_found",
+          "request_closed",
+          "not_own_request"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.add_note": {
+      "address": "svc.team.knowledge.add_note",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/knowledge.add_note.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "knowledge_page",
+        "seen_version": "none"
+      },
+      "description": "Add a note to a knowledge page.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.add_note.reply.schema.json",
+        "errors": [
+          "pending_review",
+          "not_found",
+          "not_allowed",
+          "feature_off",
+          "review_required",
+          "sensitive_content",
+          "limit_reached",
+          "personal_space_unavailable",
+          "invalid_request",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.archive": {
+      "address": "svc.team.knowledge.archive",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/knowledge.archive.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "knowledge_page",
+        "seen_version": "required"
+      },
+      "description": "Archive a knowledge page.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.archive.reply.schema.json",
+        "errors": [
+          "pending_review",
+          "not_found",
+          "not_allowed",
+          "feature_off",
+          "merged",
+          "review_required",
+          "sensitive_content",
+          "limit_reached",
+          "page_frozen",
+          "repeats_recent_revision",
+          "personal_space_unavailable",
+          "invalid_request",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.count_contributions": {
+      "address": "svc.team.knowledge.count_contributions",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/knowledge.count_contributions.schema.json",
+      "class": "request_reply",
+      "description": "How many contributions wait for a curator.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.count_contributions.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "feature_off",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.freeze": {
+      "address": "svc.team.knowledge.freeze",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/knowledge.freeze.schema.json",
+      "class": "request_reply",
+      "description": "A curator freezes a page.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.freeze.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "feature_off",
+          "personal_space_unavailable",
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.history": {
+      "address": "svc.team.knowledge.history",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/knowledge.history.schema.json",
+      "class": "request_reply",
+      "description": "A knowledge page's revisions.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.history.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "feature_off",
+          "personal_space_unavailable",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.list": {
+      "address": "svc.team.knowledge.list",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/knowledge.list.schema.json",
+      "class": "request_reply",
+      "description": "List knowledge pages.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.list.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "feature_off",
+          "personal_space_unavailable",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.list_contributions": {
+      "address": "svc.team.knowledge.list_contributions",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/knowledge.list_contributions.schema.json",
+      "class": "request_reply",
+      "description": "Contributions waiting for a curator.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.list_contributions.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "feature_off",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.merge": {
+      "address": "svc.team.knowledge.merge",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/knowledge.merge.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "knowledge_page",
+        "seen_version": "required"
+      },
+      "description": "A curator merges a page into another.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.merge.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "feature_off",
+          "merged",
+          "review_required",
+          "sensitive_content",
+          "page_frozen",
+          "personal_space_unavailable",
+          "invalid_request",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.publish_contribution": {
+      "address": "svc.team.knowledge.publish_contribution",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/knowledge.publish_contribution.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "knowledge_page",
+        "seen_version": "optional"
+      },
+      "description": "Publish a contribution, edited or as it is.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.publish_contribution.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "feature_off",
+          "page_exists",
+          "merged",
+          "sensitive_content",
+          "personal_space_unavailable",
+          "contribution_not_pending",
+          "invalid_request",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.read": {
+      "address": "svc.team.knowledge.read",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/knowledge.read.schema.json",
+      "class": "request_reply",
+      "description": "Read a knowledge page.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.read.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "feature_off",
+          "personal_space_unavailable",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.read_contribution": {
+      "address": "svc.team.knowledge.read_contribution",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/knowledge.read_contribution.schema.json",
+      "class": "request_reply",
+      "description": "Read one contribution.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.read_contribution.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "feature_off",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.reject_contribution": {
+      "address": "svc.team.knowledge.reject_contribution",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/knowledge.reject_contribution.schema.json",
+      "class": "request_reply",
+      "description": "A curator rejects a contribution.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.reject_contribution.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "feature_off",
+          "sensitive_content",
+          "contribution_not_pending",
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.resolve_note": {
+      "address": "svc.team.knowledge.resolve_note",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/knowledge.resolve_note.schema.json",
+      "class": "request_reply",
+      "description": "A curator resolves a note on a page.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.resolve_note.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "feature_off",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.revert": {
+      "address": "svc.team.knowledge.revert",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/knowledge.revert.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "knowledge_page",
+        "seen_version": "required"
+      },
+      "description": "Revert a knowledge page to an earlier revision.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.revert.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "feature_off",
+          "page_exists",
+          "merged",
+          "sensitive_content",
+          "personal_space_unavailable",
+          "invalid_request",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.unfreeze": {
+      "address": "svc.team.knowledge.unfreeze",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/knowledge.unfreeze.schema.json",
+      "class": "request_reply",
+      "description": "A curator unfreezes a page.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.unfreeze.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "feature_off",
+          "personal_space_unavailable",
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.withdraw_contribution": {
+      "address": "svc.team.knowledge.withdraw_contribution",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/knowledge.withdraw_contribution.schema.json",
+      "class": "request_reply",
+      "description": "Withdraw one's own contribution.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.withdraw_contribution.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "feature_off",
+          "contribution_not_pending",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "knowledge.write": {
+      "address": "svc.team.knowledge.write",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/knowledge.write.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "knowledge_page",
+        "seen_version": "optional"
+      },
+      "description": "Create or edit a knowledge page.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/knowledge.write.reply.schema.json",
+        "errors": [
+          "pending_review",
+          "not_found",
+          "not_allowed",
+          "feature_off",
+          "page_exists",
+          "merged",
+          "review_required",
+          "sensitive_content",
+          "limit_reached",
+          "page_frozen",
+          "repeats_recent_revision",
+          "personal_space_unavailable",
+          "saved_write_mismatch",
+          "invalid_request",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "ledger.fact": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/ledger.fact.schema.json",
+      "class": "durable",
+      "description": "A fact for an agent's work ledger from the team services.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/fact_id"
+      ],
+      "ledger": "fact_recorded",
+      "receivers": [
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "summary",
+      "routing": "named",
+      "senders": [
+        "team_services"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "memory.create": {
+      "address": "svc.team.memory.create",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/memory.create.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "memory_fact",
+        "seen_version": "none"
+      },
+      "description": "Add a memory fact.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/memory.create.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "not_found",
+          "capacity_reached",
+          "invalid_request",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "memory.delete": {
+      "address": "svc.team.memory.delete",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/memory.delete.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "memory_fact",
+        "seen_version": "required_for_request_writers"
+      },
+      "description": "Delete a memory fact.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/memory.delete.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "not_found",
+          "invalid_request",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "memory.list": {
+      "address": "svc.team.memory.list",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/memory.list.schema.json",
+      "class": "request_reply",
+      "description": "List a memory bank's facts.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/memory.list.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "memory.replace": {
+      "address": "svc.team.memory.replace",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/memory.replace.schema.json",
+      "body_rules": [
+        {
+          "any_of": [
+            "/body/fact_text",
+            "/body/tags",
+            "/body/metadata_json",
+            "/body/valid_from",
+            "/body/expires",
+            "/body/clear_expiry"
+          ]
+        }
+      ],
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "memory_fact",
+        "seen_version": "required_for_request_writers"
+      },
+      "description": "Change only the supplied fields of a memory fact.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/memory.replace.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "not_found",
+          "invalid_request",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "memory.show": {
+      "address": "svc.team.memory.show",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/memory.show.schema.json",
+      "class": "request_reply",
+      "description": "Show one memory fact.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/memory.show.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "not_found",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "memory.undo": {
+      "address": "svc.team.memory.undo",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/memory.undo.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "memory_fact",
+        "seen_version": "none"
+      },
+      "description": "Undo one memory change.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/memory.undo.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "not_found",
+          "invalid_request",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.abandon": {
+      "address": "svc.team.objectives.abandon",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/objectives.abandon.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "required"
+      },
+      "description": "Abandon one of the person's Objectives.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.abandon.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "changed_since_read",
+          "action_unavailable",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.activate_plan": {
+      "address": "svc.team.objectives.activate_plan",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.activate_plan.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "Start runtime-owned execution of the active task's semantic plan steps.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.activate_plan.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.create": {
+      "address": "svc.team.objectives.create",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.create.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "The lead creates an Objective.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.create.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "status_not_settable",
+          "confirmation_required",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error",
+          "invalid_request"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.delete": {
+      "address": "svc.team.objectives.delete",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/objectives.delete.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "required"
+      },
+      "description": "Delete one of the person's Objectives.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.delete.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "changed_since_read",
+          "action_unavailable",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.get": {
+      "address": "svc.team.objectives.get",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.get.schema.json",
+      "class": "request_reply",
+      "description": "The lead reads an Objective's full record and agent-update version.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.get.reply.schema.json",
+        "errors": [
+          "not_found",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.list": {
+      "address": "svc.team.objectives.list",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/objectives.list.schema.json",
+      "class": "request_reply",
+      "description": "The person's Objectives.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.list.reply.schema.json",
+        "errors": [
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.pause": {
+      "address": "svc.team.objectives.pause",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/objectives.pause.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "required"
+      },
+      "description": "Pause one of the person's Objectives.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.pause.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "changed_since_read",
+          "action_unavailable",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.record_checkpoint": {
+      "address": "svc.team.objectives.record_checkpoint",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.record_checkpoint.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "Save a continuation checkpoint for the active Objective work session.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.record_checkpoint.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.resume": {
+      "address": "svc.team.objectives.resume",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/objectives.resume.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "required"
+      },
+      "description": "Resume one of the person's Objectives.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.resume.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "changed_since_read",
+          "action_unavailable",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.start_task": {
+      "address": "svc.team.objectives.start_task",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.start_task.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "Queue a continuation task for an Objective and its current plan.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.start_task.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.stop": {
+      "address": "svc.team.objectives.stop",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/objectives.stop.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "required"
+      },
+      "description": "Stop one of the person's Objectives.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.stop.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "changed_since_read",
+          "action_unavailable",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.update_progress": {
+      "address": "svc.team.objectives.update_progress",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.update_progress.schema.json",
+      "body_rules": [
+        {
+          "any_of": [
+            "/body/progress_summary",
+            "/body/current_focus",
+            "/body/criterion_updates"
+          ]
+        }
+      ],
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "required"
+      },
+      "description": "The lead records progress on an Objective.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.update_progress.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "status_not_settable",
+          "confirmation_required",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error",
+          "invalid_request"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.update_status": {
+      "address": "svc.team.objectives.update_status",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.update_status.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "required"
+      },
+      "description": "The lead changes an Objective's status.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.update_status.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "status_not_settable",
+          "confirmation_required",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error",
+          "invalid_request"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_profiles.apply": {
+      "address": "svc.team.objectives.work_profiles.apply",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_profiles.apply.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "Apply the exact Objective work-profile proposal the person accepted.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_profiles.apply.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "direct_user_request_required",
+          "confirmation_required",
+          "missing_skills",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_profiles.list": {
+      "address": "svc.team.objectives.work_profiles.list",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_profiles.list.schema.json",
+      "class": "request_reply",
+      "description": "Read configured profiles, the person's installed profiles and latest proposals.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_profiles.list.reply.schema.json",
+        "errors": [
+          "feature_off",
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_profiles.propose": {
+      "address": "svc.team.objectives.work_profiles.propose",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_profiles.propose.schema.json",
+      "class": "request_reply",
+      "description": "Persist an inert exact Objective work-profile proposal for the person.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_profiles.propose.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "direct_user_request_required",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_profiles.remove": {
+      "address": "svc.team.objectives.work_profiles.remove",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_profiles.remove.schema.json",
+      "class": "request_reply",
+      "description": "Remove the person's reusable profile after explicit confirmation.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_profiles.remove.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "direct_user_request_required",
+          "confirmation_required",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_sessions.disable": {
+      "address": "svc.team.objectives.work_sessions.disable",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_sessions.disable.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "Disable bounded work sessions after the person agrees.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_sessions.disable.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "direct_user_request_required",
+          "confirmation_required",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_sessions.enable": {
+      "address": "svc.team.objectives.work_sessions.enable",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_sessions.enable.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "Enable explicitly accepted bounded work sessions on an Objective.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_sessions.enable.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "direct_user_request_required",
+          "confirmation_required",
+          "missing_skills",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_sessions.start": {
+      "address": "svc.team.objectives.work_sessions.start",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_sessions.start.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "Open a requested work session on the active Objective-linked task.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_sessions.start.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "direct_user_request_required",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_sessions.status": {
+      "address": "svc.team.objectives.work_sessions.status",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_sessions.status.schema.json",
+      "class": "request_reply",
+      "description": "Read an owned Objective's policy, recent sessions, checkpoints and tuning observations.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_sessions.status.reply.schema.json",
+        "errors": [
+          "not_found",
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "people.set_standing": {
+      "address": "svc.team.people.set_standing",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/people.set_standing.schema.json",
+      "class": "request_reply",
+      "description": "Settle a person's work after their standing changed.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/people.set_standing.reply.schema.json",
+        "errors": [
+          "administrator_required",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "person.notify": {
+      "address": "work.edge.{edge}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/person.notify.schema.json",
+      "class": "durable",
+      "description": "A notice for a person, delivered by the gateway.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/notice_id"
+      ],
+      "ledger": "person_notified",
+      "receivers": [
+        "gateway"
+      ],
+      "rendering": "none",
+      "routing": "person",
+      "senders": [
+        "lead_host",
+        "worker_host",
+        "team_services"
+      ],
+      "topology_edge": [
+        "person"
+      ],
+      "wakes_model": "never"
+    },
+    "question.closed": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": true,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/question.closed.schema.json",
+      "class": "durable",
+      "description": "A question ended without an answer.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/question_id"
+      ],
+      "ledger": "question_closed",
+      "receivers": [
+        "lead_host",
+        "worker_host",
+        "edge_adapter"
+      ],
+      "rendering": "summary",
+      "routing": "named",
+      "senders": [
+        "gateway",
+        "team_services",
+        "lead_host"
+      ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host",
+          "team_services"
+        ]
+      },
+      "topology_edge": [
+        "down",
+        "out"
+      ],
+      "wakes_model": "always"
+    },
+    "requests.pause": {
+      "address": "svc.team.requests.pause",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/requests.pause.schema.json",
+      "class": "request_reply",
+      "description": "The lead pauses its own request's work.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/requests.pause.reply.schema.json",
+        "errors": [
+          "not_found",
+          "request_closed",
+          "not_own_request"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "requests.resume": {
+      "address": "svc.team.requests.resume",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/requests.resume.schema.json",
+      "class": "request_reply",
+      "description": "The lead resumes its own request's work.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/requests.resume.reply.schema.json",
+        "errors": [
+          "not_found",
+          "request_closed",
+          "not_own_request"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "run_context.sign": {
+      "address": "svc.team.run_context.sign",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/run_context.sign.schema.json",
+      "class": "request_reply",
+      "description": "A worker running a scheduled job asks the scheduler for the run's authority token.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "scheduler"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/run_context.sign.reply.schema.json",
+        "errors": [
+          "signer_missing",
+          "not_found",
+          "claim_not_held",
+          "schedule_stopped",
+          "scheduled_job_mismatch",
+          "heartbeat_item_not_found",
+          "owner_inactive",
+          "check_failed"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "schedules.authorize_access": {
+      "address": "svc.team.schedules.authorize_access",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/schedules.authorize_access.schema.json",
+      "class": "request_reply",
+      "description": "Hand on access for a saved schedule policy and end obsolete setup grants.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.authorize_access.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "invalid_request",
+          "runtime_error",
+          "schedule_worker_policy_revision_conflict"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "schedules.disable": {
+      "address": "svc.team.schedules.disable",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/schedules.disable.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "schedule",
+        "seen_version": "required"
+      },
+      "description": "Disable a schedule.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.disable.reply.schema.json",
+        "errors": [
+          "approval_required",
+          "not_found",
+          "not_allowed",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "schedules.get": {
+      "address": "svc.team.schedules.get",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/schedules.get.schema.json",
+      "class": "request_reply",
+      "description": "Read complete safe details of one visible schedule, in JSON text pages.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.get.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "schedules.inspect_worker": {
+      "address": "svc.team.schedules.inspect_worker",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/schedules.inspect_worker.schema.json",
+      "class": "request_reply",
+      "description": "Inspect worker assignment and startup diagnostics for a schedule.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.inspect_worker.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "schedules.install": {
+      "address": "svc.team.schedules.install",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/schedules.install.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "schedule",
+        "seen_version": "required_for_request_writers"
+      },
+      "description": "Install a schedule: create, replace, ensure or refresh it.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.install.reply.schema.json",
+        "errors": [
+          "invalid_request",
+          "id_in_use",
+          "not_allowed",
+          "not_found",
+          "not_system_managed",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "schedules.list": {
+      "address": "svc.team.schedules.list",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/schedules.list.schema.json",
+      "class": "request_reply",
+      "description": "The schedules the caller may see.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.list.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "schedules.pause": {
+      "address": "svc.team.schedules.pause",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/schedules.pause.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "schedule",
+        "seen_version": "required"
+      },
+      "description": "Pause a schedule until a time.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.pause.reply.schema.json",
+        "errors": [
+          "approval_required",
+          "not_found",
+          "not_allowed",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "schedules.prepare_access": {
+      "address": "svc.team.schedules.prepare_access",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/schedules.prepare_access.schema.json",
+      "class": "request_reply",
+      "description": "Preview worker readiness and missing access without starting the job.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.prepare_access.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "schedules.remove": {
+      "address": "svc.team.schedules.remove",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/schedules.remove.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "schedule",
+        "seen_version": "required"
+      },
+      "description": "Remove a schedule.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.remove.reply.schema.json",
+        "errors": [
+          "approval_required",
+          "not_found",
+          "not_allowed",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "schedules.resume": {
+      "address": "svc.team.schedules.resume",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/schedules.resume.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "schedule",
+        "seen_version": "required"
+      },
+      "description": "Resume a schedule.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.resume.reply.schema.json",
+        "errors": [
+          "approval_required",
+          "not_found",
+          "not_allowed",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "schedules.set_worker": {
+      "address": "svc.team.schedules.set_worker",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/schedules.set_worker.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "schedule",
+        "seen_version": "required"
+      },
+      "description": "Save a schedule's worker type, startup policy and capability requirements.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.set_worker.reply.schema.json",
+        "errors": [
+          "invalid_request",
+          "approval_required",
+          "not_found",
+          "not_allowed",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error",
+          "schedule_worker_policy_revision_conflict"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "schedules.update": {
+      "address": "svc.team.schedules.update",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/schedules.update.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "schedule",
+        "seen_version": "required"
+      },
+      "description": "Change a schedule's name, instruction, timing, controls or run notes.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.update.reply.schema.json",
+        "errors": [
+          "invalid_request",
+          "approval_required",
+          "not_found",
+          "not_allowed",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
     "skills.changed": {
       "address": "evt.skills_changed",
       "admission": {
@@ -79,7 +4402,9 @@
       "class": "event",
       "description": "Hint that a managed skill was installed or removed. Receivers verify the stored receipt before they refresh.",
       "expiry_seconds": 300,
-      "idempotency": "skills_changed:<change_id>",
+      "idempotency": [
+        "/body/change_id"
+      ],
       "ledger": "none",
       "receivers": [
         "lead_host",
@@ -93,23 +4418,628 @@
       "topology_edge": "none",
       "wakes_model": "never"
     },
-    "task.stop": {
+    "staged_changes.apply": {
+      "address": "svc.team.staged_changes.apply",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/staged_changes.apply.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "staged_change",
+        "seen_version": "required"
+      },
+      "description": "The lead applies a staged change the person reviewed.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/staged_changes.apply.reply.schema.json",
+        "errors": [
+          "failed",
+          "refused",
+          "waiting",
+          "agreement_required",
+          "already_applied",
+          "not_found",
+          "not_allowed",
+          "denied",
+          "withdrawn",
+          "changed_since_read",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "steering.decide": {
+      "address": "svc.team.steering.decide",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/steering.decide.schema.json",
+      "class": "request_reply",
+      "description": "The lead decides what each held task changes, or extends the hold once.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/steering.decide.reply.schema.json",
+        "errors": [
+          "not_found",
+          "hold_expired",
+          "extension_used",
+          "tasks_not_covered",
+          "not_own_request"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "task.account": {
       "address": "work.agent.{agent}",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
         "priority": "high"
       },
+      "authority": "none",
+      "body": "bodies/task.account.schema.json",
+      "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
+      "description": "A held holder's account of where its task stopped.",
+      "expiry_seconds": 86400,
+      "idempotency": [
+        "/body/task_id",
+        "/body/steer_id",
+        "/body/stage/type"
+      ],
+      "ledger": "hold_account",
+      "receivers": [
+        "lead_host"
+      ],
+      "rendering": "summary",
+      "routing": "requester",
+      "senders": [
+        "worker_host",
+        "lead_host"
+      ],
+      "topology_edge": [
+        "up"
+      ],
+      "wakes_model": "never"
+    },
+    "task.answer": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": true,
+        "priority": "high"
+      },
       "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/task.answer.schema.json",
+      "body_rules": [
+        {
+          "unique": "/body/selected_choice_ids"
+        },
+        {
+          "any_of": [
+            "/body/text",
+            "/body/text_file",
+            "/body/selected_choice_ids",
+            "/body/decision",
+            "/body/decision_token"
+          ]
+        }
+      ],
+      "class": "durable",
+      "description": "The answer to one question.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/question_id"
+      ],
+      "ledger": "question_answered",
+      "receivers": [
+        "lead_host",
+        "worker_host",
+        "edge_adapter"
+      ],
+      "rendering": "full",
+      "routing": "named",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "team_services",
+        "worker_host",
+        "edge_adapter"
+      ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host"
+        ]
+      },
+      "topology_edge": [
+        "down",
+        "sideways",
+        "out"
+      ],
+      "wakes_model": "always"
+    },
+    "task.claimed": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/task.claimed.schema.json",
+      "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
+      "description": "A holder took a task.",
+      "expiry_seconds": 86400,
+      "idempotency": [
+        "/body/claim_id"
+      ],
+      "ledger": "standin_holder",
+      "receivers": [
+        "lead_host"
+      ],
+      "rendering": "none",
+      "routing": "requester",
+      "senders": [
+        "worker_host",
+        "lead_host",
+        "edge_adapter"
+      ],
+      "topology_edge": [
+        "up"
+      ],
+      "wakes_model": "never"
+    },
+    "task.handback": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/task.handback.schema.json",
+      "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
+      "description": "A holder that lost its lease returns a task.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/handback_id"
+      ],
+      "ledger": "standin_returned",
+      "receivers": [
+        "lead_host"
+      ],
+      "rendering": "summary",
+      "routing": "requester",
+      "senders": [
+        "worker_host",
+        "lead_host"
+      ],
+      "topology_edge": [
+        "up"
+      ],
+      "wakes_model": "never"
+    },
+    "task.probe": {
+      "address": "ctl.agent.{agent}.task.probe",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/task.probe.schema.json",
+      "class": "request_reply",
+      "description": "Whether the holder still has a task, asked by the watchdog.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/task.probe.reply.schema.json",
+        "errors": []
+      },
+      "routing": "named",
+      "senders": [
+        "lead_host",
+        "team_services"
+      ],
+      "topology_edge": "down",
+      "wakes_model": "never"
+    },
+    "task.progress": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/task.progress.schema.json",
+      "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
+      "description": "Where a task stands, from its holder to its requester.",
+      "expiry_seconds": 86400,
+      "idempotency": [
+        "/body/task_id",
+        "/body/custody_token",
+        "/body/sequence"
+      ],
+      "ledger": "standin_progress",
+      "receivers": [
+        "lead_host"
+      ],
+      "rendering": "summary",
+      "routing": "requester",
+      "senders": [
+        "worker_host",
+        "lead_host",
+        "edge_adapter"
+      ],
+      "topology_edge": [
+        "up"
+      ],
+      "wakes_model": "never"
+    },
+    "task.question": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": true,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/task.question.schema.json",
+      "body_rules": [
+        {
+          "by": "choice_id",
+          "unique": "/body/purpose/choices"
+        },
+        {
+          "unique": "/body/purpose/allowed_decisions"
+        },
+        {
+          "requires": "/body/purpose/choices",
+          "when": [
+            {
+              "at": "/body/purpose/allow_free_text",
+              "is": false
+            }
+          ]
+        }
+      ],
+      "class": "durable",
+      "description": "A question from a task's holder to the one who can answer it.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/question_id"
+      ],
+      "ledger": "question_open",
+      "receivers": [
+        "lead_host",
+        "gateway",
+        "edge_adapter"
+      ],
+      "rendering": "full",
+      "routing": "requester",
+      "senders": [
+        "worker_host",
+        "lead_host",
+        "edge_adapter"
+      ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "worker_host",
+          "lead_host"
+        ]
+      },
+      "topology_edge": [
+        "up",
+        "person",
+        "sideways",
+        "out"
+      ],
+      "wakes_model": "next_turn"
+    },
+    "task.report": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/task.report.schema.json",
+      "class": "durable",
+      "description": "A report from a holder to its requester; the lead decides whether a person sees it.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/report_id"
+      ],
+      "ledger": "report_received",
+      "receivers": [
+        "lead_host"
+      ],
+      "rendering": "full",
+      "routing": "requester",
+      "senders": [
+        "worker_host",
+        "lead_host"
+      ],
+      "topology_edge": [
+        "up"
+      ],
+      "wakes_model": "next_turn"
+    },
+    "task.request": {
+      "address": [
+        "work.agent.{agent}",
+        "work.pool.{pool}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": true,
+        "priority": "normal"
+      },
+      "authority": "optional",
+      "authority_binding": {
+        "at": "/body/work/root_task_id",
+        "type": "root_task"
+      },
+      "body": "bodies/task.request.schema.json",
+      "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
+      "description": "Give a task to an agent or a pool.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/task_id",
+        "/message_id"
+      ],
+      "ledger": "task_held",
+      "receivers": [
+        "lead_host",
+        "worker_host",
+        "edge_adapter"
+      ],
+      "rendering": "full",
+      "routing": "named",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "scheduler",
+        "edge_adapter",
+        "team_services"
+      ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host"
+        ],
+        "work.pool.{pool}": [
+          "gateway",
+          "lead_host",
+          "scheduler",
+          "team_services"
+        ]
+      },
+      "topology_edge": [
+        "down",
+        "out"
+      ],
+      "wakes_model": "always"
+    },
+    "task.result": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": true,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/task.result.schema.json",
+      "class": "durable",
+      "copy_to": [
+        "work.team"
+      ],
+      "description": "The final answer of a task, sent by its holder.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/task_id",
+        "/issuer/agent",
+        "/body/outcome/custody_token",
+        "/body/sequence"
+      ],
+      "ledger": "delegated_resolved",
+      "receivers": [
+        "lead_host",
+        "gateway",
+        "edge_adapter"
+      ],
+      "rendering": "full",
+      "routing": "requester",
+      "senders": [
+        "worker_host",
+        "lead_host",
+        "edge_adapter",
+        "team_services"
+      ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "worker_host",
+          "lead_host",
+          "team_services"
+        ]
+      },
+      "topology_edge": [
+        "up",
+        "person",
+        "out"
+      ],
+      "wakes_model": {
+        "by": "outcome.state",
+        "values": {
+          "cancelled": "next_turn",
+          "completed": "next_turn",
+          "failed": "always",
+          "partial": "next_turn",
+          "paused": "always",
+          "rejected": "always",
+          "yielded": "next_turn"
+        }
+      }
+    },
+    "task.steer": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/task.steer.schema.json",
+      "class": "durable",
+      "description": "Steering for the holder of one named task.",
+      "expiry_seconds": 86400,
+      "idempotency": [
+        "/body/task_id",
+        "/body/steer_id"
+      ],
+      "ledger": "steering_received",
+      "receivers": [
+        "worker_host",
+        "lead_host",
+        "edge_adapter"
+      ],
+      "rendering": "full",
+      "routing": "holder",
+      "senders": [
+        "lead_host",
+        "team_services"
+      ],
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host",
+          "team_services"
+        ]
+      },
+      "topology_edge": [
+        "down",
+        "out"
+      ],
+      "wakes_model": {
+        "by": "action.type",
+        "values": {
+          "guidance": "always",
+          "hold": "never",
+          "release": "never"
+        }
+      }
+    },
+    "task.stop": {
+      "address": [
+        "work.agent.{agent}",
+        "work.edge.{edge}"
+      ],
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
       "body": "bodies/task.stop.schema.json",
       "class": "durable",
       "description": "Stop one task. Sent only to the task's current holder.",
       "expiry_seconds": 86400,
-      "idempotency": "task.stop:<base64url(sha256(RFC8785([task_id, stop_id])))>",
+      "idempotency": [
+        "/body/task_id",
+        "/body/stop_id"
+      ],
       "ledger": "task_stopped",
       "receivers": [
         "lead_host",
-        "worker_host"
+        "worker_host",
+        "edge_adapter"
       ],
       "rendering": "none",
       "routing": "holder",
@@ -117,15 +5047,620 @@
         "lead_host",
         "team_services"
       ],
-      "topology_edge": "down",
+      "senders_by_address": {
+        "work.edge.{edge}": [
+          "lead_host",
+          "team_services"
+        ]
+      },
+      "topology_edge": [
+        "down",
+        "out"
+      ],
+      "wakes_model": "never"
+    },
+    "tasks.cancel": {
+      "address": "svc.team.tasks.cancel",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/tasks.cancel.schema.json",
+      "class": "request_reply",
+      "description": "Stop a task, a conversation's work, a delivery's work or all of the person's work.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/tasks.cancel.reply.schema.json",
+        "errors": [
+          "no_matching_work",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "tasks.inventory": {
+      "address": "svc.team.tasks.inventory",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/tasks.inventory.schema.json",
+      "class": "request_reply",
+      "description": "The person's running work and schedules.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/tasks.inventory.reply.schema.json",
+        "errors": [
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "tasks.list": {
+      "address": [
+        "svc.team.tasks.list",
+        "ctl.agent.{agent}.tasks.list"
+      ],
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/tasks.list.schema.json",
+      "class": "request_reply",
+      "description": "One agent's task queue.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services",
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/tasks.list.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "team_services"
+      ],
+      "senders_by_address": {
+        "ctl.agent.{agent}.tasks.list": [
+          "team_services"
+        ],
+        "svc.team.tasks.list": [
+          "gateway"
+        ]
+      },
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "tasks.list_finished": {
+      "address": [
+        "svc.team.tasks.list_finished",
+        "ctl.agent.{agent}.tasks.list_finished"
+      ],
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/tasks.list_finished.schema.json",
+      "class": "request_reply",
+      "description": "One agent's finished tasks.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services",
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/tasks.list_finished.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "team_services"
+      ],
+      "senders_by_address": {
+        "ctl.agent.{agent}.tasks.list_finished": [
+          "team_services"
+        ],
+        "svc.team.tasks.list_finished": [
+          "gateway"
+        ]
+      },
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "tasks.probe": {
+      "address": "svc.team.tasks.probe",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/tasks.probe.schema.json",
+      "class": "request_reply",
+      "description": "Whether a task the person owns is still known.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/tasks.probe.reply.schema.json",
+        "errors": []
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "tasks.progress": {
+      "address": "svc.team.tasks.progress",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/tasks.progress.schema.json",
+      "class": "request_reply",
+      "description": "Where the person's request in one conversation stands.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/tasks.progress.reply.schema.json",
+        "errors": [
+          "not_allowed"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "tasks.purge": {
+      "address": [
+        "svc.team.tasks.purge",
+        "ctl.agent.{agent}.tasks.purge"
+      ],
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/tasks.purge.schema.json",
+      "class": "request_reply",
+      "description": "Remove every queued task that is not running from an agent's queue.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services",
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/tasks.purge.reply.schema.json",
+        "errors": [
+          "queue_changed",
+          "not_found",
+          "not_allowed",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "team_services"
+      ],
+      "senders_by_address": {
+        "ctl.agent.{agent}.tasks.purge": [
+          "team_services"
+        ],
+        "svc.team.tasks.purge": [
+          "gateway"
+        ]
+      },
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "tasks.remove": {
+      "address": [
+        "svc.team.tasks.remove",
+        "ctl.agent.{agent}.tasks.remove"
+      ],
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/tasks.remove.schema.json",
+      "class": "request_reply",
+      "description": "Remove one queued task from an agent's queue.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services",
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/tasks.remove.reply.schema.json",
+        "errors": [
+          "queue_changed",
+          "not_found",
+          "not_allowed",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "team_services"
+      ],
+      "senders_by_address": {
+        "ctl.agent.{agent}.tasks.remove": [
+          "team_services"
+        ],
+        "svc.team.tasks.remove": [
+          "gateway"
+        ]
+      },
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "tasks.steer": {
+      "address": "svc.team.tasks.steer",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/steer_id",
+        "type": "command"
+      },
+      "body": "bodies/tasks.steer.schema.json",
+      "class": "request_reply",
+      "description": "The person's guidance for a running request; stored before it is accepted.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/steer_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/tasks.steer.reply.schema.json",
+        "errors": [
+          "not_started",
+          "request_finished",
+          "feature_off",
+          "not_allowed"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "tool.setup.request": {
+      "address": "work.edge.{edge}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/root_task_id",
+        "type": "root_task"
+      },
+      "body": "bodies/tool.setup.request.schema.json",
+      "class": "durable",
+      "description": "Ask the gateway to have a person or administrator set a tool up.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/setup_request_id"
+      ],
+      "ledger": "setup_wait_open",
+      "receivers": [
+        "gateway"
+      ],
+      "rendering": "none",
+      "routing": "person",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": [
+        "person"
+      ],
+      "wakes_model": "never"
+    },
+    "tool.setup.result": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": false,
+        "execution_slot": true,
+        "priority": "normal"
+      },
+      "authority": "none",
+      "body": "bodies/tool.setup.result.schema.json",
+      "class": "durable",
+      "description": "What became of a tool setup.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/setup_request_id"
+      ],
+      "ledger": "setup_wait_closed",
+      "receivers": [
+        "lead_host"
+      ],
+      "rendering": "summary",
+      "routing": "requester",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "topics.find_threads": {
+      "address": "svc.team.topics.find_threads",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/topics.find_threads.schema.json",
+      "class": "request_reply",
+      "description": "Threads with the given tags.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/topics.find_threads.reply.schema.json",
+        "errors": [
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "topics.list_tags": {
+      "address": "svc.team.topics.list_tags",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/topics.list_tags.schema.json",
+      "class": "request_reply",
+      "description": "The thread tags in use.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/topics.list_tags.reply.schema.json",
+        "errors": [
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "topics.tag_thread": {
+      "address": "svc.team.topics.tag_thread",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "at": "/body/request_id",
+        "type": "command"
+      },
+      "body": "bodies/topics.tag_thread.schema.json",
+      "class": "request_reply",
+      "description": "Tag a thread.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/topics.tag_thread.reply.schema.json",
+        "errors": [
+          "not_found",
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway"
+      ],
+      "topology_edge": "none",
       "wakes_model": "never"
     }
   },
   "max_frame_bytes": 262144,
   "max_nesting_depth": 64,
   "protocol": "1.0-pre",
+  "renew_key_proof_domain": "universal-agents/host-renew-key-proof/v1",
+  "retry_outcomes": [
+    "not_started",
+    "record_busy",
+    "runtime_error",
+    "waiting"
+  ],
   "signing_domain": "universal-agents/message-frame/v1",
   "state_records": {
+    "agent": {
+      "body": "state/agent.schema.json",
+      "bucket": "UA1_AGENTS",
+      "description": "An agent's state, written by the host it is placed on when the state changes.",
+      "key": "<team>.<agent>",
+      "signer": "host",
+      "signer_roles": [
+        "lead_host",
+        "worker_host"
+      ],
+      "write_rule": "written on change, at most once per 2 seconds; readers accept it only from the placement's host",
+      "writers": [
+        "lead_host",
+        "worker_host"
+      ]
+    },
     "agent_session": {
       "body": "state/agent_session.schema.json",
       "bucket": "UA1_CERTS",
@@ -164,6 +5699,47 @@
         "edge_adapter"
       ]
     },
+    "host": {
+      "body": "state/host.schema.json",
+      "bucket": "UA1_HOSTS",
+      "description": "A runtime host's liveness and capacity, written by the host itself every 20 seconds and naming its certificate.",
+      "key": "<runtime>",
+      "signer": "host",
+      "signer_roles": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "installation_authority",
+        "scheduler"
+      ],
+      "ttl_seconds": 60,
+      "write_rule": "written by the host itself every 20 seconds, expiring within ttl_seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions",
+      "writers": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "installation_authority",
+        "scheduler"
+      ]
+    },
+    "placement": {
+      "body": "state/placement.schema.json",
+      "bucket": "UA1_PLACEMENT",
+      "description": "Which host runs an agent; its signed sequence is the fencing token.",
+      "key": "<team>.<agent>",
+      "signer": "host",
+      "signer_roles": [
+        "team_services"
+      ],
+      "write_rule": "compare-and-set on the last key-value revision, with the next sequence; the signed sequence, not the unsigned revision, is the fencing token, so a stored copy written back is never newer",
+      "writers": [
+        "team_services"
+      ]
+    },
     "revocations": {
       "body": "state/revocations.schema.json",
       "bucket": "UA1_CERTS",
@@ -174,6 +5750,20 @@
       "writers": [
         "installation_authority",
         "edge_adapter"
+      ]
+    },
+    "team_view": {
+      "body": "state/team_view.schema.json",
+      "bucket": "UA1_TEAM_VIEW",
+      "description": "One entry of a team's shared view of its members, requests, tasks and Objectives.",
+      "key": "<team>.<entry>.<id>",
+      "signer": "host",
+      "signer_roles": [
+        "team_services"
+      ],
+      "write_rule": "deleted when the item closes or the person it names departs; each entry at most 4 KiB",
+      "writers": [
+        "team_services"
       ]
     }
   },
@@ -190,7 +5780,7 @@
     },
     {
       "code": "unknown_key",
-      "meaning": "the trust store holds no certificate for the issuer's installation, runtime and membership epoch that names the issuer's key id and was valid when the frame was issued, or the installation is neither the receiver's nor one it has an agreement with"
+      "meaning": "the trust store holds no certificate for the issuer's installation, runtime and membership epoch that names the issuer's key id and was valid when the frame was issued (a certificate another one replaces is valid only until certificate_overlap_seconds after its replacement was issued), or the installation is neither the receiver's nor one it has an agreement with; a join (verification proof_of_possession) must instead come from the receiver's own installation and name the key it presents in its body, which is not an authority key, and a key id the trust store already knows must keep its public key"
     },
     {
       "code": "bad_signature",
@@ -206,15 +5796,15 @@
     },
     {
       "code": "epoch_too_old",
-      "meaning": "the issuer's certificate has a membership or revocation epoch below the receiver's minimum for that runtime or installation"
+      "meaning": "the issuer's certificate has a membership or revocation epoch below the receiver's minimum for that runtime or installation (request/reply and events only; queued work is judged by the certificate valid when it was issued, and a join by the key it presents)"
     },
     {
       "code": "wrong_issuer",
-      "meaning": "the issuer's revocation epoch or team disagrees with its certificate; or it names an agent without a session, or a session that does not place that agent, of a type the certificate allows, on the signing runtime when the frame was issued; or a reply does not come from the agent and team the request was for"
+      "meaning": "the issuer's revocation epoch or team disagrees with its certificate (installation operations and their replies name the installation scope as their team and no agent, and other kinds a team of the certificate); or it names an agent without a session, or a session that does not place that agent, of a type the certificate allows, on the signing runtime when the frame was issued; or a reply does not come from the agent and team the request was for; or a join names an epoch other than zero, a reserved runtime id (x- or _), an agent, or a body runtime or installation other than its issuer's; or a renewal's body names another certificate or membership epoch than the certificate that signs it"
     },
     {
       "code": "wrong_sender",
-      "meaning": "none of the certificate's roles may send the kind (for a reply, receive its request); or the frame comes from another installation with a kind, class or destination team its agreement does not allow"
+      "meaning": "none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request), or a join asks for a role that is not among the kind's senders; or a frame from the receiver's own installation is addressed to another team than its issuer's; or the frame comes from another installation with a kind, class or destination team its agreement does not allow; or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)"
     },
     {
       "code": "wrong_team",
@@ -246,11 +5836,11 @@
     },
     {
       "code": "invalid_body",
-      "meaning": "the body breaks the kind's schema"
+      "meaning": "the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give; or a renewal's key rotation names a key id the installation already uses or a proof that does not verify; or the certificate in a join or renewal reply does not verify against the receiver's authority keys or does not certify the host that asked (README, \"Installation traffic\")"
     },
     {
       "code": "bad_authority",
-      "meaning": "the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names another team than the issuer's, was not valid when the frame was issued, lasts longer than authority_token_max_seconds, or is bound to another root task or command than the one the receiver holds"
+      "meaning": "the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds; or a change-conflict decision token in the body is not signed by a team-services certificate of the frame's installation and team, or was not valid when the frame was issued"
     },
     {
       "code": "access_denied",

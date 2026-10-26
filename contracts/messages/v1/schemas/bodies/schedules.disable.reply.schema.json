@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/schedules.disable.reply.schema.json",
+  "title": "schedules.disable reply",
+  "description": "Disable a schedule.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "state": {
+          "const": "disabled"
+        },
+        "schedule_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "version": {
+          "$ref": "schedules.update.reply.schema.json#/$defs/saved_schedule_version"
+        },
+        "warnings": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        }
+      },
+      "required": [
+        "outcome",
+        "state",
+        "schedule_id",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "approval_required"
+        },
+        "change_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "change_id"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_found"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "changed_since_read"
+        },
+        "current_version": {
+          "$ref": "../common.schema.json#/$defs/record_version"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "current_version"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "change_conflict"
+        },
+        "case_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "brief": {
+          "$ref": "../common.schema.json#/$defs/blob_ref"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "case_id",
+        "brief"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "request_closed"
+        },
+        "request_state": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "needs_person_decision"
+        },
+        "case_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "record_busy"
+        },
+        "retry_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "retry_at"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

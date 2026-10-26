@@ -1,0 +1,42 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.update_progress.reply",
+  "message_id": "61451fa0-96e3-7730-afda-3d232d6a69f2",
+  "idempotency_key": "objectives.update_progress.reply:k10iPbSW0dhruvqmDkwE-2Ar1w0Oufm5xt-rOyrEeQ4",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.3d740b60-fe89-7263-b4b0-0be545af1070",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "objective_id": "objective_dependency_watch",
+    "seen_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+    "objective": {
+      "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "size": 4096,
+      "media_type": "application/json"
+    },
+    "markdown": {
+      "type": "inline",
+      "text": "# Track recurring dependency checks\n\nThe initial report is saved. Next, verify two new advisories."
+    }
+  },
+  "causation_id": "3d740b60-fe89-7263-b4b0-0be545af1070",
+  "body_digest": "aXK3fLipeNiNQAYWe_E6GC_-F_rQPgdxxtvfSugxp4o",
+  "signature": "LO0cAziFMKOYzuv7l6TGwbM46SAhND6tyhSLCvID53xXSrOGnC8grftBwjjx_dlKMswSS5T8TyD7c4DIe5jGAQ"
+}

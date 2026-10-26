@@ -1,0 +1,50 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "memory.list.reply",
+  "message_id": "8775115d-605a-7e75-8596-21e45716d8d2",
+  "idempotency_key": "memory.list.reply:rH1nG_vQVD15I0CNlxXkbMFlYwIwj-wTzyElXcBkv8A",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.cd67f746-a50c-7876-b18a-d5aeb95e78c7",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "facts": [
+      {
+        "memory_id": 4,
+        "fact_text": {
+          "type": "inline",
+          "text": "Use UTC when recording deployment times."
+        },
+        "valid_from": "2026-10-21T04:30:00.000Z",
+        "tags": [
+          "operations",
+          "deployment"
+        ],
+        "metadata_json": "{\"resume_section\":\"deployment\"}",
+        "created_at": "2026-10-21T04:30:00.000Z",
+        "updated_at": "2026-10-22T04:30:00.000Z",
+        "seen_version": "2362cd12f9375d435c9f1568c042e2de180039efc42b7c76bb1fc1bdbd26439e"
+      }
+    ],
+    "total": 2
+  },
+  "causation_id": "cd67f746-a50c-7876-b18a-d5aeb95e78c7",
+  "body_digest": "it50gpEYf2SMi6MRSL_T7Ne8PWzxTE-1_PrhkInt80w",
+  "signature": "t0D2-7yXL6k_XMHufDI9gnOpSzxHrM0VM5oBfy4_5ianswOG4DG36uLFWerQjJWHXgtbCt_1cHzUQhN13xtlDA"
+}

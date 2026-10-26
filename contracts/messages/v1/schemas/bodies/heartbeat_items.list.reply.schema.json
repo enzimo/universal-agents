@@ -1,0 +1,231 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/heartbeat_items.list.reply.schema.json",
+  "title": "heartbeat_items.list.reply",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "disabled",
+            "missing_source"
+          ]
+        },
+        "source_exists": {
+          "type": "boolean"
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "title": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "updated_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "heartbeat_runtime": {
+          "type": "object",
+          "properties": {
+            "source_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            "config_available": {
+              "type": "boolean"
+            },
+            "heartbeat_enabled": {
+              "type": "boolean"
+            },
+            "configured_source_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            "configured_schedule_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            },
+            "launcher_schedule_installed": {
+              "type": "boolean"
+            },
+            "notes": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/text_content"
+              },
+              "minItems": 0,
+              "maxItems": 1000
+            }
+          },
+          "required": [
+            "source_id",
+            "config_available",
+            "notes"
+          ],
+          "additionalProperties": false
+        },
+        "warning": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/heartbeat_read_item"
+          },
+          "minItems": 0,
+          "maxItems": 100
+        },
+        "total": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "next_offset": {
+          "$ref": "../common.schema.json#/$defs/count"
+        }
+      },
+      "required": [
+        "outcome",
+        "status",
+        "source_exists",
+        "source_id",
+        "heartbeat_runtime",
+        "items",
+        "total"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "heartbeat_read_item": {
+      "type": "object",
+      "properties": {
+        "heartbeat_item_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "instruction": {
+          "$ref": "../common.schema.json#/$defs/text_content"
+        },
+        "target_agent_type": {
+          "$ref": "../common.schema.json#/$defs/agent_type"
+        },
+        "objective_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "seen_version": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "conversation_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "created_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "updated_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "last_run_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "last_success_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "last_failure_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "heartbeat_item_id",
+        "instruction",
+        "enabled",
+        "seen_version",
+        "source_id",
+        "conversation_id",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    },
+    "heartbeat_runtime_state": {
+      "type": "object",
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "config_available": {
+          "type": "boolean"
+        },
+        "heartbeat_enabled": {
+          "type": "boolean"
+        },
+        "configured_source_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "configured_schedule_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "launcher_schedule_installed": {
+          "type": "boolean"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/text_content"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        }
+      },
+      "required": [
+        "source_id",
+        "config_available",
+        "notes"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

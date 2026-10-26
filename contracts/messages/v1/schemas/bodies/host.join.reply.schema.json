@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/host.join.reply.schema.json",
+  "title": "host.join.reply body",
+  "description": "The installation authority's answer to a join: the host's signed certificate and connection credential, a pending review, or why it was refused.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "certificate": {
+          "$ref": "../certificate-document.schema.json"
+        },
+        "connection": {
+          "$ref": "../common.schema.json#/$defs/connection_credential"
+        }
+      },
+      "required": [
+        "outcome",
+        "certificate",
+        "connection"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "pending"
+        },
+        "join_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "review_code": {
+          "type": "string",
+          "pattern": "^[A-Z2-9]{8}$"
+        },
+        "retry_after_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "join_id",
+        "review_code",
+        "retry_after_seconds"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "denied"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "not_approved",
+            "key_mismatch",
+            "team_not_allowed",
+            "role_not_allowed",
+            "over_limit"
+          ]
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "protocol_mismatch"
+        },
+        "accepted": {
+          "$ref": "../common.schema.json#/$defs/protocol_label"
+        },
+        "install": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "accepted",
+        "install"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/knowledge.history.reply.schema.json",
+  "title": "knowledge.history reply",
+  "description": "A knowledge page's revisions.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "page": {
+          "$ref": "knowledge.read.reply.schema.json#/$defs/page"
+        },
+        "revisions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "updated_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              },
+              "updated_by": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "agent"
+                      },
+                      "agent_type": {
+                        "$ref": "../common.schema.json#/$defs/agent_type"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "agent_type"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "person"
+                      },
+                      "person": {
+                        "$ref": "../common.schema.json#/$defs/person_ref"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "person"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "system"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "change_summary": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 4000
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "archived"
+                ]
+              },
+              "change_kind": {
+                "type": "string",
+                "enum": [
+                  "create",
+                  "edit",
+                  "archive",
+                  "restore",
+                  "revert",
+                  "merge"
+                ]
+              }
+            },
+            "required": [
+              "revision",
+              "updated_at",
+              "updated_by",
+              "title",
+              "status",
+              "change_kind"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 50
+        },
+        "total": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "next_offset": {
+          "$ref": "../common.schema.json#/$defs/count"
+        }
+      },
+      "required": [
+        "outcome",
+        "page",
+        "revisions",
+        "total"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_found"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "feature_off"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "personal_space_unavailable"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/knowledge.merge.schema.json",
+  "title": "knowledge.merge request",
+  "description": "A curator merges a page into another.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "space": {
+      "type": "string",
+      "enum": [
+        "team",
+        "personal"
+      ]
+    },
+    "page": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "seen_version": {
+      "$ref": "../common.schema.json#/$defs/record_version",
+      "description": "The source page version read by the caller."
+    },
+    "into": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "target_seen_version": {
+      "$ref": "../common.schema.json#/$defs/record_version",
+      "description": "The destination page version read by the caller; both versions are checked before the merge."
+    },
+    "content": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 4000
+    },
+    "confirm_review": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "request_id",
+    "space",
+    "page",
+    "seen_version",
+    "into",
+    "target_seen_version",
+    "content",
+    "confirm_review"
+  ],
+  "additionalProperties": false
+}

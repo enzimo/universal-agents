@@ -1,5 +1,15 @@
 {
-  "publish": [],
+  "publish": [
+    "$JS.ACK.UA1_WORK.edge~{team}~{edge}.>",
+    "$JS.API.CONSUMER.INFO.UA1_WORK.edge~{team}~{edge}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.edge~{team}~{edge}",
+    "ua.v1._install.{self}.svc.host.join",
+    "ua.v1._install.{self}.svc.host.renew",
+    "ua.v1.{team}.{self}.dlq.notice.*",
+    "ua.v1.{team}.{self}.dlq.raw.*",
+    "ua.v1.{team}.{self}.work.agent.*",
+    "ua.v1.{team}.{self}.work.team"
+  ],
   "role": "edge_adapter",
   "subscribe": [
     "_INBOX.{self}.>"

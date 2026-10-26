@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/task.probe.reply.schema.json",
+  "title": "task.probe reply",
+  "description": "Whether the holder still has a task, asked by the watchdog.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "known": {
+          "type": "boolean"
+        },
+        "current": {
+          "type": "boolean"
+        },
+        "state": {
+          "$ref": "../common.schema.json#/$defs/progress_state"
+        },
+        "last_update_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "executing": {
+          "type": "boolean"
+        },
+        "exiting": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "outcome",
+        "known",
+        "current",
+        "executing",
+        "exiting"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

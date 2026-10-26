@@ -1,0 +1,55 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "access.review",
+  "message_id": "01928f3a-7b2c-7308-8000-000000000308",
+  "idempotency_key": "access.review:YPEBbMeYqhLpX-0GvBenJvvufvoovWk_7L_HlMsg4z8",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.work.edge.web",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "areq_2",
+    "state": {
+      "type": "open",
+      "task_id": "task_sub_4",
+      "decider": {
+        "type": "administrators"
+      },
+      "requester_agent": "lead",
+      "what": {
+        "type": "change",
+        "change_kind": "schedule",
+        "change_id": "chg_1",
+        "plan_digest": "d41d8cd98f"
+      },
+      "reason": "Apply the reviewed schedule change.",
+      "brief": {
+        "sha256": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+        "size": 170000,
+        "media_type": "text/markdown",
+        "name": "schedule-change.md"
+      },
+      "choices": [
+        "approve",
+        "deny"
+      ],
+      "expires_at": "2026-10-29T04:30:00.000Z"
+    }
+  },
+  "body_digest": "CZRQS0SseUl5dKPvjEG3FxH73Rx833dNdogstjpeMak",
+  "signature": "UcL4hwzGm1OEbjnSZYDmhWb3LncSyImjwIZ8oALtu_kQCpTUZyWJQdVQ63yqG4fNbN9yrYDTtP1kQmduDK4NAw"
+}

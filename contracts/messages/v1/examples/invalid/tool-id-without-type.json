@@ -1,0 +1,32 @@
+{
+  "description": "A tool id names its type.",
+  "refusal": "invalid_body",
+  "at": "/body/tool_id",
+  "base": "tool.setup.request/full.json",
+  "changes": [
+    {
+      "set": "/body/setup_request_id",
+      "to": "setup_9"
+    },
+    {
+      "set": "/body/tool_id",
+      "to": "calendar"
+    },
+    {
+      "set": "/body/reason",
+      "to": "Plan the meeting."
+    },
+    {
+      "set": "/body/setup/type",
+      "to": "sign_in"
+    },
+    {
+      "remove": "/body/setup/step_id"
+    },
+    {
+      "remove": "/body/delivery_ref"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"tool.setup.request\", \"message_id\": \"01928f3a-7b2c-711f-8000-00000000011f\", \"idempotency_key\": \"tool.setup.request:cMvbr2j9w4EGwmHlbz1BzCczCUKTAld1Ugi0qhZLJfI\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"edge\", \"id\": \"web\"}, \"subject\": \"ua.v1.team_example.lead-host-1.work.edge.web\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7014-8000-000000000014\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"root_task\", \"id\": \"task_root_7f\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-23T04:29:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"CIgR0Dl79Rbb1r50gbN1izXiGxjBts0o2VtEilxLBsaV6vwYCnJEBoSiMa3CX6kCT4UoISqGn1_nk2fDusLGAQ\"}, \"algorithm\": \"ed25519\", \"body\": {\"setup_request_id\": \"setup_9\", \"task_id\": \"task_root_1\", \"root_task_id\": \"task_root_7f\", \"tool_id\": \"calendar\", \"reason\": \"Plan the meeting.\", \"setup\": {\"type\": \"sign_in\", \"owner\": \"person\"}}, \"body_digest\": \"blVhTk_LnnXpIWkhPQg4BwsFkqAyYQsMAoPiLiT3vrk\", \"signature\": \"mRjd5lgZqOtx0AEpu0Q0Glulnj10ITuflcbYj7AL7ifQ3tegnbX9p_1eClOqcVayibyRsv6BBBSgx0jxi5JhAA\"}"
+}

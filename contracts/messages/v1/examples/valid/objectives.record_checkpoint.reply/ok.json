@@ -1,0 +1,94 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.record_checkpoint.reply",
+  "message_id": "65980a18-d3ce-707d-9ef6-3d35d3b67f1a",
+  "idempotency_key": "objectives.record_checkpoint.reply:D_Sbajnf06Kj7DE4BxdetqOpLb7nB3D1OnFNl_bQ2YA",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.790ab1c7-09cf-7893-ad11-423314c99fbe",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "checkpoint": {
+      "type": "inline",
+      "value": {
+        "checkpoint_id": "checkpoint_dependency_watch",
+        "session_id": "session_dependency_watch",
+        "policy_id": "policy_dependency_watch",
+        "objective_id": "objective_dependency_watch",
+        "owner_agent_id": "manager_scope:team_example:TeamArchitect",
+        "health": "on_track",
+        "observe": {
+          "type": "inline",
+          "text": "Two dependencies have new advisories in the current report."
+        },
+        "orient": {
+          "type": "inline",
+          "text": "One advisory applies to the pinned version; the other needs a version check."
+        },
+        "decide": {
+          "type": "inline",
+          "text": "Check the uncertain version before recommending a dependency update."
+        },
+        "act": {
+          "type": "inline",
+          "text": "Saved the verified advisory and queued the remaining version check."
+        },
+        "evidence_delta": [
+          {
+            "type": "inline",
+            "text": "Saved the original advisory and affected version range."
+          }
+        ],
+        "completed_subgoals": [
+          {
+            "type": "inline",
+            "text": "The remaining advisory needs a verified affected-version range."
+          }
+        ],
+        "next_subgoal": {
+          "type": "inline",
+          "text": "Verify whether the remaining advisory affects the pinned version."
+        },
+        "blockers": [
+          {
+            "type": "inline",
+            "text": "The remaining advisory needs a verified affected-version range."
+          }
+        ],
+        "in_flight_effects": [
+          {
+            "type": "inline",
+            "text": "The remaining advisory needs a verified affected-version range."
+          }
+        ],
+        "artifacts": [
+          {
+            "type": "inline",
+            "text": "The remaining advisory needs a verified affected-version range."
+          }
+        ],
+        "degraded": false,
+        "created_at": "2026-10-21T04:30:00.000Z"
+      }
+    }
+  },
+  "causation_id": "790ab1c7-09cf-7893-ad11-423314c99fbe",
+  "body_digest": "2f6bocsUU6-3ykEariUnT6_9uyCQlkizFmJw4A3XPWo",
+  "signature": "4IT1md47swScDAudlfEyLWbYK31az6aSw7Ui5lrwTvEgpBUuXEDyn6NiplDXAuVXTxgW64-6X6ulY_L04jeNCw"
+}

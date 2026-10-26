@@ -166,6 +166,13 @@ For each change, define a verification plan that matches that strategy. Generate
 - Make a release only when the user explicitly asks for one. `VERSION` is the
   canonical public version and must use `MAJOR.MINOR.PATCH` without a leading
   `v`.
+- The next minor release is developed on `release/0.10`, cut from `main`. Every
+  pull request targets that branch, including the bottom of a stack, and `main`
+  stays at the last release until the branch is merged into it for the release.
+  Testing candidates (`v0.10.0-beta.N`, `v0.10.0-rc.N`) are signed tags on that
+  branch. CI runs only for release-candidate tags (`vX.Y.Z-rc.N`) and when
+  started by hand: pull requests and branch pushes start none, so run the
+  relevant tests locally before pushing.
 - Interpret release requests as semantic-version increments from the current
   `VERSION`: patch increments `X.Y.N` to `X.Y.(N+1)`; minor increments
   `X.N.Y` to `X.(N+1).0`; major increments `N.X.Y` to `(N+1).0.0`. Do not infer

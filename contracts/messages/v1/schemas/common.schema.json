@@ -24,6 +24,12 @@
       "description": "An agent's stable id. It stays the same when the agent restarts or moves to another host.",
       "$ref": "#/$defs/token_id"
     },
+    "durable_owner_id": {
+      "description": "The stored owner of an Objective or its work records, including manager_scope:<team>:<role>. This is data, never a routing or certificate agent id.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384
+    },
     "agent_type": {
       "$ref": "#/$defs/token_id"
     },
@@ -42,15 +48,16 @@
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "idempotency_key": {
-      "description": "The sender's key for one logical send. The same key always means the same message.",
+      "description": "The sender's key for one logical send: the kind, a colon, and the unpadded base64url SHA-256 of the RFC 8785 array of the values the registry names (README, \"Idempotency keys\"). The same key always means the same message.",
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$"
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+:[A-Za-z0-9_-]{43}$"
     },
     "kind": {
-      "description": "A message kind or operation name: lower-case words joined by dots.",
+      "description": "A message kind or operation name: lower-case words joined by dots. At most 84 characters, so an idempotency key (the kind, a colon and 43 digest characters) stays within 128.",
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
-      "maxLength": 96
+      "maxLength": 84
     },
     "timestamp": {
       "description": "A UTC time from 1970 to 9999 with exactly three fractional digits. Receivers also refuse dates that do not exist, such as 30 February.",
@@ -92,9 +99,9 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
     },
     "delivery_ref": {
-      "description": "An opaque reference to where a person is reached. Only the gateway can resolve it.",
+      "description": "An opaque reference to where a person is reached, which only the gateway can resolve: dr_ and at least 16 random characters, so a phone number, chat id or handle can never pass as one.",
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+      "pattern": "^dr_[A-Za-z0-9_-]{16,124}$"
     },
     "blob_ref": {
       "description": "A file or long text in the object store, named by its digest.",
@@ -131,7 +138,7 @@
           "$ref": "#/$defs/installation_id"
         },
         "team": {
-          "$ref": "#/$defs/team_id"
+          "$ref": "#/$defs/scope_id"
         },
         "runtime": {
           "$ref": "#/$defs/runtime_id"
@@ -170,7 +177,7 @@
           "$ref": "#/$defs/installation_id"
         },
         "team": {
-          "$ref": "#/$defs/team_id"
+          "$ref": "#/$defs/scope_id"
         },
         "target": {
           "type": "string",
@@ -199,7 +206,7 @@
       "additionalProperties": false
     },
     "authority_token": {
-      "description": "Proof that work acts for a person, issued by a gateway or scheduler host and bound to one root task or one command. It names the team the person asked (its audience), and only that team presents it, copied unchanged down a delegation tree. The signature covers the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/authority-token/v1 and a newline.",
+      "description": "Proof that work acts for a person, issued by a gateway or scheduler host and bound to one root task, one command or one access request. It names the team the person asked (its audience), and only that team presents it, copied unchanged down a delegation tree. System work, which a schedule runs for no person, carries a scheduler's token that names its schedule and no person. The token names no roles: receivers read the person's current roles and standing from the team's people records. The signature covers the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/authority-token/v1 and a newline.",
       "type": "object",
       "properties": {
         "token_id": {
@@ -248,6 +255,7 @@
           "description": "The team the person asked; only that team presents the token. Its installation is the issuer's."
         },
         "person": {
+          "description": "The person the work is for. Absent only in system work: a scheduler's token that names its schedule_id (README, \"On behalf of a person\").",
           "$ref": "#/$defs/person_ref"
         },
         "bound_to": {
@@ -257,7 +265,8 @@
               "type": "string",
               "enum": [
                 "root_task",
-                "command"
+                "command",
+                "access_request"
               ]
             },
             "id": {
@@ -269,6 +278,10 @@
             "id"
           ],
           "additionalProperties": false
+        },
+        "schedule_id": {
+          "description": "The schedule a scheduled job's run belongs to. Only a scheduler certificate signs it, and a run's schedule comes only from here (README, \"On behalf of a person\").",
+          "$ref": "#/$defs/record_id"
         },
         "issued_at": {
           "$ref": "#/$defs/timestamp"
@@ -287,7 +300,6 @@
         "token_id",
         "issuer",
         "audience",
-        "person",
         "bound_to",
         "issued_at",
         "expires_at",
@@ -424,6 +436,1153 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 9007199254740991
+    },
+    "short_text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "note_text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "long_text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32768
+    },
+    "time_zone": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_+-]{0,31}(/[A-Za-z0-9_+-]{1,31}){0,2}$"
+    },
+    "tool_id": {
+      "type": "string",
+      "pattern": "^(fn|cli|http|mcp|procedure|code):[a-z0-9][a-z0-9_.-]{0,95}$"
+    },
+    "credential_key": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}$"
+    },
+    "change_record_kind": {
+      "type": "string",
+      "enum": [
+        "memory_fact",
+        "knowledge_page",
+        "schedule",
+        "objective",
+        "heartbeat_item",
+        "file",
+        "staged_change"
+      ]
+    },
+    "custody_token": {
+      "description": "The custody record's revision. A holder learns it from its claim's confirmation.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "attachment": {
+      "type": "object",
+      "description": "A file sent with a message, held in the object store.",
+      "properties": {
+        "attachment_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "blob": {
+          "$ref": "#/$defs/blob_ref"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "image",
+            "document",
+            "audio",
+            "video",
+            "other"
+          ]
+        },
+        "caption": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      },
+      "required": [
+        "attachment_id",
+        "blob",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "replied_message": {
+      "type": "object",
+      "description": "The message the person replied to.",
+      "properties": {
+        "author": {
+          "type": "string",
+          "enum": [
+            "assistant",
+            "requester",
+            "other"
+          ]
+        },
+        "author_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16000
+        },
+        "shortened": {
+          "type": "boolean"
+        },
+        "quoted_text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16000
+        },
+        "sent_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "author",
+        "text",
+        "shortened"
+      ],
+      "additionalProperties": false
+    },
+    "failure": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "category": {
+              "const": "provider_limited"
+            },
+            "provider": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "model_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            "status_code": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 599
+            },
+            "attempts": {
+              "$ref": "#/$defs/count"
+            },
+            "message": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "category",
+            "provider",
+            "model_id",
+            "attempts"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "category": {
+              "const": "worker_lost"
+            },
+            "attempts": {
+              "$ref": "#/$defs/count"
+            },
+            "message": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "category",
+            "attempts"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "category": {
+              "const": "admission_refused"
+            },
+            "message": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "category"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "category": {
+              "const": "budget_exhausted"
+            },
+            "message": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "category"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "category": {
+              "const": "deadline_reached"
+            },
+            "message": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "category"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "category": {
+              "const": "not_allowed"
+            },
+            "message": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "category"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "category": {
+              "const": "error"
+            },
+            "message": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "category"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "category": {
+              "const": "outcome_unknown"
+            },
+            "attempts": {
+              "$ref": "#/$defs/count"
+            },
+            "message": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "category",
+            "attempts"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "question_choice": {
+      "type": "object",
+      "properties": {
+        "choice_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]{1,64}$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "recommended": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "choice_id",
+        "label",
+        "recommended"
+      ],
+      "additionalProperties": false
+    },
+    "assumption": {
+      "type": "object",
+      "description": "Something the work relied on that later steering may change.",
+      "properties": {
+        "assumption_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "affects": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "maxItems": 20
+        }
+      },
+      "required": [
+        "assumption_id",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "held_action": {
+      "type": "object",
+      "description": "An outward action and how far it got.",
+      "properties": {
+        "action_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "action_type": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,119}$"
+        },
+        "summary": {
+          "$ref": "#/$defs/short_text"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "held",
+            "outcome_unknown",
+            "sent",
+            "completed"
+          ]
+        }
+      },
+      "required": [
+        "action_id",
+        "action_type",
+        "summary",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    "decision_ahead": {
+      "type": "object",
+      "description": "A decision the lead made in advance for one task or schedule.",
+      "properties": {
+        "decision_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "forward_result_to_person",
+            "forward_progress_to_person",
+            "forward_steering_to_holders"
+          ]
+        }
+      },
+      "required": [
+        "decision_id",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "decision_token": {
+      "type": "object",
+      "description": "A person's decision on a change conflict, recorded by the team services and bound to a digest of the values the person was shown. A team-services certificate signs the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/decision-token/v1 and a newline (README, \"What bodies carry\").",
+      "properties": {
+        "token_id": {
+          "$ref": "#/$defs/message_id"
+        },
+        "case_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "choice": {
+          "type": "string",
+          "enum": [
+            "keep_current",
+            "use_this_change",
+            "redo_with_note",
+            "stop_request"
+          ]
+        },
+        "values_digest": {
+          "$ref": "#/$defs/sha256_digest"
+        },
+        "issuer": {
+          "type": "object",
+          "properties": {
+            "installation": {
+              "$ref": "#/$defs/installation_id"
+            },
+            "team": {
+              "$ref": "#/$defs/team_id"
+            },
+            "runtime": {
+              "$ref": "#/$defs/runtime_id"
+            },
+            "membership_epoch": {
+              "$ref": "#/$defs/epoch"
+            },
+            "key_id": {
+              "$ref": "#/$defs/key_id"
+            }
+          },
+          "required": [
+            "installation",
+            "team",
+            "runtime",
+            "membership_epoch",
+            "key_id"
+          ],
+          "additionalProperties": false
+        },
+        "issued_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "algorithm": {
+          "const": "ed25519"
+        },
+        "signature": {
+          "$ref": "#/$defs/ed25519_signature"
+        }
+      },
+      "required": [
+        "token_id",
+        "case_id",
+        "choice",
+        "values_digest",
+        "issuer",
+        "issued_at",
+        "expires_at",
+        "algorithm",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "access_target": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "tool",
+            "tool_set",
+            "folder"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "credential_field_kind": {
+      "description": "What a credential field holds. The broker treats password, token, api_key, secret, totp and credential_file as secret whatever the field's visibility.",
+      "type": "string",
+      "enum": [
+        "username",
+        "email",
+        "login",
+        "account_id",
+        "service_label",
+        "custom",
+        "password",
+        "token",
+        "api_key",
+        "secret",
+        "totp",
+        "credential_file"
+      ]
+    },
+    "credential_visible_kind": {
+      "description": "The field kinds whose value may be shown to agents: never a secret.",
+      "type": "string",
+      "enum": [
+        "username",
+        "email",
+        "login",
+        "account_id",
+        "service_label",
+        "custom"
+      ]
+    },
+    "broker_session_id": {
+      "description": "The secure broker's form session: its unpadded base64url random id.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{16,128}$"
+    },
+    "answer": {
+      "description": "A task's answer: text, or a text file in the object store when it is longer than long_text allows. A result passed on as it is carries the subtask's answer itself, copied by code, and names the subtask.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "form": {
+              "const": "text"
+            },
+            "text": {
+              "$ref": "#/$defs/long_text"
+            },
+            "forwarded_from_task_id": {
+              "$ref": "#/$defs/record_id"
+            },
+            "note": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "form",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "form": {
+              "const": "file"
+            },
+            "text_file": {
+              "$ref": "#/$defs/blob_ref"
+            },
+            "forwarded_from_task_id": {
+              "$ref": "#/$defs/record_id"
+            },
+            "note": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "form",
+            "text_file"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "access_ask": {
+      "description": "What an access request asks for: access to one target, or approval of a staged change.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "access"
+            },
+            "target": {
+              "$ref": "#/$defs/access_target"
+            },
+            "level": {
+              "type": "string",
+              "enum": [
+                "read",
+                "write",
+                "full"
+              ]
+            },
+            "lifetime": {
+              "type": "string",
+              "enum": [
+                "one_time",
+                "task",
+                "until",
+                "until_revoked"
+              ]
+            },
+            "hours": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2160
+            },
+            "hand_on": {
+              "type": "boolean"
+            },
+            "action_digest": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,128}$"
+            }
+          },
+          "required": [
+            "type",
+            "target",
+            "level",
+            "lifetime",
+            "hand_on"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "change"
+            },
+            "change_kind": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "change_id": {
+              "$ref": "#/$defs/record_id"
+            },
+            "plan_digest": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,128}$"
+            }
+          },
+          "required": [
+            "type",
+            "change_kind",
+            "change_id",
+            "plan_digest"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "recipient": {
+      "description": "Whom a notice or review is for: the person behind a delivery reference, or the team's administrators.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "person"
+            },
+            "delivery_ref": {
+              "$ref": "#/$defs/delivery_ref"
+            }
+          },
+          "required": [
+            "type",
+            "delivery_ref"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "administrators"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "reply_target": {
+      "description": "Where a task's results, questions, progress, claims and reports go: its requester. A delegation names the delegating agent; a task the gateway starts for a person, or a run of a person's own schedule, names the gateway route that reaches the person (README, \"Replies\").",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "const": "agent"
+            },
+            "id": {
+              "$ref": "#/$defs/agent_id"
+            }
+          },
+          "required": [
+            "target",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "const": "edge"
+            },
+            "id": {
+              "$ref": "#/$defs/token_id"
+            }
+          },
+          "required": [
+            "target",
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "work_context": {
+      "type": "object",
+      "description": "Where a task sits in its request and how it should run.",
+      "properties": {
+        "origin": {
+          "type": "string",
+          "enum": [
+            "person_request",
+            "delegation",
+            "schedule_run",
+            "system_work",
+            "other_team",
+            "outside_agent"
+          ]
+        },
+        "reply_to": {
+          "$ref": "#/$defs/reply_target"
+        },
+        "root_task_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "parent_task_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "conversation_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "follows_task_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "objective_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "time_zone": {
+          "$ref": "#/$defs/time_zone"
+        },
+        "delivery_ref": {
+          "$ref": "#/$defs/delivery_ref"
+        },
+        "delivery_mode": {
+          "description": "How the gateway delivers to the person: an interactive reply, a scheduled (cron) or deferred message, a heartbeat, or one of the system schedules' modes.",
+          "type": "string",
+          "enum": [
+            "interactive",
+            "cron",
+            "deferred",
+            "heartbeat",
+            "memory_review",
+            "internal_improvement",
+            "knowledge_curation"
+          ]
+        },
+        "started_on_purpose": {
+          "type": "boolean"
+        },
+        "topology": {
+          "type": "string",
+          "enum": [
+            "hub_and_spoke",
+            "same_type_peers",
+            "all_peers",
+            "nested"
+          ]
+        },
+        "intent": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "$ref": "#/$defs/count"
+            },
+            "text": {
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "version",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        "root_request": {
+          "$ref": "#/$defs/blob_ref"
+        },
+        "deadline": {
+          "type": "object",
+          "properties": {
+            "at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "rule": {
+              "type": "string",
+              "enum": [
+                "partial_result",
+                "stop",
+                "continue"
+              ]
+            }
+          },
+          "required": [
+            "at",
+            "rule"
+          ],
+          "additionalProperties": false
+        },
+        "expected_offline_until": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "decisions_ahead": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/decision_ahead"
+          },
+          "maxItems": 8
+        }
+      },
+      "required": [
+        "origin",
+        "reply_to",
+        "root_task_id",
+        "topology"
+      ],
+      "additionalProperties": false
+    },
+    "ledger_snapshot": {
+      "type": "object",
+      "description": "A task's open work, carried by a handback so its new holder keeps the same labels.",
+      "properties": {
+        "plan": {
+          "$ref": "#/$defs/blob_ref"
+        },
+        "checkpoint": {
+          "$ref": "#/$defs/blob_ref"
+        },
+        "history_summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "delegations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "task_id": {
+                "$ref": "#/$defs/record_id"
+              },
+              "number": {
+                "$ref": "#/$defs/count"
+              },
+              "holder": {
+                "$ref": "#/$defs/agent_id"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "open",
+                  "standin",
+                  "resolved",
+                  "late_work"
+                ]
+              }
+            },
+            "required": [
+              "task_id",
+              "number",
+              "state"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 200
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "question_id": {
+                "$ref": "#/$defs/record_id"
+              },
+              "number": {
+                "$ref": "#/$defs/count"
+              },
+              "purpose": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{0,63}$"
+              }
+            },
+            "required": [
+              "question_id",
+              "number",
+              "purpose"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 50
+        },
+        "assumptions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/assumption"
+          },
+          "maxItems": 50
+        },
+        "held_actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/held_action"
+          },
+          "maxItems": 50
+        },
+        "counters": {
+          "type": "object",
+          "properties": {
+            "subtask": {
+              "$ref": "#/$defs/count"
+            },
+            "question": {
+              "$ref": "#/$defs/count"
+            },
+            "attachment": {
+              "$ref": "#/$defs/count"
+            },
+            "report": {
+              "$ref": "#/$defs/count"
+            }
+          },
+          "required": [
+            "subtask",
+            "question",
+            "attachment",
+            "report"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "delegations",
+        "questions",
+        "assumptions",
+        "held_actions",
+        "counters"
+      ],
+      "additionalProperties": false
+    },
+    "record_version": {
+      "description": "The version of a stored record that a writer saw, as the store reports it.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
+    "progress_state": {
+      "type": "string",
+      "enum": [
+        "abandoned",
+        "accepted",
+        "cancelled",
+        "completed",
+        "finalizing_plan",
+        "failed",
+        "in_progress",
+        "not_started",
+        "partial",
+        "paused",
+        "preparing",
+        "retrying",
+        "undefined",
+        "waiting"
+      ]
+    },
+    "text_content": {
+      "description": "UTF-8 plain text, inline or held in the object store. Use a blob when the whole serialized frame would exceed its size limit.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "inline"
+            },
+            "text": {
+              "$ref": "#/$defs/long_text"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "blob"
+            },
+            "ref": {
+              "$ref": "#/$defs/blob_ref"
+            }
+          },
+          "required": [
+            "type",
+            "ref"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "knowledge_editor": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "agent"
+            },
+            "agent_type": {
+              "$ref": "#/$defs/agent_type"
+            }
+          },
+          "required": [
+            "kind",
+            "agent_type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "person"
+            },
+            "person": {
+              "$ref": "#/$defs/person_ref"
+            }
+          },
+          "required": [
+            "kind",
+            "person"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "system"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "knowledge_note": {
+      "description": "An open note whose id can be passed to knowledge.resolve_note.",
+      "type": "object",
+      "properties": {
+        "note_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "content": {
+          "$ref": "#/$defs/text_content"
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "created_by": {
+          "$ref": "#/$defs/knowledge_editor"
+        }
+      },
+      "required": [
+        "note_id",
+        "content",
+        "created_at",
+        "created_by"
+      ],
+      "additionalProperties": false
+    },
+    "scope_id": {
+      "description": "A team, or _install for installation-wide traffic.",
+      "type": "string",
+      "pattern": "^(_install|[A-Za-z0-9][A-Za-z0-9_-]{0,63})$"
+    },
+    "placement_label": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+    },
+    "certificate_ref": {
+      "type": "object",
+      "properties": {
+        "certificate_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "membership_epoch": {
+          "$ref": "#/$defs/epoch"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256_digest",
+          "description": "SHA-256 of the certificate record's signing bytes (its domain prefix and canonical JSON without the signature), as TrustStore.add records it."
+        }
+      },
+      "required": [
+        "certificate_id",
+        "membership_epoch",
+        "sha256"
+      ],
+      "additionalProperties": false,
+      "description": "A host certificate record: its id, membership epoch and digest."
+    },
+    "connection_credential": {
+      "type": "object",
+      "description": "The credential a host connects to NATS with. Never logged.",
+      "properties": {
+        "type": {
+          "const": "nats_user_jwt"
+        },
+        "jwt": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
+          "maxLength": 16384
+        },
+        "expires_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "type",
+        "jwt",
+        "expires_at"
+      ],
+      "additionalProperties": false
     }
   }
 }

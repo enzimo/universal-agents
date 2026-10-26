@@ -1,0 +1,99 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.handback",
+  "message_id": "01928f3a-7b2c-7110-8000-000000000110",
+  "idempotency_key": "task.handback:jviywYtFDFKoVpJV5ZMskS9TKgqa0mXHpNiU70TzwgA",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "handback_id": "handback_0123abcd",
+    "task_id": "task_sub_1",
+    "custody_token": 3,
+    "disposition": "interrupted",
+    "launch_id": "launch_7",
+    "interrupted_at": "2026-10-22T04:10:00.000Z",
+    "reason": "The host lost its lease.",
+    "scheduler_errors": [
+      "lease renewal timed out"
+    ],
+    "actions": [
+      {
+        "action_id": "act_1",
+        "action_type": "send_email",
+        "summary": "Send the summary to the finance list.",
+        "state": "held"
+      }
+    ],
+    "ledger": {
+      "plan": {
+        "sha256": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+        "size": 7168,
+        "media_type": "application/json"
+      },
+      "checkpoint": {
+        "sha256": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg",
+        "size": 8192,
+        "media_type": "application/json"
+      },
+      "history_summary": "Grouped two of five categories.",
+      "delegations": [
+        {
+          "task_id": "task_sub_1_sub_1",
+          "number": 1,
+          "holder": "researcher-3",
+          "state": "standin"
+        }
+      ],
+      "questions": [
+        {
+          "question_id": "q_1",
+          "number": 1,
+          "purpose": "input"
+        }
+      ],
+      "assumptions": [
+        {
+          "assumption_id": "asm_1",
+          "text": "The report covers the last quarter only.",
+          "affects": [
+            "S2"
+          ]
+        }
+      ],
+      "held_actions": [
+        {
+          "action_id": "act_1",
+          "action_type": "send_email",
+          "summary": "Send the summary to the finance list.",
+          "state": "held"
+        }
+      ],
+      "counters": {
+        "subtask": 1,
+        "question": 1,
+        "attachment": 0,
+        "report": 0
+      }
+    }
+  },
+  "body_digest": "VBXEzbPzB36G2aH8oNnGo-jSnigcUsCE9EiTZA8IoDU",
+  "signature": "YZcuHVjW6-pqAB9XylovlICnv2syvETeeh0kdz7bkRVUm4sL9G6W6ziAHolowgwJgLmJG8du5p6B2XVDOVGfAg"
+}

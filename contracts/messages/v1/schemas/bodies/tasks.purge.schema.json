@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/tasks.purge.schema.json",
+  "title": "tasks.purge request",
+  "description": "Remove every queued task that is not running from an agent's queue.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "agent": {
+      "$ref": "../common.schema.json#/$defs/agent_id"
+    },
+    "seen_queue_digest": {
+      "$ref": "../common.schema.json#/$defs/record_version"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    }
+  },
+  "required": [
+    "request_id",
+    "agent",
+    "seen_queue_digest"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,62 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tool.setup.request",
+  "message_id": "01928f3a-7b2c-7339-8000-000000000339",
+  "idempotency_key": "tool.setup.request:__nS-o7yq-8JgpwI7x6_WN-bznjBa69mzmJlYat1HHc",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.work.edge.web",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7014-8000-000000000014",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "CIgR0Dl79Rbb1r50gbN1izXiGxjBts0o2VtEilxLBsaV6vwYCnJEBoSiMa3CX6kCT4UoISqGn1_nk2fDusLGAQ"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "setup_request_id": "setup_2",
+    "task_id": "task_root_1",
+    "root_task_id": "task_root_7f",
+    "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
+    "tool_id": "mcp:example.calendar",
+    "reason": "Read your calendar to plan the meeting.",
+    "setup": {
+      "type": "sign_in",
+      "owner": "person"
+    }
+  },
+  "body_digest": "a0BiiQwyoSQNFP308WYPvEmsMLErsAfa9Ja1abthnsY",
+  "signature": "yxP2FgTjFxbqODALmxTrjbnObgvqXEhs_JMKKWzoAA5_MbDOTCGcHkWx-bb-JNG4C-4ozKRnRJkO5kMBOkwfDg"
+}

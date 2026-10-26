@@ -1,8 +1,8 @@
 {
-  "description": "The receiver requires a newer membership epoch from this runtime.",
+  "description": "The receiver requires a newer membership epoch from this runtime. Epoch minimums apply to requests and events; queued work is judged by the certificate valid when it was issued.",
   "refusal": "epoch_too_old",
   "at": "/issuer/membership_epoch",
-  "base": "task.stop/basic.json",
+  "base": "agent.pause/basic.json",
   "context": {
     "minimum_epochs": [
       {
@@ -12,5 +12,5 @@
       }
     ]
   },
-  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.stop\", \"message_id\": \"01928f3a-7b2c-7001-8000-000000000001\", \"idempotency_key\": \"task.stop:U4tM9vOywwgHU_aC_5CvRx833uRNK7enxSgIBy3SkvA\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.lead-host-1.work.agent.researcher-2\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_7f3a\", \"stop_id\": \"stop_1\", \"reason\": \"The person cancelled the request.\", \"cascade_to_subtasks\": true}, \"body_digest\": \"NQVHb1wr_tFo5VU7huWwM0jQ7uKDjMvo8rcS0SxcgyQ\", \"signature\": \"oAUKn2502F2gqgai1666C_LN5zAL459RyBWoyAJxfqYoAtSKzCpPNs8ySGkEdsQD6gwhsz-MN2PdiFjIsff4Aw\"}"
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"agent.pause\", \"message_id\": \"01928f3a-7b2c-7002-8000-000000000002\", \"idempotency_key\": \"agent.pause:xBIQyOD4qBD2kMJOlJTv3fyaNk3-awpgIXG1lPskLkM\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.lead-host-1.ctl.agent.researcher-2.pause\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"request_id\": \"pause_1\"}, \"body_digest\": \"BlUzEHTAj5IJoKHaKhwxIwqU_bzN8ciQ1Rtebz-rmrA\", \"signature\": \"u2UTuvuW6JDWL9LMHc0KFasNtZOqni3chBmnXR6vUVuuJ2uEt-1z-3EOeRI18H15-3-N_cq36bYRmio02ZY0AQ\"}"
 }

@@ -1,0 +1,59 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.reject_contribution.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000506d",
+  "idempotency_key": "knowledge.reject_contribution.reply:4Gnfnmb5zPwXpclNaaIFpQpsFgTs8ZquTxDL6DKY5lc",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7488-8000-000000000488",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "contribution": {
+      "contribution_id": "kb_contrib_7f",
+      "kind": "edit",
+      "page": "deployment-guide",
+      "title": "Deployment guide",
+      "page_type": "how-to",
+      "summary": "Steps to review and deploy a release.",
+      "tags": [
+        "releases"
+      ],
+      "change_summary": "Add the release checklist.",
+      "base_revision": 3,
+      "state": "rejected",
+      "created_at": "2026-10-22T04:30:00.000Z",
+      "author": {
+        "kind": "agent",
+        "agent_type": "KnowledgeCuratorAgent"
+      },
+      "review_flags": [
+        {
+          "kind": "personal_memory_overlap",
+          "label": "text copied from personal pages or memory",
+          "field": "body",
+          "line": 2,
+          "column": 1
+        }
+      ]
+    }
+  },
+  "causation_id": "01928f3a-7b2c-7488-8000-000000000488",
+  "body_digest": "6Kbc0Fhyy95QTdCKBVmPVZ4ctzYAHtUr1-uvpz4oFKs",
+  "signature": "pMmN_785V7LdxuJ1dZimLV0PVaDmi5tnoNoYM7-q1CtE8DxgeBkBvugTg5uQmgDCIE0yFzNSAASWwjzkNdQOBA"
+}

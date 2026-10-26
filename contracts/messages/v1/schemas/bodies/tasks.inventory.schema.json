@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/tasks.inventory.schema.json",
+  "title": "tasks.inventory request",
+  "description": "The person's running work and schedules.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "offset": {
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    },
+    "child_offset": {
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "child_limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200
+    }
+  },
+  "required": [
+    "request_id",
+    "offset",
+    "limit",
+    "child_offset",
+    "child_limit"
+  ],
+  "additionalProperties": false
+}

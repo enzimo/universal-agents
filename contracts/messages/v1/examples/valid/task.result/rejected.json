@@ -1,0 +1,37 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.result",
+  "message_id": "01928f3a-7b2c-7331-8000-000000000331",
+  "idempotency_key": "task.result:-QUPxaWMj17kIyzL2ALYFqeac0PJ9gRzP9CDvrikrk4",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_sub_2",
+    "sequence": 2,
+    "outcome": {
+      "state": "rejected",
+      "reason": "queue_full",
+      "detail": "This worker already holds its limit of tasks."
+    }
+  },
+  "body_digest": "fEGtcvvOgdp-gdTYs6lGadmbbt5DoNG5FFzqUZK1OWE",
+  "signature": "0ncJDUz2jaySdlEmJfL_bGf8CiHYE5FoiJRdDE-J0rHZ7r0hpivNYqoWKvQDSub-_VDzmwS57WGSWI8DVyADDg"
+}

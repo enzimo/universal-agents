@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.abandon.reply",
+  "message_id": "d594d994-6f97-73e2-9735-934a8b3f2841",
+  "idempotency_key": "objectives.abandon.reply:2jCc64lcI9zW-SSl_cL9eZCMHWjCukJZ02k5qSm2ous",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.e17b0394-8089-73ed-8247-1ddf496e85ce",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "not_allowed",
+    "message": "This control cannot change the named Objective."
+  },
+  "causation_id": "e17b0394-8089-73ed-8247-1ddf496e85ce",
+  "body_digest": "caNlY3zDYltbi7Y0QxrBEqTC-GV9z7eHi-Fbe793faI",
+  "signature": "T2PK63CKFdvx-320LCvMVCYmfyQi9I02j35fLr55abSH40U1EOTf-Ugg9eW78W6nPOQfVhjrc_5j1loMoeZ-Aw"
+}

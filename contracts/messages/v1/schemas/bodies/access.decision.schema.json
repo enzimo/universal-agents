@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/access.decision.schema.json",
+  "title": "access.decision body",
+  "description": "What became of an access request, sent to the waiting task.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "status": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "handed_down"
+            },
+            "level": {
+              "type": "string",
+              "enum": [
+                "read",
+                "write",
+                "full"
+              ]
+            },
+            "lifetime": {
+              "type": "string",
+              "enum": [
+                "one_time",
+                "task",
+                "until",
+                "until_revoked"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "level",
+            "lifetime"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "waiting"
+            },
+            "decider": {
+              "type": "string",
+              "enum": [
+                "person",
+                "administrator"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "decider"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "granted"
+            },
+            "level": {
+              "type": "string",
+              "enum": [
+                "read",
+                "write",
+                "full"
+              ]
+            },
+            "lifetime": {
+              "type": "string",
+              "enum": [
+                "one_time",
+                "task",
+                "until",
+                "until_revoked"
+              ]
+            },
+            "expires_at": {
+              "$ref": "../common.schema.json#/$defs/timestamp"
+            }
+          },
+          "required": [
+            "state",
+            "level",
+            "lifetime"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "denied"
+            },
+            "note": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "withdrawn"
+            },
+            "by": {
+              "type": "string",
+              "enum": [
+                "lead",
+                "task_ended"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "by"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "already_held"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "refused"
+            },
+            "code": {
+              "type": "string",
+              "enum": [
+                "blocked",
+                "invalid_target",
+                "not_allowed"
+              ]
+            },
+            "message": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            }
+          },
+          "required": [
+            "state",
+            "code",
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "request_id",
+    "task_id",
+    "status"
+  ],
+  "additionalProperties": false
+}

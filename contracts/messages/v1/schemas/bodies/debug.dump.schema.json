@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/debug.dump.schema.json",
+  "title": "debug.dump request",
+  "description": "Turn an agent's diagnostic context dumps on or off.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "always",
+        "on_error",
+        "on_budget_warning"
+      ]
+    },
+    "agent": {
+      "$ref": "../common.schema.json#/$defs/agent_id"
+    }
+  },
+  "required": [
+    "request_id",
+    "enabled",
+    "mode"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/memory.create.schema.json",
+  "title": "memory.create request",
+  "description": "Add a memory fact.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "bank": {
+      "type": "string",
+      "enum": [
+        "coremem",
+        "usermem"
+      ]
+    },
+    "fact_text": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "maxItems": 100
+    },
+    "valid_from": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "expires": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "metadata_json": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 16384,
+      "description": "JSON text encoding a metadata object. Apply the bank's max_metadata_chars and exclude reserved import provenance from public replies."
+    }
+  },
+  "required": [
+    "request_id",
+    "bank",
+    "fact_text"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.set_worker.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a074",
+  "idempotency_key": "schedules.set_worker.reply:0OMJ88GO2I1JrJ-E3kdhLyejExElTitV6cT61Al6qUo",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7443-8000-000000000443",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "request_closed",
+    "message": "The request ended before this change was applied."
+  },
+  "causation_id": "01928f3a-7b2c-7443-8000-000000000443",
+  "body_digest": "C5dgWkwoDLX07fvM8ijGZvVcBhM5NBqtfmgi5Au0EDc",
+  "signature": "RdkbBXqmmqyuF8K05DqGP299x_vI7q_O9iSfCWskkD35J75EOCMc5PfVxAb8Y2dqMJZNH83wi64cMtEt2cJxAw"
+}

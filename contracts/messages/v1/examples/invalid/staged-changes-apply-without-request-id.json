@@ -1,0 +1,13 @@
+{
+  "description": "A staged_changes.apply request without its request id.",
+  "refusal": "invalid_body",
+  "at": "/body/request_id",
+  "base": "staged_changes.apply/full.json",
+  "changes": [
+    {
+      "remove": "/body/request_id"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"staged_changes.apply\", \"message_id\": \"01928f3a-7b2c-74cf-8000-0000000004cf\", \"idempotency_key\": \"staged_changes.apply:HY_GzrH5TGMm1tVIPSWPyy4XnphpMlskXRBcIhm_af0\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.lead-host-1.svc.team.staged_changes.apply\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7178-9000-000000000178\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"root_task\", \"id\": \"task_root_7f\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-22T04:34:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"yWQHfZBg0LrauwzUCR7v2qIPf5NC05rx-iYXGflyKGF5f8H7fCBMdCLR_rNP4fP9Ly4xNCEkNnfP0Z0NbIFcDQ\"}, \"algorithm\": \"ed25519\", \"body\": {\"change_id\": \"runtime_settings:change_7f\", \"seen_version\": \"60019de0f44235bb5b91f94a79a1ea60f2b2bded605a640fe47dec619793e7c1\", \"reason\": \"Use the reviewed settings for the team's next tasks.\", \"confirmed\": false}, \"body_digest\": \"zm3FlnNiKfaAT0uxWgwjetYYbs7lgZRuT21-PQ1j-Uk\", \"signature\": \"CiD6RmRUOGx1sfBx9EMFn3ILaeQPywch9RkhUNQs6F3MUmXfP6q60SdDZ5UtwDKPQLtiLH8i4WrK-3Ued0E5Ag\"}"
+}

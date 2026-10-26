@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.archive.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000501f",
+  "idempotency_key": "knowledge.archive.reply:izz14vkcv35ZxTH3GBtWeREPGumjr1uBNhqGgQTnrcw",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7473-8000-000000000473",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "request_closed",
+    "message": "The request ended before this change could be applied.",
+    "request_state": "completed"
+  },
+  "causation_id": "01928f3a-7b2c-7473-8000-000000000473",
+  "body_digest": "wBTXdvPChCCQwfc_13Lu_M3BDHIsPm2nplEDCi8HG18",
+  "signature": "1IlrSlGla_yjcRlGgYLo7nEkliGPIcVb6THklpy4ZO3CXNXTHTZu4h0QXFElfK5j_r4IirCEI1QHt7WW0DqZBg"
+}

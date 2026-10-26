@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/heartbeat_items.enable.schema.json",
+  "title": "heartbeat_items.enable request",
+  "description": "The lead enables a heartbeat item.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "heartbeat_item_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "seen_version": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "request_id",
+    "heartbeat_item_id",
+    "seen_version"
+  ],
+  "additionalProperties": false
+}

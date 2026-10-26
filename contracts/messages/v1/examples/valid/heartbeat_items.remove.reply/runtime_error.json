@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "heartbeat_items.remove.reply",
+  "message_id": "afa0e4d8-9cdf-7110-a2c6-5ea2f2f0a086",
+  "idempotency_key": "heartbeat_items.remove.reply:BhZgvvUyJx4zT27lSTnRP7-OBtL9MDLelMsBA1j1p2A",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.753e05ec-0c1c-7f46-9537-a43ec306cc6b",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "runtime_error",
+    "message": "The store could not complete this operation; inspect the record before retrying."
+  },
+  "causation_id": "753e05ec-0c1c-7f46-9537-a43ec306cc6b",
+  "body_digest": "xNB15v07ofu6aImWrT2qn-qq4dUhuMqGSKknzaZUc_I",
+  "signature": "RGdAO6zOr1NZ31kAspBgu4PdsRxSIBqNRTIYGFSUl0ruw1Uf-oQJF2eHSZHuYp41jW1F-W2gN3nMNIoQwmObBQ"
+}

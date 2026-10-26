@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.update_status.reply",
+  "message_id": "c0b077f9-fc13-7214-80b4-4ee6939f5ffa",
+  "idempotency_key": "objectives.update_status.reply:NNwMXkPdysEdlKkeS7VotGPoLdEqFd4GRTzK8E_4TW4",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.71f250df-fe32-7cea-b9c2-7e794ea72127",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "status_not_settable",
+    "message": "Only the person can request Objective deletion."
+  },
+  "causation_id": "71f250df-fe32-7cea-b9c2-7e794ea72127",
+  "body_digest": "Tbk2FE7tqhVVEl0XTusx1qer_PBr60THbXZnxrmdOpM",
+  "signature": "uTVVkwiFw6IcSHNMAa1GzdEsLJUbpQDta4lQZc58YTdZbZ7vhymgKHRYjq02e950wenCJ-A9gnIscyJ52K9oBA"
+}

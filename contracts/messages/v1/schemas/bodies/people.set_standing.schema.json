@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/people.set_standing.schema.json",
+  "title": "people.set_standing request",
+  "description": "Settle a person's work after their standing changed.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "person": {
+      "$ref": "../common.schema.json#/$defs/person_ref"
+    },
+    "expected_standing": {
+      "type": "string",
+      "enum": [
+        "active",
+        "disabled",
+        "removed"
+      ]
+    }
+  },
+  "required": [
+    "request_id",
+    "person",
+    "expected_standing"
+  ],
+  "additionalProperties": false
+}

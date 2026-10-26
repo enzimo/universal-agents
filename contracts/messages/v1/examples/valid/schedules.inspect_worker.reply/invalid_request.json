@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.inspect_worker.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a041",
+  "idempotency_key": "schedules.inspect_worker.reply:UTfCBtxs11yYNb1Q93W9NOMFftj2P1UzGPNLLXuL0RE",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7000-8000-00000000a024",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "invalid_request",
+    "message": "The requested combination is not valid for this schedule.",
+    "reason": "exact_target_requires_explicit_conversion"
+  },
+  "causation_id": "01928f3a-7b2c-7000-8000-00000000a024",
+  "body_digest": "Blc1mMQBY_kYJfV9ATXN5YdzXtEIlCDMQOIxbbHJwlI",
+  "signature": "jSKqzF61Nab587v9Ww_oEvsChdglqSr7WGMqOeFdc2kQRVSbiqsKpKoscIFVE2JbEglRH5f9iQ8iOjI0NSvdCw"
+}

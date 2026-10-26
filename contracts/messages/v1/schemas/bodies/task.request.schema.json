@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/task.request.schema.json",
+  "title": "task.request body",
+  "description": "Give a task to an agent or a pool.",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "work": {
+      "$ref": "../common.schema.json#/$defs/work_context"
+    },
+    "instructions": {
+      "$ref": "../common.schema.json#/$defs/long_text"
+    },
+    "replied_message": {
+      "$ref": "../common.schema.json#/$defs/replied_message"
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/attachment"
+      },
+      "maxItems": 20
+    },
+    "reassignment": {
+      "type": "object",
+      "properties": {
+        "handback_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "prior_holder": {
+          "$ref": "../common.schema.json#/$defs/agent_id"
+        },
+        "prior_disposition": {
+          "type": "string",
+          "enum": [
+            "not_started",
+            "interrupted"
+          ]
+        },
+        "interruption_count": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "interrupted_at": {
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/held_action"
+          },
+          "maxItems": 50
+        },
+        "checkpoint": {
+          "$ref": "../common.schema.json#/$defs/blob_ref"
+        },
+        "ledger": {
+          "description": "The handed-back task's open work and labels, so its new holder continues with the same labels.",
+          "$ref": "../common.schema.json#/$defs/ledger_snapshot"
+        }
+      },
+      "required": [
+        "prior_holder",
+        "prior_disposition",
+        "interruption_count",
+        "actions"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "task_id",
+    "work",
+    "instructions"
+  ],
+  "additionalProperties": false
+}

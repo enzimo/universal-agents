@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from custom_messages.wire.encoding import b64url_decode
 from custom_messages.wire.frame import Receiver, ReplayKey, ReplayLookup, VerifiedFrame, sign_frame, verify_frame
 from custom_messages.wire.models import Frame
-from custom_messages.wire.trust import AuthorityKey, TrustStore
+from custom_messages.wire.trust import AuthorityKey, TrustStore, VerifiedRecord
 from custom_messages.wire.values import parse_timestamp
 
 CONTRACT = Path(__file__).resolve().parents[1] / "contracts" / "messages" / "v1"
@@ -32,6 +32,8 @@ NOW = datetime(2026, 10, 22, 4, 30, 1, tzinfo=timezone.utc)
 RECORD_ORDER = ("agreement", "certificate", "revocations", "agent_session")
 # The receiving host when a frame's audience names none.
 RECEIVING_HOST = "receiving-host"
+# Edge routes the examples' edge adapter serves for outside agents (others are gateway routes).
+OUTSIDE_EDGES = {"a2a_partner"}
 _UNSET: Any = object()
 
 
@@ -67,10 +69,22 @@ def valid_frames() -> dict[str, dict[str, Any]]:
             for path in sorted((EXAMPLES / "valid").rglob("*.json"))}
 
 
+def agent_roles() -> dict[tuple[str, str], str]:
+    """Each example agent's place in its team, from its session record."""
+
+    roles = {}
+    for path in (TRUST / "sessions").glob("*.json"):
+        body = json.loads(path.read_text(encoding="utf-8"))["body"]
+        roles[(body["team"], body["agent"])] = body["agent_role"]
+    return roles
+
+
 def default_receiver(frame: Mapping[str, Any]) -> Receiver:
     audience = frame["audience"]
+    role = agent_roles().get((audience["team"], audience["id"])) if audience["target"] == "agent" else None
+    outside = audience["target"] == "edge" and audience["id"] in OUTSIDE_EDGES
     return Receiver(audience["installation"], audience["team"], audience["target"], audience["id"],
-                    audience.get("runtime", RECEIVING_HOST))
+                    audience.get("runtime", RECEIVING_HOST), role, outside)
 
 
 def replay_holding(digest: Optional[str] = None) -> ReplayLookup:
@@ -123,11 +137,33 @@ def verify(data: bytes, frame: Mapping[str, Any], context: Optional[Mapping[str,
     )
 
 
+def verify_state(data: bytes, context: Optional[Mapping[str, Any]] = None, *, trust: Optional[TrustStore] = None,
+                 record: Optional[str] = None) -> VerifiedRecord:
+    """Read a state report as a reader does, with the defaults a state example's context overrides.
+
+    ``record`` is the record type the reader reads; by default the one the document
+    names. The context may add or remove trust records, set minimum epochs, replace the
+    time (``now``) and name the record the reader holds for the key (``held``: sequence
+    and digest).
+    """
+
+    context = context or {}
+    if trust is None:
+        trust = trust_store(**{key: value for key, value in context.get("trust", {}).items() if key in {"add", "remove"}})
+    for minimum in context.get("minimum_epochs", []):
+        trust.require_epochs(minimum["installation"], minimum.get("runtime"),
+                             membership=minimum.get("membership", 0), revocation=minimum.get("revocation", 0))
+    held = context.get("held")
+    return trust.verify(data, record=record or json.loads(data)["record"],
+                        now=parse_timestamp(context["now"]) if "now" in context else NOW,
+                        held=(held["sequence"], held["digest"]) if held else None)
+
+
 def example_frame(kind: str, name: str = "basic") -> dict[str, Any]:
     return json.loads((EXAMPLES / "valid" / kind / f"{name}.json").read_text(encoding="utf-8"))
 
 
 __all__ = [
     "CONTRACT", "EXAMPLES", "KEYS", "NOW", "ReplayKey", "anchors", "answered_request", "default_receiver", "example_frame",
-    "private_key", "replay_holding", "resign", "trust_store", "valid_frames", "verify",
+    "private_key", "replay_holding", "resign", "trust_store", "valid_frames", "verify", "verify_state",
 ]

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/custody.moved.schema.json",
+  "title": "custody.moved body",
+  "description": "Tells a former holder that its task moved; later results are kept as late work.",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "custody_token": {
+      "$ref": "../common.schema.json#/$defs/custody_token"
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "reassigned",
+        "adopted_elsewhere",
+        "cancelled"
+      ]
+    }
+  },
+  "required": [
+    "task_id",
+    "custody_token",
+    "reason"
+  ],
+  "additionalProperties": false
+}

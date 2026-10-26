@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/task.steer.schema.json",
+  "title": "task.steer body",
+  "description": "Steering for the holder of one named task.",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "steer_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "person_steering_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "action": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "hold"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "guidance"
+            },
+            "source": {
+              "type": "string",
+              "enum": [
+                "lead",
+                "person_as_is",
+                "person_after_timeout"
+              ]
+            },
+            "text": {
+              "$ref": "../common.schema.json#/$defs/long_text"
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/attachment"
+              },
+              "maxItems": 20
+            },
+            "replied_message": {
+              "$ref": "../common.schema.json#/$defs/replied_message"
+            }
+          },
+          "required": [
+            "type",
+            "source",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "release"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "task_id",
+    "steer_id",
+    "action"
+  ],
+  "additionalProperties": false
+}

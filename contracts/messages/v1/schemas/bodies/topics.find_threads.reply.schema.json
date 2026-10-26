@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/topics.find_threads.reply.schema.json",
+  "title": "topics.find_threads reply",
+  "description": "Threads with the given tags.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "matches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "conversation_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "latest_task_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "status": {
+                "description": "Stored conversation status: active before a turn completes, otherwise its latest task's progress state.",
+                "type": "string",
+                "enum": [
+                  "active",
+                  "abandoned",
+                  "accepted",
+                  "cancelled",
+                  "completed",
+                  "finalizing_plan",
+                  "failed",
+                  "in_progress",
+                  "not_started",
+                  "partial",
+                  "paused",
+                  "preparing",
+                  "retrying",
+                  "undefined",
+                  "waiting"
+                ]
+              },
+              "subject_preview": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "updated_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              },
+              "matched_tags": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                },
+                "maxItems": 10
+              }
+            },
+            "required": [
+              "conversation_id",
+              "status",
+              "updated_at",
+              "matched_tags"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 10
+        }
+      },
+      "required": [
+        "outcome",
+        "matches"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "invalid_request"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

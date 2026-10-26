@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/question.closed.schema.json",
+  "title": "question.closed body",
+  "description": "A question ended without an answer.",
+  "type": "object",
+  "properties": {
+    "question_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "answered_elsewhere",
+        "expired",
+        "withdrawn_by_guidance",
+        "request_ended",
+        "replaced",
+        "case_closed"
+      ]
+    }
+  },
+  "required": [
+    "question_id",
+    "task_id",
+    "reason"
+  ],
+  "additionalProperties": false
+}

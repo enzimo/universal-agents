@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/memory.undo.schema.json",
+  "title": "memory.undo request",
+  "description": "Undo one memory change.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "bank": {
+      "type": "string",
+      "enum": [
+        "coremem",
+        "usermem"
+      ]
+    },
+    "event_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    }
+  },
+  "required": [
+    "request_id",
+    "bank",
+    "event_id"
+  ],
+  "additionalProperties": false
+}

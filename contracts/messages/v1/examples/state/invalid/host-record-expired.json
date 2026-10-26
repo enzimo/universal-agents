@@ -1,0 +1,11 @@
+{
+  "description": "A liveness record read four and a half hours after it expired.",
+  "refusal": "expired",
+  "at": "/expires_at",
+  "base": "host/lead-host.json",
+  "changes": [],
+  "context": {
+    "now": "2026-10-22T09:00:00.000Z"
+  },
+  "document_text": "{\"record\": \"host\", \"protocol\": \"1.0-pre\", \"key\": \"lead-host-1\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"lead-host-1\", \"membership_epoch\": 3, \"key_id\": \"test-lead-key-1\"}, \"sequence\": 91, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:31:00.000Z\", \"body\": {\"runtime\": \"lead-host-1\", \"certificate\": {\"certificate_id\": \"cert_lead_host_1\", \"membership_epoch\": 3, \"sha256\": \"2JcwUjk0A9PYV14eUAqSBmci9q5QHX0m-MDgPbnTTCk\"}, \"session_limit\": 4, \"sessions_active\": 1, \"protocol\": \"1.0-pre\", \"state\": \"accepting\", \"health\": \"healthy\", \"components\": [{\"component\": \"nats\", \"state\": \"healthy\"}, {\"component\": \"sandbox\", \"state\": \"degraded\", \"code\": \"slow_start\"}], \"placement_labels\": [\"sandbox:container\"], \"outbox_depth\": 0, \"revocation_epoch_seen\": 2, \"started_at\": \"2026-10-22T04:00:00.000Z\", \"heartbeat_at\": \"2026-10-22T04:30:00.000Z\", \"software\": {\"name\": \"universal-agents\", \"version\": \"0.9.8\"}}, \"algorithm\": \"ed25519\", \"body_digest\": \"E_QuRH_XiOFTpGhV235tmkVgcbE1QVrr3QakvqGoUyI\", \"signature\": \"075ct_oD_o6Li_Zm4apZ9EBQpNrDchlF8Nkspq8-ybUOjvlf3fZ4wZgHLNWNmL8bHTlNn0AgjmSgWW-RMgDuDQ\"}"
+}

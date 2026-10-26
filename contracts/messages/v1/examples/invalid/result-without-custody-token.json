@@ -1,0 +1,13 @@
+{
+  "description": "Every outcome but a refusal before admission carries the custody token.",
+  "refusal": "invalid_body",
+  "at": "/body/outcome/custody_token",
+  "base": "task.result/completed.json",
+  "changes": [
+    {
+      "remove": "/body/outcome/custody_token"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.result\", \"message_id\": \"01928f3a-7b2c-7103-8000-000000000103\", \"idempotency_key\": \"task.result:j4yb1tdhKoGw1tu9_jqW2lv7QE6zvgQaDpZukJPHihk\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"agent\": \"researcher-2\", \"session\": \"s-researcher-2-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"lead\"}, \"subject\": \"ua.v1.team_example.worker-host-1.work.agent.lead\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_sub_1\", \"sequence\": 4, \"intent_version\": 2, \"steering_seen\": \"steer_1\", \"assumptions\": [{\"assumption_id\": \"asm_1\", \"text\": \"The report covers the last quarter only.\", \"affects\": [\"S2\"]}], \"summary\": \"Costs grouped into five categories.\", \"outcome\": {\"state\": \"completed\", \"answer\": {\"form\": \"text\", \"text\": \"Travel 40%, software 30%, other 30%.\"}, \"artifacts\": [{\"attachment_id\": \"att_1\", \"blob\": {\"sha256\": \"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI\", \"size\": 2048, \"media_type\": \"application/pdf\", \"name\": \"costs.pdf\"}, \"kind\": \"document\", \"caption\": \"Last quarter's invoices\"}]}}, \"body_digest\": \"nePXeccGpiBrIuK-yzFz1jj9FlL70HR6il5PrxUqFfQ\", \"signature\": \"38iIxIisG7zsNs3klyT0DtVluYA-xPr1eGboxKLXzV6gxnXcJZF7VQMilaQIioR13sUdf83G5J-ISGBGCcr2Bw\"}"
+}

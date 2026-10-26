@@ -1,0 +1,50 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.work_profiles.apply.reply",
+  "message_id": "fcf01015-7afd-7f7d-8efc-a7bbe9fb5456",
+  "idempotency_key": "objectives.work_profiles.apply.reply:_LXFt_lR-b0Wo18DWL7RDXL8kvvhmQZGJYPPnqbIUwY",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.0dc268f9-72aa-7fb3-9f76-723fa4f64864",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "result": {
+      "type": "reusable",
+      "proposal": {
+        "type": "blob",
+        "ref": {
+          "sha256": "2c0FB-Tl-Uu-RyWumNNreK7J3wDtEL84rb5mvmyAy1Y",
+          "size": 4096,
+          "media_type": "application/json"
+        }
+      },
+      "installed_profile": {
+        "type": "blob",
+        "ref": {
+          "sha256": "2c0FB-Tl-Uu-RyWumNNreK7J3wDtEL84rb5mvmyAy1Y",
+          "size": 4096,
+          "media_type": "application/json"
+        }
+      }
+    }
+  },
+  "causation_id": "0dc268f9-72aa-7fb3-9f76-723fa4f64864",
+  "body_digest": "gH3lExnsttbVU5YOja4YN5JWCGqLLN4-iCWfwRVb-zc",
+  "signature": "R7s9mw7sJQkP0plNsj4YYD5ZvghwBSxyjo7Ga-70MIkbGknoxLrcu57em2VebGu6UX75qc2BQbfEEEUh8wJlBQ"
+}

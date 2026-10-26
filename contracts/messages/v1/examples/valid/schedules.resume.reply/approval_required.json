@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.resume.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a066",
+  "idempotency_key": "schedules.resume.reply:-Bg6BPbYqd8rO9LbsBkn2c1Y7jt4ghq914iG6kF8HNg",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7434-8000-000000000434",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "approval_required",
+    "message": "A person must approve this protected schedule change.",
+    "change_id": "change_review_policy"
+  },
+  "causation_id": "01928f3a-7b2c-7434-8000-000000000434",
+  "body_digest": "C5yQfZrFlq-Dg3-Rwt4kib0p4izDDObhypuMHRR3Lhc",
+  "signature": "Lq-xkXQ8NvHJFjayWJtkwBdnh7ZAMwqx0nya6N-321MWnCfVi-IrSn4_jlSPpUFCDfocvzMVKyUrYLqpImxvCg"
+}

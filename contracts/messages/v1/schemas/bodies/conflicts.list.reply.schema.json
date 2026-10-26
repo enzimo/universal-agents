@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/conflicts.list.reply.schema.json",
+  "title": "conflicts.list reply",
+  "description": "Open and recent change conflicts, for administrators.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "cases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "case_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "record_kind": {
+                "$ref": "../common.schema.json#/$defs/change_record_kind"
+              },
+              "opened_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "open",
+                  "decided",
+                  "withdrawn",
+                  "expired",
+                  "cancelled"
+                ]
+              }
+            },
+            "required": [
+              "case_id",
+              "record_kind",
+              "opened_at",
+              "state"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 50
+        },
+        "total": {
+          "$ref": "../common.schema.json#/$defs/count"
+        }
+      },
+      "required": [
+        "outcome",
+        "cases",
+        "total"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "administrator_required"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

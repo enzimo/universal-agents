@@ -1,0 +1,53 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.disable",
+  "message_id": "01928f3a-7b2c-7437-8000-000000000437",
+  "idempotency_key": "schedules.disable:coQmpKqVK27q8gO-zmo_wBsr1PzbwwuAQAJubdt2LPY",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.schedules.disable",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7000-9000-00000000c001",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "command",
+      "id": "req_schedules_disable_full"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "s0CAHaPIrf9_Hf6yXSpEOzsttsHUvNbgAQYzmLh5I0XMnccun1qqAtHaAah_iSdf4xLJTjp2767QEbtLfvSwDg"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "req_schedules_disable_full",
+    "schedule_id": "schedule_id_1",
+    "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc"
+  },
+  "body_digest": "dI-Zw2FzvCAtAES_-4uUw9K3aHVQ5TiQhC2AOB5Vs3Q",
+  "signature": "Ui_PjI_XM7OsokF-9wsE1h66HQpqHr9BQp8emR7sS0FZECoGbk9flNFXDZbI8H-mCc03SKggoAv_VdG9QJLuDQ"
+}

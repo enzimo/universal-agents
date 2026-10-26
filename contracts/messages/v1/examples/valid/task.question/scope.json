@@ -1,0 +1,48 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.question",
+  "message_id": "01928f3a-7b2c-7321-8000-000000000321",
+  "idempotency_key": "task.question:JETNwyoXgDzU6GngpY4VyMH6Mk8cY36QesdORkOvDVc",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.work.agent.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "question_id": "q_21",
+    "task_id": "task_sub_1",
+    "sequence": 3,
+    "text": "Which quarter should I cover?",
+    "can_answer": "person",
+    "relays_question_id": "q_0",
+    "deadline": "2026-10-22T06:00:00.000Z",
+    "assumption": {
+      "assumption_id": "asm_1",
+      "text": "The report covers the last quarter only.",
+      "affects": [
+        "S2"
+      ]
+    },
+    "purpose": {
+      "type": "scope",
+      "proposal": "Cover the last two quarters; one quarter hides the seasonal dip."
+    }
+  },
+  "body_digest": "4cH52blyQ0OqKZC1FuiyV1uRaSi9jQTWMkbdNuSL134",
+  "signature": "MbRYfRJYrkrCYn4KnGxGpGs4qyFEZXry6wvYxsJzAq0sUFT4pV4fayoiqVy8xRR9mEZWdOUuphgf5qOpHpi6BQ"
+}

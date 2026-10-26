@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/task.answer.schema.json",
+  "title": "task.answer body",
+  "description": "The answer to one question.",
+  "type": "object",
+  "properties": {
+    "question_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "text": {
+      "$ref": "../common.schema.json#/$defs/long_text"
+    },
+    "text_file": {
+      "description": "The answer as a text file in the object store, when it is longer than text allows.",
+      "$ref": "../common.schema.json#/$defs/blob_ref"
+    },
+    "selected_choice_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9_-]{1,64}$"
+      },
+      "maxItems": 20
+    },
+    "decision": {
+      "type": "string",
+      "enum": [
+        "resume",
+        "partial",
+        "cancel",
+        "retry",
+        "retry_in_5_minutes",
+        "retry_in_10_minutes"
+      ]
+    },
+    "replied_message": {
+      "$ref": "../common.schema.json#/$defs/replied_message"
+    },
+    "passed_on": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string",
+          "enum": [
+            "person",
+            "lead"
+          ]
+        },
+        "original_message_id": {
+          "$ref": "../common.schema.json#/$defs/message_id"
+        }
+      },
+      "required": [
+        "from",
+        "original_message_id"
+      ],
+      "additionalProperties": false
+    },
+    "decision_token": {
+      "$ref": "../common.schema.json#/$defs/decision_token"
+    }
+  },
+  "required": [
+    "question_id",
+    "task_id"
+  ],
+  "additionalProperties": false
+}

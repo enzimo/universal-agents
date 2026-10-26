@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/tool.setup.result.schema.json",
+  "title": "tool.setup.result body",
+  "description": "What became of a tool setup.",
+  "type": "object",
+  "properties": {
+    "setup_request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "declined",
+        "expired",
+        "unavailable"
+      ]
+    },
+    "tool_id": {
+      "$ref": "../common.schema.json#/$defs/tool_id"
+    },
+    "setup": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "sign_in"
+            },
+            "owner": {
+              "const": "person"
+            }
+          },
+          "required": [
+            "type",
+            "owner"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "account_link"
+            },
+            "owner": {
+              "type": "string",
+              "enum": [
+                "team",
+                "person"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "owner"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "team_sign_in_app"
+            },
+            "owner": {
+              "const": "team"
+            }
+          },
+          "required": [
+            "type",
+            "owner"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "external_step"
+            },
+            "owner": {
+              "type": "string",
+              "enum": [
+                "team",
+                "person"
+              ]
+            },
+            "step_id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,39}$"
+            }
+          },
+          "required": [
+            "type",
+            "owner",
+            "step_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "task_request",
+        "person_action"
+      ]
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3
+    },
+    "account_label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "needs_administrator": {
+      "type": "boolean"
+    },
+    "reason_code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "message": {
+      "$ref": "../common.schema.json#/$defs/note_text"
+    },
+    "link_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "broker_session_id": {
+      "$ref": "../common.schema.json#/$defs/broker_session_id"
+    }
+  },
+  "required": [
+    "setup_request_id",
+    "task_id",
+    "status",
+    "tool_id",
+    "setup",
+    "source",
+    "attempt",
+    "needs_administrator"
+  ],
+  "additionalProperties": false
+}

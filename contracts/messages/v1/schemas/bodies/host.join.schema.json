@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/host.join.schema.json",
+  "title": "host.join body",
+  "description": "A new host asks to join the installation; the frame is signed with the key it presents.",
+  "type": "object",
+  "properties": {
+    "join_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "installation": {
+      "$ref": "../common.schema.json#/$defs/token_id"
+    },
+    "runtime": {
+      "$ref": "../common.schema.json#/$defs/runtime_id"
+    },
+    "teams": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/team_id"
+      },
+      "maxItems": 64,
+      "minItems": 1
+    },
+    "roles": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/host_role"
+      },
+      "maxItems": 7,
+      "minItems": 1
+    },
+    "application_key": {
+      "$ref": "../common.schema.json#/$defs/application_key"
+    },
+    "nats_public_key": {
+      "$ref": "../common.schema.json#/$defs/nats_user_key"
+    },
+    "agent_types": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/agent_type"
+      },
+      "maxItems": 256
+    },
+    "session_limit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "protocol": {
+      "$ref": "../common.schema.json#/$defs/protocol_label"
+    },
+    "deployment": {
+      "type": "string",
+      "enum": [
+        "local",
+        "operator_managed",
+        "third_party"
+      ]
+    },
+    "profile_sha256": {
+      "$ref": "../common.schema.json#/$defs/sha256_digest"
+    },
+    "software": {
+      "$ref": "../common.schema.json#/$defs/software"
+    }
+  },
+  "required": [
+    "join_id",
+    "installation",
+    "runtime",
+    "teams",
+    "roles",
+    "application_key",
+    "nats_public_key",
+    "agent_types",
+    "session_limit",
+    "protocol",
+    "deployment",
+    "profile_sha256"
+  ],
+  "additionalProperties": false
+}

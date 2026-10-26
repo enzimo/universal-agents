@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "memory.delete.reply",
+  "message_id": "d70ab869-2b1e-7257-880a-117c4ed7225e",
+  "idempotency_key": "memory.delete.reply:I3FOvRsPxQr99yiw_kW131FcXl4aaTeK_GtuVfYn-Y0",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7455-8000-000000000455",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "runtime_error",
+    "message": "The store was unavailable before the transaction committed. Retry the command."
+  },
+  "causation_id": "01928f3a-7b2c-7455-8000-000000000455",
+  "body_digest": "B_abr6Uw9sGL3J-0WWIQlt6fus_FifvkNIus5XnqUbE",
+  "signature": "iTLrrKlfgi-8XXwubRlHnwS60X4R499reJ2ocGUR8BINQMfP61ECH6ryrsDxVmfEVEY1kjU2CcXs6DA31KX-CQ"
+}

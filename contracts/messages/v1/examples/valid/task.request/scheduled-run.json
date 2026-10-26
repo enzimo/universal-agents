@@ -1,0 +1,66 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "task.request",
+  "message_id": "01928f3a-7b2c-7201-8000-000000000201",
+  "idempotency_key": "task.request:4ntXuKTja6L00RUHs-Irc-HCxd2_qf5KamfnavdlLk4",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "scheduler-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-scheduler-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "pool",
+    "id": "researcher"
+  },
+  "subject": "ua.v1.team_example.scheduler-1.work.pool.researcher",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7211-8000-000000000211",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "scheduler-1",
+      "membership_epoch": 1,
+      "key_id": "test-scheduler-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "run_sched_1_0430"
+    },
+    "schedule_id": "sched_1",
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "Fc3mfow4c6Vb79czXRhioFKXuUDYfeb3B2B9qtKpgy0BfgBnpVcPmj2GUVVVy_JhcfyS9RFCQ3v_GtuOzC3fAA"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "run_sched_1_0430",
+    "work": {
+      "origin": "schedule_run",
+      "reply_to": {
+        "target": "edge",
+        "id": "web"
+      },
+      "root_task_id": "run_sched_1_0430",
+      "conversation_id": "conv_7",
+      "time_zone": "Europe/Berlin",
+      "delivery_ref": "dr_U2NoZWR1bGVkTW9ybmluZw",
+      "delivery_mode": "cron",
+      "topology": "hub_and_spoke"
+    },
+    "instructions": "Send me this morning's three most important unread emails."
+  },
+  "body_digest": "QIUVxiqlbDrw5oFlbopvGoJUnrJCnS4-LT02MsLHMU8",
+  "signature": "DryLKUTqV1HHamaXGvVb-AR1FGjO_pFD-HAS-JWQwVts08WAzPw3-4V9WIjQTpttkIKeuYsYYLigMMLMYP4NDA"
+}

@@ -1,0 +1,63 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.merge",
+  "message_id": "01928f3a-7b2c-7494-8000-000000000494",
+  "idempotency_key": "knowledge.merge:nw739_Jsk3SpZ770B5j_wV5ExE7WeiWW9cPqQkN62eg",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.knowledge.merge",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7134-9000-000000000134",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "QKWD3Uz4XVHnh4UXXOJAxWwC6yKblAxxS7HOkWUZLsOA_l3qc-4Hmb82h3swM9WmVxFtV2jQHH3EUEd1y2hRAw"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "kb_merge_full",
+    "space": "personal",
+    "page": "release-notes",
+    "seen_version": "1",
+    "into": "deployment-guide",
+    "target_seen_version": "3",
+    "content": {
+      "type": "inline",
+      "text": "Review the release checklist, then run the deployment. See [[release-checklist]]."
+    },
+    "confirm_review": false
+  },
+  "body_digest": "oTK5LxZU1AfvndWP-t1YTQHGrqm7sOeFcjvNJy7GWIw",
+  "signature": "lEycbvjTQv_XB72aYyAIYHC5MXby1ctyDtV4i48TEs6e_VUzVQYjTYiyl93nKTeZZ3dBJoXT1411EBIZxvNXDA"
+}
