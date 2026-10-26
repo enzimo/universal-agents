@@ -33,6 +33,7 @@ from nats.js.api import AckPolicy, ConsumerConfig, RetentionPolicy, StorageType,
 
 from custom_messages.wire.kinds import KINDS
 from tests import message_contract_support as fixtures
+from tests.live_nats_support import flush_fully
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 CONTRACT = Path(__file__).resolve().parents[1] / "contracts/messages/v1"
@@ -226,19 +227,10 @@ class Client:
 
 
 async def subscribe_ready(client: Client, subject: str, cb) -> None:
-    """Subscribe and wait until the server holds the subscription.
-
-    nats-py 2.16.0 queues SUB in its outgoing buffer for a writer task, but
-    flush() writes its PING straight to the socket. One PONG therefore does not
-    prove the server has the subscription, and a request sent from another
-    connection right after can get "no responders" (about 3% of runs under
-    load). While the first flush waits, the writer task sends the queued SUB, so
-    the second PING follows it on the wire.
-    """
+    """Subscribe and wait until the server holds the subscription."""
 
     await client.nc.subscribe(subject, cb=cb)
-    await client.nc.flush()
-    await client.nc.flush()
+    await flush_fully(client.nc)
 
 
 async def connect(stack: AsyncExitStack, broker, user: str) -> Client:
