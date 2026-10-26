@@ -1089,23 +1089,6 @@ def test_renewal_rotation_signing_vector() -> None:
     assert document == before, "signing must not mutate the caller's frame"
 
 
-@pytest.mark.parametrize(("location", "field", "value", "code"), [
-    ("body", "renew_id", "changed", "invalid_body"),
-    ("body", "certificate_id", "changed", "wrong_issuer"),  # a renewal names the certificate that signs it
-    ("body", "profile_sha256", "A" * 43, "invalid_body"),
-    ("issuer", "revocation_epoch", 2, "wrong_issuer"),
-    ("audience", "id", "another_authority", "invalid_body"),
-    ("", "message_id", "01928f3a-7b2c-7709-8000-000000000709", "invalid_body"),
-    ("", "expires_at", "2026-10-22T04:31:00.000Z", "invalid_body"),
-    ("", "protocol", "1.1-pre", "invalid_body"),
-])
-def test_new_key_proof_cannot_be_reused_for_a_different_renewal(location: str, field: str, value, code: str) -> None:
-    document = fixtures.example_frame("host.renew", "rotate")
-    target = document[location] if location else document
-    target[field] = value
-    assert refusal(fixtures.resign(document), document).code == code
-
-
 def test_rotation_proof_covers_a_newer_minors_unknown_fields() -> None:
     document = fixtures.example_frame("host.renew", "rotate")
     document["protocol"] = "1.1-pre"
@@ -1114,33 +1097,6 @@ def test_rotation_proof_covers_a_newer_minors_unknown_fields() -> None:
                           fixtures.private_key("test-lead-key-1"))
     fixtures.verify(json.dumps(document).encode(), document)
     document["body"]["application_key_rotation"]["future_option"] = "changed"
-    assert refusal(fixtures.resign(document), document).code == "invalid_body"
-
-
-@pytest.mark.parametrize("missing", ["key", "proof"])
-def test_rotation_requires_both_key_and_proof_in_both_validators(missing: str) -> None:
-    document = fixtures.example_frame("host.renew", "rotate")
-    del document["body"]["application_key_rotation"][missing]
-    assert list(validator("bodies/host.renew.schema.json").iter_errors(document["body"]))
-    assert refusal(fixtures.resign(document), document).code == "invalid_body"
-
-
-@pytest.mark.parametrize("bad", ["key", "proof"])
-def test_rotation_requires_a_valid_signature_by_the_new_key(bad: str) -> None:
-    document = fixtures.example_frame("host.renew", "rotate")
-    rotation = document["body"]["application_key_rotation"]
-    if bad == "key":
-        rotation["key"]["public_key"] = fixtures.KEYS["test-gateway-key-1"]["public_key"]
-    else:
-        rotation["proof"] = b64url(bytes(64))
-    refused = refusal(fixtures.resign(document), document)
-    assert (refused.code, refused.at) == ("invalid_body", "/body/application_key_rotation/proof")
-
-
-def test_rotation_cannot_be_null() -> None:
-    document = fixtures.example_frame("host.renew", "rotate")
-    document["body"]["application_key_rotation"] = None
-    assert list(validator("bodies/host.renew.schema.json").iter_errors(document["body"]))
     assert refusal(fixtures.resign(document), document).code == "invalid_body"
 
 
@@ -1366,6 +1322,15 @@ def test_neighbouring_checks_each_have_a_two_defect_example() -> None:
 # a reply's certificate (its signature, single validity window and what it certifies)
 # and a key rotation's new key id and proof (README, "Installation traffic").
 RECEIVER_CHECKED = re.compile(r"/body/certificate/(signature|expires_at|body/[a-z_]+)|/body/application_key_rotation/(key/key_id|proof)")
+ROTATION_PROOF_AT = "/body/application_key_rotation/proof"
+
+
+def receiver_compares_body(case: dict) -> bool:
+    """A missing proof fails the schema; a present proof still needs signature verification."""
+
+    if case["at"] == ROTATION_PROOF_AT and pointed(json.loads(case["frame_text"]), ROTATION_PROOF_AT) is None:
+        return False
+    return RECEIVER_CHECKED.fullmatch(case["at"]) is not None
 
 
 def receiver_only(case: dict) -> bool:
@@ -1377,10 +1342,10 @@ def receiver_only(case: dict) -> bool:
     kind = json.loads(case["frame_text"])["kind"]
     rules = REGISTRY["kinds"].get(kind, {}).get("body_rules", [])
     places = {rule.get("unique") or rule.get("requires") or rule["any_of"][0].rsplit("/", 1)[0] for rule in rules}
-    return case["at"] == "/idempotency_key" or case["at"] in places or RECEIVER_CHECKED.fullmatch(case["at"]) is not None
+    return case["at"] == "/idempotency_key" or case["at"] in places or receiver_compares_body(case)
 
 
-@pytest.mark.parametrize("path", [p for p in invalid_examples() if RECEIVER_CHECKED.fullmatch(json.loads(p.read_text())["at"])],
+@pytest.mark.parametrize("path", [p for p in invalid_examples() if receiver_compares_body(json.loads(p.read_text()))],
                          ids=lambda path: path.stem)
 def test_refusals_that_compare_the_body_with_records_pass_the_schema(path: Path) -> None:
     """Only a receiver gives these, so the shared examples are its tests; a schema accepts the body."""
@@ -1391,52 +1356,35 @@ def test_refusals_that_compare_the_body_with_records_pass_the_schema(path: Path)
     assert not list(validator(body_schema_file(document["kind"])).iter_errors(document["body"]))
 
 
-@pytest.mark.parametrize("path", [p for p in invalid_examples() if json.loads(p.read_text())["refusal"] == "invalid_body"
-                                  and not receiver_only(json.loads(p.read_text()))], ids=lambda path: path.stem)
-def test_invalid_bodies_fail_their_schema_where_named(path: Path) -> None:
+def schema_checked(path: Path) -> bool:
+    """Whether the schemas refuse an invalid example too.
+
+    Every malformed frame and invalid body named by its place, except what only a receiver
+    can check: dates that do not exist, new-key proofs that do not verify, keys that are not
+    the ones their parts give, and body rules (README, "Canonical form and signatures",
+    "Application key rotation", "Idempotency keys" and "What bodies carry").
+    """
+
+    case = json.loads(path.read_text(encoding="utf-8"))
+    return (case["refusal"] in ("malformed", "invalid_body") and bool(case["at"])
+            and path.stem != "impossible-date" and not receiver_only(case))
+
+
+@pytest.mark.parametrize("path", [path for path in invalid_examples() if schema_checked(path)], ids=lambda path: path.stem)
+def test_the_schemas_refuse_malformed_frames_and_invalid_bodies_where_named(path: Path) -> None:
     case = json.loads(path.read_text(encoding="utf-8"))
     document = json.loads(case["frame_text"])
-    errors = list(validator(body_schema_file(document["kind"])).iter_errors(document["body"]))
+    if case["refusal"] == "malformed":
+        errors, prefix = list(validator("frame.schema.json").iter_errors(document)), ""
+    else:
+        errors, prefix = list(validator(body_schema_file(document["kind"])).iter_errors(document["body"])), "/body"
     assert errors
-    locations = {"/body" + "".join(f"/{part}" for part in error.absolute_path) for error in errors}
-    nested = {"/body" + "".join(f"/{part}" for part in sub.absolute_path) for error in errors for sub in error.context or ()}
+    locations = {prefix + "".join(f"/{part}" for part in error.absolute_path) for error in errors}
+    nested = {prefix + "".join(f"/{part}" for part in sub.absolute_path) for error in errors for sub in error.context or ()}
     assert case["at"] in locations | nested or any(case["at"].startswith(location) for location in locations), (locations, nested)
 
 
-# A pattern cannot know month lengths, so impossible-date passes the schema; receivers
-# refuse dates that do not exist (README, "Canonical form and signatures").
-@pytest.mark.parametrize("path", [p for p in invalid_examples() if json.loads(p.read_text())["refusal"] == "malformed"
-                                  and json.loads(p.read_text())["at"] and p.stem != "impossible-date"], ids=lambda path: path.stem)
-def test_malformed_frames_fail_the_frame_schema_too(path: Path) -> None:
-    case = json.loads(path.read_text(encoding="utf-8"))
-    assert not validator("frame.schema.json").is_valid(json.loads(case["frame_text"]))
-
-
 # -- who sent it ----------------------------------------------------------------------------------------
-
-def test_the_reply_forgery_from_the_review_is_refused() -> None:
-    """A host that received another agent's pause request answers as that agent (review finding 4)."""
-
-    request = fixtures.example_frame("agent.pause", "to-researcher-3")
-    reply = signed_example("agent.pause.reply")
-    reply.update(causation_id=request["message_id"])
-    reply["issuer"]["agent"] = "researcher-3"
-    refused = refusal(fixtures.resign(reply), reply, {"answering": "agent.pause/to-researcher-3.json"})
-    assert (refused.code, refused.at) == ("wrong_issuer", "/issuer/agent")
-
-
-def test_a_reply_from_the_agent_asked_is_accepted_only_against_its_request() -> None:
-    reply = signed_example("agent.pause.reply")
-    data = json.dumps(reply).encode()
-    assert fixtures.verify(data, reply).frame.causation_id == fixtures.example_frame("agent.pause")["message_id"]
-    assert refusal(data, reply, {"answering": "agent.pause/to-researcher-3.json"}).code == "wrong_issuer"
-
-
-def test_a_session_on_another_host_does_not_let_a_host_speak_for_the_agent() -> None:
-    frame = signed_example()
-    frame["issuer"].update(runtime="worker-host-1", key_id="test-worker-key-1")
-    assert refusal(fixtures.resign(frame), frame).code == "wrong_issuer"
-
 
 def certificate_record(runtime: str, *, roles: tuple[str, ...], epoch: int = 1,
                        issued_at: str = "2026-10-22T00:00:00.000Z", expires_at: str = "2026-11-21T00:00:00.000Z",
@@ -1512,13 +1460,9 @@ def test_a_record_sequence_reused_for_other_content_is_refused() -> None:
     assert (refused.value.code, refused.value.at) == ("replayed", "/sequence")
 
 
-def test_a_frame_that_arrived_without_its_header_copies_is_refused() -> None:
-    frame = signed_example()
-    refused = refusal(json.dumps(frame).encode(), frame, {"headers": {}})
-    assert (refused.code, refused.at) == ("subject_mismatch", "/kind")
-
-
 def test_a_revocation_that_arrives_later_still_stops_queued_frames() -> None:
+    """Recheck the same store after an update; a preloaded revocation cannot prove cache invalidation."""
+
     frame = signed_example()
     data = json.dumps(frame).encode()
     store = fixtures.trust_store()

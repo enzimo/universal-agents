@@ -501,8 +501,9 @@ Each file in `examples/invalid/` describes one refusal:
 - `signing`: `after` (the default) signs again after the changes, `before` keeps the
   base's signature, `stale_digest` signs again but keeps the base's body digest;
   `signed_by` signs with another key; `token_signing: before` keeps the authority token's
-  signature; `record_signing: before` keeps the signature of a state record the body
-  carries (a reply's certificate); `after_signing` respells a value with the same bytes;
+  signature; `proof_signing: before` keeps a renewal's new-key proof;
+  `record_signing: before` keeps the signature of a state record the body carries
+  (a reply's certificate); `after_signing` respells a value with the same bytes;
 - `text_changes` and `pad_to_bytes`: edits to the serialized text;
 - `context`: `receiver` fields, `now`, `arrived_on`, `headers`, `replay` (`digest` held
   for the frame's key), `trust` (`add` and `remove`, relative to `examples/trust/`),
@@ -521,6 +522,12 @@ fails one. Every kind has a valid and an invalid example, and every alternative 
 (each constant that tells a `oneOf` apart) appears in a valid example; the tests check both.
 
 ## Verification
+
+Refusal examples check one frame against a starting context. Tests of trust updates
+also keep the same store between checks: the late-revocation test first verifies a
+frame, adds a revocation, then verifies that the frame is refused. Starting with an
+already-revoked certificate cannot check that sequence. Missing header copies and
+mismatched header copies have separate refusal examples.
 
 Run `tests/test_message_contract.py` for contract agreement, the examples and hostile
 input refusals. `tests/test_live_message_contract.py` starts a separate authenticated
