@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "objectives.create",
-  "message_id": "01928f3a-7b2c-7425-8000-000000000425",
-  "idempotency_key": "objectives.create:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "message_id": "8113ee7e-851e-7903-a541-e24e5acfb957",
+  "idempotency_key": "objectives.create:-T7Kyfk-Q_0LoLsjlwGI3Tw5i8Gwd-k-bAvM46MO-ZM",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -46,15 +46,49 @@
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
-    "title": "Example title",
-    "desired_outcome": "Example desired outcome",
-    "horizon": "finite",
-    "priority": "low",
+    "request_id": "request_objectives_create",
+    "title": "Track recurring dependency checks",
+    "desired_outcome": {
+      "type": "inline",
+      "text": "Keep the dependency report current and notify the person about actionable changes."
+    },
+    "horizon": "recurring",
+    "priority": "normal",
     "success_criteria": [
-      "Example success criteria"
+      {
+        "type": "inline",
+        "text": "The remaining advisory needs a verified affected-version range."
+      }
+    ],
+    "why": {
+      "type": "inline",
+      "text": "The person needs to notice changes before the next release."
+    },
+    "current_focus": {
+      "type": "inline",
+      "text": "Verify the two advisories added since the previous checkpoint."
+    },
+    "progress_summary": {
+      "type": "inline",
+      "text": "The initial report is saved; the next run will compare new advisories."
+    },
+    "completion_policy": "recurring_indefinite",
+    "requires_user_confirmation": false,
+    "creation_mode": "promote_task",
+    "task_id": "task_root_7f",
+    "constraints": [
+      {
+        "type": "inline",
+        "text": "The remaining advisory needs a verified affected-version range."
+      }
+    ],
+    "non_goals": [
+      {
+        "type": "inline",
+        "text": "The remaining advisory needs a verified affected-version range."
+      }
     ]
   },
-  "body_digest": "WlvtuabJv02VF8A9zTasH0lwCbj5TZKkW_Y3nQ7p8cw",
-  "signature": "qtrrCNDsTQr1atF5RRgYft6HKSNukRsJrEODBvrEGrEDUixMOp8pvixdhiOtVDleYj7mO2OGB-e27tnarUr0Aw"
+  "body_digest": "FOecuNRuHBpvMmivnTOgXLiJ_1zyEtd_Tf8Ou5qeAs8",
+  "signature": "JbL0Tgt0iIgGMGBlQO6IfboVLWZ71be7FvT1gkv1nVwfgSc7pc1igSVQf2qrpcZnEjJRQ9TY_lYXrYii8m9SDQ"
 }

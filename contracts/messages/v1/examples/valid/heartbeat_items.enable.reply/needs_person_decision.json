@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "heartbeat_items.enable.reply",
+  "message_id": "e13bdc2b-7ffc-7a93-b929-0243c58ce8f8",
+  "idempotency_key": "heartbeat_items.enable.reply:vNIYXaqrgUvQPQJnEeFCrn2e-RJILaPF6qujWgMHxz4",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.296b41ec-b0b9-7b29-a65b-e2e831b476f6",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "needs_person_decision",
+    "case_id": "conflict_dependency_watch",
+    "message": "The person must decide the recorded conflict before this change can continue."
+  },
+  "causation_id": "296b41ec-b0b9-7b29-a65b-e2e831b476f6",
+  "body_digest": "FwYj9uLBpHe7DSjogO_vzqr7WpCNuymmpUxPhx2P3aM",
+  "signature": "mY8Bpc44hahCj-eahI6PnDmCwylEwdCIM9rQ9au9ZhBSHHvQvd88-E0Yr8j0AjJ22MGwbAetzILQAAG47xFaAA"
+}

@@ -26,18 +26,18 @@
     "outcome": "ok",
     "matches": [
       {
-        "conversation_id": "conversation_id_1",
-        "latest_task_id": "latest_task_id_1",
-        "status": "abandoned",
-        "subject_preview": "Example subject preview",
+        "conversation_id": "conversation_ops_7f",
+        "latest_task_id": "task_deploy_7f",
+        "status": "active",
+        "subject_preview": "Prepare the deployment checklist",
         "updated_at": "2026-10-22T04:30:00.000Z",
         "matched_tags": [
-          "matched_tags_1"
+          "deployment"
         ]
       }
     ]
   },
   "causation_id": "01928f3a-7b2c-745e-8000-00000000045e",
-  "body_digest": "rTcbelGe7CHkUJhHGeWJu_N7QNJ_6Yck5vQVcYpvuKQ",
-  "signature": "6KpZRg2ZfyOgUPBFUghc0dHVxCTDOjV62gLs5psxMb0BGKgC1fbaBxF8UhtYf-jXmY22736_heNJCXx_1P5gDg"
+  "body_digest": "95fEl-CZNyaxC2kDx-WVfsLGXf30LX2QBvOdLFF-0LE",
+  "signature": "o4hHN4ihbFaXXVPo_GVw5LVRV6Crwh8WlzTomClEnXDrLbYoX94zFAVpMZ3UI2yEf7GpDuWkXNLnRMz5p91sDA"
 }

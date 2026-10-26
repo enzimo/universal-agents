@@ -1,0 +1,35 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.work_profiles.apply.reply",
+  "message_id": "acdd912d-e244-7a5a-ae75-8c7368d7cba9",
+  "idempotency_key": "objectives.work_profiles.apply.reply:9Bo5eezAK2thBR63Sqzu-n5SW4Lblj65F6rApyngIME",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.2f54b9fc-6c96-79bc-ac1a-16695249ebbe",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "missing_skills",
+    "message": "The required Objective work-session skills are unavailable.",
+    "missing_skills": [
+      "long-horizon-plan-execution"
+    ]
+  },
+  "causation_id": "2f54b9fc-6c96-79bc-ac1a-16695249ebbe",
+  "body_digest": "jmzvlhn4UcIq7wqjt6pFbRWs-T16SNqU4dFXuAPO8eE",
+  "signature": "AKF-asZ56yclosFoj0hawRIW2Q-QH7M_XP4n3kdQE0qPNq191UA5XrFD6lNSNOo-FQkHycP9IK7ZXC4XgO1pCg"
+}

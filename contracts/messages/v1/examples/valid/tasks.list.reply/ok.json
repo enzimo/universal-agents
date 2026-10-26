@@ -27,19 +27,24 @@
     "tasks": [
       {
         "task_id": "task_id_1",
-        "state": "abandoned",
+        "state": "in_progress",
         "problem_statement": "Example problem statement",
         "is_current": true,
-        "queue_position": 3,
-        "last_updated_at": "2026-10-22T04:30:00.000Z"
+        "queue_position": 0,
+        "last_updated_at": "2026-10-22T04:30:00.000Z",
+        "blocker": {
+          "type": "inline",
+          "text": "Waiting for the requested source."
+        },
+        "latest_activity": "Checking the source."
       }
     ],
     "total": 3,
     "queued_count": 3,
     "current_count": 3,
-    "queue_digest": "v3"
+    "queue_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   },
   "causation_id": "01928f3a-7b2c-7407-8000-000000000407",
-  "body_digest": "FXjjGzw5G6PR06cH72gpb4Qd_u9pVOMYxG9ncAbVp3g",
-  "signature": "iscwkr6fdTyqGhaM928z8QhsmEgxfuusy5HkthOFXKhaVjtcn_9SLBxtPMJiXou9szbZ-mc2ofvUrUJA19IQCg"
+  "body_digest": "T2KGNssiNj6j7CxVhC_fagd-xfY4_oYtTy3dQBs516I",
+  "signature": "1pe8W3KTqek2NijSlXR0rDkBQV1i7z4kfJa4bGpPjyorkTIpr-VsnGx58nlTJakOtLTnt_Fw3H0b2gofNKS5Dw"
 }

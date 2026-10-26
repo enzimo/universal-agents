@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "objectives.update_progress",
-  "message_id": "01928f3a-7b2c-7428-8000-000000000428",
-  "idempotency_key": "objectives.update_progress:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "message_id": "3d740b60-fe89-7263-b4b0-0be545af1070",
+  "idempotency_key": "objectives.update_progress:4XVU0vu0GzZ8DYTAGF22Q-UJjrVhYF5YcWQO1QW5ReI",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -46,11 +46,35 @@
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
-    "objective_id": "objective_id_1",
-    "seen_version": "v3",
-    "progress_summary": "Example progress summary"
+    "request_id": "request_objectives_update_progress",
+    "objective_id": "objective_dependency_watch",
+    "seen_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+    "progress_summary": {
+      "type": "inline",
+      "text": "The initial report is saved; the next run will compare new advisories."
+    },
+    "current_focus": {
+      "type": "inline",
+      "text": "Verify the two advisories added since the previous checkpoint."
+    },
+    "task_id": "task_root_7f",
+    "plan_id": "plan_dependency_watch",
+    "user_visible": true,
+    "criterion_updates": [
+      {
+        "criterion_id": "criterion_sources_verified",
+        "description": {
+          "type": "inline",
+          "text": "The report lists each affected dependency and its advisory source."
+        },
+        "status": "open",
+        "evidence_summary": {
+          "type": "inline",
+          "text": "The saved report includes a source and checked version for each dependency."
+        }
+      }
+    ]
   },
-  "body_digest": "LQJnwlPo94lKByCpkQYFxKmL28S6ZMNn4dqj5C88D7o",
-  "signature": "3B-A6eg4954k6OH4c74q0uiOO4iKt89AdCj1J9acegHNN5awPoI7r8zmFoQguD3uDRIvuYe9ifa42gM4XfNrDg"
+  "body_digest": "-TK1V7h2pW8WfuzxKMKgR1yPWcAuA7uk4uVMoJMBSw4",
+  "signature": "DaOKyrF5rvaJfR029TVwTUZLo7SGSxA-sFM7iChwPWvRcimyYzBrAH-g2oKDf8ZD0x21wXaqdHS1cVe97e7pDg"
 }

@@ -11,120 +11,10 @@
           "const": "ok"
         },
         "page": {
-          "type": "object",
-          "properties": {
-            "space": {
-              "type": "string",
-              "enum": [
-                "team",
-                "personal"
-              ]
-            },
-            "page": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 240
-            },
-            "title": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 1000
-            },
-            "summary": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 4000
-            },
-            "body": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 32768
-            },
-            "body_ref": {
-              "$ref": "../common.schema.json#/$defs/blob_ref"
-            },
-            "tags": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
-              },
-              "maxItems": 100
-            },
-            "status": {
-              "type": "string",
-              "enum": [
-                "active",
-                "archived"
-              ]
-            },
-            "seen_version": {
-              "$ref": "../common.schema.json#/$defs/record_version"
-            },
-            "updated_at": {
-              "$ref": "../common.schema.json#/$defs/timestamp"
-            },
-            "updated_by": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "properties": {
-                    "kind": {
-                      "const": "agent"
-                    },
-                    "agent_type": {
-                      "$ref": "../common.schema.json#/$defs/agent_type"
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "agent_type"
-                  ],
-                  "additionalProperties": false
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "kind": {
-                      "const": "person"
-                    },
-                    "person": {
-                      "$ref": "../common.schema.json#/$defs/person_ref"
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "person"
-                  ],
-                  "additionalProperties": false
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "kind": {
-                      "const": "system"
-                    }
-                  },
-                  "required": [
-                    "kind"
-                  ],
-                  "additionalProperties": false
-                }
-              ]
-            }
-          },
-          "required": [
-            "space",
-            "page",
-            "title",
-            "tags",
-            "status",
-            "seen_version",
-            "updated_at",
-            "updated_by"
-          ],
-          "additionalProperties": false
+          "$ref": "knowledge.read.reply.schema.json#/$defs/page"
+        },
+        "note": {
+          "$ref": "knowledge.read.reply.schema.json#/$defs/added_note"
         }
       },
       "required": [
@@ -222,39 +112,14 @@
       "type": "object",
       "properties": {
         "outcome": {
-          "const": "review_required"
-        },
-        "review_flags": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "pattern": "^[a-z][a-z0-9_]{0,63}$"
-          },
-          "maxItems": 20
-        },
-        "message": {
-          "$ref": "../common.schema.json#/$defs/short_text"
-        }
-      },
-      "required": [
-        "outcome",
-        "review_flags"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "outcome": {
           "const": "sensitive_content"
         },
         "review_flags": {
           "type": "array",
           "items": {
-            "type": "string",
-            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            "$ref": "knowledge.read.reply.schema.json#/$defs/review_flag"
           },
-          "maxItems": 20
+          "maxItems": 100
         },
         "message": {
           "$ref": "../common.schema.json#/$defs/short_text"
@@ -263,51 +128,6 @@
       "required": [
         "outcome",
         "review_flags"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "outcome": {
-          "const": "limit_reached"
-        },
-        "message": {
-          "$ref": "../common.schema.json#/$defs/short_text"
-        }
-      },
-      "required": [
-        "outcome"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "outcome": {
-          "const": "page_frozen"
-        },
-        "message": {
-          "$ref": "../common.schema.json#/$defs/short_text"
-        }
-      },
-      "required": [
-        "outcome"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "outcome": {
-          "const": "repeats_recent_revision"
-        },
-        "message": {
-          "$ref": "../common.schema.json#/$defs/short_text"
-        }
-      },
-      "required": [
-        "outcome"
       ],
       "additionalProperties": false
     },
@@ -316,21 +136,6 @@
       "properties": {
         "outcome": {
           "const": "personal_space_unavailable"
-        },
-        "message": {
-          "$ref": "../common.schema.json#/$defs/short_text"
-        }
-      },
-      "required": [
-        "outcome"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "outcome": {
-          "const": "saved_write_mismatch"
         },
         "message": {
           "$ref": "../common.schema.json#/$defs/short_text"
@@ -385,7 +190,8 @@
         }
       },
       "required": [
-        "outcome"
+        "outcome",
+        "current_version"
       ],
       "additionalProperties": false
     },

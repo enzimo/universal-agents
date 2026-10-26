@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.revert",
   "message_id": "01928f3a-7b2c-7476-8000-000000000476",
-  "idempotency_key": "knowledge.revert:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "knowledge.revert:JeeEX0TYU7v5jowg7nE_kxS9FC4PwSOMFyQVQ8jHk5c",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -35,22 +35,22 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000140"
+      "id": "kb_revert_full"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "6jZXAiKunf3DoPnZFLtru2yDSWFnVD_e2Ku27-41qq3tvITTcB2tfeAawT7pcWE-YQIFmY1hf-HRENQf21JaDQ"
+    "signature": "g1SL39SZ9JIlcmW49cnmMizF4RuKbyAGblGZsl5ja-DqQyoxdK2aZ8R3kv8d0TBM4Z4YlmGLq-JnnQapP8wTDQ"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
+    "request_id": "kb_revert_full",
     "space": "team",
-    "page": "Example page",
-    "to_revision": 3,
-    "seen_version": "v3",
-    "reason": "Restore the last reviewed instructions."
+    "page": "deployment-guide",
+    "to_revision": 1,
+    "seen_version": "3",
+    "reason": "Reverted on the Web Chat Knowledge page"
   },
-  "body_digest": "Kxzel9UrMsn5kirq4C1k48JnHyU7DS8ayJau6c3lf40",
-  "signature": "ytW1JBW1AQNbtRmrAAxeOGxe9qEJI0r4XW-vcc73spiTvfTj0JKLFgxOuvHM9cDWRjrYnOZG_jY29IzyJ81yDw"
+  "body_digest": "f2UaYxdWIzXSqkR0SRKSXh1-nSs2VLeaPMqlHHKrK4A",
+  "signature": "R7KS9SZHEuLgvq_QxF7gv16qECZ2bdQGnzI7GFUMcYROEf4-3tMtnovw-6f64_8TDlweym-jxNRTmqEXvDpwCQ"
 }

@@ -4,6 +4,13 @@
   "title": "topics.list_tags request",
   "description": "The thread tags in use.",
   "type": "object",
-  "properties": {},
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    }
+  },
+  "required": [
+    "request_id"
+  ],
   "additionalProperties": false
 }

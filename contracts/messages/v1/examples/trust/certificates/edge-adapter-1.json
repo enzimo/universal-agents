@@ -1,5 +1,6 @@
 {
   "record": "certificate",
+  "protocol": "1.0-pre",
   "key": "host.install_example.edge-adapter-1.1",
   "writer": {
     "type": "authority",
@@ -40,5 +41,5 @@
   },
   "algorithm": "ed25519",
   "body_digest": "zc0xyGa8qz4zSHfIZ2dlMmaXW-LTjdbk3MFf5STmnko",
-  "signature": "uvkHW4Titwu5K5UYem2vh3ZotFuC-_37ggQrXU48suqjN2e0fdvkbuNSt7d6yOTlIJNEEUsI1nrBbnOsTBmdBA"
+  "signature": "2daHnZLpDyCPePQ4O_xAwovOytRapvEvMeDm08aaX6JQmwi_DuF0JhLMDtWTrzJNU4Q8IQRTsEI3Y_ulhGWuAw"
 }

@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "custody.decide.reply",
+  "message_id": "35edd3d4-cf46-79ea-88aa-1e202fb5788c",
+  "idempotency_key": "custody.decide.reply:KIUhzclolRAE1RoP_ms0WZYdvyMMxWo4fpx_7PEM4ng",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-74b4-8000-0000000004b4",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "stale_custody",
+    "current_custody_token": 1,
+    "message": "The command was refused. Review the current state before continuing."
+  },
+  "causation_id": "01928f3a-7b2c-74b4-8000-0000000004b4",
+  "body_digest": "m_80VJV7lJAH8INP_2qaKu5AzE1Eo5UpYa8TUwzMRI0",
+  "signature": "uivhQMA7mj38_Wrt-XlgpHwouRVWQMWVWfs951JHsXIbQYHmxQSdeCgv_dyMgABK_W_9Co-Cp_rlPFt9C_yYBA"
+}

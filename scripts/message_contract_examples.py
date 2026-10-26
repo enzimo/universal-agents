@@ -14,7 +14,10 @@ values:
   signing bytes, and ``key-rotation.json``: a renewal's new-key proof.
 
 This module fills in public keys, idempotency keys, body digests, signatures and
-each invalid example's ``frame_text``. It signs and derives keys with RFC 8785,
+each invalid example's ``frame_text``. Tokens are signed wherever a frame carries
+them: its authority token, an authority token in its body (``body.authority``, the
+scheduler's answer to ``run_context.sign``) and a change-conflict decision token
+(``body.decision_token``). It signs and derives keys with RFC 8785,
 SHA-256 and Ed25519 directly, not with ``custom_messages.wire``, so the tests
 compare two implementations of the signing and key rules. ``scripts/export_message_contract.py`` runs it before writing its manifest;
 ``--check`` there fails when a file here is not what this module renders.
@@ -41,8 +44,10 @@ STATES = EXAMPLES / "state"
 RENEW_KIND, KEY_ROTATION = "host.renew", "application_key_rotation"
 # Fields of an invalid example; frame_text is the one this module writes.
 INVALID_FIELDS = {"description", "refusal", "also", "at", "base", "changes", "signing", "signed_by", "token_signing",
-                  "proof_signing", "after_signing", "text_changes", "pad_to_bytes", "context", "frame_text"}
-INVALID_STATE_FIELDS = {"description", "refusal", "at", "base", "changes", "signing", "context", "document_text"}
+                  "proof_signing", "record_signing", "after_signing", "text_changes", "pad_to_bytes", "context", "frame_text"}
+INVALID_STATE_FIELDS = {"description", "refusal", "also", "at", "base", "changes", "signing", "context", "document_text"}
+# A host record names its writer's certificate; the ref's digest is that record's.
+HOST_RECORD = "host"
 SIGNING_MODES = {"after", "before", "stale_digest"}
 BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
@@ -145,7 +150,7 @@ class Signer:
         if kind.endswith(".reply") and kind.removesuffix(".reply") in self.kinds:
             request = self.requests.get(frame.get("causation_id", ""))
             if request is None:
-                return frame["idempotency_key"]  # a reply without its request is refused before its key matters
+                return str(frame["idempotency_key"])  # a reply without its request is refused before its key matters
             parts = [request["idempotency_key"]]
         elif kind in self.kinds:
             entry = self.kinds[kind]
@@ -154,7 +159,7 @@ class Signer:
             if frame["audience"]["target"] in copies:
                 parts.append(frame["audience"]["target"])
         else:
-            return frame["idempotency_key"]
+            return str(frame["idempotency_key"])
         digest = hashlib.sha256(rfc8785.dumps(parts)).digest()
         return f"{kind}:{b64url(digest)}"
 
@@ -164,16 +169,24 @@ class Signer:
         return token
 
     def frame(self, frame: dict[str, Any], *, key_id: str | None = None, digest: str | None = None,
-              sign_token: bool = True, sign_proof: bool = True) -> dict[str, Any]:
-        """Sign a frame: a renewal's new-key proof and its authority token first, then the body digest, then the frame."""
+              sign_token: bool = True, sign_records: bool = True, sign_proof: bool = True) -> dict[str, Any]:
+        """Sign a frame's records, renewal proof and tokens before its body digest and signature.
+
+        ``sign_records=False`` keeps a nested record's signature, so a record changed
+        after its writer signed it can be described.
+        ``sign_proof=False`` keeps a renewal's proof when its signed fields change.
+        """
 
         frame = dict(frame)
-        frame["body"] = self.sign_nested_records(self.fill_public_keys(frame["body"]))
+        body = self.fill_public_keys(frame["body"])
+        frame["body"] = self.sign_nested_records(body) if sign_records else body
         if frame["kind"] == RENEW_KIND and KEY_ROTATION in frame["body"] and sign_proof:
             frame = self.rotation_proof(frame)
         if "authority" in frame and sign_token:
             frame["authority"] = self.token(frame["authority"])
         body = frame.get("body")
+        if isinstance(body, dict) and isinstance(body.get("authority"), dict) and sign_token:
+            body = frame["body"] = dict(body, authority=self.token(body["authority"]))
         if isinstance(body, dict) and isinstance(body.get("decision_token"), dict) and sign_token:
             decision = dict(body["decision_token"], algorithm="ed25519")
             decision["signature"] = self.sign(self.decision_domain, decision, decision["issuer"]["key_id"])
@@ -242,15 +255,24 @@ def render_keys() -> tuple[dict[str, dict[str, Any]], dict[Path, str]]:
     return document["keys"], {path: document_text(document)}
 
 
-def render_trust(signer: Signer) -> dict[Path, str]:
-    files = {}
+def render_trust(signer: Signer) -> tuple[dict[str, str], dict[Path, str]]:
+    """The trust records, and each certificate record's digest by its key (host.<installation>.<runtime>.<epoch>).
+
+    The digest is SHA-256 of the record's signing bytes, which a host record's
+    certificate ref names.
+    """
+
+    files, digests = {}, {}
     for path in sorted((EXAMPLES / "trust").rglob("*.json")):
         document = _read(path)
         if path.name == "anchors.json":
             files[path] = document_text(signer.fill_public_keys(document))
-        else:
-            files[path] = document_text(signer.state(document))
-    return files
+            continue
+        signed = signer.state(document)
+        files[path] = document_text(signed)
+        if signed["record"] == "certificate" and path.parent.name != "extra":
+            digests[signed["key"]] = b64url(hashlib.sha256(signer.signing_bytes(signer.state_domain, signed)).digest())
+    return digests, files
 
 
 def render_valid(signer: Signer) -> tuple[dict[str, dict[str, Any]], dict[Path, str]]:
@@ -285,6 +307,7 @@ def invalid_frame_text(case: dict[str, Any], frames: dict[str, dict[str, Any]], 
         frame = signer.frame(frame, key_id=case.get("signed_by"),
                              digest=frame["body_digest"] if mode == "stale_digest" else None,
                              sign_token=case.get("token_signing", "after") == "after",
+                             sign_records=case.get("record_signing", "after") == "after",
                              sign_proof=case.get("proof_signing", "after") == "after")
     for change in case.get("after_signing", []):
         parent, last = _parent(frame, change["respell"])
@@ -309,12 +332,20 @@ def render_invalid(signer: Signer, frames: dict[str, dict[str, Any]]) -> dict[Pa
     return files
 
 
-def render_states(signer: Signer) -> dict[Path, str]:
-    """Valid state reports, signed by their writers, and refusal cases built from them."""
+def render_states(signer: Signer, certificates: dict[str, str]) -> dict[Path, str]:
+    """Valid state reports, signed by their writers, and refusal cases built from them.
+
+    A valid host record's certificate ref gets the digest of its writer's certificate record.
+    """
 
     files, records = {}, {}
     for path in sorted((STATES / "valid").rglob("*.json")):
-        document = signer.state(_read(path))
+        document = _read(path)
+        if document["record"] == HOST_RECORD:
+            writer = document["writer"]
+            key = f"host.{writer['installation']}.{writer['runtime']}.{writer['membership_epoch']}"
+            document["body"]["certificate"]["sha256"] = certificates[key]
+        document = signer.state(document)
         records[path.relative_to(STATES / "valid").as_posix()] = document
         files[path] = document_text(document)
     for path in sorted((STATES / "invalid").glob("*.json")):
@@ -381,11 +412,12 @@ def render_examples(registry: dict[str, Any]) -> dict[Path, str]:
 
     keys, files = render_keys()
     signer = Signer(keys, registry)
-    files.update(render_trust(signer))
+    certificates, trust = render_trust(signer)
+    files.update(trust)
     frames, valid = render_valid(signer)
     files.update(valid)
     files.update(render_invalid(signer, frames))
-    files.update(render_states(signer))
+    files.update(render_states(signer, certificates))
     files.update(render_vectors(signer, registry))
     files.update(render_rotation_vector(signer, frames))
     return files

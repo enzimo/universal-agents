@@ -5,6 +5,9 @@
   "description": "Where the person's request in one conversation stands.",
   "type": "object",
   "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
     "conversation_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
     },
@@ -13,6 +16,7 @@
     }
   },
   "required": [
+    "request_id",
     "conversation_id"
   ],
   "additionalProperties": false

@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "knowledge.add_note.reply",
-  "message_id": "01928f3a-7b2c-7471-8000-000000000471",
-  "idempotency_key": "knowledge.add_note.reply:NsNNz90BaUVvjMp7SHF3HQHzLmCAQELMBGokIOecEjw",
+  "message_id": "01928f3a-7b2c-7000-8000-000000005008",
+  "idempotency_key": "knowledge.add_note.reply:y0b3mr-Ht6xG3OmMB15O7jMe0JvPr_oSITAfwS921uU",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -26,44 +26,117 @@
     "outcome": "ok",
     "page": {
       "space": "team",
-      "page": "Example page",
-      "title": "Example title",
-      "summary": "Example summary",
-      "body": "Example body",
-      "body_ref": {
-        "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
-        "size": 3,
-        "media_type": "application/pdf",
-        "name": "Example name"
-      },
+      "page": "deployment-guide",
+      "title": "Deployment guide",
+      "page_type": "how-to",
+      "summary": "Steps to review and deploy a release.",
       "tags": [
-        "Example tags"
+        "releases"
       ],
       "status": "active",
-      "seen_version": "v3",
+      "seen_version": "3",
       "updated_at": "2026-10-22T04:30:00.000Z",
-      "updated_by": {
-        "kind": "agent",
-        "agent_type": "token_id_1"
-      }
-    },
-    "review_flags": [
-      "review_flags_1"
-    ],
-    "note": {
-      "note_id": "note_1",
       "content": {
         "type": "inline",
-        "text": "Review the deployment checklist."
+        "text": "Review the release checklist, then run the deployment. See [[release-checklist]]."
+      },
+      "created_at": "2026-10-21T09:00:00.000Z",
+      "updated_by": {
+        "kind": "person",
+        "person": "person_7c1"
+      },
+      "shown_by": {
+        "kind": "person",
+        "person": "person_7c1"
+      },
+      "backlinks": [
+        {
+          "space": "team",
+          "page": "release-checklist",
+          "title": "Release checklist",
+          "page_type": "how-to",
+          "summary": "Steps to review and deploy a release.",
+          "tags": [
+            "releases"
+          ],
+          "status": "active",
+          "seen_version": "2",
+          "updated_at": "2026-10-22T04:30:00.000Z"
+        }
+      ],
+      "open_notes": [
+        {
+          "note_id": "kb_note_01",
+          "content": {
+            "type": "inline",
+            "text": "Check that the rollback steps match the current release."
+          },
+          "created_at": "2026-10-22T04:30:00.000Z",
+          "created_by": {
+            "kind": "person",
+            "person": "person_7c1"
+          }
+        },
+        {
+          "note_id": "kb_note_02",
+          "content": {
+            "type": "blob",
+            "ref": {
+              "sha256": "bAo6Qv70pBlfvvIPTJfUQ9kixZs5HB6XObJGtqKBgg4",
+              "size": 56,
+              "media_type": "text/plain"
+            }
+          },
+          "created_at": "2026-10-22T04:30:00.000Z",
+          "created_by": {
+            "kind": "agent",
+            "agent_type": "KnowledgeCuratorAgent"
+          }
+        },
+        {
+          "note_id": "kb_note_03",
+          "content": {
+            "type": "inline",
+            "text": "Check that the rollback steps match the current release."
+          },
+          "created_at": "2026-10-22T04:30:00.000Z",
+          "created_by": {
+            "kind": "system"
+          }
+        }
+      ],
+      "pending_contributions": [
+        {
+          "contribution_id": "kb_contrib_7f",
+          "kind": "edit",
+          "created_at": "2026-10-22T04:30:00.000Z"
+        }
+      ],
+      "links": [
+        {
+          "written": "release-checklist",
+          "space": "team",
+          "page": "release-checklist",
+          "exists": true
+        }
+      ],
+      "type": "inline"
+    },
+    "review_flags": [],
+    "note": {
+      "note_id": "kb_note_01",
+      "content": {
+        "type": "inline",
+        "text": "Check that the rollback steps match the current release."
       },
       "created_at": "2026-10-22T04:30:00.000Z",
       "created_by": {
-        "kind": "agent",
-        "agent_type": "KnowledgeCuratorAgent"
+        "kind": "person",
+        "person": "person_7c1"
       }
     }
   },
   "causation_id": "01928f3a-7b2c-7470-8000-000000000470",
-  "body_digest": "Ca6bdW7L6FSQT_aTabLgFUxNUE88S_P-K4qOXwlTZwI",
-  "signature": "ZTkISorjKEwg-heTN4Q95nc1HBgVS2qRgxg1kOqzn6QYcKVis8nRdYIvwX8tQM5lgYJYzKHWD564rdFQbNnACg"
+  "body_digest": "TjEYtx-Cq08ObZnOlglTtOlrB1Vx0pEUp1ddfKPgWVg",
+  "signature": "F_XVf5OSHPtV2D-hF8SWRJuZjiFYIGBSF4hkOEigzWWbg3kZq17j6Db7aAf_wgoca7DSc2Ti4c2tg4ldaB3cAg"
 }

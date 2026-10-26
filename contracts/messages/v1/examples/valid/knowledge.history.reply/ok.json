@@ -1,7 +1,7 @@
 {
   "protocol": "1.0-pre",
   "kind": "knowledge.history.reply",
-  "message_id": "01928f3a-7b2c-746b-8000-00000000046b",
+  "message_id": "01928f3a-7b2c-7000-8000-000000005031",
   "idempotency_key": "knowledge.history.reply:UtsQstBiapGITmpxBRbi_vUpW7T5vhbU7skl1nW2UU0",
   "issuer": {
     "installation": "install_example",
@@ -26,41 +26,142 @@
     "outcome": "ok",
     "page": {
       "space": "team",
-      "page": "Example page",
-      "title": "Example title",
-      "summary": "Example summary",
-      "body": "Example body",
-      "body_ref": {
-        "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
-        "size": 3,
-        "media_type": "application/pdf",
-        "name": "Example name"
-      },
+      "page": "deployment-guide",
+      "title": "Deployment guide",
+      "page_type": "how-to",
+      "summary": "Steps to review and deploy a release.",
       "tags": [
-        "Example tags"
+        "releases"
       ],
       "status": "active",
-      "seen_version": "v3",
+      "seen_version": "3",
       "updated_at": "2026-10-22T04:30:00.000Z",
+      "content": {
+        "type": "inline",
+        "text": "Review the release checklist, then run the deployment. See [[release-checklist]]."
+      },
+      "created_at": "2026-10-21T09:00:00.000Z",
       "updated_by": {
-        "kind": "agent",
-        "agent_type": "token_id_1"
-      }
+        "kind": "person",
+        "person": "person_7c1"
+      },
+      "shown_by": {
+        "kind": "person",
+        "person": "person_7c1"
+      },
+      "backlinks": [
+        {
+          "space": "team",
+          "page": "release-checklist",
+          "title": "Release checklist",
+          "page_type": "how-to",
+          "summary": "Steps to review and deploy a release.",
+          "tags": [
+            "releases"
+          ],
+          "status": "active",
+          "seen_version": "2",
+          "updated_at": "2026-10-22T04:30:00.000Z"
+        }
+      ],
+      "open_notes": [
+        {
+          "note_id": "kb_note_01",
+          "content": {
+            "type": "inline",
+            "text": "Check that the rollback steps match the current release."
+          },
+          "created_at": "2026-10-22T04:30:00.000Z",
+          "created_by": {
+            "kind": "person",
+            "person": "person_7c1"
+          }
+        },
+        {
+          "note_id": "kb_note_02",
+          "content": {
+            "type": "blob",
+            "ref": {
+              "sha256": "bAo6Qv70pBlfvvIPTJfUQ9kixZs5HB6XObJGtqKBgg4",
+              "size": 56,
+              "media_type": "text/plain"
+            }
+          },
+          "created_at": "2026-10-22T04:30:00.000Z",
+          "created_by": {
+            "kind": "agent",
+            "agent_type": "KnowledgeCuratorAgent"
+          }
+        },
+        {
+          "note_id": "kb_note_03",
+          "content": {
+            "type": "inline",
+            "text": "Check that the rollback steps match the current release."
+          },
+          "created_at": "2026-10-22T04:30:00.000Z",
+          "created_by": {
+            "kind": "system"
+          }
+        }
+      ],
+      "pending_contributions": [
+        {
+          "contribution_id": "kb_contrib_7f",
+          "kind": "edit",
+          "created_at": "2026-10-22T04:30:00.000Z"
+        }
+      ],
+      "links": [
+        {
+          "written": "release-checklist",
+          "space": "team",
+          "page": "release-checklist",
+          "exists": true
+        }
+      ],
+      "type": "inline"
     },
     "revisions": [
       {
         "revision": 3,
+        "title": "Deployment guide",
+        "status": "active",
+        "change_kind": "edit",
+        "change_summary": "Updated the release steps.",
+        "updated_at": "2026-10-22T04:30:00.000Z",
+        "updated_by": {
+          "kind": "person",
+          "person": "person_7c1"
+        }
+      },
+      {
+        "revision": 2,
+        "title": "Deployment guide",
+        "status": "active",
+        "change_kind": "edit",
+        "change_summary": "Updated the release steps.",
         "updated_at": "2026-10-22T04:30:00.000Z",
         "updated_by": {
           "kind": "agent",
-          "agent_type": "token_id_1"
-        },
-        "change_summary": "Example change summary"
+          "agent_type": "KnowledgeCuratorAgent"
+        }
+      },
+      {
+        "revision": 1,
+        "title": "Deployment guide",
+        "status": "active",
+        "change_kind": "create",
+        "change_summary": "Created the deployment guide.",
+        "updated_at": "2026-10-22T04:30:00.000Z",
+        "updated_by": {
+          "kind": "system"
+        }
       }
     ],
     "total": 3
   },
   "causation_id": "01928f3a-7b2c-746a-8000-00000000046a",
-  "body_digest": "pYYqvsuzlUS4FWNRfv9tUeK-rdXM33OHI7kMneXOsDQ",
-  "signature": "vOKZV0I-bJ28--_ToSMx_EaCwU6zHEoAjrznJW-FpdkYdwMuy1WwP2F_Y2dYN0zW655eJQfrgIawx3wDelLCDQ"
+  "body_digest": "ksNP-z0jkavS_lQSyJZqE0HSnOeIT9FuposuVMAFTg0",
+  "signature": "J2bV_u-SjVkJblXn0GqV7WVaEaPIMGwjNnkMzW4Jn02WIh-c_gUDz253dnYR3O91QoVv36NU4-yi6sm8LICpCg"
 }

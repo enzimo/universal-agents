@@ -13,100 +13,14 @@
         "contributions": {
           "type": "array",
           "items": {
-            "type": "object",
-            "properties": {
-              "contribution_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 240
-              },
-              "page": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 240
-              },
-              "title": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 1000
-              },
-              "state": {
-                "type": "string",
-                "enum": [
-                  "pending",
-                  "published",
-                  "withdrawn",
-                  "rejected"
-                ]
-              },
-              "seen_version": {
-                "$ref": "../common.schema.json#/$defs/record_version"
-              },
-              "created_at": {
-                "$ref": "../common.schema.json#/$defs/timestamp"
-              },
-              "author": {
-                "oneOf": [
-                  {
-                    "type": "object",
-                    "properties": {
-                      "kind": {
-                        "const": "agent"
-                      },
-                      "agent_type": {
-                        "$ref": "../common.schema.json#/$defs/agent_type"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "agent_type"
-                    ],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "kind": {
-                        "const": "person"
-                      },
-                      "person": {
-                        "$ref": "../common.schema.json#/$defs/person_ref"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "person"
-                    ],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "kind": {
-                        "const": "system"
-                      }
-                    },
-                    "required": [
-                      "kind"
-                    ],
-                    "additionalProperties": false
-                  }
-                ]
-              }
-            },
-            "required": [
-              "contribution_id",
-              "title",
-              "state",
-              "seen_version",
-              "created_at",
-              "author"
-            ],
-            "additionalProperties": false
+            "$ref": "knowledge.read.reply.schema.json#/$defs/contribution_summary"
           },
-          "maxItems": 20
+          "maxItems": 100
         },
         "total": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "next_offset": {
           "$ref": "../common.schema.json#/$defs/count"
         }
       },

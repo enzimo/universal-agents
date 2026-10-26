@@ -1,0 +1,39 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.install.reply",
+  "message_id": "01928f3a-7b2c-7e60-8000-0000000003ea",
+  "idempotency_key": "schedules.install.reply:WiNgbN89ONYbkTYCRcUsySZe5wBvzYjsI-5sl3teEdg",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7000-8000-00000000a019",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "state": "kept",
+    "schedule_id": "schedule_id_1",
+    "timing_revision": 3,
+    "next_fire_at": "2026-10-23T09:00:00.000Z",
+    "version": {
+      "state": "available",
+      "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc"
+    }
+  },
+  "causation_id": "01928f3a-7b2c-7000-8000-00000000a019",
+  "body_digest": "6IZfyBS38jHEhHGP4ADvaFWzLwnrm6TVeMG6UMVl6hM",
+  "signature": "mYRMSxWRsCqyUpTiLuCYw-EgiBQcqq8W0cEBBuls0Znjh_3swF57i-__o8NddXhyLYEWT9tHxZ_M5tUpHwHIBQ"
+}

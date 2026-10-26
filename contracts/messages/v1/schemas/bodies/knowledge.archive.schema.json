@@ -24,7 +24,9 @@
       "$ref": "../common.schema.json#/$defs/record_version"
     },
     "reason": {
-      "$ref": "../common.schema.json#/$defs/short_text"
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
     }
   },
   "required": [

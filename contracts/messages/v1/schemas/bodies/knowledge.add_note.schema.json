@@ -21,9 +21,7 @@
       "maxLength": 240
     },
     "note": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 2000
+      "$ref": "../common.schema.json#/$defs/text_content"
     },
     "confirm_review": {
       "type": "boolean"

@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "host.renew.reply",
   "message_id": "01928f3a-7b2c-7705-8000-000000000705",
-  "idempotency_key": "host.renew.reply:nzXRDioPCgpHuf2xF28YbRwZKXgxAd1p-FFp_tp1Vgc",
+  "idempotency_key": "host.renew.reply:De22AeSdifYyv2EHZ3-YbVph8McuFScE0UGwYh9eEKs",
   "issuer": {
     "installation": "install_example",
     "team": "_install",
@@ -18,7 +18,7 @@
     "id": "lead-host-1",
     "runtime": "lead-host-1"
   },
-  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7704-8000-000000000704",
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7708-8000-000000000708",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
@@ -26,6 +26,7 @@
     "outcome": "ok",
     "certificate": {
       "record": "certificate",
+      "protocol": "1.0-pre",
       "key": "host.install_example.lead-host-1.4",
       "writer": {
         "type": "authority",
@@ -69,7 +70,7 @@
       },
       "algorithm": "ed25519",
       "body_digest": "SQuMxr498InsJPC7v6kRhbjdhjGN3SzWDpRVtApgQBg",
-      "signature": "WNNcldDxg7u9rmAAHF936XZtOxUw9gXmX7v0W26Xc0sXRp6hMQKCDUwMUYNg5PK5BYUoPacejmUqiEr2_ptAAQ"
+      "signature": "1pCrPkAQKRkWnjNVhl2Jk3ppJSm9duO5PGsWzkDpdTXv4eIoGtPquq54A2CsgGKgw5HssYtgR4DJDqdgKVN6Cw"
     },
     "connection": {
       "type": "nats_user_jwt",
@@ -77,7 +78,7 @@
       "expires_at": "2026-10-23T04:30:00.000Z"
     }
   },
-  "causation_id": "01928f3a-7b2c-7704-8000-000000000704",
-  "body_digest": "VRi_rXFh5NeKQ6u6k0w9FwfHdKeYLRhe_dGLc3clZR4",
-  "signature": "49Doo2WzikXu0PV5b2uAxptfB38KoYiwd2vfSWHMRapCsrivdKc3A7W6TCRFAjbqxwMd16GxQ21JxM92VDPDAQ"
+  "causation_id": "01928f3a-7b2c-7708-8000-000000000708",
+  "body_digest": "r8thx4NNqzhT6fJbsGB_LuYb6GJ029nCeNGl8W6edPQ",
+  "signature": "3TKEVfMORmcujXb6RI2zlZOiCZo7xIs8tujwYU88zxGgRjMlE8vYzBIXisSbEfgr-akxt1qHifRATW-OAE2aAw"
 }

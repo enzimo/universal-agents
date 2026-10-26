@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "objectives.list.reply",
-  "message_id": "01928f3a-7b2c-7414-8000-000000000414",
-  "idempotency_key": "objectives.list.reply:mnPoKlGMTIAg8gbB9IQ_IqeMtsYQ_cEHrgax1LBRCYY",
+  "message_id": "5dfa14d0-d5a2-7637-8f33-3ac58cb790e9",
+  "idempotency_key": "objectives.list.reply:LWgSSitO58FbcSGEP7ckwPhEs021JvLYY1EOQu4hA9s",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -18,7 +18,7 @@
     "id": "web",
     "runtime": "gateway-1"
   },
-  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7413-8000-000000000413",
+  "subject": "_INBOX.gateway-1.4201abd6-e71b-7e29-b0af-82ec9e1feace",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
@@ -26,33 +26,91 @@
     "outcome": "ok",
     "objectives": [
       {
-        "objective_id": "objective_id_1",
-        "seen_version": "v3",
-        "title": "Example title",
-        "status": "proposed",
-        "horizon": "finite",
-        "priority": "low",
-        "desired_outcome": "Example desired outcome",
-        "progress_summary": "Example progress summary",
+        "objective_id": "objective_dependency_watch",
+        "seen_version": "27f3b9c11e04194e2352ffe214bf68d66fc0bd4eec858a585850d952a4d3c5f4",
+        "title": "Track recurring dependency checks",
+        "status": "active",
+        "horizon": "recurring",
+        "priority": "normal",
+        "desired_outcome": {
+          "type": "inline",
+          "text": "Keep the dependency report current and notify the person about actionable changes."
+        },
+        "progress_summary": {
+          "type": "inline",
+          "text": "The initial report is saved; the next run will compare new advisories."
+        },
         "subgoals": [
-          "Example subgoals"
+          {
+            "step_id": "step_verify_advisories",
+            "title": {
+              "type": "inline",
+              "text": "Track recurring dependency checks"
+            },
+            "status": "in_progress",
+            "status_detail": {
+              "type": "inline",
+              "text": "Checking the remaining advisory against its original source."
+            },
+            "result_summary": {
+              "type": "inline",
+              "text": "All previously identified advisories have a verified source."
+            }
+          }
         ],
         "success_criteria": [
-          "Example success criteria"
+          {
+            "criterion_id": "criterion_sources_verified",
+            "description": {
+              "type": "inline",
+              "text": "The report lists each affected dependency and its advisory source."
+            },
+            "status": "open",
+            "evidence_summary": {
+              "type": "inline",
+              "text": "The saved report includes a source and checked version for each dependency."
+            },
+            "updated_at": "2026-10-22T04:30:00.000Z"
+          }
         ],
         "schedule_ids": [
-          "schedule_ids_1"
+          "schedule_dependency_watch"
         ],
         "heartbeat_item_ids": [
-          "heartbeat_item_ids_1"
+          "heartbeat_dependency_watch"
         ],
         "available_actions": [
-          "pause"
-        ]
+          "pause",
+          "stop",
+          "abandon",
+          "delete"
+        ],
+        "objective_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+        "current_focus": {
+          "type": "inline",
+          "text": "Verify the two advisories added since the previous checkpoint."
+        },
+        "plan_summary": {
+          "type": "inline",
+          "text": "Compare dependencies, check new advisories, and report actionable changes."
+        },
+        "current_plan_id": "plan_dependency_watch",
+        "work_policy_status": "active",
+        "updated_at": "2026-10-22T04:30:00.000Z",
+        "owner_agent_id": "manager_scope:team_example:TeamArchitect",
+        "root_conversation_id": "conversation_dependency_watch",
+        "created_by_task_id": "task_root_7f",
+        "promoted_from_task_id": "task_root_7f",
+        "owner_agent_name": "Team lead",
+        "owner_person": "person_7c1",
+        "team_id": "team_example",
+        "owner_named_agent_type": "TeamArchitect",
+        "created_at": "2026-10-21T04:30:00.000Z"
       }
-    ]
+    ],
+    "total": 1
   },
-  "causation_id": "01928f3a-7b2c-7413-8000-000000000413",
-  "body_digest": "M7F_vPSGpHgRqeRjeT9gUzGI2zyH2KORdnq16nq-1-0",
-  "signature": "m_elzSOLZHWe9dXBFrf9KWqm67XybOr3UlYFC1mX2-wRhX8XE7GfB5l7Ck1yfg3Pivee5dtHSAtzxs8Z1NbdAg"
+  "causation_id": "4201abd6-e71b-7e29-b0af-82ec9e1feace",
+  "body_digest": "MRts2i_Pol285uMUILl51QFBoA4QLs_WsvUiccDpxzY",
+  "signature": "CP9tt8jykZbTsWz59V6BG2kP-DGOpctTrpTVCHZm-TstCHNnNb-V4fzpv60oBv08qBzfutOP0g2GkK5uFvWKAA"
 }

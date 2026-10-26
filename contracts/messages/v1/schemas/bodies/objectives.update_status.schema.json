@@ -12,7 +12,8 @@
       "$ref": "../common.schema.json#/$defs/record_id"
     },
     "seen_version": {
-      "$ref": "../common.schema.json#/$defs/record_version"
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     },
     "status": {
       "type": "string",
@@ -27,12 +28,22 @@
         "abandoned"
       ]
     },
-    "note": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 2000
+    "summary": {
+      "$ref": "../common.schema.json#/$defs/text_content"
     },
-    "confirmed": {
+    "user_confirmation_summary": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "satisfied_by_current_task": {
+      "type": "boolean"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "plan_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "user_visible": {
       "type": "boolean"
     }
   },
@@ -40,8 +51,7 @@
     "request_id",
     "objective_id",
     "seen_version",
-    "status",
-    "confirmed"
+    "status"
   ],
   "additionalProperties": false
 }

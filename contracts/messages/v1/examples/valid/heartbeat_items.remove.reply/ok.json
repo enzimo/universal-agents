@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "heartbeat_items.remove.reply",
-  "message_id": "01928f3a-7b2c-74c7-8000-0000000004c7",
-  "idempotency_key": "heartbeat_items.remove.reply:nNV5-5q-sN349_PAlKR8ZgdGBwm64ZrTLn-wkXtCTB0",
+  "message_id": "916bc4d9-0026-77e7-a141-b1e932539ef6",
+  "idempotency_key": "heartbeat_items.remove.reply:BhZgvvUyJx4zT27lSTnRP7-OBtL9MDLelMsBA1j1p2A",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -18,24 +18,16 @@
     "id": "lead",
     "runtime": "lead-host-1"
   },
-  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-74c6-8000-0000000004c6",
+  "subject": "_INBOX.lead-host-1.753e05ec-0c1c-7f46-9537-a43ec306cc6b",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
   "body": {
     "outcome": "ok",
-    "item": {
-      "heartbeat_item_id": "heartbeat_item_id_1",
-      "title": "Example title",
-      "instruction": "Example instruction",
-      "target_agent_type": "token_id_1",
-      "objective_id": "objective_id_1",
-      "enabled": true,
-      "seen_version": "v3"
-    },
-    "warning": "heartbeat_off"
+    "heartbeat_item_id": "heartbeat_dependency_watch",
+    "removed": true
   },
-  "causation_id": "01928f3a-7b2c-74c6-8000-0000000004c6",
-  "body_digest": "6xUBaBUqWArMF6RYPoSSrLk2AMZj_55QceRXw6TG_To",
-  "signature": "mwkUg3cyi4U5C0e506BJRvkG-4lo6wSXLD8PULSzUQdRSLPPDotQGcToqw5im0gxgRpbqVlok0f6vVaWbLzDCw"
+  "causation_id": "753e05ec-0c1c-7f46-9537-a43ec306cc6b",
+  "body_digest": "cRzCG2YAeMtoJbdjM-2rBK9J2KiU7EhhHcifpiwlrUQ",
+  "signature": "gM2XW6ja0oM5ZEfWDmxdR6RonETcD2a915gUBzRkND176MiTdago4v4Ad27WqMYc1aLcj0si719icuHPfj80Ag"
 }

@@ -1,0 +1,63 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.publish_contribution",
+  "message_id": "01928f3a-7b2c-7000-8000-0000000050ba",
+  "idempotency_key": "knowledge.publish_contribution:z9DytIsX_ZN50XSA364QUHaz26pkoJYGKPydoKaUs3w",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.knowledge.publish_contribution",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7000-8000-0000000050bb",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "command",
+      "id": "kb_command_0000000050ba"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "m_-7FpP5tNKXiy3NwPvMXHqYUNPg-uHVXz50QHRFB3EeJYZq394MEQ_QRX_Ixdqyu-3xkZHk44YTCok1p1L4Cg"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "kb_command_0000000050ba",
+    "contribution_id": "kb_contrib_create_91",
+    "edited": true,
+    "title": "Deployment guide",
+    "summary": "Steps to review and deploy a release.",
+    "tags": [
+      "releases"
+    ],
+    "content": {
+      "type": "inline",
+      "text": "Review the release checklist, then run the deployment. See [[release-checklist]]."
+    },
+    "page": "release-guide"
+  },
+  "body_digest": "u12Bzic6aDa671dNUVta9Xn-b6166qgvA1N_16pai9s",
+  "signature": "0I9nb1sj6xlpXsZZhoD4ovZyy-vFE8TSdeUmilm4TC0zFaYFv_NK-BiKLdOGkUG2IXcWWEoXgnE-DB30QU77Dw"
+}

@@ -35,20 +35,21 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000149"
+      "id": "cmd_memory_list"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "TLeJ2HYWBOTsCCxcbkfpsCqru5R-SM3H_GdBUODm4MmdQig2yozxxjMuoKSqbzOP2-KViZ12ZjaeAZWX2VIqCA"
+    "signature": "jZ3VHWOvs5QFHPuHkyRfxyZj3_zWft11U4jinbEn2ezSuy7FaVd_QILUTYyso9hVrdtbQcY8KdA5q3d7H0M9Cg"
   },
   "algorithm": "ed25519",
   "body": {
+    "request_id": "cmd_memory_list",
     "bank": "coremem",
-    "sort": "newest",
-    "offset": 3,
-    "limit": 3
+    "sort": "memory_id",
+    "offset": 0,
+    "limit": 50
   },
-  "body_digest": "yCyWqucM6--exCx5YkWzI8fOwqRBIU_zZx2JmkEitOE",
-  "signature": "oefmOelJ4LIfuEBYbZXDGWNvm3rc1-GsvUw2tHgw4ygEmX5DTZmXhAzBTTUvWiYZLUfAn0Jd2h32-Ll9-NzTCQ"
+  "body_digest": "OPQvJnHqaCqxs2jTdL6bGh3z4KLvk2fubVeJL-qLZHs",
+  "signature": "PMGgjEBzMYO46jp6kbRFhtoTAzaCoPhz8DevRkKGnxDyXbClXB3aAy9YVSoHKldEO_1YredF-7Eub8xJk2i3Aw"
 }

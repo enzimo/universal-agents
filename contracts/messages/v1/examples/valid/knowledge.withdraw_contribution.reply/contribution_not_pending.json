@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.withdraw_contribution.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000508b",
+  "idempotency_key": "knowledge.withdraw_contribution.reply:LCXFpehByC2OGm9t4prKuEGXbGILyH68mWrXl4pcnV4",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7485-8000-000000000485",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "contribution_not_pending",
+    "message": "This contribution has already been decided."
+  },
+  "causation_id": "01928f3a-7b2c-7485-8000-000000000485",
+  "body_digest": "fMHaiLZrFi5TZYcs6oR43jQl0xyBddztDmfpHZOqylY",
+  "signature": "CSZ8Y1tXTx7aOnVQdfxb2XO1Xpg4nth7HhiVOjLp_1cngIN4VU7GLQLQhJlW5hhjQ1-aIBYWMGQjj5Vh4MdjAA"
+}

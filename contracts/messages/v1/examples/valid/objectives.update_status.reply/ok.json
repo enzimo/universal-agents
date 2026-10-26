@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "objectives.update_status.reply",
-  "message_id": "01928f3a-7b2c-742c-8000-00000000042c",
-  "idempotency_key": "objectives.update_status.reply:gMXqRTm0YXVYsjZsRzMtJ3XUuevPB_6PAfS5PnvPCEw",
+  "message_id": "7cf5879f-04ef-731b-8f4e-b92b1980f742",
+  "idempotency_key": "objectives.update_status.reply:NNwMXkPdysEdlKkeS7VotGPoLdEqFd4GRTzK8E_4TW4",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -18,17 +18,33 @@
     "id": "lead",
     "runtime": "lead-host-1"
   },
-  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-742b-8000-00000000042b",
+  "subject": "_INBOX.lead-host-1.71f250df-fe32-7cea-b9c2-7e794ea72127",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
   "body": {
     "outcome": "ok",
-    "objective_id": "objective_id_1",
-    "status": "proposed",
-    "seen_version": "v3"
+    "objective_id": "objective_dependency_watch",
+    "status": "active",
+    "seen_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+    "objective": {
+      "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "size": 4096,
+      "media_type": "application/json"
+    },
+    "markdown": {
+      "type": "inline",
+      "text": "# Track recurring dependency checks\n\nThe initial report is saved. Next, verify two new advisories."
+    },
+    "incomplete": [],
+    "skipped": [
+      {
+        "part": "schedule",
+        "id": "schedule_system_dependency_watch"
+      }
+    ]
   },
-  "causation_id": "01928f3a-7b2c-742b-8000-00000000042b",
-  "body_digest": "zoRrw1GNv7g4LVNFyBIo04nxu2pp9SFc39ndww-TRn0",
-  "signature": "YxPIPz0T9sQxPrKuqzLt1I4DF6iSE9YfUIVTEeg4PWhoC4D6gUz2Mvmls0lrANmydPEBrW-8A72AVlkt5bWLBQ"
+  "causation_id": "71f250df-fe32-7cea-b9c2-7e794ea72127",
+  "body_digest": "WE8tg7UV0wZTFAaG26-tb6qDNUCKjewzF1W_qoT0X88",
+  "signature": "JR3hTclA7Oe5LQMTttaxg1FdgydDK_1pQk04sBvIigHTgHetgENHG7Xgeen8hqxDlHa4TaziOFU9OTb7YG_nDg"
 }

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/schedules.update.schema.json",
   "title": "schedules.update request",
-  "description": "Change a schedule's instruction, timing or delivery.",
+  "description": "Change a schedule's name, instruction, timing, controls or run notes.",
   "type": "object",
   "properties": {
     "request_id": {
@@ -16,13 +16,11 @@
     },
     "name": {
       "type": "string",
-      "minLength": 1,
-      "maxLength": 500
+      "minLength": 0,
+      "maxLength": 16384
     },
     "instruction": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 32768
+      "$ref": "../common.schema.json#/$defs/text_content"
     },
     "timing": {
       "oneOf": [
@@ -34,8 +32,8 @@
             },
             "interval_ms": {
               "type": "integer",
-              "minimum": 1000,
-              "maximum": 31536000000
+              "minimum": 1,
+              "maximum": 9007199254740991
             }
           },
           "required": [
@@ -52,7 +50,9 @@
             },
             "expression": {
               "type": "string",
-              "pattern": "^[0-9*/,? A-Za-z-]{9,120}$"
+              "minLength": 1,
+              "maxLength": 4096,
+              "description": "Cron text, including @ shorthands and # expressions; the receiver validates it with croniter."
             },
             "time_zone": {
               "$ref": "../common.schema.json#/$defs/time_zone"
@@ -88,8 +88,135 @@
     },
     "repeat_count": {
       "type": "integer",
-      "minimum": 1,
-      "maximum": 100000
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "clear_name": {
+      "type": "boolean"
+    },
+    "time_zone": {
+      "$ref": "../common.schema.json#/$defs/time_zone"
+    },
+    "next_fire_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "clear_expires_at": {
+      "type": "boolean"
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "paused_until": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "clear_pause": {
+      "type": "boolean"
+    },
+    "run_notes": {
+      "type": "object",
+      "properties": {
+        "schedule_kind": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "notify": {
+              "type": "string",
+              "enum": [
+                "on_change",
+                "always",
+                "never"
+              ]
+            },
+            "notify_on_failure": {
+              "type": "boolean"
+            },
+            "evidence_required": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 16384
+            },
+            "custom_json": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 16384,
+              "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "state": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 16384
+            },
+            "confidence": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 16384
+            },
+            "last_observed_at": {
+              "$ref": "../common.schema.json#/$defs/timestamp"
+            },
+            "last_changed_at": {
+              "$ref": "../common.schema.json#/$defs/timestamp"
+            },
+            "domain_json": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 16384,
+              "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "domain_schema_hint_json": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384,
+          "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "clear_run_notes": {
+      "type": "boolean"
+    },
+    "schedule_memory_json": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 16384,
+      "description": "JSON object serialized as text. The receiver parses and validates it; the whole frame must fit max_frame_bytes."
+    },
+    "schedule_kind": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 16384
+    },
+    "notify": {
+      "type": "string",
+      "enum": [
+        "on_change",
+        "always",
+        "never"
+      ]
+    },
+    "evidence_required": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 16384
+    },
+    "notify_on_failure": {
+      "type": "boolean"
     }
   },
   "required": [

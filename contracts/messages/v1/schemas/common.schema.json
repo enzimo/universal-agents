@@ -24,6 +24,12 @@
       "description": "An agent's stable id. It stays the same when the agent restarts or moves to another host.",
       "$ref": "#/$defs/token_id"
     },
+    "durable_owner_id": {
+      "description": "The stored owner of an Objective or its work records, including manager_scope:<team>:<role>. This is data, never a routing or certificate agent id.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384
+    },
     "agent_type": {
       "$ref": "#/$defs/token_id"
     },
@@ -200,7 +206,7 @@
       "additionalProperties": false
     },
     "authority_token": {
-      "description": "Proof that work acts for a person, issued by a gateway or scheduler host and bound to one root task or one command. It names the team the person asked (its audience), and only that team presents it, copied unchanged down a delegation tree. The signature covers the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/authority-token/v1 and a newline.",
+      "description": "Proof that work acts for a person, issued by a gateway or scheduler host and bound to one root task, one command or one access request. It names the team the person asked (its audience), and only that team presents it, copied unchanged down a delegation tree. System work, which a schedule runs for no person, carries a scheduler's token that names its schedule and no person. The token names no roles: receivers read the person's current roles and standing from the team's people records. The signature covers the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/authority-token/v1 and a newline.",
       "type": "object",
       "properties": {
         "token_id": {
@@ -249,6 +255,7 @@
           "description": "The team the person asked; only that team presents the token. Its installation is the issuer's."
         },
         "person": {
+          "description": "The person the work is for. Absent only in system work: a scheduler's token that names its schedule_id (README, \"On behalf of a person\").",
           "$ref": "#/$defs/person_ref"
         },
         "bound_to": {
@@ -293,7 +300,6 @@
         "token_id",
         "issuer",
         "audience",
-        "person",
         "bound_to",
         "issued_at",
         "expires_at",
@@ -1543,7 +1549,8 @@
           "$ref": "#/$defs/epoch"
         },
         "sha256": {
-          "$ref": "#/$defs/sha256_digest"
+          "$ref": "#/$defs/sha256_digest",
+          "description": "SHA-256 of the certificate record's signing bytes (its domain prefix and canonical JSON without the signature), as TrustStore.add records it."
         }
       },
       "required": [
@@ -1551,7 +1558,8 @@
         "membership_epoch",
         "sha256"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "A host certificate record: its id, membership epoch and digest."
     },
     "connection_credential": {
       "type": "object",

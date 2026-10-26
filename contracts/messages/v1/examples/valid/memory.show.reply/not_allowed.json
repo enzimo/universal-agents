@@ -24,9 +24,9 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "not_allowed",
-    "message": "Example short text"
+    "message": "This task cannot change this memory bank."
   },
   "causation_id": "01928f3a-7b2c-744c-8000-00000000044c",
-  "body_digest": "ndygni9OJ0mKj0moIMNE8d_WpJsDHbcv-NSrk03DUfg",
-  "signature": "0_mEttFISCXSkbO8Oq7zwavQQoAMD8Lll2xrCMN3TSc3XoeOkKkIawj0KcQla2AEnJ0F_3rzsGoLGDuwUURqCA"
+  "body_digest": "4A_txQeZ-LukNFKjQUB4MbjA5PerbYaKR_QnObNzTYE",
+  "signature": "yxKw-uP6w0-irU80CCNoL4CzioGiWd3nyI0xTSDPzduTrpn0PhKt14ZbR__F6Ct6w7C8oMaP2Ejk4rq43LlZCQ"
 }

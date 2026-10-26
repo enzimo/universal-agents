@@ -1,0 +1,14 @@
+{
+  "description": "A team view key has a fourth part; the key is <team>.<entry>.<id>.",
+  "refusal": "invalid_body",
+  "at": "/key",
+  "base": "team_view/roster.json",
+  "changes": [
+    {
+      "set": "/key",
+      "to": "team_example.roster.researcher-2.extra"
+    }
+  ],
+  "context": {},
+  "document_text": "{\"record\": \"team_view\", \"protocol\": \"1.0-pre\", \"key\": \"team_example.roster.researcher-2.extra\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"key_id\": \"test-services-key-1\"}, \"sequence\": 6, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"body\": {\"entry\": \"roster\", \"agent\": \"researcher-2\", \"display_name\": \"Researcher\", \"agent_type\": \"Researcher\", \"role\": \"worker\", \"availability\": \"busy\", \"updated_at\": \"2026-10-22T04:29:00.000Z\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"Dm_GCU3iF06isl4zHgHtKpJb3xJc6E8MqKhuQYukJX8\", \"signature\": \"asNaBtfWJ69as6GvHb-_B7XYjzHUJXQyslP8BnaTaBu3MbBVksSZnAXp4_9reHF_D9Hhj2fxKf_2EP_kzN1zCg\"}"
+}

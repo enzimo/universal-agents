@@ -1,7 +1,7 @@
 {
   "protocol": "1.0-pre",
   "kind": "knowledge.list.reply",
-  "message_id": "01928f3a-7b2c-7466-8000-000000000466",
+  "message_id": "01928f3a-7b2c-7000-8000-000000005035",
   "idempotency_key": "knowledge.list.reply:9tj0Js8om-wHeqwOEUnbgUuLp_wXqjS2vvppLx42gYU",
   "issuer": {
     "installation": "install_example",
@@ -24,9 +24,9 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "not_allowed",
-    "message": "Example short text"
+    "message": "This work may not perform this knowledge operation."
   },
   "causation_id": "01928f3a-7b2c-7464-8000-000000000464",
-  "body_digest": "ndygni9OJ0mKj0moIMNE8d_WpJsDHbcv-NSrk03DUfg",
-  "signature": "tuF_oM-Kgf4jA8j-pe22j3vqSLpkXhAflwNz09pHamGtsfvXsj4yrqULbWAxWhthRMEBskrZBpQgWn-IPciNDA"
+  "body_digest": "cEkBRcHuAp7arVgQIcOeCvN7KhLF5U2LJye3IFXBDd8",
+  "signature": "MizM76RFcNqeOzvrntLzbcGv-OfCGkXtJBCsAWlp5QBGr_r00_FlwcnYDtvgHbMq6Ot9MBD8ci_IYPpDPOhkBQ"
 }

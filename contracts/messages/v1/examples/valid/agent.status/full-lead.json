@@ -1,0 +1,29 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "agent.status",
+  "message_id": "01928f3a-7b2c-7e00-8000-00000000ee00",
+  "idempotency_key": "agent.status:4diqJramdHsYcECrqxBz6zeDosK4Q44vdFNHnMERifY",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.gateway-1.ctl.agent.lead.status",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "level": "full"
+  },
+  "body_digest": "x4htQNyV-yRj9--N5HdPlcgTOvj2ON2gdihTM3EpJjc",
+  "signature": "hGbVvmGVIsc8QnlIRBphNmxhv5pRg2eUCPnwOUxnTeljhYvkU4ugHlliayE7jQmJSKmpEt9z2moH-ww4nALmAw"
+}

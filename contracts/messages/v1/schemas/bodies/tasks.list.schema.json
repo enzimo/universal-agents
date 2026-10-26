@@ -5,6 +5,9 @@
   "description": "One agent's task queue.",
   "type": "object",
   "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
     "agent": {
       "$ref": "../common.schema.json#/$defs/agent_id"
     },
@@ -20,6 +23,7 @@
     }
   },
   "required": [
+    "request_id",
     "agent",
     "offset",
     "limit"

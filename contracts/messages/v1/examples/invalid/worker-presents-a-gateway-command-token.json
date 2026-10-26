@@ -1,0 +1,27 @@
+{
+  "description": "A worker host that received a gateway's command token cannot present it: on memory.delete only the gateway presents command tokens, and agents present their root task's token.",
+  "refusal": "bad_authority",
+  "at": "/authority/bound_to/type",
+  "base": "memory.delete/full.json",
+  "changes": [
+    {
+      "set": "/issuer",
+      "to": {
+        "installation": "install_example",
+        "team": "team_example",
+        "runtime": "worker-host-1",
+        "agent": "researcher-2",
+        "session": "s-researcher-2-1",
+        "membership_epoch": 3,
+        "revocation_epoch": 1,
+        "key_id": "test-worker-key-1"
+      }
+    },
+    {
+      "set": "/subject",
+      "to": "ua.v1.team_example.worker-host-1.svc.team.memory.delete"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"memory.delete\", \"message_id\": \"01928f3a-7b2c-7455-8000-000000000455\", \"idempotency_key\": \"memory.delete:3oc1C884iVi1liY9j4ZSCqrbiWIvDkoHCgG3k1IeEhw\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"agent\": \"researcher-2\", \"session\": \"s-researcher-2-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.worker-host-1.svc.team.memory.delete\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7148-9000-000000000148\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"command\", \"id\": \"cmd_memory_delete\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-22T04:34:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"XO5ySrTKeYgPvDC6WJR9yJ0qvZRYixrLGbHJdOAXSFUt6xN8EFb0-CI-Xf_wGDjmr4dZGQ3I6AEdvngPZoV3DQ\"}, \"algorithm\": \"ed25519\", \"body\": {\"request_id\": \"cmd_memory_delete\", \"bank\": \"coremem\", \"memory_id\": 3, \"seen_version\": \"85c8ca789a0caf0a4d6e33cbd583ca10879683806898c53b262d6aa06597d50d\"}, \"body_digest\": \"hJFojDfOPMD0huoREggP4tB_78-JcPBrogxp_ELQ3nw\", \"signature\": \"7M99FWmTa-Bs7IyiGrtjpMHCuF3uQ80h6xIkFpCy-LIiQ-2wwMbkmpiWOWOsKK4EMdX7z0l2-IPeePmIIB-yBw\"}"
+}

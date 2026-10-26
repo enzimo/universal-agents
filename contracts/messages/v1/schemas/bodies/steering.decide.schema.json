@@ -46,8 +46,7 @@
                           "source": {
                             "type": "string",
                             "enum": [
-                              "lead",
-                              "person_as_is"
+                              "lead"
                             ]
                           },
                           "attachments": {
@@ -62,6 +61,19 @@
                           "type",
                           "text",
                           "source"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "description": "The team services copy the original person steering, attachments and replied message by person_steering_id. The lead supplies no replacement text.",
+                        "properties": {
+                          "type": {
+                            "const": "person_as_is"
+                          }
+                        },
+                        "required": [
+                          "type"
                         ],
                         "additionalProperties": false
                       },

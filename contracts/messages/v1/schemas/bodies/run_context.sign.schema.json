@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/run_context.sign.schema.json",
   "title": "run_context.sign request",
-  "description": "A worker running a scheduled job asks for the run's authority token.",
+  "description": "A worker running a scheduled job asks the scheduler for the run's authority token.",
   "type": "object",
   "properties": {
     "request_id": {

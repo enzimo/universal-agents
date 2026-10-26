@@ -1,5 +1,6 @@
 {
   "record": "revocations",
+  "protocol": "1.0-pre",
   "key": "revocations.install_example",
   "writer": {
     "type": "authority",
@@ -30,5 +31,5 @@
   },
   "algorithm": "ed25519",
   "body_digest": "3b4aJ4Lv6-VtNR7Uc-v-D5V2WvqcP1NG0DYXqfduVwc",
-  "signature": "GncY8IFCswuA_Ch33DyoXE3qTHXO1UA362Uu2IypQCQOCJhsxbPkcuieDexSTzpeoy_KVYKMGKmCp7hbXQamAA"
+  "signature": "p1mdIRzGR7gT802OIn8x95OkkXcBkPgrRlo-XY8jyCEIxM71QQZdTifr_twbW3ImII0WNZ65-MBX8pf3bkiqCg"
 }

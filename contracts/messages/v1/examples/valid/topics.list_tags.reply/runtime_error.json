@@ -24,9 +24,9 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "runtime_error",
-    "message": "Example short text"
+    "message": "The store was unavailable before the transaction committed. Retry the command."
   },
   "causation_id": "01928f3a-7b2c-745b-8000-00000000045b",
-  "body_digest": "66VTNQ95LGRxIdtdQjL5dDY_PX3Olu982NAoKNPPDdE",
-  "signature": "5S1yS3ck4PzNmTg5JS3al0hkxZA15e0d1oPtpZVfDlnIZjYASGX5z3ggHv93acmxzUlhrt5XTBYOppvIaDCyCA"
+  "body_digest": "B_abr6Uw9sGL3J-0WWIQlt6fus_FifvkNIus5XnqUbE",
+  "signature": "M5pd7VBvVeojvdN8l7i7UWrrIdXW5gXQp8YIxVww8MO8u4QT1dG7R4KNvGWmTEAw1gBWK43lUK_QOnND_XknBg"
 }

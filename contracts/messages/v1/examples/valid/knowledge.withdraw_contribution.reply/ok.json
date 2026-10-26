@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "knowledge.withdraw_contribution.reply",
-  "message_id": "01928f3a-7b2c-7486-8000-000000000486",
-  "idempotency_key": "knowledge.withdraw_contribution.reply:oZPc8qMvmwKPPRAs9eelwdoPv9cqaFa6N7fsiAaCVu4",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000508f",
+  "idempotency_key": "knowledge.withdraw_contribution.reply:LCXFpehByC2OGm9t4prKuEGXbGILyH68mWrXl4pcnV4",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -25,19 +25,35 @@
   "body": {
     "outcome": "ok",
     "contribution": {
-      "contribution_id": "Example contribution id",
-      "page": "Example page",
-      "title": "Example title",
-      "state": "pending",
-      "seen_version": "v3",
+      "contribution_id": "kb_contrib_7f",
+      "kind": "edit",
+      "page": "deployment-guide",
+      "title": "Deployment guide",
+      "page_type": "how-to",
+      "summary": "Steps to review and deploy a release.",
+      "tags": [
+        "releases"
+      ],
+      "change_summary": "Add the release checklist.",
+      "base_revision": 3,
+      "state": "withdrawn",
       "created_at": "2026-10-22T04:30:00.000Z",
       "author": {
         "kind": "agent",
-        "agent_type": "token_id_1"
-      }
+        "agent_type": "KnowledgeCuratorAgent"
+      },
+      "review_flags": [
+        {
+          "kind": "personal_memory_overlap",
+          "label": "text copied from personal pages or memory",
+          "field": "body",
+          "line": 2,
+          "column": 1
+        }
+      ]
     }
   },
   "causation_id": "01928f3a-7b2c-7485-8000-000000000485",
-  "body_digest": "kmh5-ddjEnFPAQsTSX0pg0Q-W8ZUAmKjhi_N_7TBH2c",
-  "signature": "qQSAJsulo-fnrrHYVJJlz_UXg34kpDr6_cJkoEOgyEKtqwz8dUNyE9cUXX6_67TiDB5FMLuXjK4uefMzN-OmAg"
+  "body_digest": "kol0Lt4UMsppd8nIiLX6YuhxK8ePbchDHOPGq0xAsiY",
+  "signature": "sOlgKxFGNFf0-NlfpLDAjy2ZpEA-3ModGmDWfoMAQeqYbvm-6M5w95IFuVcBN8V5PuZL_iyNIkRDOeTBxxAADg"
 }

@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "host.renew.reply",
+  "message_id": "01928f3a-7b2c-7713-8000-000000000713",
+  "issuer": {
+    "installation": "install_example",
+    "team": "_install",
+    "runtime": "authority-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-authority-host-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "_install",
+    "target": "installation_service",
+    "id": "lead-host-1",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7704-8000-000000000704",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "needs_approval",
+    "join_id": "join_renew_1"
+  },
+  "causation_id": "01928f3a-7b2c-7704-8000-000000000704",
+  "idempotency_key": "host.renew.reply:bTqTsJTPsYOjxfmJ-SqfRU-DHTgE_J_PBhQ2o4Wi6iI",
+  "body_digest": "OXzz_PUwbqU4GFJCwos8WjVscLznQDr34sGsBd0HJwU",
+  "signature": "GDVLEJB9IK17qZ5BTU7s_OzRXtBxsqb6HkfYl09kJr-Gxm6_weCyO0cYmX0hIwAG0h_MaY8sTJwAh37LsuzXCg"
+}

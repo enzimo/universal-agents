@@ -57,6 +57,7 @@ from runtime_settings.projection import _project_transport
 from runtime_settings.transport import TransportSettings
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from tests.broker_access_support import context_signer
+from tests.live_nats_support import flush_adapter_fully
 
 pytestmark = [
     pytest.mark.integration,
@@ -350,6 +351,8 @@ async def test_live_gateway_discovery_uses_operational_subject_not_presence(tmp_
             delivery=SubscriptionDelivery.CORE,
             logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
         )
+        # The gateway's discovery request comes from its own connection.
+        await flush_adapter_fully(responder_client.adapter)
 
         async def responder() -> None:
             while True:

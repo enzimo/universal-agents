@@ -13,19 +13,16 @@
       "minLength": 1,
       "maxLength": 240
     },
-    "seen_version": {
-      "$ref": "../common.schema.json#/$defs/record_version"
-    },
     "reason": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 2000
+      "maxLength": 32768
     }
   },
   "required": [
     "request_id",
     "contribution_id",
-    "seen_version"
+    "reason"
   ],
   "additionalProperties": false
 }

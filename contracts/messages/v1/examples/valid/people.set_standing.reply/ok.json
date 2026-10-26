@@ -25,16 +25,8 @@
   "body": {
     "outcome": "ok",
     "state": "settled",
-    "standing": "active",
-    "tasks_stopped": 3,
-    "schedules_paused": 3,
-    "schedules_moved": 3,
-    "grants_revoked": 3,
-    "requests_closed": 3,
-    "memory_kept": 3,
-    "pages_kept": 3,
-    "threads_closed": 3,
-    "forms_closed": 3,
+    "standing": "disabled",
+    "tasks_stopped": 2,
     "team_schedules_moved": [
       {
         "schedule_id": "schedule_id_1",
@@ -42,11 +34,17 @@
         "new_owner": "person_1"
       }
     ],
-    "problems": [
-      "Example problems"
-    ]
+    "problems": [],
+    "task_records_deleted": 0,
+    "objectives_stopped": 0,
+    "objectives_deleted": 0,
+    "schedules_deleted": 1,
+    "memory_review_jobs_deleted": 0,
+    "held_record_count": 0,
+    "restored_record_count": 0,
+    "sandbox_deleted": true
   },
   "causation_id": "01928f3a-7b2c-7497-8000-000000000497",
-  "body_digest": "8I-5ujY234AkRJ_TVLiU7-3rIYzNQfbGNAB8496qi78",
-  "signature": "9gNQddVFynxjigQ9l8tjBthghDVXbwIkfWNwUOmgKgqEcDhGHKvv2LaPNv-aTD85kSeYJII9nVNYjgM4HLOmCg"
+  "body_digest": "sfEbxYv8MggrXTBmgFmcptrTRZB9Hu7ufLlRxl6Hep0",
+  "signature": "QNfrW4ghczejcq4GIsS0V9daOY16d7aUSogJ_F7J8QbR5w7k1U8kjgymMN96pevfqyjGEwiA_FDyZv-8eXI3DQ"
 }

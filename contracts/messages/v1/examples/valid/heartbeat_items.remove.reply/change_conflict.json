@@ -1,0 +1,38 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "heartbeat_items.remove.reply",
+  "message_id": "cf4d99cc-f8ab-7011-9f67-efcea64e62ea",
+  "idempotency_key": "heartbeat_items.remove.reply:BhZgvvUyJx4zT27lSTnRP7-OBtL9MDLelMsBA1j1p2A",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.753e05ec-0c1c-7f46-9537-a43ec306cc6b",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "change_conflict",
+    "case_id": "conflict_dependency_watch",
+    "brief": {
+      "sha256": "Bj-Ex0HCWAoYFdc4VJ_O1AEzCBkxGNsBz9zuU5AJ4fQ",
+      "size": 4096,
+      "media_type": "text/plain"
+    },
+    "message": "Another request changed this record; review the recorded conflict."
+  },
+  "causation_id": "753e05ec-0c1c-7f46-9537-a43ec306cc6b",
+  "body_digest": "FXsU9aPma5cjixYUaD6oZ-evF9jL0zodjCFE6rjFZsc",
+  "signature": "iiApS_SRUbn8AF9FEKSQoNqwQ1uOcCWJyQiQWyfBT_Qe4jT-R2YKP5uG5zK5lIyVkPPLPPnWH_lQDhDXlK88Bw"
+}

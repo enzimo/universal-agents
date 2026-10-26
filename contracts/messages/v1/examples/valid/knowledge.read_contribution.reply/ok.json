@@ -1,7 +1,7 @@
 {
   "protocol": "1.0-pre",
   "kind": "knowledge.read_contribution.reply",
-  "message_id": "01928f3a-7b2c-7480-8000-000000000480",
+  "message_id": "01928f3a-7b2c-7000-8000-000000005066",
   "idempotency_key": "knowledge.read_contribution.reply:WS2VIzcbcvocJFG4HZBCKAGpOPKKUbn2viuDokuds2E",
   "issuer": {
     "installation": "install_example",
@@ -25,20 +25,137 @@
   "body": {
     "outcome": "ok",
     "contribution": {
-      "contribution_id": "Example contribution id",
-      "page": "Example page",
-      "title": "Example title",
+      "contribution_id": "kb_contrib_7f",
+      "kind": "edit",
+      "page": "deployment-guide",
+      "title": "Deployment guide",
+      "page_type": "how-to",
+      "summary": "Steps to review and deploy a release.",
+      "tags": [
+        "releases"
+      ],
+      "change_summary": "Add the release checklist.",
+      "base_revision": 3,
       "state": "pending",
-      "seen_version": "v3",
       "created_at": "2026-10-22T04:30:00.000Z",
       "author": {
         "kind": "agent",
-        "agent_type": "token_id_1"
+        "agent_type": "KnowledgeCuratorAgent"
+      },
+      "review_flags": [
+        {
+          "kind": "personal_memory_overlap",
+          "label": "text copied from personal pages or memory",
+          "field": "body",
+          "line": 2,
+          "column": 1
+        }
+      ],
+      "content": {
+        "type": "inline",
+        "text": "Review the release checklist, then run the deployment. See [[release-checklist]]."
+      },
+      "current": {
+        "space": "team",
+        "page": "deployment-guide",
+        "title": "Deployment guide",
+        "page_type": "how-to",
+        "summary": "Steps to review and deploy a release.",
+        "tags": [
+          "releases"
+        ],
+        "status": "active",
+        "seen_version": "3",
+        "updated_at": "2026-10-22T04:30:00.000Z",
+        "content": {
+          "type": "inline",
+          "text": "Review the release checklist, then run the deployment. See [[release-checklist]]."
+        },
+        "created_at": "2026-10-21T09:00:00.000Z",
+        "updated_by": {
+          "kind": "person",
+          "person": "person_7c1"
+        },
+        "shown_by": {
+          "kind": "person",
+          "person": "person_7c1"
+        },
+        "backlinks": [
+          {
+            "space": "team",
+            "page": "release-checklist",
+            "title": "Release checklist",
+            "page_type": "how-to",
+            "summary": "Steps to review and deploy a release.",
+            "tags": [
+              "releases"
+            ],
+            "status": "active",
+            "seen_version": "2",
+            "updated_at": "2026-10-22T04:30:00.000Z"
+          }
+        ],
+        "open_notes": [
+          {
+            "note_id": "kb_note_01",
+            "content": {
+              "type": "inline",
+              "text": "Check that the rollback steps match the current release."
+            },
+            "created_at": "2026-10-22T04:30:00.000Z",
+            "created_by": {
+              "kind": "person",
+              "person": "person_7c1"
+            }
+          },
+          {
+            "note_id": "kb_note_02",
+            "content": {
+              "type": "blob",
+              "ref": {
+                "sha256": "bAo6Qv70pBlfvvIPTJfUQ9kixZs5HB6XObJGtqKBgg4",
+                "size": 56,
+                "media_type": "text/plain"
+              }
+            },
+            "created_at": "2026-10-22T04:30:00.000Z",
+            "created_by": {
+              "kind": "agent",
+              "agent_type": "KnowledgeCuratorAgent"
+            }
+          },
+          {
+            "note_id": "kb_note_03",
+            "content": {
+              "type": "inline",
+              "text": "Check that the rollback steps match the current release."
+            },
+            "created_at": "2026-10-22T04:30:00.000Z",
+            "created_by": {
+              "kind": "system"
+            }
+          }
+        ],
+        "pending_contributions": [
+          {
+            "contribution_id": "kb_contrib_7f",
+            "kind": "edit",
+            "created_at": "2026-10-22T04:30:00.000Z"
+          }
+        ],
+        "links": [
+          {
+            "written": "release-checklist",
+            "space": "team",
+            "page": "release-checklist",
+            "exists": true
+          }
+        ],
+        "type": "inline"
       }
-    },
-    "body": "Example body"
+    }
   },
   "causation_id": "01928f3a-7b2c-747f-8000-00000000047f",
-  "body_digest": "7P7AzUYp1DCvKJcVQvvKEz-VUeTUND0FTHz-FCdy-3c",
-  "signature": "ocYj6IaU5FqSJkCq8flZpR-I48VHp4bZ6oA6LvUi85-ulE3_jDyKdB14BcKZh9RGSni6n8pDUbxnEWFe2f5VDQ"
+  "body_digest": "Q7yGGXw9rxs45dH0ItM6C980eZkNNy0UDKNUFHSmLWA",
+  "signature": "KEIJ2zh-Oq31CzEyFjECyZlT-4P6WZpY-w9DoGCX2UV-mBtEqPSmwTp6wfcD8XKeApMeXGePfgCCC9rkotfrDg"
 }

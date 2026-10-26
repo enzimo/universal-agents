@@ -16,15 +16,18 @@
         "schedule_id": {
           "$ref": "../common.schema.json#/$defs/record_id"
         },
-        "seen_version": {
-          "$ref": "../common.schema.json#/$defs/record_version"
+        "version": {
+          "$ref": "schedules.update.reply.schema.json#/$defs/saved_schedule_version"
+        },
+        "warnings": {
+          "$ref": "../common.schema.json#/$defs/text_content"
         }
       },
       "required": [
         "outcome",
         "state",
         "schedule_id",
-        "seen_version"
+        "version"
       ],
       "additionalProperties": false
     },
@@ -91,7 +94,8 @@
         }
       },
       "required": [
-        "outcome"
+        "outcome",
+        "current_version"
       ],
       "additionalProperties": false
     },

@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "staged_changes.apply",
   "message_id": "01928f3a-7b2c-74cf-8000-0000000004cf",
-  "idempotency_key": "staged_changes.apply:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "staged_changes.apply:pSXaIr6GNHHvXxsZxwuiSfxQC8JYqz_vqUAe0BIHsYo",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -40,18 +40,18 @@
       "id": "task_root_7f"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "hWMfgFV_6vxVeTu6XbORupd6M4d95R8NRH9iluYYH54t9289tuqSbAhfKQHXdkcDoY6abmKtGwNIK3Kqk3oNBQ"
+    "signature": "yWQHfZBg0LrauwzUCR7v2qIPf5NC05rx-iYXGflyKGF5f8H7fCBMdCLR_rNP4fP9Ly4xNCEkNnfP0Z0NbIFcDQ"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
-    "change_id": "Example change id",
-    "seen_version": "v3",
-    "reason": "Example reason",
-    "confirmed": true
+    "request_id": "cmd_staged_changes_apply",
+    "change_id": "runtime_settings:change_7f",
+    "seen_version": "60019de0f44235bb5b91f94a79a1ea60f2b2bded605a640fe47dec619793e7c1",
+    "reason": "Use the reviewed settings for the team's next tasks.",
+    "confirmed": false
   },
-  "body_digest": "kkbDBYdjkWktmMYFG56S-6i92cC4T98q1wj6jzlY-oA",
-  "signature": "iDwh35WhfI1czs695GdDqU_y_GGS4A29LyqIgYfiqYSRKcP2V_6RdEQbTxzKz4w-KNzR4TyRS-FZBevJ9c-kBQ"
+  "body_digest": "xcRy9N8B3-67vPWGNH5s2eTvP8bP5Dx7rT6X3OihLxc",
+  "signature": "Bo_-ExdN9z7qGG1vaHyZiBsq_ng-jhQo3aZi5H3DsjxzheftBdXOmyRi8KCysY5b9uvPMALygpt8PC0Sr2NlAQ"
 }

@@ -4,6 +4,13 @@
   "title": "knowledge.count_contributions request",
   "description": "How many contributions wait for a curator.",
   "type": "object",
-  "properties": {},
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    }
+  },
+  "required": [
+    "request_id"
+  ],
   "additionalProperties": false
 }

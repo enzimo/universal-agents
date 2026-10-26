@@ -1,15 +1,17 @@
 {
   "protocol": "1.0-pre",
   "kind": "schedules.update",
-  "message_id": "01928f3a-7b2c-7a08-8000-000000000a08",
-  "idempotency_key": "schedules.update:vfLJL2c14BQ9xhQMQL-zK6-NnQo3qAmc9cnvaHwbnrY",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a01b",
+  "idempotency_key": "schedules.update:zjfah7--nl8bVdeV-FNF7JjFGjXpiCgo6IGYTd6Lr7I",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
-    "runtime": "gateway-1",
-    "membership_epoch": 1,
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
     "revocation_epoch": 1,
-    "key_id": "test-gateway-key-1"
+    "key_id": "test-lead-key-1"
   },
   "audience": {
     "installation": "install_example",
@@ -17,11 +19,11 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.gateway-1.svc.team.schedules.update",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.schedules.update",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
-    "token_id": "01928f3a-7b2c-7176-9000-000000000176",
+    "token_id": "01928f3a-7b2c-7000-9000-00000000c02c",
     "issuer": {
       "installation": "install_example",
       "runtime": "gateway-1",
@@ -34,29 +36,25 @@
     },
     "person": "person_7c1",
     "bound_to": {
-      "type": "command",
-      "id": "cmd_000176"
+      "type": "root_task",
+      "id": "task_root_7f"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "h7H3o45qN24MrpwJ9MrZFIg5OP8UNb8UryQn8gAMklBVAmsop8deymrp_ASIhqAwqwdYpzyyYRAIUnWI48CDCQ"
+    "signature": "9_4RmhkZ3mn0qGuDvkU9K2KsXB0HSNiZapd_mL9lmHfW6gkOy24aihzZRIjLrvD8oRpjeiVEscRiq3Q4dJKjBQ"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_2",
     "schedule_id": "schedule_id_1",
-    "seen_version": "v3",
-    "name": "Example name",
-    "instruction": "Example instruction",
+    "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
     "timing": {
       "kind": "cron",
-      "expression": "0 7 * * 1-5",
+      "expression": "0 9 * * 1#2",
       "time_zone": "Europe/Berlin"
     },
-    "expires_at": "2026-10-22T04:30:00.000Z",
-    "repeat_count": 3
+    "request_id": "req_schedules_update_cron"
   },
-  "body_digest": "nkp8ri_6uGmnh_HynKOll4bJRoIANgDjCHYG4i0r4bw",
-  "signature": "jEIlnlrbf0d6ByC_fLUeCclMQTRbEiZhHj-qKld2VVXVO92x5vG4ijTwDI1e_45nnHCFqOW21d6jxUQc7wDBCQ"
+  "body_digest": "8h44m3J33RB5aSSe0E9f6D3pflZyw9GoMwMq0vuWN4I",
+  "signature": "0ThnyUu6zZk4CGSmdc7OyjrySKtmGIwSFlq7hA5Z6QNuIzFpuYCbb1v6NEIL-Pp58KN6FIP-445XyfD1tkDiBg"
 }

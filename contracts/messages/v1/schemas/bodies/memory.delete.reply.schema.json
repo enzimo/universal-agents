@@ -60,21 +60,6 @@
       "type": "object",
       "properties": {
         "outcome": {
-          "const": "capacity_reached"
-        },
-        "message": {
-          "$ref": "../common.schema.json#/$defs/short_text"
-        }
-      },
-      "required": [
-        "outcome"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "outcome": {
           "const": "invalid_request"
         },
         "message": {
@@ -100,7 +85,8 @@
         }
       },
       "required": [
-        "outcome"
+        "outcome",
+        "current_version"
       ],
       "additionalProperties": false
     },

@@ -16,15 +16,14 @@
         "schedule_id": {
           "$ref": "../common.schema.json#/$defs/record_id"
         },
-        "seen_version": {
-          "$ref": "../common.schema.json#/$defs/record_version"
+        "warnings": {
+          "$ref": "../common.schema.json#/$defs/text_content"
         }
       },
       "required": [
         "outcome",
         "state",
-        "schedule_id",
-        "seen_version"
+        "schedule_id"
       ],
       "additionalProperties": false
     },
@@ -91,7 +90,8 @@
         }
       },
       "required": [
-        "outcome"
+        "outcome",
+        "current_version"
       ],
       "additionalProperties": false
     },

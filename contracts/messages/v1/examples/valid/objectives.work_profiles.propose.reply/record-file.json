@@ -1,0 +1,39 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.work_profiles.propose.reply",
+  "message_id": "01928f3a-7b2c-7e50-8000-000000000012",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7e50-8000-000000000001",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "proposal": {
+      "type": "blob",
+      "ref": {
+        "sha256": "NhmlBuxT7lD6v-wgblGaSYKsYPGAvo5FoVdaGWcmtKs",
+        "size": 4096,
+        "media_type": "application/json"
+      }
+    }
+  },
+  "causation_id": "01928f3a-7b2c-7e50-8000-000000000001",
+  "idempotency_key": "objectives.work_profiles.propose.reply:7D2pDDx2keKVbax8c9gIwb66ztT0glPRfDaGaa7zgvQ",
+  "body_digest": "Mn7w4T37NcmJlt3oPTfy4s-tU7z2g71OXCuJfqLtrgw",
+  "signature": "hVVRfrO3v-Q3bTwCTQcXQuDUxOSW3k43cAn3_n4W6uQf04m-IwU48NIAlQko6ujOfJKTAgtApAsmLdGWYik8Bw"
+}

@@ -1,0 +1,110 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.authorize_access.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a030",
+  "idempotency_key": "schedules.authorize_access.reply:qk-mn-IXr5o_gTs01ag9-yJgkJpHUqcMXUBLr0ibM58",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7000-8000-00000000a02c",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "schedule_id": "schedule_id_1",
+    "access": {
+      "status": "reviewed",
+      "policy_revision": 2,
+      "worker_type": "WebResearchAgent",
+      "given": [
+        {
+          "tool_id": "fn:web_research",
+          "level": "read",
+          "operations": [
+            "exa_search"
+          ],
+          "missing_for": [
+            "worker_type"
+          ],
+          "required": true,
+          "grant_id": "grant_review_web",
+          "message": {
+            "type": "blob",
+            "ref": {
+              "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+              "size": 40960,
+              "media_type": "text/plain",
+              "name": "review-instructions.txt"
+            }
+          }
+        }
+      ],
+      "waiting": [
+        {
+          "tool_id": "fn:web_research",
+          "level": "read",
+          "operations": [
+            "exa_search"
+          ],
+          "missing_for": [
+            "worker_type"
+          ],
+          "required": true,
+          "message": {
+            "type": "blob",
+            "ref": {
+              "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+              "size": 40960,
+              "media_type": "text/plain",
+              "name": "review-instructions.txt"
+            }
+          },
+          "request_id": "access_review_web"
+        }
+      ],
+      "ask_a_person": [
+        {
+          "tool_id": "fn:web_research",
+          "level": "read",
+          "operations": [
+            "exa_search"
+          ],
+          "missing_for": [
+            "worker_type"
+          ],
+          "required": true,
+          "message": {
+            "type": "inline",
+            "text": "The schedule may use web research in its runs."
+          }
+        }
+      ],
+      "ended": [],
+      "next_step": {
+        "type": "blob",
+        "ref": {
+          "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+          "size": 40960,
+          "media_type": "text/plain",
+          "name": "review-instructions.txt"
+        }
+      }
+    }
+  },
+  "causation_id": "01928f3a-7b2c-7000-8000-00000000a02c",
+  "body_digest": "VJ_ynvIhPcnFDBhm9iQk1R426dIkrdxhTWoDS4VnbKg",
+  "signature": "E3Nio4pnIz8Tu387FE2Dj203uE1oyH23XkMikhekzERBaMC6nsYIm_Cd5Oi1VSZOcfETZECrYHuFDhOY5KHrCQ"
+}

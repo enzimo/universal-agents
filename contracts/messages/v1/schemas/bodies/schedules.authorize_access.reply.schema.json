@@ -1,0 +1,356 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/schedules.authorize_access.reply.schema.json",
+  "title": "schedules.authorize_access.reply",
+  "description": "Saved access, waiting reviews, requests a person must decide and ended setup grants. A notice alone gives no access.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "schedule_id": {
+          "$ref": "../common.schema.json#/$defs/record_id"
+        },
+        "access": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "const": "reviewed"
+                },
+                "policy_revision": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "worker_type": {
+                  "$ref": "../common.schema.json#/$defs/agent_type"
+                },
+                "given": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "tool_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 240
+                      },
+                      "level": {
+                        "type": "string",
+                        "enum": [
+                          "read",
+                          "write",
+                          "full"
+                        ]
+                      },
+                      "operations": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 240
+                        },
+                        "maxItems": 64
+                      },
+                      "missing_for": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "worker_type",
+                            "owner"
+                          ]
+                        },
+                        "maxItems": 2
+                      },
+                      "required": {
+                        "type": "boolean"
+                      },
+                      "grant_id": {
+                        "$ref": "../common.schema.json#/$defs/record_id"
+                      },
+                      "request_id": {
+                        "$ref": "../common.schema.json#/$defs/record_id"
+                      },
+                      "message": {
+                        "$ref": "../common.schema.json#/$defs/text_content"
+                      }
+                    },
+                    "required": [
+                      "tool_id",
+                      "level",
+                      "operations",
+                      "missing_for",
+                      "required",
+                      "message"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "maxItems": 64
+                },
+                "waiting": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "tool_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 240
+                      },
+                      "level": {
+                        "type": "string",
+                        "enum": [
+                          "read",
+                          "write",
+                          "full"
+                        ]
+                      },
+                      "operations": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 240
+                        },
+                        "maxItems": 64
+                      },
+                      "missing_for": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "worker_type",
+                            "owner"
+                          ]
+                        },
+                        "maxItems": 2
+                      },
+                      "required": {
+                        "type": "boolean"
+                      },
+                      "grant_id": {
+                        "$ref": "../common.schema.json#/$defs/record_id"
+                      },
+                      "request_id": {
+                        "$ref": "../common.schema.json#/$defs/record_id"
+                      },
+                      "message": {
+                        "$ref": "../common.schema.json#/$defs/text_content"
+                      }
+                    },
+                    "required": [
+                      "tool_id",
+                      "level",
+                      "operations",
+                      "missing_for",
+                      "required",
+                      "message"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "maxItems": 64
+                },
+                "ask_a_person": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "tool_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 240
+                      },
+                      "level": {
+                        "type": "string",
+                        "enum": [
+                          "read",
+                          "write",
+                          "full"
+                        ]
+                      },
+                      "operations": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 240
+                        },
+                        "maxItems": 64
+                      },
+                      "missing_for": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "worker_type",
+                            "owner"
+                          ]
+                        },
+                        "maxItems": 2
+                      },
+                      "required": {
+                        "type": "boolean"
+                      },
+                      "grant_id": {
+                        "$ref": "../common.schema.json#/$defs/record_id"
+                      },
+                      "request_id": {
+                        "$ref": "../common.schema.json#/$defs/record_id"
+                      },
+                      "message": {
+                        "$ref": "../common.schema.json#/$defs/text_content"
+                      }
+                    },
+                    "required": [
+                      "tool_id",
+                      "level",
+                      "operations",
+                      "missing_for",
+                      "required",
+                      "message"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "maxItems": 64
+                },
+                "ended": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "../common.schema.json#/$defs/record_id"
+                  },
+                  "maxItems": 256
+                },
+                "next_step": {
+                  "$ref": "../common.schema.json#/$defs/text_content"
+                }
+              },
+              "required": [
+                "status",
+                "policy_revision",
+                "worker_type",
+                "given",
+                "waiting",
+                "ask_a_person",
+                "ended",
+                "next_step"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "const": "not_needed"
+                },
+                "message": {
+                  "$ref": "../common.schema.json#/$defs/text_content"
+                }
+              },
+              "required": [
+                "status",
+                "message"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "outcome",
+        "schedule_id",
+        "access"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_found"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "invalid_request"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4096
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "schedule_worker_policy_revision_conflict"
+        },
+        "current_policy_revision": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "current_policy_revision"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

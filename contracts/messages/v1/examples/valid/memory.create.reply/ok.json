@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "memory.create.reply",
   "message_id": "01928f3a-7b2c-7450-8000-000000000450",
-  "idempotency_key": "memory.create.reply:1GpmdjNFzyR9R6NGuDPIqT-moE-J8H6HEv-P7k0LgLs",
+  "idempotency_key": "memory.create.reply:DsLMX7OfJrq0Vk9jlt6cBOqZI4FR6Cu4nwrZpG9xLEs",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -26,19 +26,24 @@
     "outcome": "ok",
     "fact": {
       "memory_id": 3,
-      "fact_text": "Example fact text",
+      "fact_text": {
+        "type": "inline",
+        "text": "Use UTC when recording deployment times."
+      },
       "valid_from": "2026-10-22T04:30:00.000Z",
-      "expires": "2026-10-22T04:30:00.000Z",
       "tags": [
-        "Example tags"
+        "operations",
+        "deployment"
       ],
+      "metadata_json": "{\"resume_section\":\"deployment\"}",
       "created_at": "2026-10-22T04:30:00.000Z",
       "updated_at": "2026-10-22T04:30:00.000Z",
-      "seen_version": "v3"
+      "seen_version": "2362cd12f9375d435c9f1568c042e2de180039efc42b7c76bb1fc1bdbd26439e",
+      "expires": "2026-10-23T04:30:00.000Z"
     },
-    "event_id": "event_id_1"
+    "event_id": "mem_event_create_3"
   },
   "causation_id": "01928f3a-7b2c-744f-8000-00000000044f",
-  "body_digest": "5fzWBlWnY2u1d8WtOLds2tGeMkOtiaTMdrBcbZOGsP8",
-  "signature": "N5enO12It2eCXhObrK4g7JxV0hJb4bGfHiZYXcRXkBJykV5PqLKfvuJHO_n8KV5nLMtUgLNO5hCewYM4cjTfCA"
+  "body_digest": "v3yvhaXLt9z7zYG6xi79mtJoPbtJ2RZ8xz6gGX1Y9Vo",
+  "signature": "zzOtAuJqwULIzRBdjI1zApGLpgNWigsGBdggF3oP_iryc3Kolp6kocTsxlqa4GHXaBKCLLPpknRTFeVn4ZrlAA"
 }

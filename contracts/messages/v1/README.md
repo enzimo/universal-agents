@@ -102,9 +102,13 @@ outside agent or another team. `custom_messages.wire.topology.edge_allowed` chec
 against the kind and the sender's role (from its agent session); a message on an edge the
 topology does not allow is refused with `delivery.refused`. Work a person gave an agent
 directly reports to the person whatever the agent's role. A kind whose `topology_edge` is
-`none` is not a topology check: it goes to the team services (access requests, refusals) or
-only hosts send it; `edge_allowed` allows it. Messages that hosts send without an agent
-(gateway, scheduler, team services) are not topology checks either.
+`none` is not a topology check: it goes to the team services (access requests, refusals),
+only hosts send it, or it goes back to a refused frame's sender (`delivery.refused`);
+`edge_allowed` allows it. A kind that lead or worker hosts send to an agent, worker pool or
+edge address names its edges, and the generator refuses `none` there: the lead's
+`agent.pause`, `agent.resume`, `agent.exit`, `agent.status` and `task.probe` travel `down`.
+Messages that hosts send without an agent (gateway, scheduler, team services) are not
+topology checks either.
 
 ## What bodies carry
 
@@ -230,7 +234,7 @@ authority (`state_records` in the registry, `schemas/state/`):
 
 | Record | Signed by | Says |
 | --- | --- | --- |
-| authority keys | (given to every host when it joins) | which keys are this installation's authority |
+| authority keys | (in the bootstrap bundle every host starts from) | which keys are this installation's authority |
 | `certificate` | the installation's authority | host H of installation X signs with key K for teams T, with roles R and agent types A, between two times, at membership and revocation epochs |
 | `revocations` | the installation's authority | these certificates are revoked |
 | `agent_session` | a team services host of the agent's team | agent G, of type and team role, runs on host H from one time to another |
@@ -263,21 +267,30 @@ frame it checks, in the registry's order:
 
 1. **Certificate (`unknown_key`):** the trust store holds a certificate for the issuer's
    installation, runtime and membership epoch that names the issuer's key id and was
-   valid when the frame was issued. Another installation needs an agreement.
+   valid when the frame was issued. A certificate that another one `replaces` counts as
+   valid only until `certificate_overlap_seconds` after its replacement was issued.
+   Another installation needs an agreement.
 2. **Signature and digest** with that certificate's key.
 3. **Revocation (`revoked`):** neither the certificate nor the one that signed the
    frame's agent session is revoked, whenever it was revoked and whatever issue time
    the frame gives: a revoked key still stops queued work, because the sender chooses that time.
-4. **Epochs (`epoch_too_old`):** the certificate's epochs meet the receiver's minimum
-   for that runtime and installation. The frame's own epochs only name the certificate.
-5. **Issuer (`wrong_issuer`):** the frame's revocation epoch and team match the
-   certificate. A frame that names an agent names its session too, and the session must
-   place that agent, of a type the certificate allows, on the signing runtime when the
-   frame was issued. A reply must answer the request the receiver sent, from the team
-   and agent that request was for.
+4. **Epochs (`epoch_too_old`):** for request/reply messages and events, the certificate's
+   epochs meet the receiver's minimum for that runtime and installation. Queued work
+   (durable and dead-letter frames) is judged by the certificate valid when it was issued
+   and skips this step ("Trust over time"). The frame's own epochs only name the
+   certificate.
+5. **Issuer (`wrong_issuer`):** the frame's revocation epoch matches the certificate, and
+   its team is one the certificate serves; installation operations and their replies name
+   the installation scope `_install` instead, and no agent. A frame that names an agent
+   names its session too, and the session must place that agent, of a type the
+   certificate allows, on the signing runtime when the frame was issued. A reply must
+   answer the request the receiver sent, from the team and agent that request was for. A
+   renewal's body names the certificate that signs it.
 6. **Sender (`wrong_sender`):** one of the certificate's roles may send the kind to its
    audience's address (for a reply, receive its request; a kind's `senders_by_address`
-   narrows some addresses), and another installation's frame stays within its agreement.
+   narrows some addresses). A frame from the receiver's own installation is addressed to
+   its issuer's team: reaching another team needs a later agreement between teams. Another
+   installation's frame stays within its agreement.
    Contact with outside agents goes through the lead, in both directions. A frame whose
    sole sending role is `edge_adapter`, which speaks for outside agents, reaches only the
    lead's inbox or the team services: the receiving host states its agent's role
@@ -304,25 +317,57 @@ An authority token (`authority` in the frame) proves that work acts for a person
   presents it, copied unchanged down a delegation tree, and only inside frames of the
   token's own installation.
 - It is bound to one root task, one command, or one access request (a person's decision
-  on it), and lasts at most `authority_token_max_seconds`.
+  on it), and lasts at most `authority_token_max_seconds`. A command token lasts at most
+  `command_token_max_seconds` (300 seconds): the gateway signs one for each command, and
+  it is useful only for minutes (plan, section 8).
+- It names no roles: receivers read the person's current roles and standing from the
+  team's people records, so a role taken away while a token lasts no longer counts.
 - A scheduled job's run carries a token the scheduler signed with the run's
   `schedule_id`. A run's schedule comes only from there: the work context names no
   schedule, so a host that passes the task on cannot change it, and a run handed back
   and dispatched again keeps it.
+- System work, a run of a schedule that works for no person, carries a scheduler's token
+  that names its `schedule_id` and no person. No other token may leave out the person.
+  Today's signed context for such a run also names its schedule and no person.
 
 A receiver refuses with `bad_authority` a token on a kind whose `authority` is `none`, a
 missing token where it is `required`, and a token that is not signed by an unrevoked
 gateway or scheduler certificate serving its audience team, names a schedule without a
-scheduler's signature, names another team than the frame's issuer, or was not valid when
-the frame was issued.
+scheduler's signature, names neither a person nor a schedule, names another team than the
+frame's issuer, lasts longer than its limit, or was not valid when the frame was issued.
 
-Each kind that takes a token states its `authority_binding`: what the token is bound to,
-and with `at` the body field naming that record. The receiver checks such a field
-(`task.request`: `/body/work/root_task_id`; `access.resolved`: `/body/request_id`; the
-credential and tool setup forms: `/body/root_task_id`). In every case the handler then
-checks that the token is bound to the root task, command or request it holds
+**A run's token.** A worker that claimed a due schedule itself asks for its run's token
+with `run_context.sign`. Only a scheduler signs a run's token (plan, section 13A.10), so a
+scheduler answers it: the scheduler serves the team services' audience for this one
+address (`transport.yaml`), and like every role it receives only the kinds that list it.
+The scheduler checks the claim against the frame's `issuer.agent`, which the agent's
+session confirms; a frame that names no agent is refused as `claim_not_held`. An `ok`
+answer carries the token, and its `system_work` is true exactly when the token names no
+person.
+
+**Bindings.** Each kind that takes a token states its `authority_binding`: one binding, or
+a list of them, one per token type it takes. A binding `{type, at, senders}` says:
+- `type`: what the token is bound to (`root_task`, `command` or `access_request`). A token
+  of a type the kind does not list is refused.
+- `at`: the body field that names that record. The receiver compares the two ids
+  (`task.request`: `/body/work/root_task_id`; `access.resolved`: `/body/request_id`; the
+  credential and tool setup forms: `/body/root_task_id`; commands: `/body/request_id`, or
+  `/body/steer_id` for `tasks.steer`). A command binding always names its field.
+- `senders`: the host roles that may present a token of that type, within the senders of
+  the frame's address; without it, every sender of that address may. On an operation that
+  both the gateway and agents send, such as `memory.delete`, a command token is accepted
+  only from the gateway and a root-task token only from agent hosts. An agent host that
+  received a person's command token therefore cannot use it there.
+
+Each of these mismatches is refused as `bad_authority`. A binding without `at` names no
+body field: the handler checks that the token is bound to the root task it holds
 (`VerifiedAuthority.require_bound_to`), still as `bad_authority`, before its access
-decision. Replies carry no token.
+decision. Four lead operations, `steering.decide`, `intent.set`, `requests.pause` and
+`requests.resume`, name a request in their body (`root_task_id`) and keep a binding
+without `at`. A lead turn may act only on its own request (plan, section 11A.12): the team
+services compare `root_task_id` with the token's root task and answer another request
+with the typed refusal `not_own_request`, which tells the person to act in that request's
+thread, instead of refusing the frame. Replies carry no token.
 
 ## Delivery, expiry and idempotency
 
@@ -414,7 +459,8 @@ absent optional field is `null`. For example `task.stop` lists `[/body/task_id,
 
 The Python helper is `custom_messages.wire.frame.idempotency_key(kind, *values)`. A
 receiver recomputes the key after checking the body and refuses a different one as
-`invalid_body` at `/idempotency_key`.
+`invalid_body` at `/idempotency_key`. What the receiver of an operation keeps under its
+key, and for how long, is in "Stored outcomes".
 
 **Durable copies.** Some facts must reach two inboxes. The team services keep each
 task's custody record from claims, results, handbacks, progress and hold accounts,
@@ -429,7 +475,8 @@ read the requester's inbox; a kind's `copy_to` addresses get a second frame:
   window, so a copy with its original's key would be lost;
 - saved before publishing and retried unchanged, like any durable frame.
 
-Every role serving the copy's target receives it; it does not become a receiver of the
+The team services read it there, and no other role does: the scheduler serves the same
+target only to answer `run_context.sign`. A copy's reader does not become a receiver of the
 kind. A copy takes no execution slot, is accepted while paused, wakes no model and is
 not rendered: the team services record the fact in the custody record. A copy of
 `task.result` with its original's key is refused as `invalid_body`.
@@ -454,13 +501,20 @@ Each file in `examples/invalid/` describes one refusal:
 - `signing`: `after` (the default) signs again after the changes, `before` keeps the
   base's signature, `stale_digest` signs again but keeps the base's body digest;
   `signed_by` signs with another key; `token_signing: before` keeps the authority token's
-  signature; `proof_signing: before` keeps a renewal's new-key proof; `after_signing`
-  respells a value with the same bytes;
+  signature; `proof_signing: before` keeps a renewal's new-key proof;
+  `record_signing: before` keeps the signature of a state record the body carries
+  (a reply's certificate); `after_signing` respells a value with the same bytes;
 - `text_changes` and `pad_to_bytes`: edits to the serialized text;
 - `context`: `receiver` fields, `now`, `arrived_on`, `headers`, `replay` (`digest` held
   for the frame's key), `trust` (`add` and `remove`, relative to `examples/trust/`),
   `minimum_epochs` and `answering` (a valid example, or null for none);
 - `frame_text`: the frame exactly as received, written by the script.
+
+`examples/state/invalid/` describes refusals of state reports the same way, from a valid
+record under `examples/state/valid/`. Its `context` may add or remove trust records, set
+`minimum_epochs`, replace `now`, and name the record the reader `held` (sequence and
+digest); `document_text` is the record as stored. The script also fills each valid host
+record's certificate digest.
 
 Every refusal code except `access_denied` has an example, and every two neighbouring
 checks have an example with both defects, so a receiver that checks in another order
@@ -468,6 +522,12 @@ fails one. Every kind has a valid and an invalid example, and every alternative 
 (each constant that tells a `oneOf` apart) appears in a valid example; the tests check both.
 
 ## Verification
+
+Refusal examples check one frame against a starting context. Tests of trust updates
+also keep the same store between checks: the late-revocation test first verifies a
+frame, adds a revocation, then verifies that the frame is refused. Starting with an
+already-revoked certificate cannot check that sequence. Missing header copies and
+mismatched header copies have separate refusal examples.
 
 Run `tests/test_message_contract.py` for contract agreement, the examples and hostile
 input refusals. `tests/test_live_message_contract.py` starts a separate authenticated
@@ -480,15 +540,19 @@ file. It uses public fixture signing keys and no operator credentials.
   `server.minimum_version`.
 - **Settings:** the broker, stream and consumers are created from `transport.yaml`, and
   the test checks that the server reports the same values back.
-- **What it proves:** real publish, pull, acknowledgement and signed inbox replies; a
-  result and its team-services copy both stored and pulled by their own readers; a
-  scheduled run delivered to a worker pool and its result to the person's gateway route;
-  an outside agent's adapter refused when it publishes into a worker pool;
-  separate consumers for ids that an `_` separator would have merged; and refusals of
-  other consumers' fetches and acknowledgements, consumer creation and deletion, stream
-  reads, publishing under another runtime's id, subscribing to another runtime's inbox,
-  to stream subjects or to another agent's requests, and writing into another runtime's
-  inbox except to answer a request once.
+- **What it proves:**
+  - real publish, pull, acknowledgement and signed inbox replies;
+  - a result and its team-services copy both stored and pulled by their own readers;
+  - a scheduled run delivered to a worker pool, and its result to the person's gateway route;
+  - a new host that holds only the pre-join permissions joins, and checks the authority's
+    reply from its bootstrap records;
+  - dead-letter raw copies and notices stored under the receiver's own id;
+  - separate consumers for ids that an `_` separator would have merged;
+  - refusals of: an outside agent's adapter publishing into a worker pool; other
+    consumers' fetches and acknowledgements; consumer creation and deletion; stream
+    reads; publishing under another runtime's id, dead-letter copies included;
+    subscribing to another runtime's inbox, to stream subjects or to another agent's
+    requests; writing into another runtime's inbox except to answer a request once.
 
 A team `config.yaml` or `debug.env` cannot supply this isolated authorization fixture.
 
@@ -498,19 +562,52 @@ A queued message can wait days, for example while a host is cut off.
 - **Certificate at issue time.** Receivers verify every frame and state record with the writer's certificate that was valid when it was issued, even if that certificate has expired since.
 - **Revocation.** A certificate on the installation's revocations record refuses all of its frames and records, whenever it was revoked.
 - **Epochs.** The receiver's minimum membership and revocation epochs apply to certificate-authenticated request/reply messages and events only. Queued work is never refused for an old epoch. Joining proves key possession without a certificate, so a join's epoch zero is accepted on retries after the key becomes known; revocation still refuses the key.
+- **Renewed certificates.** Every renewal, with or without a new key, gets a certificate at a higher membership epoch that names the old one in `replaces`. The old certificate stays in `UA1_CERTS` for queued work, but signs new frames only until `certificate_overlap_seconds` (5 minutes) after its replacement was issued (authorization plan 12.5). A receiver that wants the old epoch gone for requests and events sooner raises its minimum epoch.
 - **Expiry.** Each delivery class has an expiry in `transport.yaml`. Receivers keep their replay record at least as long as the longest expiry.
 
 ## Installation traffic
 
-Joining an installation and renewing a certificate use addresses under `ua.v1._install.<sender>`, and their frames name the scope `_install` instead of a team.
-- **Joining.** A new host has no certificate yet. It signs `host.join` with the key the request presents; the registry marks this as `verification: proof_of_possession`, and it applies to that one operation only. The presented key is checked on every join, including retries after the authority knows its key id. A key id the receiver's trust store already knows must still present the same public key, and a revoked one stops the join. A join speaks only for its own host, in the `_install` scope, and names no agent.
-- **Afterwards.** The authority returns a signed membership certificate (`certificate-document.schema.json`) and a connection credential. Success replies require the certificate record type and its body schema; another state record is not a certificate. Receivers also verify the nested certificate's signature against their trusted installation authority. Later requests are verified as usual.
+Joining an installation and renewing a certificate use addresses under `ua.v1._install.<sender>`. Their frames name the scope `_install` (`transport.yaml` `installation_scope`) as both the issuer's and the audience's team, and never an agent.
+
+**Starting a host.** A new host starts from a bootstrap bundle that an administrator, or the local installation itself, gives it (authorization plan 12.2). The bundle holds:
+- the installation's authority keys;
+- the certificates of the installation authority's hosts, and the installation's revocations record, so the host can check the authority's replies before it has a certificate of its own;
+- the NATS credential of the pre-join permission set, `generated/permissions/joining_host.json`. With it the host can publish its own join request and read its own reply inbox, and nothing else.
+
+**Joining.** A new host has no certificate yet. It signs `host.join` with the key the request presents; the registry marks this as `verification: proof_of_possession`, and it applies to that one operation only. A receiver checks:
+- the join comes from the receiver's own installation and names, as its issuer's key, the key its body presents, which is not an authority key (`unknown_key`);
+- a key id the trust store already knows keeps its public key (`unknown_key`), and a revoked one stops the join (`revoked`);
+- the issuer names `_install`, no agent, epoch zero and a runtime id that does not start with `x-` or `_`, and the body asks for that runtime in that installation (`wrong_issuer`);
+- the body asks only for roles among the kind's senders, never the installation authority's (`wrong_sender`).
+
+These comparisons, and a renewal's comparison with its certificate, read the body's fields as received, before the body schema: a missing or mistyped field counts as another value (`examples/invalid/host-renew-without-certificate-id.json`).
+
+A join is not answered with a fresh challenge from the authority, as the authorization plan's enrollment endpoint is (12.3, 12.4). A join frame lasts 30 seconds, the receiver's replay record refuses other content under its message id, and its retry key names the runtime, key and join id. A copied join can therefore only repeat the same request within its lifetime, and the certificate it gets back is useless without the private key.
+
+**What the authority decides.** An administrator approves the key's fingerprint, or the installation approves a local process automatically; until then the reply is `pending`. A join for a runtime that already holds an unexpired certificate under another key is a lost-key recovery: an administrator approves it again (plan 12.5), and the new certificate gets a higher membership epoch and `replaces` the old one. A join's certificate grants at most the teams, roles, agent types and sessions it asked for.
+
+**Renewing.** A host renews with `host.renew`, signed by the certificate it renews; the body names that certificate and its membership epoch. Every renewed certificate has a higher membership epoch than the one it replaces and names it in `replaces` ("Trust over time"). A host whose reply was lost retries with the same renewal id while the old certificate still signs, or reads its new certificate from `UA1_CERTS`.
+
+**Replies.** A success reply carries the signed certificate (`certificate-document.schema.json`), which only an authority key writes, and a connection credential. The receiver verifies the certificate and refuses the reply as `invalid_body` at `/body/certificate/...` when:
+- it does not verify against the installation's own authority keys, or its record's `expires_at` differs from its body's;
+- it is for another installation or another runtime than the host that asked;
+- a join's certificate names another application or NATS key than the join presented, or grants more teams, roles, agent types or sessions than it asked for;
+- a renewal's certificate does not replace the certificate that signed the renewal, does not have a higher membership epoch, or names another key than the rotated one (or, without a rotation, the kept one), or another NATS key than the new one asked for (or the kept one).
+
+The host then keeps the certificate with `TrustStore.add`. Later requests are verified as usual.
+
+**Identifiers.** `profile_sha256` identifies the runtime profile the host asks for: the subjects, agent types and limits an administrator reviews before approving (authorization plan 12.3). The enrollment service that phase 2 adds defines that profile's document; the certificate states the profile granted.
 
 ### Application key rotation
 
 `host.renew` optionally carries `application_key_rotation`, an object with both `key`
 (an application key) and `proof` (an Ed25519 signature). Omitting the object keeps
-the application key.
+the application key. The new key needs a key id the installation does not use yet: not
+the host's current key id, another host's, or an authority key's (`invalid_body` at
+`/body/application_key_rotation/key/key_id`). The one exception is a retry after a lost
+reply: the key id of the certificate that already replaced the signing one, with the same
+public key, which is what a retry after a lost reply names; the authority answers it with
+that certificate. The renewed certificate has a higher membership epoch, like every renewal.
 
 The new private key signs these bytes:
 
@@ -531,34 +628,50 @@ provide the exact bytes, proof and finished frame for other implementations.
 ## State records
 
 Hosts, agents, placements and the team view are key-value records, not messages. Each value is a signed state document (`schemas/state.schema.json`):
-- the record type, its key and its writer;
+- the record type, the writer's protocol label ("Versions"), its key and its writer;
 - a sequence that only grows;
 - issue and expiry times;
 - the body, its digest and an Ed25519 signature over the domain prefix `universal-agents/state-record/v1` and a newline, followed by the RFC 8785 canonical JSON of the document without its signature.
 
-The registry's `state_records` section names each record's bucket, key form, signer, the roles whose certificates may sign it (`signer_roles`), the roles that may store it, and its body schema. The trust records of "Who sent it" use the same format and are kept by the trust store; the records here report state and are verified each time they are read (`TrustStore.verify`).
-- **Placement.** A placement record's key-value revision is its fencing token.
-- **Agent records.** A reader accepts an agent record only from the host its placement names.
-- **Writer identity.** A record is signed by its writer's host certificate, valid when the record was written and not revoked, and one of whose roles is in `signer_roles`. A host record's body runtime must equal its writer's runtime. Agent and placement bodies, and a team-view key's first token, name a team that the writer's certificate serves. A team-view key starts with that team and its body's entry type; its remaining id names the view entry and need not equal a task id.
+The registry's `state_records` section names each record's bucket, key form, signer, the roles whose certificates may sign it (`signer_roles`), the roles that may store it (`writers`), and its body schema. The trust records of "Who sent it" use the same format and are kept by the trust store (`TrustStore.add`). The records here report state, are used as soon as they are read, like requests, and are verified on every read (`TrustStore.verify(data, record=..., now=..., held=...)`):
+- **Writer.** The record is signed by its writer's host certificate, valid when the record was written, not revoked, and with one of the record's `signer_roles`. Only hosts of the reader's own installation write state reports (`wrong_issuer`): agreements carry durable work only, and a peer's host keeps its own state in its own installation.
+- **Epochs.** The writer's certificate meets the reader's minimum epochs (`epoch_too_old`).
+- **Time.** A record that has expired, or is dated ahead of the reader's clock by more than the clock tolerance, is refused (`expired`, `not_yet_valid`). A record of a bucket with a per-key lifetime (`ttl_seconds`: host liveness, 60 seconds) states an expiry within it (`invalid_body`), so a copy kept elsewhere is never read as current.
+- **Sequence.** The reader passes the sequence and digest of the record it holds for the key, if any. An older sequence, or other content under the same sequence, is refused (`replayed`), so a reader that holds a newer record never reads an older one written back to the bucket. A reader that holds nothing, after a restart for example, takes the newest record it reads: host liveness records expire within a minute, but agent, placement and team-view records do not expire, so a reader that must not go back keeps the highest sequence it has seen across restarts.
 
-`TrustStore.verify` checks these bindings. The caller checks the agent's placement,
-which requires runtime state and is not inferred from the record's own claims.
+A reader refuses a state report with the first failing check, in the registry's order:
+1. `too_large`, `malformed` (the document's form, and a record of another type than the one read: `TrustStore.verify` takes the record type its bucket holds);
+2. `wrong_issuer` when the writer's type is not the record's signer (it decides where the key comes from), then `unknown_key`;
+3. `bad_signature`, `bad_digest`, `revoked`, `epoch_too_old`;
+4. `wrong_issuer` for the writer's roles or installation, then `wrong_team` for the record's team, read from the key or the body as received;
+5. `expired`, `not_yet_valid`, `replayed`;
+6. `invalid_body`: the body schema, then the record's dates (its expiry, its bucket's lifetime, a trust record's single validity window), then its key and body rules.
+
+Trust records (`TrustStore.add`) follow the same order without the reader's checks; their own-installation rules need the body and come with its rules. The two-defect examples under `examples/state/invalid/` (`also`) pin the order.
+
+What each record says, and what `TrustStore.verify` checks about it:
+- **Host liveness.** A host writes only its own record, under its runtime id. The record names the certificate it is signed with: its id, membership epoch and `sha256`, the SHA-256 of the certificate record's signing bytes, which `TrustStore.add` recorded. It allows at most that certificate's sessions. Its roles, teams and agent types are the certificate's, so the record does not repeat them.
+- **Agent records.** The key is `<team>.<agent>` of the body, and the team is one the writer's certificate serves. A reader accepts an agent record only from the host its placement names; the reader checks that, since it needs the placement.
+- **Placement.** The key and team follow the same rule. The team services write a placement with compare-and-set on the last key-value revision and the next sequence. The fencing token written into admission records is the signed sequence, not the revision, which the server assigns and nobody signs. `host_epoch` is the membership epoch of the host's certificate when the agent was placed. Renewals raise the epoch without moving the agent: a reader accepts the placement while the host's liveness record names a certificate of that runtime at `host_epoch` or later.
+- **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows (message contract plan 11A.9). An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs.
+
+**Not generated yet.** The NATS permissions for the key-value buckets, the object store and the dead-letter stream come with the services that use them (message contract plan 13A.9). Until then the registry's `writers` say who may store each record, and the readers' checks above do not depend on who stored it.
 
 ## Dead letters
 
-A receiver that sets a message aside keeps the exact bytes at `dlq.raw.<copy>` and sends a `dlq.notice`. The notice holds identifiers only: the stage, the reason (a verification refusal or a handler failure) and the set-aside message's unverified claims. It never holds the content.
+A receiver that sets a message aside picks a copy id at random (256 bits, written as 64 lowercase hexadecimal characters). It keeps the exact bytes at `dlq.raw.<copy>` under its own runtime id, and sends a `dlq.notice` to its team's services, which tell administrators. Both wait in `UA1_DLQ` for 30 days. The installation authority, whose installation traffic has no team, sends notices about that traffic to a team its certificate serves; a certificate always serves at least one.
+- **The notice holds identifiers only:**
+  - the copy id, which its subject also names;
+  - the reason: a verification refusal code, or `handler_failed`, `delivery_limit` or `upgrade_drain` (the generator checks that the list names every refusal code);
+  - the refusal's JSON pointer, up to the last field the receiver's schema knows (`FrameRefused.known_at`): an unknown field is named by the object that holds it, so a name the sender chose never reaches the notice;
+  - where the message sat in its stream;
+  - the set-aside message's own unverified claims: kind, message id, issuer team and runtime, protocol;
+  - the raw copy's size and SHA-256.
 
-Raw copies have no frame kind: they preserve the refused bytes exactly. Generated
-permissions therefore include the dead-letter class addresses for each notice
-sender, bound to its own runtime id. They do not permit publishing copies under
-another runtime's id.
-
-Contract validation should combine schema and cryptographic tests with live NATS
-permission tests. The former cover writer binding, certificate types and key
-proofs; the latter prove that the generated subjects and permissions let a host
-join and retain raw dead letters while refusing another sender's identity. The
-live contract test starts an isolated authenticated NATS server, version 2.15.1
-or later. It does not use a team's live broker or credentials.
+  It has no free text, because a refusal's details can quote the content.
+- **Raw copies** have no frame kind: they keep the refused bytes exactly, so a person can inspect what arrived. Generated permissions let each notice sender publish copies under its own runtime id only. A receiver keeps a copy only when it is at most `max_frame_bytes` (the stream's message limit); for a larger message the notice says `raw.stored: false`.
+- **People's content.** A raw copy can hold a person's message. Only the team services read `UA1_DLQ`; its read grants come with them (message contract plan 13A.9). Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies whose frames name that person, in an authority token or a person reference.
+- **Retry keys** name the receiver's runtime and the copy id, so two receivers' notices never share one.
 
 ## Versions
 
@@ -566,7 +679,10 @@ Within one protocol label:
 - a sender at the same or an older minor is read strictly: an unknown field is a defect;
 - a newer minor's unknown optional fields are ignored.
 
-The frame states its minor, so the receiver chooses before reading the body. A change that an
+The frame states its minor, so the receiver chooses before reading the body. State records
+state theirs the same way (`protocol`), so a certificate or a liveness record can gain
+optional fields within the major too; the signature covers the record as received,
+unknown fields included. A change that an
 older receiver must understand needs a new major, which brings new subjects and streams.
 Receivers recompute keys, so a kind's key parts and copies are fixed for the major: a newer
 minor never adds, removes or reorders them.
@@ -580,34 +696,828 @@ authority token. `tasks.steer` uses `/body/steer_id`; `conflicts.decide` carries
 `request_id` so a new decision after a refusal has a new key. Retrying the same command
 keeps its key. The exporter rejects parts that are missing or optional.
 
-An operation that takes a token states its `authority_binding`: a gateway's command token
-is bound to the command, an agent's to its root task, and an operation both may send lists
-both types. The handler checks the binding against the command or task it holds.
+An operation that takes a token states its `authority_binding` ("On behalf of a person").
+A gateway's command carries its own id, `request_id` (`steer_id` for `tasks.steer`): the
+gateway makes a new one for each new command and keeps it when it retries the same command,
+and the command's token is bound to it. Reads carry one too, so their token is bound to
+them; their retry key stays the message id. An agent's operation carries its root task's
+token. An operation both may send lists both bindings, each with the roles that present it.
 
-Knowledge merges carry the source's `seen_version`, the destination's
-`target_seen_version`, and the merged `content`. Both versions must still match
-before either page changes. `content` is either `type: inline` with `text`, or
-`type: blob` with an object-store `ref` to UTF-8 plain text. An omitted merge title
+**Relays to an agent's host.** The holder answers for its own queue through the team
+services (plan, section 13A.4). The gateway sends `tasks.list`, `tasks.list_finished`,
+`tasks.remove` and `tasks.purge` to the team services (`svc.team.tasks.<operation>`), and
+only the team services pass them on to the agent's host
+(`ctl.agent.<agent>.tasks.<operation>`, `senders_by_address`). `debug.dump` takes the same
+way to `ctl.agent.<agent>.debug.dump`: today the lead applies it in its own process, and
+the relay lets the team services move to another host without a new message (plan,
+section 11A.10). A relayed frame carries the gateway's command token unchanged, with the
+same `request_id`. The agent's host verifies the person from the gateway's signature: no
+body names a person, and the team services never sign tokens. Command tokens are accepted
+only from these senders, so an agent host cannot use one on another operation.
+
+### Knowledge
+
+These operations keep the knowledge service's current behavior. Their common page,
+contribution and review-flag shapes live in `knowledge.read.reply.schema.json` so
+every knowledge reply carries the same fields without changing the shared frame.
+
+`knowledge.list` accepts `all`, `team` or `personal`, a query, and optional
+`page_type` and `tag` filters. `all` includes the verified person's own pages and
+the team's pages; work for nobody sees only team pages. Gateway browsing keeps
+`KnowledgeService.browse`, including active or archived pages, a matching total
+and the browser's 20-row pages. Agent searches keep `KnowledgeService.search`,
+which searches active pages with the type and tag filters and caps each page
+at `search.max_results`, at most 50. Adapters pass `offset` through to search;
+the cap never limits the complete result set. Agent replies omit `total`
+because search does not count all filtered matches. After selecting rows that
+fit the frame, adapters check for one more result at `offset + returned` using
+the same search filters. If it exists, `next_offset` names that position;
+otherwise continuation is absent. This preserves paging beyond the first
+configured page without scanning the whole result set for a count.
+Gateway browsing requires its exact matching `total` and does not send the
+agent-only type and tag filters. Senders lowercase page types and normalize tags
+as the service does. The types are `concept`, `how-to`, `decision`, `lesson`,
+`reference` and `source`; tags have up to 80 characters, with at most 100 per page.
+
+List rows include the type, summary, tags, status, decimal `seen_version`, update
+time and optional search snippet. Snippets use inline-or-blob text because the
+store's word-based search snippets have no character bound. All list replies
+respect the serialized frame limit even when fewer rows than `limit` fit.
+`next_offset` is present only when more rows remain and advances by the number
+actually returned. History pages slice the service's latest 50 revisions; their
+`total` counts that window, preserving today's bounded history. Contribution
+lists page through all the person's pending proposals with their matching total.
+They accept up to 100 entries for agent lists; gateway browsing keeps its current
+50-entry service cap and 20-row browser pages.
+
+A detailed page also carries its content, creation time, current editor,
+`frozen_until` when frozen, backlinks, resolved links, up to five oldest open
+notes, and up to 20 pending proposals with their ids, kinds and creation times.
+The gateway uses the proposal list's length for its pending count. Backlinks keep
+the service's 20-row bound and links its 100-row bound. Each link gives the text
+as written, destination space and page, and whether it exists. `redirected_from`
+records the merged name that was followed. When reading an earlier revision,
+`seen_version` still names the current page revision, while `shown_revision` and
+`shown_by` identify the revision shown and its editor. The shown title, type,
+summary, tags and content come from that revision. History rows carry each
+revision's title, status, change kind, change summary, creation time and editor.
+The gateway keeps today's editor-name rewrite before sending records to the
+browser; person references are never browser display names.
+
+Every detailed page uses `type: inline` with those fields, or `type: blob`
+with an `application/json` reference to the complete inline page. This applies
+to reads, mutation replies and the current page inside a contribution.
+The receiver validates retrieved JSON against the inline page schema before
+using it. A page's backlinks alone can exceed the frame limit under supported
+settings, so moving only its content to a blob is insufficient. Senders move
+the complete page to a blob when the signed reply would otherwise exceed
+262,144 bytes. The file keeps all metadata and service-bounded collections.
+
+Writes have one optional `content` field, either `type: inline` with `text`, or
+`type: blob` with an object-store `ref` to UTF-8 plain text. The two forms cannot
+be mixed. Page and contribution replies use the same field. An edit may omit
+title, content, type, summary or tags to keep those values; an empty summary or
+tag list clears that field. A create without a title or content is refused by
+the service. Without `seen_version`, a write creates a page and refuses an
+existing name; with it, the write edits that decimal revision. The default type
+for a new page is `reference`.
+
+Merges carry the source's `seen_version`, the destination's `target_seen_version`,
+and the merged `content`. Both versions must still match before either page
+changes. Agents working for a person merge only that person's personal pages;
+team merges run in the curator's team maintenance work. An omitted merge title
 or summary keeps the destination's value; an empty summary clears it.
-`confirm_review` records the caller's confirmation when the content check asks
-for it; it grants no access. Archive and revert requests carry the caller's
-nonempty `reason`, rather than inventing an explanation at the receiver.
+`confirm_review` records confirmation of flagged
+content and grants no access. Archive and revert carry a nonempty `reason`.
+For a person's Web Chat action, the gateway sends the fixed text
+`Archived on the Web Chat Knowledge page` or `Reverted on the Web Chat Knowledge page`;
+the browser never supplies this text. Agents supply their own reasons. Senders
+truncate archive and revert reasons and change summaries to the configured
+`max_summary_chars`, at most 4,000, as the service does today.
 
 An agent working for a person proposes team notes and archives. These operations
 return `pending_review` and a `contribution_id`, as `knowledge.write` does. This
-outcome means a proposal was saved; it does not mean the page changed.
+outcome means a proposal was saved; it does not mean the page changed. The reply
+also offers the proposal kind, page reference and review flags for the agent's
+current result display.
 
-`knowledge.read` returns up to five `open_notes` on the page, oldest first, with
-their server-assigned ids, content, creation time and editor kind. Successful
-`knowledge.add_note` replies also return the note. Long note content uses the
-same inline-or-blob form as a merge. Receivers use blob references when inline
-content would exceed the serialized frame budget, including the rest of the
-page and its notes. Resolving a note requires `merged: true` after incorporating
-it into the page, or `false` to dismiss it. Reading again exposes the next open
-notes. Freezing a page requires `minutes`, between one minute and one week.
+Contribution list, read, withdrawal and rejection results retain the proposal's
+kind, type, summary, tags, change summary, base revision, state, creation time,
+author and review flags. A full read includes its content and the current team
+page for comparison when that page exists. A proposal has no independent
+`seen_version`. Publishing may omit `seen_version` to use the proposal's base
+revision; a proposed new page under a free name creates at revision zero.
+An explicit revision checks the page the reviewer compared. `edited: false`
+publishes as proposed. `edited: true` sends edited page fields or an edited
+inline-or-blob `note`. A `page` override is allowed only for a new-page proposal;
+otherwise the reviewed title supplies the new name, never an unreviewed proposed
+name. An archive publishes status only and refuses edited page fields.
+Successful publishing returns the page and, for a note proposal, the added note.
+
+Notes in requests and replies use inline-or-blob text. The receiver enforces
+`max_note_chars`, up to 50,000, and `max_body_chars`, up to 500,000, after fetching
+the text. Senders use blobs when a field exceeds the 32,768-character inline
+limit or when all the inline content together would exceed the frame budget.
+Each returned note has its server-assigned id, content, creation time and editor.
+Resolving a note needs only its `note_id` and `merged`, true after incorporating
+it or false to dismiss it; page and space are optional context. Reading again
+exposes the next notes. Freeze, unfreeze, resolve and reject carry no
+`seen_version` and offer no store-conflict refusals, because the runtime never
+checks a page revision for them. Freeze takes `minutes` from one minute to one
+week; senders clamp a larger duration to one week as the service does. Its reply
+includes the freeze expiry; an unfreeze reply omits it.
+
+Review flags are objects with kind, label, field, line and column, never matched
+private text. An empty field and zero positions mean no known location. Kind is
+bounded text, rather than an identifier pattern, to retain `custom:<name>` with
+any configured pattern name of up to 60 characters. The contract allows 67
+characters for kind and 240 for label. The runtime sets no upper bound on flag
+counts or rejection reasons; this contract chooses at most 100 flags per result
+and 32,768 characters for a rejection reason. Deployments must keep reports and
+rejection text within those bounds when using these messages. A rejection needs
+a nonempty reason. Personal reads without a verified person return
+`personal_space_unavailable`; withdrawal retains `feature_off` when knowledge
+is disabled.
 
 Contract verification pairs schema/model round trips with real SQLite knowledge
 workflows, including stale source and destination versions, pending proposals,
 note discovery and resolution, archive and revert reasons, and freeze duration.
 The protocol adapters are not live yet; these checks do not prove NATS delivery
 or object-store integration.
+
+### Memory and staged changes
+
+`memory.*` operations act on the team's `coremem` or the verified person's
+`usermem`. A fact's `seen_version` is its record digest, including its internal
+identity and last change time. Reusing a deleted fact's number does not reuse
+its version. Agents must send the version for replace and delete; people's
+commands may omit it, as today's numbered memory commands do.
+
+`memory.create` needs `fact_text`; omitted tags and metadata start empty.
+`memory.replace` changes only the fields supplied. It needs at least one of
+`fact_text`, `tags`, `metadata_json`, `valid_from`, `expires` or `clear_expiry`.
+An empty tags array or metadata object clears that field. `clear_expiry: true`
+maps to today's `invalid_after_utc="never"`; sending it with `expires` is an
+`invalid_request`. Omitted fields keep their stored values.
+
+`fact_text` uses `text_content`, either inline text or a UTF-8 plain-text blob.
+Today's service has no fact-text length limit, so a blob preserves long facts
+without exceeding the frame limit. `metadata_json` encodes an object as JSON
+text, at most 16,384 characters. Public replies exclude the reserved
+`imported_from` metadata, as today's public memory view does. For protocol 1,
+each bank's `max_tags` setting must stay within 100, `max_tag_chars` within 256,
+and `max_metadata_chars` within 16,384. Today's settings have no upper bounds;
+these larger-than-default bounds leave room for metadata and tags in one
+frame when fact text uses a blob. The receiver still enforces the bank's
+configured limits. They do not change runtime settings in this contract-only
+phase.
+
+`memory.list` takes a zero-based `offset` and a `limit` from 1 to 100. The
+adapter maps them to today's one-based start and end rows. `memory_id` sorts
+by number ascending; `newest` by update time and then number descending;
+`valid_from` by start time and then number ascending; `expires` by expiry and
+then number ascending, with no expiry last. The last two map to today's
+`valid_from_utc` and `invalid_after_utc` sorts. The reply gives `total` and,
+only while more remain, `next_offset`. It returns fewer rows than requested
+when needed to fit the frame, using blob text even for a single large fact.
+`memory.show` returns one fact. Create, replace and delete return an event id;
+`memory.undo` reverses a create, replace, delete or expiry while that event's
+result is still current. Undoing a create deletes the fact and returns no
+fact; the other undo results return the restored fact. Only create checks
+bank capacity, so replace, delete and undo do not offer `capacity_reached`.
+The gateway renders today's memory command text from the request and typed
+reply, using `render_pinned_memory_result`'s formatting and the person's time
+zone. The service does not send a second rendered copy.
+
+Topic search reports the conversation's stored status. New threads are `active`;
+after a turn completes, the store records that task's progress state. A thread
+status therefore allows `active` as well as the task states, without adding it to
+the task-state definition.
+
+`staged_changes.apply.seen_version` is the staged `plan_digest` returned by
+the staging tool. A changed digest gives `changed_since_read` with the current
+digest. Approval still applies only to that exact plan. `confirmed` records
+conversational agreement when authorization is off; it grants no approval
+when authorization is on. After `agreement_required`, a newly confirmed
+command has a new request id because its body changed.
+
+Successful application returns `state: applied`, the recorded `approval`,
+the person's optional decision `note`, and the adapter's `result_json`.
+Approval keeps today's mode, approver and approval time; only
+`person_approval` may name an `access_request_id`. The four modes are
+`person_approval`, `held_access`, `agreement` and `operator_configuration`.
+Notes keep today's 2,000-character limit. Agreement replies keep titles up
+to 400 characters and 1 to 40 effect lines of at most 1,000 characters each.
+Adapter results are free objects today; `result_json` encodes the object in
+at most 16,384 characters. Adapters must keep their result within this bound.
+A `failed` outcome preserves the approval, note and adapter error result as
+a final receipt, rather than treating it as a retryable `runtime_error`.
+
+`denied` and `withdrawn` name the access request and keep the person's note.
+`refused` preserves the reason and note when the plan can no longer apply,
+including after approval. Its reason is bounded to 16,384 characters because
+today's exception text has no limit. `waiting` names the access request and
+is never stored as a final outcome. Retry the same request id after its
+decision so the approved call can continue. Shared covered-change refusals
+remain available for the later request-conflict checks.
+
+### Objectives and heartbeat items
+
+These operations preserve the 0.9.8 Objective tools and the person's controls.
+The gateway uses a command token bound to `request_id`. Lead operations use
+the current root task's token. The receiver resolves the person from that
+token and checks named tasks and Objectives with the existing ownership
+service. A task id supplies context, never authority. Session and checkpoint
+calls name the active task and its actual session. Inaccessible records are
+reported as missing.
+
+`objectives.list` accepts the gateway and lead. The gateway sees the person's
+Objectives, including closed ones by default. The lead sees team Objectives
+and those of the person its task works for, excluding closed ones by default.
+Optional `statuses`, `horizons` and `include_closed` preserve the tool's
+filters. `offset` and `limit` page the results, with `limit` from 1 to 100.
+The reply's `total` counts matching records and `next_offset` appears only
+while more remain. The gateway's existing discovery limit stays 100 records;
+paging retrieves that listing without requiring one large frame. Lead reads
+keep the store's newest-first order. Receivers may return fewer than `limit`
+to fit the frame; callers continue with `next_offset` until it is absent.
+
+Each row preserves current focus, plan id and summary, subgoals with status
+and result, criteria with evidence and update time, linked ids, work-policy
+status, and update and deletion timestamps. `objectives.get` resolves an
+Objective by its id, task, plan, or current verified task context. It returns
+the full record and rendered Markdown, as today's tool does. A large record
+uses `objective.type: blob` with an `application/json` reference to the same
+complete record. A list row's `details_file` similarly carries its full
+summary when nested collections cannot fit. No text or list is truncated.
+
+Stored Objective owners use `durable_owner_id`, including the runtime's
+`manager_scope:<team>:<role>` values. They may contain colons and exceed the
+128-character record-id bound, so they have a separate 16,384-character
+bound. These reply fields convey stored data. Ownership checks still resolve
+the caller from verified identity; routing and certificate agent ids keep
+their subject-safe type.
+
+There are two Objective versions. A list row's `seen_version` is
+`contract_sha256(objective.model_dump(mode="json"))`, from
+`manager_control_runtime._runtime_objective_summary`. The gateway sends it
+on `pause`, `resume`, `stop`, `abandon` and `delete`; these controls check the
+whole record, including progress, status and events. The row's
+`objective_version`, and `objectives.get` and lead-write replies' `seen_version`,
+come from `custom_messages.records.objectives.objective_version`.
+Lead `update_progress` and `update_status` send that digest as `seen_version`.
+It covers decision fields and criteria without criterion timestamps.
+Runtime bookkeeping, including status, focus, progress, owners, links and
+events, is excluded so running work does not invalidate an agent's edit.
+`changed_since_read.current_version` uses the digest checked by its operation.
+Both digests are 64-character lowercase hexadecimal strings.
+
+`objectives.create` requires `why`, title and desired outcome. It also carries
+completion policy, criteria, constraints, non-goals, required
+user confirmation, focus, progress, and `creation_mode` of `promote_task` or
+`spawn_task`. An optional `task_id` selects a source task working for the same
+person; otherwise the current verified task supplies it. The reply returns
+the Objective version, root task and plan, creation mode and lineage ids.
+Creation ensures an Objective-owned task and plan as today.
+Each `success_criteria` item is existing inline-or-blob description text or a
+`type: criterion` object. The object needs `description` as `text_content` and
+may supply `criterion_id`, `status`, `evidence_summary` as `text_content`, and
+`updated_at`. The adapter removes the wire-only `type`, resolves text, and
+passes the remaining object to `ObjectiveSuccessCriterion`, through today's
+`create_objective.success_criteria_json`. Supplied ids, evidence, statuses
+and timestamps survive creation. Omitted fields keep today's generated id,
+`open` status, absent evidence and current update time. A description-only
+item keeps those same defaults. Timestamps use the protocol's UTC spelling.
+The `type` discriminator keeps text and structured criteria distinct for
+portable code generation.
+Lead-write replies may include the complete saved record as an `objective`
+JSON file reference and its rendered Markdown, keeping the acknowledgement small.
+
+`update_progress` can change progress, focus, criteria, or any combination.
+At least one must be present. Criterion updates name an existing criterion
+or describe a new one, with optional status and evidence. As today, the store
+creates a criterion from a description when its id does not resolve; an
+update with neither a known id nor description changes no criterion.
+`task_id`, `plan_id` and `user_visible` retain the tool's event context.
+`update_status` carries `summary`, `user_confirmation_summary`,
+`satisfied_by_current_task` and the same event context. The receiver answers
+`confirmation_required` when satisfaction requires the person's recorded
+confirmation text. Deletion stays with the person's controls. `incomplete`
+and `skipped` identify lifecycle steps that failed or protected links left
+unchanged, as today's warnings do. After a person control the gateway can
+refresh with `objectives.list` and `tasks.inventory`; the control reply does
+not embed a refreshed inventory.
+
+The remaining covered tools have explicit operations:
+
+- `objectives.work_sessions.enable` takes the Objective, active task,
+  confirmation summary, optional profile name and `confirmed` flag.
+  `disable` takes the Objective, task and confirmation flag; its protected
+  schedule remains an inert record. `start` opens one work window on the
+  active Objective-linked task. All three require the direct person request
+  as today's tools do, and return the saved policy or session.
+- `objectives.work_profiles.apply` carries the exact proposal id and digest,
+  active task, confirmation summary and flag. Its result distinguishes an
+  Objective policy, reusable installed profile and already-applied proposal.
+  The coordinator checks the proposal's digest and expiry. This digest is
+  separate from an Objective version.
+- `objectives.work_profiles.propose` persists an inert proposal through
+  `propose_objective_work_profile`. It carries the active `task_id`, normalized
+  `profile_name`, `rationale`, and a complete `profile` containing cadence
+  and budget. The adapter passes that profile's fields to today's flat tool
+  arguments. Omitted cadence time zone means `owner`; omitted `scope` means
+  `objective`; omitted `replace_existing` means false. `objective_id` selects
+  an owned active Objective or defaults to the current task's Objective.
+  Reusable proposals have no Objective target. The operator's cadence,
+  budget, name-replacement and installed-profile limits still apply. The
+  reply returns the persisted proposal, its exact digest and expiry.
+- `objectives.work_profiles.list` maps to `objective_work_profiles(action="list")`.
+  It needs no direct person request or confirmation. `include_proposals`
+  defaults to true. Its `catalog` retains configured profiles, this person's
+  active installed profiles, the default name, all custom-profile limits,
+  and the latest 50 proposals when requested. Configured entries and installed
+  records retain `profile_source` to distinguish them. Installed entries
+  retain their ids, acceptance provenance and proposal digest.
+  The installed-profile limit stays 1 to 500. Configured profiles have no
+  runtime count limit; protocol 1 chooses at most 1,000 configured profiles,
+  allowing at most 1,500 entries together. Deployments must keep within that
+  bound when switching to the protocol.
+- `objectives.work_profiles.remove` maps to `objective_work_profiles(action="remove")`.
+  It carries `profile_name`, active `task_id`, `confirmation_summary` and
+  `confirmed`. It returns the complete removed installed-profile record,
+  including removal time, task and summary. The person must explicitly
+  confirm removal in a direct request. Existing Objective policy snapshots
+  retain their copied profile. Proposal creation also requires a direct
+  person request, but does not require confirmation and never applies a
+  proposal. Apply still checks confirmation, digest, expiry, replacement
+  state and policy state before changing anything.
+- `objectives.work_sessions.status` maps to `objective_work_sessions(action="status")`.
+  Optional `objective_id` selects an owned Objective; an omitted selector
+  uses the current verified task context. Its `snapshot` retains the policy,
+  latest 20 sessions, and the configured checkpoint history, from 1 to 500
+  entries. These are the runtime's current windows, not a complete archive.
+  A missing policy is omitted, an empty history stays an empty array, and
+  a disabled coordinator returns an empty snapshot, as today's tool does.
+  `tuning_signals_json` contains the runtime's observation object as JSON text,
+  up to 16,384 characters, preserving fractional averages and ratios and
+  null values without putting fractional numbers in the signed frame.
+  It is omitted when the runtime returns no tuning signals. Those observations
+  grant no access and do not change budget limits.
+- `objectives.record_checkpoint` carries the active task and session,
+  observe, orient, decide and act text, health, evidence changes, completed
+  subgoals, next subgoal, blockers, effects in progress and artifacts. It
+  returns the saved checkpoint. Session `active_seconds_used` becomes
+  integer `active_ms_used`, rounding reported duration down to whole milliseconds.
+  Integer budget seconds retain their names and units.
+- `objectives.start_task` carries the Objective, source task, work brief,
+  optional focus and visibility. It returns the queued task and current plan
+  when one exists. `objectives.activate_plan` carries the active task,
+  semantic steps of title, objective and optional rationale, and `final_review`.
+  The runtime creates internal ids. Its reply tells the caller to return
+  control for execution in fresh contexts. As today, the plan builder compacts
+  step titles to 180 characters and objectives and rationales to 1,000.
+  `final_review` adds the final review step unless one already has that title;
+  the reply's `step_count` includes it.
+
+Session enable, disable and start, profile apply, checkpoint, task and plan calls are covered Objective
+changes with `seen_version: none`: today's tools take no Objective expected
+version. Profile application retains its own proposal-digest check. Current
+confirmation, enabled-feature, required-skill and ownership checks still
+apply. Covered refusals carry their shared data; `record_busy` and
+`runtime_error` remain retry outcomes. Conversational confirmation grants no
+access and does not bypass system-schedule approval.
+Failures after saving a change remain `ok` with `warnings`, as today's
+`after_saved_change` reports them. They must not become retryable failures.
+
+The new profile and status operations are lead-only requests to the team
+services, signed for the current root task. `request_id` identifies every
+call; reads keep the message-id retry key and propose/remove use the request
+id. The task id must be the active task of that signed request. No body may
+choose a person. Catalog access follows `fn:objectives`: propose is
+`propose_objective_work_profile` at `write`; list is `objective_work_profiles`
+action `list` at `read`; remove is action `remove` at `full`; status is
+`objective_work_sessions` action `status` at `read`. Propose and remove have
+no covered record kind, as the catalog specifies, so they do not acquire
+Objective version checks or the five covered-change refusals. Reads have no
+covered change either. Their exact refusal lists are in the registry and
+reply schemas; `runtime_error` is retryable and the other outcomes are final.
+
+Proposal and removal replies use inline-or-blob records. Catalog and status
+replies use a whole `catalog` or `snapshot` with the same alternative. Every
+record blob is UTF-8 `application/json` containing exactly the inline
+`value`, validated against its value schema after retrieval. The catalog
+schema is `objectives.work_profiles.list.reply.schema.json#/$defs/profile_catalog`;
+the snapshot schema is
+`objectives.work_sessions.status.reply.schema.json#/$defs/work_session_snapshot`.
+Proposal files use `pending_profile_proposal` in the propose reply, with no
+application fields because creating a proposal applies nothing. Removal
+files use `removed_installed_profile` in the remove reply, including all
+removal provenance. Record mappings omit runtime `message_class` markers
+and rename `owner_canonical_user_id` to `owner_person`; the value still comes
+from verified identity. Files retain all nested fields and collections,
+with the same text references and timestamp/unit mappings as inline records.
+Files allow large
+histories within current record-count bounds without truncation or an
+oversized frame. Tuning JSON must encode an object within its stated bound.
+Pure suggestions and inert profile export rendering remain local. SQLite
+conformance checks exercise today's tools and stored records; future
+dispatch and blob retrieval are not implemented or live-tested here.
+
+`heartbeat_items.list` is a lead read with `source_id`, `include_disabled`,
+`offset` and `limit`. It returns source and launcher diagnostics, full item
+records and versions, `total` and optional `next_offset`. The default includes
+disabled items. When the source is absent, a successful inspection reports
+`missing_source`, or `disabled` when heartbeat is off, with no items. An existing
+source returns its items even when heartbeat is disabled, as today's tool does.
+Source ids remain free configured strings, bounded at 16,384 characters.
+Item versions come from `storage.heartbeat_repository.heartbeat_item_version`:
+id, title, instruction, target agent type and Objective, excluding run times.
+Add can select the source. Changes, removal, enable and disable send the
+item's `seen_version`. A saved item can still report heartbeat-disabled or
+launcher-missing warnings; callers must not retry that as a failed create.
+Both create operations are covered with `seen_version: none`.
+
+The runtime has no upper bounds on much Objective prose or these nested
+collections. Protocol 1 uses `text_content` for prose and files for larger
+records. Display names and other free strings allow 16,384 characters where
+no stricter shared id type applies. Stored Objective, policy, session and
+checkpoint collections have no artificial item-count ceiling, whether inline
+or in the complete record, summary or snapshot JSON file. This keeps existing
+large collections readable. Senders use the serialized frame size to choose
+the file representation, and receivers validate the complete retrieved value
+against the same typed schema. Actual service history windows, including the
+latest 20 sessions and configured checkpoint history, still apply.
+Free event details become `details_json`, bounded at 16,384 characters.
+Inline request collections keep their 1,000-item bound where specified. For
+requests without a file alternative, phase 4 must keep inputs within these bounds.
+These bounds change what the adapter accepts; they do
+not authorize truncation. Senders count serialized UTF-8 bytes and move
+content to files or shorten a page before the frame reaches 262,144 bytes.
+Local definitions keep these records typed without changing shared schemas.
+
+### Schedules
+
+`schedules.*` operations keep the stored schedule, run-note and worker behavior of
+`custom_messages.contracts.schedule_v1`, `schedule_changes`, `schedule_worker_service`
+and `schedule_worker_inspection`. The team services check ownership through the verified
+task context or command token. A schedule's name and assigned agent type may be absent.
+The page then displays its id or an unspecified assignment, as today.
+
+`schedules.list` pages the schedules the caller may see. Each row returns the schedule's
+listing digest as `seen_version`, timing, repeat limit, run notes and worker assignment.
+The assignment keeps `automatic_creation` as `not_configured`, `enabled`, `disabled` or
+`default_policy`, plus `review_agent_type`, `upgrade_required`, `desired_agent_type` and
+`reassignment_pending`. `not_running_since` and `not_running_explanation` explain a stuck
+schedule. Automatic creation says whether startup is allowed; it does not prove that a
+worker started or has access. The reply's `next_offset` appears only when more rows remain.
+
+`schedules.get` reads one exact `schedule_id`. It maps the existing
+`list_scheduled_jobs(schedule_id=...)` detail read to `fn:schedule_runs`, action
+`list_scheduled_jobs`, level `read`. It is not a new runtime tool. Gateway reads use
+a command token bound to `request_id`; lead and worker reads use root-task authority.
+The receiver checks the same owner scope before reading details. System work may read
+only the schedule named by its signed context. A missing or invisible schedule returns
+`not_found`; a refused scope returns `not_allowed`. An offset beyond the text or another
+invalid selection returns `invalid_request`; an unsuccessful read returns `runtime_error`.
+This read has no covered change, stores no outcome and uses `/message_id` as its key.
+
+The request's `offset` and `max_chars` map to `details_offset` and `details_max_chars`.
+The wire accepts 1..4,000 characters per page, the runtime's existing excerpt limit.
+The reply's `detail` keeps `text`, `offset`, `total_chars`, `sha256` and, only when more
+text remains, `next_offset`. An offset at the end returns an empty final page. Offsets
+and lengths count Unicode characters, not UTF-8 bytes, and allow 0..2^53 - 1. The
+receiver serializes the complete safe projection with `ensure_ascii=False` and sorted
+keys before paging. `sha256` is the lowercase hexadecimal SHA-256 of that complete
+UTF-8 text. Callers assemble pages only while it stays unchanged; if it changes, start
+again at zero. `seen_version` alone cannot detect changes to the run ledger because
+the listing digest deliberately leaves those changes out.
+
+The JSON detail projection keeps these existing `schedule_payload` fields, with their
+current names and values, including nulls inside this JSON text:
+`schedule_id`, `record_digest`, `schedule_name`, `management_class`,
+`system_schedule_kind`, `assigned_agent_type`, `enabled`, `paused_until`,
+`expires_at_utc`, `next_fire_at`, `interval_ms`, `cron_expression`, `cron_timezone`,
+`repeat_count`, `objective_id`, `owner_canonical_user_id`, `problem_statement` and
+`schedule_memory`. The last two retain the full instruction and all saved policy,
+state, schema hints, timestamps and ledger entries, including saved results and
+notification history. These flexible JSON records have no fixed total size limit in
+the runtime, so detail paging avoids imposing the 16,384-character bound of a single
+JSON field or silently shortening history. The projection is an explicit allowlist;
+new runtime fields need review before they can leave this read.
+
+The adapter must omit `gateway_context` before serialization and hashing. It must
+never serialize gateway channel addresses, session keys, account ids, headers or
+task-context tokens into these detail pages. The reply may instead carry the existing
+opaque `delivery_ref` and `conversation_id` when available. Only the gateway resolves
+the delivery reference. Ownership checks happen before that reference is issued.
+
+`schedules.install` keeps create, replace, ensure and refresh. An omitted `worker` lets
+the team services fill the lead's type and id, as the runtime does today. A worker object
+may name a type, an exact agent, or both; an empty object also uses that default. The
+receiver still checks the installation mode, provenance and system-schedule permit.
+The `management_class` alternatives forbid `system_schedule_kind` on a user schedule.
+A system schedule may omit its kind and then means `unclassified`, as today. The list
+uses the same alternatives. A failed write can return `runtime_error` and is retried
+without a stored outcome.
+
+Timing is an interval in milliseconds, a cron expression and IANA time zone, or a
+one-time date. Cron text accepts shorthands such as `@daily` and `@hourly`, and `#`
+expressions such as `0 9 * * 1#2`. The receiver validates the text with croniter and the
+zone with ZoneInfo; a character pattern cannot replace those checks. `repeat_count: 0`
+means no repeat limit; a one-time schedule still runs once. Interval milliseconds range
+from 1 through 2^53 - 1 and repeat counts from 0 through 2^53 - 1. The adapter preserves
+the existing tool's whole-second interval conversion and validates that the resulting
+date can be represented. These integer bounds replace the old one-year and 100,000-run
+caps without changing normal schedules.
+
+Run notes keep `schedule_kind`, `policy`, `state` and `domain_schema_hint_json`.
+`policy.notify` is `on_change`, `always` or `never`; `notify_on_failure` is a boolean and
+`evidence_required` is task-defined text. `policy.custom_json`, `state.domain_json` and
+`domain_schema_hint_json` hold the runtime's free JSON objects. The receiver parses them
+as objects. State keeps `summary`, `confidence`, `last_observed_at` and `last_changed_at`.
+Confidence is a string label in 0.9.8, for example `high` or `unknown`, so it stays text.
+Omitted fields use the runtime defaults on install. The execution ledger remains
+runtime-owned; a policy edit must not replace state or ledger entries a run just wrote.
+
+`schedules.update` accepts a partial edit. `clear_name` clears the optional name;
+`clear_expires_at` clears expiration. `time_zone` alone changes an existing cron
+schedule's zone, and `next_fire_at` explicitly moves its next run. `enabled`,
+`paused_until` and `clear_pause` keep the update tool's combined edits; the separate
+pause, resume and disable operations remain available too. `run_notes` patches only its
+supplied fields. Top-level `schedule_kind`, `notify`, `evidence_required` and
+`notify_on_failure` keep the existing tool's policy-only edits. `schedule_memory_json`
+replaces the full stored notes, including a supplied ledger, while `clear_run_notes`
+clears them. Omitted update fields leave the stored values unchanged. Clear flags win
+over values where today's tool does so, including the name; supplying both an expiration
+and its clear flag, both a pause and its clear flag, or both replacement notes and
+`clear_run_notes` returns `invalid_request` with a reason. A run-note patch together with
+`schedule_memory_json` or `clear_run_notes`, or a top-level policy field also supplied
+inside the patch, is refused as ambiguous. The receiver also returns `invalid_request`
+for incompatible stored timing, a bad cron expression or time zone, and invalid repeat
+limits for a one-time schedule.
+
+Successful install, update, pause, resume, disable, remove and worker configuration
+replies may carry `warnings` as `text_content`. Join every runtime `warnings` entry
+and any `manager_report.warning` with a newline, in their original order. Preserve
+the complete text and its recovery instruction. Use a blob when inline text would
+exceed its bound or the frame budget; never shorten or drop warnings. A saved change
+stays `outcome: ok` when history, reporting, scheduler wake, cleanup or a post-save read
+fails. Store that successful outcome with its effects. It is not `runtime_error` and
+must not invite a second mutation.
+
+For a surviving schedule, these successes return `version.state: available` with
+`version.seen_version`, the listing digest read after saving. Copy that digest into a
+later change's request `seen_version`. If the save is known to have succeeded but the
+saved record cannot be read, return `version.state: unavailable`, without a digest,
+and preserve the warning. Do not substitute the input digest or invent one. The caller
+must inspect before changing the schedule again. Install's `timing_revision` is omitted
+when no saved snapshot is available. An update whose runtime result has
+`removed_by_expiration: true` returns `version.state: removed_by_expiration`, with no
+digest because there is no current record. This separate state prevents confusing a
+confirmed deletion with a failed read. A transient digest captured before expiry cleanup
+is not a current version and is not returned. Removal replies
+use `state: removed` without a version; the request already identified the record being
+removed. Expiry removal and explicit removal both remain successful outcomes.
+
+`schedules.set_worker` saves `target_agent_type`, startup `policy`, capability
+requirements, `activate_schedule` and `convert_exact_target`. It clears an exact agent
+target only with explicit conversion. Omitted policy or capabilities keep the saved
+ones; an empty object resets that part to runtime defaults. Policy retains `enabled`,
+`profile_id: local`, `expires_at_utc` and typed rules. Fractional runtime seconds become
+integer `*_ms` fields: claim wait and interrupted-run skip window allow 0..86,400,000;
+startup and admission timeouts 1..3,600,000; retry backoff 1..300,000; optional idle TTL
+1..86,400,000. `max_launch_attempts_per_occurrence` stays 1..10 and `launch_when_busy`
+stays boolean. Millisecond precision is the wire limit; the adapter rejects submillisecond
+values rather than rounding them silently. The operator's tighter limits still apply.
+
+Worker configuration checks both versions before saving, in the same write transaction.
+`seen_version` checks the schedule's listing digest; `seen_policy_revision` separately
+checks the worker policy's integer revision, with 0 for the first policy. A stale schedule
+returns `changed_since_read` with `current_version`; a stale policy returns
+`schedule_worker_policy_revision_conflict` with `current_policy_revision`. If both changed,
+the schedule check comes first. The success reply returns the schedule version result and
+policy revision, `pending_current_claim`, enabled flags, saved policy and requirements,
+readiness, missing access and a summary. A current claim finishes before reassignment.
+Activation keeps a known-blocked draft disabled. A protected change returns
+`approval_required` with its `change_id` for `apply_change`, as today.
+
+The worker service's other refusals use `invalid_request.reason`, preserving the exact
+code: `exact_target_requires_explicit_conversion`,
+`local_workers_require_supported_root_schedule`, `schedule_requires_canonical_owner`,
+`worker_policy_already_expired` or the system timer's `<family>_requires_<type>` code.
+Access and owner-scope refusals remain `not_allowed` and missing schedules `not_found`.
+
+Three operations keep the existing worker tools available to remote hosts:
+
+- `schedules.inspect_worker` keeps `inspect_scheduled_worker`. The lead names a schedule;
+  a worker may omit the id and sees only the schedule in its current persisted custody.
+  It returns the schedule digest and policy revision, registration and eligibility,
+  requested, inherited and effective rules, readiness, observed requirements, launch and
+  occurrence diagnostics, definition changes and repair instructions. Unsupported system
+  or child timers report `worker_configuration_supported: false` with `execution_json`;
+  absent diagnostics are omitted rather than null. Suggested refreshes name the current
+  policy revision. Dynamic inspection dictionaries use `*_json`; launch and admission
+  durations use `spawn_to_ready_ms` and `due_to_admission_ms`.
+- `schedules.prepare_access` keeps `prepare_scheduled_job_access`. An optional target type
+  and capability requirements preview readiness without saving them. Omission uses the
+  saved values. Readiness keeps `ready`, `provisional` or `blocked`, each check's
+  `ready`, `deferred` or `blocked` status, reason, required flag and missing holders.
+  Capabilities keep up to 64 requirements, each with `capability_id`, `operation`,
+  `necessity: required|conditional`, `resource_constraints_json` and
+  `source: declared|observed|approved`, plus `runtime_discovery`.
+- `schedules.authorize_access` keeps `authorize_scheduled_job_access`. The lead supplies
+  the saved `seen_policy_revision`; a stale policy returns the same revision refusal as
+  configuration. It gives only access the lead may hand on, ends obsolete setup grants,
+  and returns `given`, `waiting`, `ask_a_person`, `ended` and `next_step` under
+  `access.status: reviewed`. With authorization off, `access.status: not_needed` says
+  why no grant is needed. Waiting reviews do not grant access or start a worker. Access
+  approved in a run remains attached to that schedule. This is an access change, not a
+  covered schedule write, matching the catalog's `record_kind: none`.
+
+The new reads use `/message_id` as their retry key; authorization uses `/body/request_id`
+and stores its final outcome with its effects. All three use root-task authority and
+the same team-service routing as the other agent operations. Schedule controls keep their
+required `seen_version`; the operator command line must list first too.
+
+Names, schedule kinds, evidence text, confidence labels and JSON text have a generous
+16,384-character wire bound because the runtime supplies no upper bound. Cron text is
+bounded at 4,096 characters. Each diagnostic reason is bounded at 4,096; readiness and
+missing-access lists at 64; eligibility types and ended-grant ids at 256; eligibility
+instructions at 16. These limits must contain the instance's settings and saved data.
+Instructions, fixed messages, summaries and repair explanations use `text_content`, so
+large text can use a blob. Every serialized frame must still fit 262,144 bytes, including
+JSON escaping and UTF-8 encoding. The receiver pages list rows to fit that budget and
+refuses an oversized single command rather than truncating its values. The adapter must
+check stored diagnostic JSON against its bound; these choices require acceptance tests
+with the destination's saved data before switching the runtime to this contract.
+
+### People, tasks, agent status and steering
+
+`people.set_standing` returns the manager's actual work counts, including deleted
+task records, Objectives and schedules, held and restored records, deleted sandboxes,
+and team schedules moved to another administrator. Gateway-owned grant and access
+request changes are not manager counts. A repeated command returns its saved result.
+
+`tasks.inventory` pages a combined sequence of roots, then schedules, each ordered
+by its id. `offset` and `limit` select that sequence; `total` counts both kinds.
+For each returned root, `child_offset` and `child_limit` select children ordered by
+task id, with `children_total` and `next_child_offset` to continue. Repeat the same
+root window with the next child offset to read a larger graph. Senders may shorten
+either window to fit the frame, but never silently discard members. The maximum
+window is 100 roots or schedules and 200 children per root. Blockers use
+`text_content` so the full waiting reason can be read from a blob when necessary.
+Schedule entries retain `objective_id` for scheduled-Objective counts and may omit
+their name, as today. `tasks.list` keeps blockers and latest activity;
+`tasks.list_finished` keeps the owner's display name. Task ids in these lists are
+the root task ids. Both list replies return `next_offset` only when more remain.
+After a cancel or Objective control, the gateway reads the inventory again to show
+the refreshed work list.
+
+`agent.status` uses today's finding severities, `problem`, `warning` and `note`.
+Context measurements are absent when unavailable, including an idle agent. Tools,
+skills and findings may be absent in a basic answer. A full answer is allowed only
+for the team's lead, checked against its current session by the receiver.
+Per-mille values are the measured ratio multiplied by 1,000 and rounded to the
+nearest integer. They may exceed 1,000 when a budget is exceeded; the contract
+allows up to 1,000,000. The diagnostic JSON string stays bounded at 65,536 characters.
+
+`intent.set` uses integer versions in its request, successful reply and
+`changed_since_read.current_version`; a stale reply always includes that value.
+For `steering.decide`, `type: person_as_is` carries no replacement text or
+attachments. The team services copy the person's stored text, attachments and
+replied message using `person_steering_id`. `type: guidance` with `source: lead`
+carries the lead's own words. This prevents a lead's paraphrase from being sent
+as the person's unchanged steering.
+
+## Covered changes
+
+Two of a person's requests can run at once and change the same stored record. The stores
+refuse a change that was based on an older read, and a change to a record that another
+request changed while this one ran (`storage.change_ledger`). An operation that changes
+such a record states `covered_change: {record_kind, seen_version}` in the registry. Only
+request/reply operations have one, and the generator checks the operation's body, reply
+and key against it.
+
+**Record kinds.** `record_kind` is one of `covered_record_kinds`, which are the
+store-safety code's `ChangeRecordKind` names; a test keeps the two lists equal.
+- `memory_fact`, `knowledge_page`, `schedule`, `objective` and `heartbeat_item` each name
+  one stored record.
+- `staged_change` is a staged platform plan, which can change several records when it is
+  applied.
+- `file` has no operation yet. Files stay with the host that has the folder, and
+  `record_busy` covers a file that another request is writing.
+
+**The version the writer read.** `seen_version` in the body is the record's version as
+the writer last read it. The registry value says who must send it:
+- `required`: every sender sends it, and the body requires it. People's controls in the
+  gateway already send the version they listed, for example the chat and page controls
+  of schedules and Objectives.
+- `required_for_request_writers`: every request writer must send it; a person's command
+  through the gateway may leave it out, and then acts on the record it names without a
+  check. Request writers are agents: a lead or worker host sends their frames for them,
+  with a token bound to the root task the agent works on (a person's request or a
+  scheduled run). This is today's rule for memory: agent tools must name the fact's
+  version, and people's own commands name a fact by the number they see
+  (`custom_agents.pinned_memory_runtime`).
+- `optional`: any sender may send it, and the receiver checks it when it is given.
+  `knowledge.write` works as today for every writer: without a version it creates a page,
+  and is refused with `page_exists` when the name is taken; with one it edits the page
+  while the page still has that revision (`knowledge_base.service`).
+- `none`: there is no version, and the body has no `seen_version`. A create or a note has
+  nothing to read first (`memory.create`, `objectives.create`, `heartbeat_items.add`,
+  `knowledge.add_note`), and `memory.undo` names the event it reverses.
+
+The body offers the field without requiring it for `required_for_request_writers`,
+because a schema cannot tell an agent from a person. The receiver checks it: it refuses
+an agent's change without a version with the operation's `invalid_request` reply, and
+changes nothing. An operation that only creates a record has no version to send, so
+`schedules.install` sends one when it changes a stored schedule.
+
+Every sender, the operator's command line included, reads the record before it changes
+it, and sends the version it read wherever the operation takes one. Today's `cron` and
+`heartbeat` commands send none and must list first once they use these operations.
+
+**What the version is.** The version is the store's own, as today's code computes it, and
+it travels as a string:
+
+| Record kind | Version |
+| --- | --- |
+| `memory_fact` | the fact's record digest (`pinned_memory_record_digest`): bank, owner, number, internal id and last change time, so a fact that later takes the same number has another one |
+| `knowledge_page` | the page revision as a decimal string, such as `"3"` |
+| `schedule` | the schedule's listing digest (`schedule_listing_digest`), which leaves out what runs change by themselves |
+| `objective` | two digests today: people's controls compare a digest of the whole record, and the lead's updates compare `objective_version`, which leaves out status, progress and other bookkeeping so that running work does not refuse an agent's edit. The Objectives section of this README states which operation uses which |
+| `heartbeat_item` | the item's version (`heartbeat_item_version`), a digest of its id, title, instruction, target agent type and Objective, never of its run times |
+| `staged_change` | the staged plan's digest (`plan_digest`) that the staging tool returned; today `apply_change` refuses a plan whose digest changed after approval |
+
+**Shared refusals.** A covered operation offers the shared refusals (`change_refusals`)
+that can happen to it, each with its data:
+- `changed_since_read` carries `current_version`, the record's version now. It is
+  required wherever a writer may send a version, so the writer can read again and decide
+  from what changed. `memory.undo` sends no version but can still be refused this way:
+  today an undo is refused when the fact changed after the event or its number now holds
+  another fact. Its `current_version` is absent when the number holds no fact. The
+  creates cannot be stale, so they do not offer `changed_since_read`.
+- `change_conflict` carries the conflict's `case_id` and its `brief`, a blob reference.
+- `request_closed` may carry the request's state.
+- `needs_person_decision` may carry the `case_id` the person decides.
+- `record_busy` carries `retry_at`, when to try again.
+
+`change_conflict`, `needs_person_decision` and `record_busy` come only from the checks of
+covered records, so the generator refuses them on an operation without `covered_change`.
+`changed_since_read` and `request_closed` also answer the lead's operations on its own
+request (`intent.set`, `custody.decide`, `requests.pause`, `requests.resume`), which change
+the request itself and no covered record.
+
+These replies include the conflict cases planned for phase 4. Until those cases
+exist, agent tool writes keep calling today's stores directly: moving them onto
+these operations earlier would leave no `case_id` or `brief` to return. Gateway
+commands may move separately because the request-specific conflict rule does not
+refuse a person's own edits.
+
+## Stored outcomes
+
+A request/reply operation that changes something is carried out once per command, however
+often the sender retries it. Its retry key is its idempotency key, made from the parts its
+registry entry lists ("Idempotency keys").
+
+- **Stored with the change.** The receiver of a change operation stores the final outcome
+  under the team and the retry key, in the same transaction as the change, before it
+  replies. A repeat of the key gets the stored reply and changes nothing.
+- **Kept 7 days.** The receiver keeps an outcome for at least 7 days, the longest
+  lifetime of an authority token (`authority_token_max_seconds`).
+- **Reads store nothing.** A read is keyed by `/message_id`, so every frame is a new read
+  and a retry reads again.
+- **Outcomes that ask for a retry are not stored.** For outcomes in `retry_outcomes` the
+  receiver stores nothing, so a retry with the same key is decided again:
+  - `not_started`: `tasks.steer` while the request still waits behind other work. Today
+    the gateway holds such guidance and sends it again under the same id until the lead
+    accepts it (`assistant_gateway.application.thread_guidance`), and the lead records
+    an id only when it accepts the guidance (`custom_agents.task_steering_runtime`). A
+    stored `not_started` would answer every later retry, and the guidance would be lost.
+  - `record_busy`: another request is writing the file or sign-in; the reply says when
+    to try again.
+  - `waiting`: `staged_changes.apply` while the person has not decided yet.
+  - `runtime_error`: the receiver failed, and its transaction changed nothing.
+- **Fresh ids.** The ids in key parts (`request_id`, `steer_id` and the others) are made
+  fresh by the sender for each new command, as a UUIDv7 or at least 128 random bits, and
+  kept when the same command is retried. A sender never reuses one for another command.
+  Keys do not name their sender: fresh ids keep two hosts' commands apart, and a retry
+  that another gateway process sends (held guidance can move between them) still finds
+  the stored outcome. The examples use short ids so that they are easy to read.
+- **A repeated key with another body** is a sender defect. The receiver answers with
+  the stored outcome, changes nothing, and logs both body digests.
+- **No per-frame parts.** A retry is a new frame, so the key of a covered change never
+  uses a part that changes with every frame: `/message_id`, `/idempotency_key`,
+  `/issued_at`, `/not_before`, `/expires_at`, `/body_digest` or `/signature`. Such a key
+  would never find the stored outcome. The generator refuses one.
+
+## Reply size
+
+A reply never exceeds `max_frame_bytes`, like every frame.
+- A list reply returns fewer items than asked when more would not fit. It says how many
+  items there are in all (`total`) and where to continue (`next_offset`), and the caller
+  asks again from there. `next_offset` is present only when more items remain.
+  Agent knowledge searches omit `total` because the existing search service
+  provides continuation without a matching count, as described under Knowledge.
+- The request says where to start and how many items it wants (`offset` and `limit`).
+- Long text goes by blob reference wherever the schema offers `text_content`.

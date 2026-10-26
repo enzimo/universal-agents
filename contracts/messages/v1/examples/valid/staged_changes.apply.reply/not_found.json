@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "staged_changes.apply.reply",
+  "message_id": "1a7c8831-7881-76fc-a67a-ae4fa9191731",
+  "idempotency_key": "staged_changes.apply.reply:o7et_zgBJd02zZTFep9mLIy-Ulv865Q3XOYm0qLL-PU",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-74cf-8000-0000000004cf",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "not_found",
+    "message": "The named record no longer exists."
+  },
+  "causation_id": "01928f3a-7b2c-74cf-8000-0000000004cf",
+  "body_digest": "iMGS3JzlC67jiHbH7dsCnNHKgm3LJgDWOB9T1RtBUeM",
+  "signature": "FPmoFH9x5jtqiCj9r35vbn54D0K9u6RsHJPtOkq19nYh3qMx2MAc9kKQwJEuH3WsFTy5qHe293rb8frdsS6OAA"
+}

@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "memory.replace",
   "message_id": "01928f3a-7b2c-7452-8000-000000000452",
-  "idempotency_key": "memory.replace:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "memory.replace:ui7-AnYn1tATIb0dhTRARGb9PR-79tZWZjr5JGrJ6a4",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -35,26 +35,31 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000150"
+      "id": "cmd_memory_replace"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "nUJrmR9CBKUSiM0QMzs7TFnK1bgGVy29ywSf2ynZJZNfdl7s5YVLw825081HigAwefRpqHq8ZHWhtoi82ljNDg"
+    "signature": "gGQ09H4nAgBgAsqs6UFdjtxVb-CmqrPXJ7nBQ6-BqJ1cKKa3jeYfF8PQhzywe3xzqDtqt-sZvXX53Enl7FavBw"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
+    "request_id": "cmd_memory_replace",
     "bank": "coremem",
     "memory_id": 3,
-    "seen_version": "v3",
-    "fact_text": "Example fact text",
+    "seen_version": "85c8ca789a0caf0a4d6e33cbd583ca10879683806898c53b262d6aa06597d50d",
+    "fact_text": {
+      "type": "inline",
+      "text": "Use UTC when recording deployment times."
+    },
     "tags": [
-      "Example tags"
+      "operations",
+      "deployment"
     ],
     "valid_from": "2026-10-22T04:30:00.000Z",
-    "expires": "2026-10-22T04:30:00.000Z"
+    "expires": "2026-10-23T04:30:00.000Z",
+    "metadata_json": "{\"resume_section\":\"deployment\"}"
   },
-  "body_digest": "LRNhvs0O98zjaHmDEeZNxix4LAzd9cRuZIL3PaNwV7g",
-  "signature": "RRqFXKCcQz3pPth40rqeGPqPWgbhCF-jDEYf6UqKJjju9IcMf2FbHswMr-zyBQRFDQXBs0UCFrEnFVuc0jIaBA"
+  "body_digest": "_BHOXy9ZrtVbJiZYFhFsM8QgiypcbycozFYKJcHgv7Y",
+  "signature": "7LPLRKxqtoaCSn59H5QM_IzawZcCAjB-l0xjq1qnJ-jnoSMBro4RedjhrjUERJThBCu8ZgklsL8cZDrPJZ7LBA"
 }

@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "objectives.update_status",
-  "message_id": "01928f3a-7b2c-742b-8000-00000000042b",
-  "idempotency_key": "objectives.update_status:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "message_id": "71f250df-fe32-7cea-b9c2-7e794ea72127",
+  "idempotency_key": "objectives.update_status:2RFvGnDXn_v8Pyt-WTbL_Lufa0lQsSuAeLfq7mdhXVg",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -46,13 +46,23 @@
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
-    "objective_id": "objective_id_1",
-    "seen_version": "v3",
-    "status": "proposed",
-    "note": "Example note",
-    "confirmed": true
+    "request_id": "request_objectives_update_status",
+    "objective_id": "objective_dependency_watch",
+    "seen_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+    "status": "satisfied",
+    "summary": {
+      "type": "inline",
+      "text": "The requested dependency checks are complete."
+    },
+    "satisfied_by_current_task": true,
+    "task_id": "task_root_7f",
+    "plan_id": "plan_dependency_watch",
+    "user_visible": true,
+    "user_confirmation_summary": {
+      "type": "inline",
+      "text": "The person reviewed the report and confirmed that the requested checks are complete."
+    }
   },
-  "body_digest": "pRw0NmZFYFTF_P8uF-3p8DpMO_Tl35_NRh_Cz5DUaHQ",
-  "signature": "eDwaLqk3fhiVlo9m42LjXyBcDtuYz7sSJoY5GBnC4VuSj-OXvRKbeHFkZdHRFsTK73IENvgMg5xfA_fse398Dw"
+  "body_digest": "5WFJ2XQTlfqibVwNCBoKWYXPSlO84k-Il-kuotopSX0",
+  "signature": "B1kOZ8S_w1WtJwkzd6F2sglHSfXrXrakgnEtvcDCZ7-RseVFkE0e_9GW_n9Y0_biWjgnmI9vIxcon2PF0rg7DA"
 }

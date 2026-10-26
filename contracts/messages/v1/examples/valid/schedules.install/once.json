@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.install",
   "message_id": "01928f3a-7b2c-7a07-8000-000000000a07",
-  "idempotency_key": "schedules.install:q4w5zaZePN54W0j_LjDb4WSRBdP3IgAotct2FkcorOM",
+  "idempotency_key": "schedules.install:u8jGPx4Mqb7dDDET-kvMf8gQPpOQOGH7n3dMtUcfj3w",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -21,7 +21,7 @@
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
-    "token_id": "01928f3a-7b2c-7170-9000-000000000170",
+    "token_id": "01928f3a-7b2c-7000-9000-00000000c008",
     "issuer": {
       "installation": "install_example",
       "runtime": "gateway-1",
@@ -35,59 +35,56 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000170"
+      "id": "req_schedules_install_once"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "r4lZm7KIEX2tQKdjQg5SoqZ15o3U8cpCIKNpV1R-tXCTPnSHo44z0xMGdtL2_JY6KYkbBlTm3PNAjUjO73mTAQ"
+    "signature": "ZNVmoDWNDcq81_KJSBpz444-J5GrzyKr_IZIRt_25sfKtiO_qhckm4xuaUebt5ablAOo2Gjrv-V3bHbPFUxoDQ"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_3",
+    "request_id": "req_schedules_install_once",
     "schedule_id": "schedule_id_1",
     "mode": "create",
-    "seen_version": "v3",
-    "name": "Example name",
+    "name": "Review product documentation",
     "management_class": "user",
-    "system_schedule_kind": "unclassified",
     "objective_id": "objective_id_1",
     "worker": {
-      "agent_type": "token_id_1",
-      "agent_id": "token_id_1"
+      "agent_type": "WebResearchAgent",
+      "agent_id": "researcher-2"
     },
     "timing": {
       "kind": "once",
       "at": "2026-10-23T07:00:00.000Z"
     },
     "repeat_count": 3,
-    "expires_at": "2026-10-22T04:30:00.000Z",
-    "paused_until": "2026-10-22T04:30:00.000Z",
+    "expires_at": "2026-11-22T09:00:00.000Z",
+    "paused_until": "2026-10-23T09:00:00.000Z",
     "enabled": true,
     "action": {
       "type": "task",
-      "instruction": "Example instruction",
-      "attachments": [
-        {
-          "attachment_id": "attachment_id_1",
-          "blob": {
-            "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
-            "size": 3,
-            "media_type": "application/pdf",
-            "name": "Example name"
-          },
-          "kind": "image",
-          "caption": "Example caption"
-        }
-      ]
+      "instruction": {
+        "type": "inline",
+        "text": "Review the product documentation and report material changes."
+      }
     },
     "run_notes": {
-      "schedule_kind": "schedule_kind_1",
+      "schedule_kind": "product documentation / weekly review",
       "policy": {
-        "notify": true,
+        "notify": "on_change",
         "notify_on_failure": true,
-        "evidence_required": true
-      }
+        "evidence_required": "fresh authoritative source",
+        "custom_json": "{\"product\":\"example\",\"only_material_changes\":true}"
+      },
+      "state": {
+        "summary": "No material changes in the latest review.",
+        "confidence": "high",
+        "last_observed_at": "2026-10-22T04:30:00.000Z",
+        "last_changed_at": "2026-10-15T09:00:00.000Z",
+        "domain_json": "{\"last_release\":\"0.9.8\"}"
+      },
+      "domain_schema_hint_json": "{\"last_release\":\"string\"}"
     },
     "decisions_ahead": [
       {
@@ -101,6 +98,6 @@
       "time_zone": "Europe/Berlin"
     }
   },
-  "body_digest": "J5J9a1ZLTH_4hqQBkaoXAYwyvevzSgaerimbNQetQU0",
-  "signature": "WUEZ_0NDfkWzk6S1yiUJfmQK2iVpHwSnDHLGbIdmJdfU2bH0BU65lyef0geRnb9jOMapq1BbBapUCZ_UibwOCQ"
+  "body_digest": "6GlUL-mGdPYDngW1TCevrg6Yns80SwPoDKubFL30sY0",
+  "signature": "cbtzkjVNuOh7m8k4KnGvJf8oCgylLPwrgn-cfxHQ4rfVPWoCOjjK4aSM018bSoD34Y1d8ghPWQhc4Y2jlQMqAA"
 }

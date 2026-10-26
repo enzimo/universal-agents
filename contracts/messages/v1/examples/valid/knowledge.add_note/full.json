@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "knowledge.add_note",
   "message_id": "01928f3a-7b2c-7470-8000-000000000470",
-  "idempotency_key": "knowledge.add_note:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "knowledge.add_note:tey74kKXFagvqFzFuhsS1XLorthOZTfP-tmLFxz-S9U",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -35,21 +35,24 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000127"
+      "id": "kb_add_note_full"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "yYdTxDfNEzJZSLzwhNMtS7c06RnYTPhJDd8snTwjJj9i6gSEMhmcJtamJiMSnkjtial03mIIDWZx3AijUQWpCg"
+    "signature": "PZNIuXJnOQv5Dyg5PJmOcWMOrVHy5SifHxK8gMKovOW1qnG84FeJ1iQC7SpxB3UePEyHagB_5l3bqZY26t6DCw"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
+    "request_id": "kb_add_note_full",
     "space": "team",
-    "page": "Example page",
-    "note": "Example note",
+    "page": "deployment-guide",
+    "note": {
+      "type": "inline",
+      "text": "Check that the rollback steps match the current release."
+    },
     "confirm_review": true
   },
-  "body_digest": "qwwe_WEPnyLIPh2m9u_sjYeLHK1AvdpY6uOrSbN1oEk",
-  "signature": "LfNqulvkoMC0_2MvddznVROYexwZ5hdAl-IHcwV5mpjeELUpVJ8yOq-WnSXaaDVTK3oAqB3CbbcnGqMKq6JpBA"
+  "body_digest": "5Pp90IhISVMMiFnLN1EDlGuqREQ5LnkQtyTv9rNp75k",
+  "signature": "doSrHJOhwZ1I_ZfZVXJoIQ7pexMItdAA646W_JwsTxXBxo88skB6C9Tve_slQJ_7KKEOivAxkuB9hJiAWurbAg"
 }

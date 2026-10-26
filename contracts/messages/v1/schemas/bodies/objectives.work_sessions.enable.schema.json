@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/objectives.work_sessions.enable.schema.json",
+  "title": "objectives.work_sessions.enable request",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "objective_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "confirmation_summary": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "profile_name": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 16384
+    },
+    "confirmed": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "request_id",
+    "objective_id",
+    "task_id",
+    "confirmation_summary"
+  ],
+  "additionalProperties": false
+}

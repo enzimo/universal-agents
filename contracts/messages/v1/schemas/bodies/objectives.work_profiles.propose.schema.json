@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/objectives.work_profiles.propose.schema.json",
+  "title": "objectives.work_profiles.propose request",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "profile_name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "profile": {
+      "type": "object",
+      "properties": {
+        "cadence_cron": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "cadence_timezone": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "budget": {
+          "type": "object",
+          "properties": {
+            "active_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "checkpoint_reserve_seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "checkpoint_reserve_turns": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "checkpoint_reserve_tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "checkpoint_reserve_tool_calls": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "turns": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "total_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "tool_calls": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "active_seconds",
+            "checkpoint_reserve_seconds",
+            "checkpoint_reserve_turns",
+            "checkpoint_reserve_tokens",
+            "checkpoint_reserve_tool_calls",
+            "turns",
+            "total_tokens",
+            "tool_calls"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "cadence_cron",
+        "budget"
+      ],
+      "additionalProperties": false
+    },
+    "rationale": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "scope": {
+      "type": "string",
+      "enum": [
+        "objective",
+        "reusable"
+      ]
+    },
+    "objective_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "replace_existing": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "request_id",
+    "task_id",
+    "profile_name",
+    "profile",
+    "rationale"
+  ],
+  "additionalProperties": false
+}

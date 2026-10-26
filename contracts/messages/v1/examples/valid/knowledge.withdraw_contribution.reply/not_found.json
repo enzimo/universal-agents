@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "knowledge.withdraw_contribution.reply",
-  "message_id": "01928f3a-7b2c-7487-8000-000000000487",
-  "idempotency_key": "knowledge.withdraw_contribution.reply:oZPc8qMvmwKPPRAs9eelwdoPv9cqaFa6N7fsiAaCVu4",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000508e",
+  "idempotency_key": "knowledge.withdraw_contribution.reply:LCXFpehByC2OGm9t4prKuEGXbGILyH68mWrXl4pcnV4",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -24,9 +24,9 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "not_found",
-    "message": "Example short text"
+    "message": "The requested page, revision, note or contribution was not found."
   },
   "causation_id": "01928f3a-7b2c-7485-8000-000000000485",
-  "body_digest": "kjF9c_l0diFRNuvYGjQmkStmu5fcSEld8Fzu2xnpRcU",
-  "signature": "ySqPnvJ64xUlTacY3mF1y2sUjJXIv2bq6cw_3nGmSz6Tf_8Eiw-zZxU8fSyOR_oh6M1U9-79GrR95NEDk5cbBA"
+  "body_digest": "D32h1Y8tDHiciQc7Rob3bs-oWzKJVXDTwPLTf0pz4c0",
+  "signature": "MZHVnb1hlaFZHCqo65Aw9QfoJ2cunQr75i1haESQ5xk5l_iwkE9xmbdQaUZcXelIrIMXd7Dzrr8EA5uOpWkuCQ"
 }

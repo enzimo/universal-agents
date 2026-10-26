@@ -1,6 +1,7 @@
 {
   "authority_token_domain": "universal-agents/authority-token/v1",
   "authority_token_max_seconds": 604800,
+  "certificate_overlap_seconds": 300,
   "change_refusals": [
     {
       "code": "changed_since_read",
@@ -22,6 +23,16 @@
       "code": "record_busy",
       "meaning": "another request is writing the file or sign-in; carries when to try again"
     }
+  ],
+  "command_token_max_seconds": 300,
+  "covered_record_kinds": [
+    "memory_fact",
+    "knowledge_page",
+    "schedule",
+    "objective",
+    "heartbeat_item",
+    "file",
+    "staged_change"
   ],
   "decision_token_domain": "universal-agents/decision-token/v1",
   "frame_schema": "frame.schema.json",
@@ -247,6 +258,7 @@
       "description": "Stop an agent after its current step.",
       "expiry_seconds": 30,
       "idempotency": [
+        "/audience/id",
         "/body/request_id"
       ],
       "ledger": "none",
@@ -263,7 +275,7 @@
       "senders": [
         "lead_host"
       ],
-      "topology_edge": "none",
+      "topology_edge": "down",
       "wakes_model": "never"
     },
     "agent.pause": {
@@ -315,6 +327,7 @@
       "description": "Resume a paused agent.",
       "expiry_seconds": 30,
       "idempotency": [
+        "/audience/id",
         "/body/request_id"
       ],
       "ledger": "none",
@@ -334,7 +347,7 @@
         "lead_host",
         "team_services"
       ],
-      "topology_edge": "none",
+      "topology_edge": "down",
       "wakes_model": "never"
     },
     "agent.status": {
@@ -370,7 +383,7 @@
         "team_services",
         "gateway"
       ],
-      "topology_edge": "none",
+      "topology_edge": "down",
       "wakes_model": "never"
     },
     "conflicts.cancel": {
@@ -382,6 +395,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/conflicts.cancel.schema.json",
@@ -419,6 +433,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/conflicts.decide.schema.json",
@@ -458,6 +473,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/conflicts.list.schema.json",
@@ -619,7 +635,10 @@
       "wakes_model": "never"
     },
     "debug.dump": {
-      "address": "svc.team.debug.dump",
+      "address": [
+        "svc.team.debug.dump",
+        "ctl.agent.{agent}.debug.dump"
+      ],
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -627,6 +646,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/debug.dump.schema.json",
@@ -638,7 +658,9 @@
       ],
       "ledger": "none",
       "receivers": [
-        "team_services"
+        "team_services",
+        "lead_host",
+        "worker_host"
       ],
       "rendering": "none",
       "reply": {
@@ -649,8 +671,17 @@
       },
       "routing": "team",
       "senders": [
-        "gateway"
+        "gateway",
+        "team_services"
       ],
+      "senders_by_address": {
+        "ctl.agent.{agent}.debug.dump": [
+          "team_services"
+        ],
+        "svc.team.debug.dump": [
+          "gateway"
+        ]
+      },
       "topology_edge": "none",
       "wakes_model": "never"
     },
@@ -738,15 +769,15 @@
       "authority": "none",
       "body": "bodies/dlq.notice.schema.json",
       "class": "dead_letter",
-      "description": "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only.",
+      "description": "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only. The team services tell administrators.",
       "expiry_seconds": 2592000,
       "idempotency": [
+        "/issuer/runtime",
         "/body/copy_id"
       ],
       "ledger": "none",
       "receivers": [
-        "team_services",
-        "installation_authority"
+        "team_services"
       ],
       "rendering": "none",
       "routing": "team",
@@ -775,6 +806,10 @@
       },
       "body": "bodies/heartbeat_items.add.schema.json",
       "class": "request_reply",
+      "covered_change": {
+        "record_kind": "heartbeat_item",
+        "seen_version": "none"
+      },
       "description": "The lead adds a heartbeat item.",
       "expiry_seconds": 30,
       "idempotency": [
@@ -790,7 +825,6 @@
         "errors": [
           "not_found",
           "objective_link_refused",
-          "changed_since_read",
           "change_conflict",
           "request_closed",
           "needs_person_decision",
@@ -889,6 +923,42 @@
           "request_closed",
           "needs_person_decision",
           "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "heartbeat_items.list": {
+      "address": "svc.team.heartbeat_items.list",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/heartbeat_items.list.schema.json",
+      "class": "request_reply",
+      "description": "The lead reads heartbeat items and their versions.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/heartbeat_items.list.reply.schema.json",
+        "errors": [
           "runtime_error"
         ]
       },
@@ -1006,6 +1076,8 @@
       "description": "A new host asks to join the installation; the frame is signed with the key it presents.",
       "expiry_seconds": 30,
       "idempotency": [
+        "/issuer/runtime",
+        "/issuer/key_id",
         "/body/join_id"
       ],
       "ledger": "none",
@@ -1048,6 +1120,7 @@
       "description": "A host renews its certificate and connection credential, or rotates its keys.",
       "expiry_seconds": 30,
       "idempotency": [
+        "/issuer/runtime",
         "/body/renew_id"
       ],
       "ledger": "none",
@@ -1123,14 +1196,28 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/knowledge.add_note.schema.json",
       "class": "request_reply",
+      "covered_change": {
+        "record_kind": "knowledge_page",
+        "seen_version": "none"
+      },
       "description": "Add a note to a knowledge page.",
       "expiry_seconds": 30,
       "idempotency": [
@@ -1148,18 +1235,11 @@
           "not_found",
           "not_allowed",
           "feature_off",
-          "page_exists",
-          "merged",
           "review_required",
           "sensitive_content",
           "limit_reached",
-          "page_frozen",
-          "repeats_recent_revision",
           "personal_space_unavailable",
-          "saved_write_mismatch",
-          "contribution_not_pending",
           "invalid_request",
-          "changed_since_read",
           "change_conflict",
           "request_closed",
           "needs_person_decision",
@@ -1184,12 +1264,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/knowledge.archive.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -1213,7 +1303,6 @@
           "not_found",
           "not_allowed",
           "feature_off",
-          "page_exists",
           "merged",
           "review_required",
           "sensitive_content",
@@ -1221,8 +1310,6 @@
           "page_frozen",
           "repeats_recent_revision",
           "personal_space_unavailable",
-          "saved_write_mismatch",
-          "contribution_not_pending",
           "invalid_request",
           "changed_since_read",
           "change_conflict",
@@ -1249,12 +1336,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/knowledge.count_contributions.schema.json",
       "class": "request_reply",
       "description": "How many contributions wait for a curator.",
@@ -1297,10 +1394,6 @@
       },
       "body": "bodies/knowledge.freeze.schema.json",
       "class": "request_reply",
-      "covered_change": {
-        "record_kind": "knowledge_page",
-        "seen_version": "required"
-      },
       "description": "A curator freezes a page.",
       "expiry_seconds": 30,
       "idempotency": [
@@ -1317,22 +1410,8 @@
           "not_found",
           "not_allowed",
           "feature_off",
-          "page_exists",
-          "merged",
-          "review_required",
-          "sensitive_content",
-          "limit_reached",
-          "page_frozen",
-          "repeats_recent_revision",
           "personal_space_unavailable",
-          "saved_write_mismatch",
-          "contribution_not_pending",
           "invalid_request",
-          "changed_since_read",
-          "change_conflict",
-          "request_closed",
-          "needs_person_decision",
-          "record_busy",
           "runtime_error"
         ]
       },
@@ -1352,12 +1431,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/knowledge.history.schema.json",
       "class": "request_reply",
       "description": "A knowledge page's revisions.",
@@ -1376,6 +1465,7 @@
           "not_found",
           "not_allowed",
           "feature_off",
+          "personal_space_unavailable",
           "runtime_error"
         ]
       },
@@ -1396,12 +1486,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/knowledge.list.schema.json",
       "class": "request_reply",
       "description": "List knowledge pages.",
@@ -1419,6 +1519,7 @@
         "errors": [
           "not_allowed",
           "feature_off",
+          "personal_space_unavailable",
           "runtime_error"
         ]
       },
@@ -1439,12 +1540,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/knowledge.list_contributions.schema.json",
       "class": "request_reply",
       "description": "Contributions waiting for a curator.",
@@ -1507,16 +1618,11 @@
           "not_found",
           "not_allowed",
           "feature_off",
-          "page_exists",
           "merged",
           "review_required",
           "sensitive_content",
-          "limit_reached",
           "page_frozen",
-          "repeats_recent_revision",
           "personal_space_unavailable",
-          "saved_write_mismatch",
-          "contribution_not_pending",
           "invalid_request",
           "changed_since_read",
           "change_conflict",
@@ -1542,17 +1648,27 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/knowledge.publish_contribution.schema.json",
       "class": "request_reply",
       "covered_change": {
         "record_kind": "knowledge_page",
-        "seen_version": "required"
+        "seen_version": "optional"
       },
       "description": "Publish a contribution, edited or as it is.",
       "expiry_seconds": 30,
@@ -1572,13 +1688,8 @@
           "feature_off",
           "page_exists",
           "merged",
-          "review_required",
           "sensitive_content",
-          "limit_reached",
-          "page_frozen",
-          "repeats_recent_revision",
           "personal_space_unavailable",
-          "saved_write_mismatch",
           "contribution_not_pending",
           "invalid_request",
           "changed_since_read",
@@ -1606,12 +1717,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/knowledge.read.schema.json",
       "class": "request_reply",
       "description": "Read a knowledge page.",
@@ -1630,6 +1751,7 @@
           "not_found",
           "not_allowed",
           "feature_off",
+          "personal_space_unavailable",
           "runtime_error"
         ]
       },
@@ -1650,12 +1772,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/knowledge.read_contribution.schema.json",
       "class": "request_reply",
       "description": "Read one contribution.",
@@ -1699,10 +1831,6 @@
       },
       "body": "bodies/knowledge.reject_contribution.schema.json",
       "class": "request_reply",
-      "covered_change": {
-        "record_kind": "knowledge_page",
-        "seen_version": "required"
-      },
       "description": "A curator rejects a contribution.",
       "expiry_seconds": 30,
       "idempotency": [
@@ -1719,22 +1847,9 @@
           "not_found",
           "not_allowed",
           "feature_off",
-          "page_exists",
-          "merged",
-          "review_required",
           "sensitive_content",
-          "limit_reached",
-          "page_frozen",
-          "repeats_recent_revision",
-          "personal_space_unavailable",
-          "saved_write_mismatch",
           "contribution_not_pending",
           "invalid_request",
-          "changed_since_read",
-          "change_conflict",
-          "request_closed",
-          "needs_person_decision",
-          "record_busy",
           "runtime_error"
         ]
       },
@@ -1759,10 +1874,6 @@
       },
       "body": "bodies/knowledge.resolve_note.schema.json",
       "class": "request_reply",
-      "covered_change": {
-        "record_kind": "knowledge_page",
-        "seen_version": "required"
-      },
       "description": "A curator resolves a note on a page.",
       "expiry_seconds": 30,
       "idempotency": [
@@ -1779,22 +1890,6 @@
           "not_found",
           "not_allowed",
           "feature_off",
-          "page_exists",
-          "merged",
-          "review_required",
-          "sensitive_content",
-          "limit_reached",
-          "page_frozen",
-          "repeats_recent_revision",
-          "personal_space_unavailable",
-          "saved_write_mismatch",
-          "contribution_not_pending",
-          "invalid_request",
-          "changed_since_read",
-          "change_conflict",
-          "request_closed",
-          "needs_person_decision",
-          "record_busy",
           "runtime_error"
         ]
       },
@@ -1814,12 +1909,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/knowledge.revert.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -1844,14 +1949,8 @@
           "feature_off",
           "page_exists",
           "merged",
-          "review_required",
           "sensitive_content",
-          "limit_reached",
-          "page_frozen",
-          "repeats_recent_revision",
           "personal_space_unavailable",
-          "saved_write_mismatch",
-          "contribution_not_pending",
           "invalid_request",
           "changed_since_read",
           "change_conflict",
@@ -1883,10 +1982,6 @@
       },
       "body": "bodies/knowledge.unfreeze.schema.json",
       "class": "request_reply",
-      "covered_change": {
-        "record_kind": "knowledge_page",
-        "seen_version": "required"
-      },
       "description": "A curator unfreezes a page.",
       "expiry_seconds": 30,
       "idempotency": [
@@ -1903,22 +1998,8 @@
           "not_found",
           "not_allowed",
           "feature_off",
-          "page_exists",
-          "merged",
-          "review_required",
-          "sensitive_content",
-          "limit_reached",
-          "page_frozen",
-          "repeats_recent_revision",
           "personal_space_unavailable",
-          "saved_write_mismatch",
-          "contribution_not_pending",
           "invalid_request",
-          "changed_since_read",
-          "change_conflict",
-          "request_closed",
-          "needs_person_decision",
-          "record_busy",
           "runtime_error"
         ]
       },
@@ -1938,12 +2019,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/knowledge.withdraw_contribution.schema.json",
       "class": "request_reply",
       "description": "Withdraw one's own contribution.",
@@ -1961,6 +2052,7 @@
         "errors": [
           "not_found",
           "not_allowed",
+          "feature_off",
           "contribution_not_pending",
           "runtime_error"
         ]
@@ -1982,17 +2074,27 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/knowledge.write.schema.json",
       "class": "request_reply",
       "covered_change": {
         "record_kind": "knowledge_page",
-        "seen_version": "required_for_request_writers"
+        "seen_version": "optional"
       },
       "description": "Create or edit a knowledge page.",
       "expiry_seconds": 30,
@@ -2020,7 +2122,6 @@
           "repeats_recent_revision",
           "personal_space_unavailable",
           "saved_write_mismatch",
-          "contribution_not_pending",
           "invalid_request",
           "changed_since_read",
           "change_conflict",
@@ -2075,14 +2176,28 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/memory.create.schema.json",
       "class": "request_reply",
+      "covered_change": {
+        "record_kind": "memory_fact",
+        "seen_version": "none"
+      },
       "description": "Add a memory fact.",
       "expiry_seconds": 30,
       "idempotency": [
@@ -2100,7 +2215,6 @@
           "not_found",
           "capacity_reached",
           "invalid_request",
-          "changed_since_read",
           "change_conflict",
           "request_closed",
           "needs_person_decision",
@@ -2125,12 +2239,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/memory.delete.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2152,7 +2276,6 @@
         "errors": [
           "not_allowed",
           "not_found",
-          "capacity_reached",
           "invalid_request",
           "changed_since_read",
           "change_conflict",
@@ -2179,12 +2302,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/memory.list.schema.json",
       "class": "request_reply",
       "description": "List a memory bank's facts.",
@@ -2221,19 +2354,41 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/memory.replace.schema.json",
+      "body_rules": [
+        {
+          "any_of": [
+            "/body/fact_text",
+            "/body/tags",
+            "/body/metadata_json",
+            "/body/valid_from",
+            "/body/expires",
+            "/body/clear_expiry"
+          ]
+        }
+      ],
       "class": "request_reply",
       "covered_change": {
         "record_kind": "memory_fact",
         "seen_version": "required_for_request_writers"
       },
-      "description": "Replace a memory fact's text or tags.",
+      "description": "Change only the supplied fields of a memory fact.",
       "expiry_seconds": 30,
       "idempotency": [
         "/body/request_id"
@@ -2248,7 +2403,6 @@
         "errors": [
           "not_allowed",
           "not_found",
-          "capacity_reached",
           "invalid_request",
           "changed_since_read",
           "change_conflict",
@@ -2275,12 +2429,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/memory.show.schema.json",
       "class": "request_reply",
       "description": "Show one memory fact.",
@@ -2318,12 +2482,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/memory.undo.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -2345,7 +2519,6 @@
         "errors": [
           "not_allowed",
           "not_found",
-          "capacity_reached",
           "invalid_request",
           "changed_since_read",
           "change_conflict",
@@ -2373,6 +2546,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/objectives.abandon.schema.json",
@@ -2408,6 +2582,53 @@
       "topology_edge": "none",
       "wakes_model": "never"
     },
+    "objectives.activate_plan": {
+      "address": "svc.team.objectives.activate_plan",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.activate_plan.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "Start runtime-owned execution of the active task's semantic plan steps.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.activate_plan.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
     "objectives.create": {
       "address": "svc.team.objectives.create",
       "admission": {
@@ -2421,6 +2642,10 @@
       },
       "body": "bodies/objectives.create.schema.json",
       "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
       "description": "The lead creates an Objective.",
       "expiry_seconds": 30,
       "idempotency": [
@@ -2438,12 +2663,12 @@
           "feature_off",
           "status_not_settable",
           "confirmation_required",
-          "changed_since_read",
           "change_conflict",
           "request_closed",
           "needs_person_decision",
           "record_busy",
-          "runtime_error"
+          "runtime_error",
+          "invalid_request"
         ]
       },
       "routing": "team",
@@ -2462,6 +2687,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/objectives.delete.schema.json",
@@ -2497,6 +2723,43 @@
       "topology_edge": "none",
       "wakes_model": "never"
     },
+    "objectives.get": {
+      "address": "svc.team.objectives.get",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.get.schema.json",
+      "class": "request_reply",
+      "description": "The lead reads an Objective's full record and agent-update version.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.get.reply.schema.json",
+        "errors": [
+          "not_found",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
     "objectives.list": {
       "address": "svc.team.objectives.list",
       "admission": {
@@ -2505,9 +2768,21 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": "command"
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/objectives.list.schema.json",
       "class": "request_reply",
       "description": "The person's Objectives.",
@@ -2528,7 +2803,8 @@
       },
       "routing": "team",
       "senders": [
-        "gateway"
+        "gateway",
+        "lead_host"
       ],
       "topology_edge": "none",
       "wakes_model": "never"
@@ -2542,6 +2818,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/objectives.pause.schema.json",
@@ -2577,6 +2854,53 @@
       "topology_edge": "none",
       "wakes_model": "never"
     },
+    "objectives.record_checkpoint": {
+      "address": "svc.team.objectives.record_checkpoint",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.record_checkpoint.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "Save a continuation checkpoint for the active Objective work session.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.record_checkpoint.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
     "objectives.resume": {
       "address": "svc.team.objectives.resume",
       "admission": {
@@ -2586,6 +2910,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/objectives.resume.schema.json",
@@ -2621,6 +2946,53 @@
       "topology_edge": "none",
       "wakes_model": "never"
     },
+    "objectives.start_task": {
+      "address": "svc.team.objectives.start_task",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.start_task.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "Queue a continuation task for an Objective and its current plan.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.start_task.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
     "objectives.stop": {
       "address": "svc.team.objectives.stop",
       "admission": {
@@ -2630,6 +3002,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/objectives.stop.schema.json",
@@ -2677,6 +3050,15 @@
         "type": "root_task"
       },
       "body": "bodies/objectives.update_progress.schema.json",
+      "body_rules": [
+        {
+          "any_of": [
+            "/body/progress_summary",
+            "/body/current_focus",
+            "/body/criterion_updates"
+          ]
+        }
+      ],
       "class": "request_reply",
       "covered_change": {
         "record_kind": "objective",
@@ -2704,7 +3086,8 @@
           "request_closed",
           "needs_person_decision",
           "record_busy",
-          "runtime_error"
+          "runtime_error",
+          "invalid_request"
         ]
       },
       "routing": "team",
@@ -2753,6 +3136,361 @@
           "request_closed",
           "needs_person_decision",
           "record_busy",
+          "runtime_error",
+          "invalid_request"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_profiles.apply": {
+      "address": "svc.team.objectives.work_profiles.apply",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_profiles.apply.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "Apply the exact Objective work-profile proposal the person accepted.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_profiles.apply.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "direct_user_request_required",
+          "confirmation_required",
+          "missing_skills",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_profiles.list": {
+      "address": "svc.team.objectives.work_profiles.list",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_profiles.list.schema.json",
+      "class": "request_reply",
+      "description": "Read configured profiles, the person's installed profiles and latest proposals.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_profiles.list.reply.schema.json",
+        "errors": [
+          "feature_off",
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_profiles.propose": {
+      "address": "svc.team.objectives.work_profiles.propose",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_profiles.propose.schema.json",
+      "class": "request_reply",
+      "description": "Persist an inert exact Objective work-profile proposal for the person.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_profiles.propose.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "direct_user_request_required",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_profiles.remove": {
+      "address": "svc.team.objectives.work_profiles.remove",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_profiles.remove.schema.json",
+      "class": "request_reply",
+      "description": "Remove the person's reusable profile after explicit confirmation.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_profiles.remove.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "direct_user_request_required",
+          "confirmation_required",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_sessions.disable": {
+      "address": "svc.team.objectives.work_sessions.disable",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_sessions.disable.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "Disable bounded work sessions after the person agrees.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_sessions.disable.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "direct_user_request_required",
+          "confirmation_required",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_sessions.enable": {
+      "address": "svc.team.objectives.work_sessions.enable",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_sessions.enable.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "Enable explicitly accepted bounded work sessions on an Objective.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_sessions.enable.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "direct_user_request_required",
+          "confirmation_required",
+          "missing_skills",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_sessions.start": {
+      "address": "svc.team.objectives.work_sessions.start",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_sessions.start.schema.json",
+      "class": "request_reply",
+      "covered_change": {
+        "record_kind": "objective",
+        "seen_version": "none"
+      },
+      "description": "Open a requested work session on the active Objective-linked task.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_sessions.start.reply.schema.json",
+        "errors": [
+          "not_found",
+          "feature_off",
+          "invalid_request",
+          "direct_user_request_required",
+          "change_conflict",
+          "request_closed",
+          "needs_person_decision",
+          "record_busy",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "objectives.work_sessions.status": {
+      "address": "svc.team.objectives.work_sessions.status",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/objectives.work_sessions.status.schema.json",
+      "class": "request_reply",
+      "description": "Read an owned Objective's policy, recent sessions, checkpoints and tuning observations.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/objectives.work_sessions.status.reply.schema.json",
+        "errors": [
+          "not_found",
+          "invalid_request",
           "runtime_error"
         ]
       },
@@ -2772,6 +3510,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/people.set_standing.schema.json",
@@ -2963,14 +3702,14 @@
       "authority": "none",
       "body": "bodies/run_context.sign.schema.json",
       "class": "request_reply",
-      "description": "A worker running a scheduled job asks for the run's authority token.",
+      "description": "A worker running a scheduled job asks the scheduler for the run's authority token.",
       "expiry_seconds": 30,
       "idempotency": [
         "/body/request_id"
       ],
       "ledger": "none",
       "receivers": [
-        "team_services"
+        "scheduler"
       ],
       "rendering": "none",
       "reply": {
@@ -2993,6 +3732,46 @@
       "topology_edge": "none",
       "wakes_model": "never"
     },
+    "schedules.authorize_access": {
+      "address": "svc.team.schedules.authorize_access",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/schedules.authorize_access.schema.json",
+      "class": "request_reply",
+      "description": "Hand on access for a saved schedule policy and end obsolete setup grants.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.authorize_access.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "invalid_request",
+          "runtime_error",
+          "schedule_worker_policy_revision_conflict"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
     "schedules.disable": {
       "address": "svc.team.schedules.disable",
       "admission": {
@@ -3001,12 +3780,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/schedules.disable.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -3046,6 +3835,100 @@
       "topology_edge": "none",
       "wakes_model": "never"
     },
+    "schedules.get": {
+      "address": "svc.team.schedules.get",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
+      "body": "bodies/schedules.get.schema.json",
+      "class": "request_reply",
+      "description": "Read complete safe details of one visible schedule, in JSON text pages.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.get.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "gateway",
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "schedules.inspect_worker": {
+      "address": "svc.team.schedules.inspect_worker",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/schedules.inspect_worker.schema.json",
+      "class": "request_reply",
+      "description": "Inspect worker assignment and startup diagnostics for a schedule.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.inspect_worker.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
     "schedules.install": {
       "address": "svc.team.schedules.install",
       "admission": {
@@ -3054,12 +3937,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/schedules.install.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -3088,15 +3981,15 @@
           "change_conflict",
           "request_closed",
           "needs_person_decision",
-          "record_busy"
+          "record_busy",
+          "runtime_error"
         ]
       },
       "routing": "team",
       "senders": [
         "gateway",
         "lead_host",
-        "worker_host",
-        "team_services"
+        "worker_host"
       ],
       "topology_edge": "none",
       "wakes_model": "never"
@@ -3109,12 +4002,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/schedules.list.schema.json",
       "class": "request_reply",
       "description": "The schedules the caller may see.",
@@ -3151,12 +4054,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/schedules.pause.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -3196,6 +4109,46 @@
       "topology_edge": "none",
       "wakes_model": "never"
     },
+    "schedules.prepare_access": {
+      "address": "svc.team.schedules.prepare_access",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/schedules.prepare_access.schema.json",
+      "class": "request_reply",
+      "description": "Preview worker readiness and missing access without starting the job.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/schedules.prepare_access.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
     "schedules.remove": {
       "address": "svc.team.schedules.remove",
       "admission": {
@@ -3204,12 +4157,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/schedules.remove.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -3257,12 +4220,22 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/schedules.resume.schema.json",
       "class": "request_reply",
       "covered_change": {
@@ -3319,7 +4292,7 @@
         "record_kind": "schedule",
         "seen_version": "required"
       },
-      "description": "Choose which worker runs a schedule.",
+      "description": "Save a schedule's worker type, startup policy and capability requirements.",
       "expiry_seconds": 30,
       "idempotency": [
         "/body/request_id"
@@ -3332,6 +4305,7 @@
       "reply": {
         "body": "bodies/schedules.set_worker.reply.schema.json",
         "errors": [
+          "invalid_request",
           "approval_required",
           "not_found",
           "not_allowed",
@@ -3340,7 +4314,8 @@
           "request_closed",
           "needs_person_decision",
           "record_busy",
-          "runtime_error"
+          "runtime_error",
+          "schedule_worker_policy_revision_conflict"
         ]
       },
       "routing": "team",
@@ -3359,19 +4334,29 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": [
-          "command",
-          "root_task"
-        ]
-      },
+      "authority_binding": [
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        },
+        {
+          "senders": [
+            "lead_host",
+            "worker_host"
+          ],
+          "type": "root_task"
+        }
+      ],
       "body": "bodies/schedules.update.schema.json",
       "class": "request_reply",
       "covered_change": {
         "record_kind": "schedule",
         "seen_version": "required"
       },
-      "description": "Change a schedule's instruction, timing or delivery.",
+      "description": "Change a schedule's name, instruction, timing, controls or run notes.",
       "expiry_seconds": 30,
       "idempotency": [
         "/body/request_id"
@@ -3384,6 +4369,7 @@
       "reply": {
         "body": "bodies/schedules.update.reply.schema.json",
         "errors": [
+          "invalid_request",
           "approval_required",
           "not_found",
           "not_allowed",
@@ -3462,6 +4448,8 @@
       "reply": {
         "body": "bodies/staged_changes.apply.reply.schema.json",
         "errors": [
+          "failed",
+          "refused",
           "waiting",
           "agreement_required",
           "already_applied",
@@ -3718,7 +4706,7 @@
         "lead_host",
         "team_services"
       ],
-      "topology_edge": "none",
+      "topology_edge": "down",
       "wakes_model": "never"
     },
     "task.progress": {
@@ -4080,6 +5068,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/tasks.cancel.schema.json",
@@ -4117,6 +5106,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/tasks.inventory.schema.json",
@@ -4156,6 +5146,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/tasks.list.schema.json",
@@ -4184,6 +5175,14 @@
         "gateway",
         "team_services"
       ],
+      "senders_by_address": {
+        "ctl.agent.{agent}.tasks.list": [
+          "team_services"
+        ],
+        "svc.team.tasks.list": [
+          "gateway"
+        ]
+      },
       "topology_edge": "none",
       "wakes_model": "never"
     },
@@ -4199,6 +5198,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/tasks.list_finished.schema.json",
@@ -4227,6 +5227,14 @@
         "gateway",
         "team_services"
       ],
+      "senders_by_address": {
+        "ctl.agent.{agent}.tasks.list_finished": [
+          "team_services"
+        ],
+        "svc.team.tasks.list_finished": [
+          "gateway"
+        ]
+      },
       "topology_edge": "none",
       "wakes_model": "never"
     },
@@ -4239,6 +5247,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/tasks.probe.schema.json",
@@ -4273,6 +5282,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/tasks.progress.schema.json",
@@ -4312,6 +5322,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/tasks.purge.schema.json",
@@ -4342,6 +5353,14 @@
         "gateway",
         "team_services"
       ],
+      "senders_by_address": {
+        "ctl.agent.{agent}.tasks.purge": [
+          "team_services"
+        ],
+        "svc.team.tasks.purge": [
+          "gateway"
+        ]
+      },
       "topology_edge": "none",
       "wakes_model": "never"
     },
@@ -4357,6 +5376,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/tasks.remove.schema.json",
@@ -4387,6 +5407,14 @@
         "gateway",
         "team_services"
       ],
+      "senders_by_address": {
+        "ctl.agent.{agent}.tasks.remove": [
+          "team_services"
+        ],
+        "svc.team.tasks.remove": [
+          "gateway"
+        ]
+      },
       "topology_edge": "none",
       "wakes_model": "never"
     },
@@ -4399,6 +5427,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/steer_id",
         "type": "command"
       },
       "body": "bodies/tasks.steer.schema.json",
@@ -4498,6 +5527,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/topics.find_threads.schema.json",
@@ -4535,6 +5565,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/topics.list_tags.schema.json",
@@ -4571,6 +5602,7 @@
       },
       "authority": "required",
       "authority_binding": {
+        "at": "/body/request_id",
         "type": "command"
       },
       "body": "bodies/topics.tag_thread.schema.json",
@@ -4605,6 +5637,12 @@
   "max_nesting_depth": 64,
   "protocol": "1.0-pre",
   "renew_key_proof_domain": "universal-agents/host-renew-key-proof/v1",
+  "retry_outcomes": [
+    "not_started",
+    "record_busy",
+    "runtime_error",
+    "waiting"
+  ],
   "signing_domain": "universal-agents/message-frame/v1",
   "state_records": {
     "agent": {
@@ -4664,7 +5702,7 @@
     "host": {
       "body": "state/host.schema.json",
       "bucket": "UA1_HOSTS",
-      "description": "A runtime host's liveness and capacity, written by the host itself every 20 seconds.",
+      "description": "A runtime host's liveness and capacity, written by the host itself every 20 seconds and naming its certificate.",
       "key": "<runtime>",
       "signer": "host",
       "signer_roles": [
@@ -4677,7 +5715,7 @@
         "scheduler"
       ],
       "ttl_seconds": 60,
-      "write_rule": "written by the host itself every 20 seconds; a host writes only its own record",
+      "write_rule": "written by the host itself every 20 seconds, expiring within ttl_seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions",
       "writers": [
         "gateway",
         "lead_host",
@@ -4691,13 +5729,13 @@
     "placement": {
       "body": "state/placement.schema.json",
       "bucket": "UA1_PLACEMENT",
-      "description": "Which host runs an agent; its key-value revision is the fencing token.",
+      "description": "Which host runs an agent; its signed sequence is the fencing token.",
       "key": "<team>.<agent>",
       "signer": "host",
       "signer_roles": [
         "team_services"
       ],
-      "write_rule": "compare-and-set on the last revision; the revision is the fencing token",
+      "write_rule": "compare-and-set on the last key-value revision, with the next sequence; the signed sequence, not the unsigned revision, is the fencing token, so a stored copy written back is never newer",
       "writers": [
         "team_services"
       ]
@@ -4723,7 +5761,7 @@
       "signer_roles": [
         "team_services"
       ],
-      "write_rule": "deleted when the item closes; each entry at most 4 KiB",
+      "write_rule": "deleted when the item closes or the person it names departs; each entry at most 4 KiB",
       "writers": [
         "team_services"
       ]
@@ -4742,7 +5780,7 @@
     },
     {
       "code": "unknown_key",
-      "meaning": "the trust store holds no certificate for the issuer's installation, runtime and membership epoch that names the issuer's key id and was valid when the frame was issued, or the installation is neither the receiver's nor one it has an agreement with; a join (verification proof_of_possession) must instead name the key it presents in its body, and a key id the trust store already knows must keep its public key"
+      "meaning": "the trust store holds no certificate for the issuer's installation, runtime and membership epoch that names the issuer's key id and was valid when the frame was issued (a certificate another one replaces is valid only until certificate_overlap_seconds after its replacement was issued), or the installation is neither the receiver's nor one it has an agreement with; a join (verification proof_of_possession) must instead come from the receiver's own installation and name the key it presents in its body, which is not an authority key, and a key id the trust store already knows must keep its public key"
     },
     {
       "code": "bad_signature",
@@ -4762,11 +5800,11 @@
     },
     {
       "code": "wrong_issuer",
-      "meaning": "the issuer's revocation epoch or team disagrees with its certificate; or it names an agent without a session, or a session that does not place that agent, of a type the certificate allows, on the signing runtime when the frame was issued; or a reply does not come from the agent and team the request was for"
+      "meaning": "the issuer's revocation epoch or team disagrees with its certificate (installation operations and their replies name the installation scope as their team and no agent, and other kinds a team of the certificate); or it names an agent without a session, or a session that does not place that agent, of a type the certificate allows, on the signing runtime when the frame was issued; or a reply does not come from the agent and team the request was for; or a join names an epoch other than zero, a reserved runtime id (x- or _), an agent, or a body runtime or installation other than its issuer's; or a renewal's body names another certificate or membership epoch than the certificate that signs it"
     },
     {
       "code": "wrong_sender",
-      "meaning": "none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request); or the frame comes from another installation with a kind, class or destination team its agreement does not allow; or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)"
+      "meaning": "none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request), or a join asks for a role that is not among the kind's senders; or a frame from the receiver's own installation is addressed to another team than its issuer's; or the frame comes from another installation with a kind, class or destination team its agreement does not allow; or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)"
     },
     {
       "code": "wrong_team",
@@ -4798,11 +5836,11 @@
     },
     {
       "code": "invalid_body",
-      "meaning": "the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give"
+      "meaning": "the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give; or a renewal's key rotation names a key id the installation already uses or a proof that does not verify; or the certificate in a join or renewal reply does not verify against the receiver's authority keys or does not certify the host that asked (README, \"Installation traffic\")"
     },
     {
       "code": "bad_authority",
-      "meaning": "the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, lasts longer than authority_token_max_seconds, or is bound to another record than its kind's binding names or the receiver holds; or a change-conflict decision token in the body is not signed by a team-services certificate of the frame's installation and team, or was not valid when the frame was issued"
+      "meaning": "the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds; or a change-conflict decision token in the body is not signed by a team-services certificate of the frame's installation and team, or was not valid when the frame was issued"
     },
     {
       "code": "access_denied",

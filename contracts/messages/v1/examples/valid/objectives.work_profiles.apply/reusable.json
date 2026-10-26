@@ -1,0 +1,61 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.work_profiles.apply",
+  "message_id": "0dc268f9-72aa-7fb3-9f76-723fa4f64864",
+  "idempotency_key": "objectives.work_profiles.apply:alfP0o1Dne57mvtITOXiKKyAgnqvPDQ6oS0Y0OrLMHA",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.objectives.work_profiles.apply",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7154-9000-000000000154",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "6rG0DjDSHQrjmwz_useUIS7iIPZRmOlgpf0OjA58FlrkQQVynbxDCAWq6-NIwa1yz3fF6wjU8pU4Rsyn8I2DAw"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "request_objectives_work_profiles_apply_reusable",
+    "proposal_id": "proposal_dependency_watch",
+    "proposal_digest": "883c0d22a1901c801cbe67c5ad43420dbe3091ec5b6bec4ce59d0b3700597bf9",
+    "task_id": "task_root_7f",
+    "confirmation_summary": {
+      "type": "inline",
+      "text": "The person accepted a daily twenty-minute work session for this Objective."
+    },
+    "confirmed": true
+  },
+  "body_digest": "6tIXPh3-Bn4GDx2cKE2ZjVMgyfIQ2w_nTG5HboRUKo8",
+  "signature": "eCbQUzrGDKvrVnscM45hmMC5SXMvAEeewTzBqp0F2vDSPj7sEeRWUYuvS8SpaUfWevYKwPVzluHgg5x3cBikBQ"
+}

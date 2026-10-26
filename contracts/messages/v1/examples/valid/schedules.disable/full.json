@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "schedules.disable",
   "message_id": "01928f3a-7b2c-7437-8000-000000000437",
-  "idempotency_key": "schedules.disable:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "idempotency_key": "schedules.disable:coQmpKqVK27q8gO-zmo_wBsr1PzbwwuAQAJubdt2LPY",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -21,7 +21,7 @@
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
-    "token_id": "01928f3a-7b2c-7169-9000-000000000169",
+    "token_id": "01928f3a-7b2c-7000-9000-00000000c001",
     "issuer": {
       "installation": "install_example",
       "runtime": "gateway-1",
@@ -35,19 +35,19 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "command",
-      "id": "cmd_000169"
+      "id": "req_schedules_disable_full"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-23T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "FdxB9p6fOWiTdFV0SUPAjj8GYdN_MOVT2DxUDK_wsYnzG0Jk9IdXtPSI5PM8xO1OTlEHmvftGNP-dApvFPBvDA"
+    "signature": "s0CAHaPIrf9_Hf6yXSpEOzsttsHUvNbgAQYzmLh5I0XMnccun1qqAtHaAah_iSdf4xLJTjp2767QEbtLfvSwDg"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
+    "request_id": "req_schedules_disable_full",
     "schedule_id": "schedule_id_1",
-    "seen_version": "v3"
+    "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc"
   },
-  "body_digest": "b5tjEx2Z-Ue8rHcxFf7eA1zJQumyNDPkTt2ZlBLouY8",
-  "signature": "zSw24Hly_hl-IGTeDgUyg5L-KKM2okulXBkZRyRAEyvyngSvMctEQFv6I23iFJvJnWMqed89NeoNoTaB9P5rCQ"
+  "body_digest": "dI-Zw2FzvCAtAES_-4uUw9K3aHVQ5TiQhC2AOB5Vs3Q",
+  "signature": "Ui_PjI_XM7OsokF-9wsE1h66HQpqHr9BQp8emR7sS0FZECoGbk9flNFXDZbI8H-mCc03SKggoAv_VdG9QJLuDQ"
 }

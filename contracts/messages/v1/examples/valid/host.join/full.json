@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "host.join",
   "message_id": "01928f3a-7b2c-7701-8000-000000000701",
-  "idempotency_key": "host.join:9jZ1_8_B-Q6djDGXFmRxSrRjp_UcPXTRg04QX3SGX00",
+  "idempotency_key": "host.join:NlSDzVWG0y7PhcerWs2WeNY9032ALZX8_HGVGTa1Ji4",
   "issuer": {
     "installation": "install_example",
     "team": "_install",
@@ -38,7 +38,7 @@
     },
     "nats_public_key": "UBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
     "agent_types": [
-      "Researcher"
+      "researcher"
     ],
     "session_limit": 8,
     "protocol": "1.0-pre",
@@ -48,6 +48,6 @@
       "version": "0.9.8"
     }
   },
-  "body_digest": "FtFcJ8QhVZbqURHybgyFspNrOpxpcRUjhlbr-Aeyr2U",
-  "signature": "8Hg7F68nXDAPtjKsYXiyQe0eeSvZclKkHnbx7AbqKnrcgKu8G57EJKtcefT5Rkp_5vpKh_MYS_NkaS8HeCDVAw"
+  "body_digest": "VTO9BejxJ6G09S72iI9pvDiS2DzNhmJJSmM-qLBD-58",
+  "signature": "nZgZD5y2rtjSoOkhSPIsO8cf-o7lHxgfUf9PnaD-wOweJCoACAEgPW6FdFAS_FKflAsiXU4uaCk3riSnFoeyDQ"
 }

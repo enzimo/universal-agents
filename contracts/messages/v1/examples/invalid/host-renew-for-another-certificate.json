@@ -1,0 +1,14 @@
+{
+  "description": "lead-host-1 asks to renew the worker host's certificate. A renewal renews the certificate that signs it.",
+  "refusal": "wrong_issuer",
+  "at": "/body/certificate_id",
+  "base": "host.renew/full.json",
+  "changes": [
+    {
+      "set": "/body/certificate_id",
+      "to": "cert_worker_host_1"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"host.renew\", \"message_id\": \"01928f3a-7b2c-7704-8000-000000000704\", \"idempotency_key\": \"host.renew:ixLWl6a3kuFxKLcCNJACyby16aoYdwtBp3xOy4X3JcM\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"_install\", \"runtime\": \"lead-host-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"_install\", \"target\": \"installation_service\", \"id\": \"authority\"}, \"subject\": \"ua.v1._install.lead-host-1.svc.host.renew\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"renew_id\": \"renew_1\", \"certificate_id\": \"cert_worker_host_1\", \"membership_epoch\": 3, \"profile_sha256\": \"CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo\", \"software\": {\"name\": \"universal-agents\", \"version\": \"0.9.8\"}}, \"body_digest\": \"Aa_oHXBD5flQ86j0skT2eGs2Wx4hlTa-kmf50TM2Nfs\", \"signature\": \"sy6dA-f0FXe9uCS0ySgXGlVlSiBDH-32BVTT9oeRhK_dC7VGtSH-oQr7RrYq84M_1TVR0IR-vwS4Hv6SpOU9Bg\"}"
+}

@@ -1,0 +1,40 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.pause.reply",
+  "message_id": "01928f3a-7b2c-7e60-8000-000000000014",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7431-8000-000000000431",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "state": "paused",
+    "schedule_id": "schedule_id_1",
+    "version": {
+      "state": "unavailable"
+    },
+    "warnings": {
+      "type": "inline",
+      "text": "The change to schedule_id_1 was saved, but reading the saved schedule failed. Do not repeat the change; inspect the saved record before taking further action."
+    }
+  },
+  "causation_id": "01928f3a-7b2c-7431-8000-000000000431",
+  "idempotency_key": "schedules.pause.reply:LQiDPVp5RsHzLW_FFf4c4deh8Ky55lwrNgwG1q3sHXs",
+  "body_digest": "7DpixMTzFLpRMGcFpaTen44wP7TPX3Lf6xt0fsPiQbM",
+  "signature": "cZVq5Frne1tuK0P4a7tjz8welZF9t2NEV1VMg1D1QXmKvkFAMWsXwyeh3tfH-s8MTxBqQXdYInVpQxzS0AsrCg"
+}

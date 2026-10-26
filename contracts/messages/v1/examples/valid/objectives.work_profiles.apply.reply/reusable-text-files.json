@@ -1,0 +1,122 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.work_profiles.apply.reply",
+  "message_id": "63be2f8b-47f3-7bbb-81bc-30a9a0cc91cc",
+  "idempotency_key": "objectives.work_profiles.apply.reply:_LXFt_lR-b0Wo18DWL7RDXL8kvvhmQZGJYPPnqbIUwY",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.0dc268f9-72aa-7fb3-9f76-723fa4f64864",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "result": {
+      "type": "reusable",
+      "proposal": {
+        "type": "inline",
+        "value": {
+          "schema_version": 1,
+          "proposal_id": "proposal_dependency_watch",
+          "owner_agent_id": "manager_scope:team_example:TeamArchitect",
+          "owner_person": "person_7c1",
+          "source_task_id": "task_root_7f",
+          "scope": "reusable",
+          "profile_name": "daily",
+          "profile": {
+            "cadence_cron": "0 9 * * *",
+            "cadence_timezone": "owner",
+            "budget": {
+              "active_seconds": 1200,
+              "checkpoint_reserve_seconds": 120,
+              "checkpoint_reserve_turns": 2,
+              "checkpoint_reserve_tokens": 10000,
+              "checkpoint_reserve_tool_calls": 2,
+              "turns": 20,
+              "total_tokens": 50000,
+              "tool_calls": 30
+            }
+          },
+          "rationale": {
+            "type": "blob",
+            "ref": {
+              "sha256": "5vr8d1nNLl31cvDu4zarjlDwvePZln9_E5fX-SGcS1Q",
+              "size": 4096,
+              "media_type": "text/plain"
+            }
+          },
+          "replace_existing": false,
+          "proposal_digest": "883c0d22a1901c801cbe67c5ad43420dbe3091ec5b6bec4ce59d0b3700597bf9",
+          "status": "applied",
+          "created_at": "2026-10-21T04:30:00.000Z",
+          "expires_at": "2026-10-23T04:30:00.000Z",
+          "applied_at": "2026-10-22T04:30:00.000Z",
+          "applied_by_task_id": "task_root_7f",
+          "acceptance_summary": {
+            "type": "blob",
+            "ref": {
+              "sha256": "F0osveqjF_33nBXOfYifR3AAPCFs4g2OvmpyEEF2CVY",
+              "size": 4096,
+              "media_type": "text/plain"
+            }
+          },
+          "installed_profile_id": "profile_dependency_watch"
+        }
+      },
+      "installed_profile": {
+        "type": "inline",
+        "value": {
+          "schema_version": 1,
+          "installed_profile_id": "profile_dependency_watch",
+          "owner_agent_id": "manager_scope:team_example:TeamArchitect",
+          "owner_person": "person_7c1",
+          "profile_name": "daily",
+          "profile": {
+            "cadence_cron": "0 9 * * *",
+            "cadence_timezone": "owner",
+            "budget": {
+              "active_seconds": 1200,
+              "checkpoint_reserve_seconds": 120,
+              "checkpoint_reserve_turns": 2,
+              "checkpoint_reserve_tokens": 10000,
+              "checkpoint_reserve_tool_calls": 2,
+              "turns": 20,
+              "total_tokens": 50000,
+              "tool_calls": 30
+            }
+          },
+          "source_proposal_id": "proposal_dependency_watch",
+          "proposal_digest": "883c0d22a1901c801cbe67c5ad43420dbe3091ec5b6bec4ce59d0b3700597bf9",
+          "installed_by_task_id": "task_root_7f",
+          "acceptance_summary": {
+            "type": "blob",
+            "ref": {
+              "sha256": "F0osveqjF_33nBXOfYifR3AAPCFs4g2OvmpyEEF2CVY",
+              "size": 4096,
+              "media_type": "text/plain"
+            }
+          },
+          "status": "active",
+          "created_at": "2026-10-21T04:30:00.000Z",
+          "updated_at": "2026-10-22T04:30:00.000Z"
+        }
+      }
+    }
+  },
+  "causation_id": "0dc268f9-72aa-7fb3-9f76-723fa4f64864",
+  "body_digest": "3Nf0qeOxCV-_fIM4yd5UAfxCMbOoBzqC8x761iXwf9w",
+  "signature": "Ai-f54StYpzyprUsCPBAONu3YzFzpLqKODeAIsWc1vd-bTBXViYhbjuhAEjKaABwzOcPymp3PsCPbUn3buM0CQ"
+}

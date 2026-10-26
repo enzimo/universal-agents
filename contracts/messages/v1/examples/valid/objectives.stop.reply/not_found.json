@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "objectives.stop.reply",
-  "message_id": "01928f3a-7b2c-741e-8000-00000000041e",
-  "idempotency_key": "objectives.stop.reply:3qNYoEy4xQpY_kubFOZPlc772mV_2B6YCkZ9JjYDdUY",
+  "message_id": "fd236299-031d-79c6-8694-f13738a965bf",
+  "idempotency_key": "objectives.stop.reply:4WLq-CuGEYqW95JBFdW-148gKe_ii5e0uhBvpvaQ3O8",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -18,15 +18,15 @@
     "id": "web",
     "runtime": "gateway-1"
   },
-  "subject": "_INBOX.gateway-1.01928f3a-7b2c-741c-8000-00000000041c",
+  "subject": "_INBOX.gateway-1.4db689fd-864e-7cbf-a891-c3846eb1d5d7",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
   "body": {
     "outcome": "not_found",
-    "message": "Example short text"
+    "message": "The record is missing or unavailable to this task."
   },
-  "causation_id": "01928f3a-7b2c-741c-8000-00000000041c",
-  "body_digest": "kjF9c_l0diFRNuvYGjQmkStmu5fcSEld8Fzu2xnpRcU",
-  "signature": "0fmVb1Can4hysiKkvpGS_rJ2UGsJBma4vbGj9IVAaq9ZRzoTdR-HbM6jdrMJSOsRfRnZkoekw--fZiIz9cMyBw"
+  "causation_id": "4db689fd-864e-7cbf-a891-c3846eb1d5d7",
+  "body_digest": "Vz5UXJDMhmJC_Td-LvIlWsFnFbXaqD3HJ1YHlHtzwcs",
+  "signature": "txcVwZgwGKD0qkbWU8sDJvd2rw1ngQfwNylBdYYU1rYYckKcMYSN-FDN4n7FWhAQCd4eNJXu9uokbdTptuorAg"
 }

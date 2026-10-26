@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import ast
+from fnmatch import fnmatchcase
 from pathlib import Path
 import shlex
 import tomllib
 
+import pytest
 import yaml
 
 
@@ -17,6 +19,38 @@ def _workflow(name: str) -> dict:
         (WORKFLOW_ROOT / name).read_text(encoding="utf-8"),
         Loader=yaml.BaseLoader,
     )
+
+
+CHECK_WORKFLOWS = (
+    "tests.yml",
+    "security-quality.yml",
+    "dependency-audit.yml",
+    "personal-details.yml",
+)
+
+
+@pytest.mark.parametrize("name", CHECK_WORKFLOWS)
+def test_checks_run_only_for_release_candidates_or_by_hand(name: str) -> None:
+    triggers = _workflow(name)["on"]
+
+    assert set(triggers) == {"push", "workflow_dispatch"}
+    assert triggers["push"] == {"tags": ["v*.*.*-rc.*"]}
+
+
+@pytest.mark.parametrize(
+    ("tag", "starts"),
+    [
+        ("v0.10.0-rc.1", True),
+        ("v10.20.30-rc.12", True),
+        ("v0.10.0", False),
+        ("v0.10.0-beta.1", False),
+        ("v0.9.9-nightly.202610240317", False),
+    ],
+)
+def test_only_release_candidate_tags_start_the_checks(tag: str, starts: bool) -> None:
+    (pattern,) = _workflow("tests.yml")["on"]["push"]["tags"]
+
+    assert fnmatchcase(tag, pattern) is starts
 
 
 def test_security_quality_installs_required_rust_components() -> None:
@@ -84,11 +118,8 @@ def test_cognitive_complexity_advisory_is_repository_owned() -> None:
     assert "complexipy==8.0.1" in lock
     assert checkout["with"]["fetch-depth"] == "0"
     assert advisory["continue-on-error"] == "true"
-    assert "github.event.pull_request.base.sha" in advisory["env"]["COMPLEXITY_BASE_SHA"]
-    assert "github.event.before" in advisory["env"]["COMPLEXITY_BASE_SHA"]
-    assert advisory["run"] == (
-        'python scripts/report_cognitive_complexity.py "${COMPLEXITY_BASE_SHA}"'
-    )
+    assert "env" not in advisory
+    assert advisory["run"] == "python scripts/report_cognitive_complexity.py origin/main"
 
 
 def test_postgres_live_job_controls_pull_retries_and_cleanup() -> None:

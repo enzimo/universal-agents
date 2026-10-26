@@ -1,0 +1,71 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "knowledge.read_contribution.reply",
+  "message_id": "01928f3a-7b2c-7e30-8000-000000000008",
+  "idempotency_key": "knowledge.read_contribution.reply:WS2VIzcbcvocJFG4HZBCKAGpOPKKUbn2viuDokuds2E",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-747f-8000-00000000047f",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "contribution": {
+      "contribution_id": "kb_contrib_7f",
+      "kind": "archive",
+      "page": "deployment-guide",
+      "title": "Deployment guide",
+      "page_type": "how-to",
+      "summary": "Steps to review and deploy a release.",
+      "tags": [
+        "releases"
+      ],
+      "change_summary": "Add the release checklist.",
+      "base_revision": 3,
+      "state": "pending",
+      "created_at": "2026-10-22T04:30:00.000Z",
+      "author": {
+        "kind": "agent",
+        "agent_type": "KnowledgeCuratorAgent"
+      },
+      "review_flags": [
+        {
+          "kind": "personal_memory_overlap",
+          "label": "text copied from personal pages or memory",
+          "field": "body",
+          "line": 2,
+          "column": 1
+        }
+      ],
+      "content": {
+        "type": "inline",
+        "text": "Review the release checklist, then run the deployment. See [[release-checklist]]."
+      },
+      "current": {
+        "type": "blob",
+        "ref": {
+          "sha256": "11w-e3dZR4kU2qmEToF0PYH9D2peRS_ge9d5xSev6SI",
+          "size": 1658,
+          "media_type": "application/json"
+        }
+      }
+    }
+  },
+  "causation_id": "01928f3a-7b2c-747f-8000-00000000047f",
+  "body_digest": "d8Z2roExBLk0OftFwKD_uAkV237cy-yxk7gbMIynVDc",
+  "signature": "0zpKyc4z3tZ82ISrhvPWWd0HZ53ZkQHJW6arFpzzwZr_PxV9OD1qUsQjp4auEGp2R0RfXiBLn9QIxzf5g1oXBQ"
+}

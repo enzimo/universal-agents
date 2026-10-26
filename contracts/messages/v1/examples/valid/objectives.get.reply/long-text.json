@@ -1,0 +1,190 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "objectives.get.reply",
+  "message_id": "73491239-bc57-7cf1-85ee-94a826f86147",
+  "idempotency_key": "objectives.get.reply:K8ghpJAFDVsIcqUwIUuUtSn0yvxHO9afgzJM-MArF-M",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.f97acc24-19ba-709d-b590-27cffadad8bd",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "objective_id": "objective_dependency_watch",
+    "seen_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+    "objective": {
+      "type": "inline",
+      "value": {
+        "objective_id": "objective_dependency_watch",
+        "title": {
+          "type": "blob",
+          "ref": {
+            "sha256": "5oObVkPi5hruzw5eoXE-FlAOVhX5tmejfPw7EVDuh18",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "desired_outcome": {
+          "type": "blob",
+          "ref": {
+            "sha256": "bVkH4jeyC20tYmhn0O5It9nabNQjNQxexbb8QJq1AQs",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "why": {
+          "type": "blob",
+          "ref": {
+            "sha256": "zWCmzBrk5bEe36bmSZkWWEL9yrUB65dgItEDnJ-K_Pw",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "status": "active",
+        "horizon": "recurring",
+        "priority": "normal",
+        "completion_policy": "recurring_indefinite",
+        "success_criteria": [
+          {
+            "criterion_id": "criterion_sources_verified",
+            "description": {
+              "type": "blob",
+              "ref": {
+                "sha256": "y9bjfX-SA4epXU3XScoFKdYhz0Saucm_0eDEOE9iuMU",
+                "size": 4096,
+                "media_type": "text/plain"
+              }
+            },
+            "status": "open",
+            "evidence_summary": {
+              "type": "blob",
+              "ref": {
+                "sha256": "a-5pTS137mxWoP4PCBwrT0RbTHzXA0pRz0RoEva_91Q",
+                "size": 4096,
+                "media_type": "text/plain"
+              }
+            },
+            "updated_at": "2026-10-22T04:30:00.000Z"
+          }
+        ],
+        "constraints": [
+          {
+            "type": "blob",
+            "ref": {
+              "sha256": "6FYPmTxSyMHVoJjutWVN3oWdMOyF40WOj96Tv3bdWc8",
+              "size": 4096,
+              "media_type": "text/plain"
+            }
+          }
+        ],
+        "non_goals": [
+          {
+            "type": "blob",
+            "ref": {
+              "sha256": "6FYPmTxSyMHVoJjutWVN3oWdMOyF40WOj96Tv3bdWc8",
+              "size": 4096,
+              "media_type": "text/plain"
+            }
+          }
+        ],
+        "progress_summary": {
+          "type": "blob",
+          "ref": {
+            "sha256": "inL5Yfukb_VC4iWMxd7ObEb3Fx9zctgVm-c-neZUVqE",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "current_focus": {
+          "type": "blob",
+          "ref": {
+            "sha256": "CNM3qiNAQ4_IejUzNMdE2UGoMlVUbOVrUm1u8KkIYT8",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        },
+        "owner_agent_id": "manager_scope:team_example:TeamArchitect",
+        "owner_agent_name": "Team lead",
+        "owner_person": "person_7c1",
+        "team_id": "team_example",
+        "owner_named_agent_type": "TeamArchitect",
+        "root_conversation_id": "conversation_dependency_watch",
+        "created_by_task_id": "task_root_7f",
+        "promoted_from_task_id": "task_root_7f",
+        "current_plan_id": "plan_dependency_watch",
+        "plan_ids": [
+          "plan_dependency_watch"
+        ],
+        "related_task_ids": [
+          "task_root_7f"
+        ],
+        "recovery_task_ids": [],
+        "schedule_links": [
+          {
+            "schedule_id": "schedule_dependency_watch",
+            "managed_by_objective": true,
+            "disabled_by_objective_pause": false,
+            "linked_at": "2026-10-22T04:30:00.000Z"
+          }
+        ],
+        "heartbeat_links": [
+          {
+            "heartbeat_item_id": "heartbeat_dependency_watch",
+            "managed_by_objective": true,
+            "disabled_by_objective_pause": false,
+            "linked_at": "2026-10-22T04:30:00.000Z"
+          }
+        ],
+        "event_log": [
+          {
+            "event_id": "event_dependency_watch",
+            "event_type": "progress_updated",
+            "summary": {
+              "type": "blob",
+              "ref": {
+                "sha256": "nRn3p0CiuHPjPHea2lcTAury0-SrUXPtCAVfzlpieOg",
+                "size": 4096,
+                "media_type": "text/plain"
+              }
+            },
+            "task_id": "task_root_7f",
+            "plan_id": "plan_dependency_watch",
+            "schedule_id": "schedule_dependency_watch",
+            "heartbeat_item_id": "heartbeat_dependency_watch",
+            "user_visible": true,
+            "details_json": "{\"checked_dependencies\": 12, \"new_advisories\": 2}",
+            "created_at": "2026-10-21T04:30:00.000Z"
+          }
+        ],
+        "requires_user_confirmation": false,
+        "created_at": "2026-10-21T04:30:00.000Z",
+        "updated_at": "2026-10-22T04:30:00.000Z"
+      }
+    },
+    "markdown": {
+      "type": "blob",
+      "ref": {
+        "sha256": "flOOety4YBn334vzsuQ3rvVPZxyATci05Vn6XAM62z8",
+        "size": 4096,
+        "media_type": "text/plain"
+      }
+    }
+  },
+  "causation_id": "f97acc24-19ba-709d-b590-27cffadad8bd",
+  "body_digest": "7RLNon37NHewI8YIvwTzr-zmtA0-_DmWutxrEnXiQHk",
+  "signature": "EQwFey6b3kfo3zpnjC9Yl3yBCzcd1h5I0Ok82aOVSteha0lJVwYMwsycf8CbF9P-80GGLb2b0kn3c_lSo77gDg"
+}

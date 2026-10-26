@@ -1,0 +1,49 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.inspect_worker.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a027",
+  "idempotency_key": "schedules.inspect_worker.reply:UTfCBtxs11yYNb1Q93W9NOMFftj2P1UzGPNLLXuL0RE",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7000-8000-00000000a024",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "schedule_id": "schedule_id_1",
+    "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc",
+    "management_class": "system",
+    "worker_configuration_supported": false,
+    "worker_configuration_reason": "automatic_workers_require_user_owned_root_schedule",
+    "policy_revision": 0,
+    "automation_enabled": false,
+    "schedule_enabled": true,
+    "execution_json": "{\"mode\":\"memory_review_dispatch\",\"worker_agent_type\":\"MemReviewAgent\",\"worker_start\":\"upgrade_required\",\"health_verified\":false}",
+    "repair_instructions": {
+      "type": "blob",
+      "ref": {
+        "sha256": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+        "size": 40960,
+        "media_type": "text/plain",
+        "name": "review-instructions.txt"
+      }
+    }
+  },
+  "causation_id": "01928f3a-7b2c-7000-8000-00000000a024",
+  "body_digest": "QGR76YsPjHXPLBvXeOOvq3ldwIupMkpcI8UJMYkrDB8",
+  "signature": "DIYY7o-kDwCwHMQmCuJHugIQJfluSkFM6TMAhnrvL79bwUFLAlcMv34C-Tsi9sOmQV892EQmKd3d3hIugKOvAg"
+}

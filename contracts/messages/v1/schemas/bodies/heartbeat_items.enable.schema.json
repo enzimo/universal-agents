@@ -12,7 +12,8 @@
       "$ref": "../common.schema.json#/$defs/record_id"
     },
     "seen_version": {
-      "$ref": "../common.schema.json#/$defs/record_version"
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     }
   },
   "required": [

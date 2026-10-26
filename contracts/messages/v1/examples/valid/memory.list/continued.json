@@ -1,0 +1,55 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "memory.list",
+  "message_id": "cd67f746-a50c-7876-b18a-d5aeb95e78c7",
+  "idempotency_key": "memory.list:DfJ5jsGJaD1RYxIQ3MPn0dwXjN1nKLCkqbULB_ziDc0",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "gateway-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-gateway-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.gateway-1.svc.team.memory.list",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "180596f9-702e-70c7-8072-67b0bda9a910",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "command",
+      "id": "cmd_memory_list_continued"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "IpH4SeGpnEWRQB9mLOw5CCAHtDY_1RXagKPdEpsE5NZeOFedzTbuQcRyeDcwsYTHdY7wSgFutS7SJT9YdAaOCQ"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "cmd_memory_list_continued",
+    "bank": "coremem",
+    "sort": "memory_id",
+    "offset": 1,
+    "limit": 50
+  },
+  "body_digest": "NrGkL9EQDOb-lBhaRHLKDWhUwyUlYZYvalGC9KhMMG8",
+  "signature": "aI65R3JITgVe9ImEeU4s27fIq00sbkI_5vnq1aPgvkqUcS3hvI8DCFyK98RuHQWXPnWYy5fqGF0Yl6FcyTkqBQ"
+}

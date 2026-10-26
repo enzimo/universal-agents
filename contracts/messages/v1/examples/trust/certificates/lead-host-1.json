@@ -1,5 +1,6 @@
 {
   "record": "certificate",
+  "protocol": "1.0-pre",
   "key": "host.install_example.lead-host-1.3",
   "writer": {
     "type": "authority",
@@ -42,5 +43,5 @@
   },
   "algorithm": "ed25519",
   "body_digest": "rJMNT9uJr4R9IP9lV1660pOktkq4ShOyzXXhNoZPafk",
-  "signature": "B-epVXVhFhUBQFv-jt6AogcGZ8JTXjXPLVeO9Nn2asfgM_j8vZSjAJdcuHEWjam4wtR2eu_adgHDYJ6uOOaIAA"
+  "signature": "CTiCINzwYsXfD6mpuMV64hCH-lNP7w7kR5ZvJ9WCZ-cWseSc4GRm009YiEdSAigsyDt0FhpGHFnCwGVKvUO-Ag"
 }

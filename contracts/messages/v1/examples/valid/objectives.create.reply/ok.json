@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
   "kind": "objectives.create.reply",
-  "message_id": "01928f3a-7b2c-7426-8000-000000000426",
-  "idempotency_key": "objectives.create.reply:XlPkkUWw1u4uAy0Zpdsu4stgHKKKK2M75hwsfjCaqOY",
+  "message_id": "bc70a298-ca7f-7950-8c87-db2a8ab08652",
+  "idempotency_key": "objectives.create.reply:AB4yw2aHvtJ5q4uG-t6thaJFmv5YJQXY8zkM8FP0A9k",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -18,16 +18,30 @@
     "id": "lead",
     "runtime": "lead-host-1"
   },
-  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7425-8000-000000000425",
+  "subject": "_INBOX.lead-host-1.8113ee7e-851e-7903-a541-e24e5acfb957",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
   "body": {
     "outcome": "ok",
-    "objective_id": "objective_id_1",
-    "seen_version": "v3"
+    "objective_id": "objective_dependency_watch",
+    "seen_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+    "objective": {
+      "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "size": 4096,
+      "media_type": "application/json"
+    },
+    "markdown": {
+      "type": "inline",
+      "text": "# Track recurring dependency checks\n\nThe initial report is saved. Next, verify two new advisories."
+    },
+    "task_id": "task_root_7f",
+    "plan_id": "plan_dependency_watch",
+    "created_by_task_id": "task_root_7f",
+    "promoted_from_task_id": "task_root_7f",
+    "creation_mode": "promote_task"
   },
-  "causation_id": "01928f3a-7b2c-7425-8000-000000000425",
-  "body_digest": "uMhy_o4LTq20gjc8vd4hgpZzwEFSgip1FrXhonBD1lo",
-  "signature": "iayyCZfZWeOHdw2adRs7jMSZzQ_pR5Zw5W8dCqybLBgyixWSO656mfo99f9wqgmdcD9B2V4dd3FxCOIwW8-lCg"
+  "causation_id": "8113ee7e-851e-7903-a541-e24e5acfb957",
+  "body_digest": "0lJndG-3lfu89Zi_gjMz9yYgyKEgt7q2l3nS3kx62rI",
+  "signature": "g8348SZwZ8_kNiRSkgeBAXB6MHSQ0oue4R1afq3p9nQV-42xAWdJJ2CgMJsYI3q6GrD3hYUe37GYDwHlawSBBw"
 }

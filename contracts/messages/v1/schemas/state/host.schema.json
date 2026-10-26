@@ -2,42 +2,21 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/state/host.schema.json",
   "title": "host state record body",
-  "description": "A runtime host's liveness and capacity, written every 20 seconds.",
+  "description": "A runtime host's liveness and capacity, written by the host itself every 20 seconds and expiring within 60. Its roles, teams and agent types are the ones its certificate states; the record names that certificate.",
   "type": "object",
   "properties": {
     "runtime": {
       "$ref": "../common.schema.json#/$defs/runtime_id"
     },
     "certificate": {
+      "description": "The certificate the record is signed with.",
       "$ref": "../common.schema.json#/$defs/certificate_ref"
-    },
-    "roles": {
-      "type": "array",
-      "items": {
-        "$ref": "../common.schema.json#/$defs/host_role"
-      },
-      "maxItems": 7,
-      "minItems": 1
-    },
-    "teams": {
-      "type": "array",
-      "items": {
-        "$ref": "../common.schema.json#/$defs/team_id"
-      },
-      "maxItems": 64,
-      "minItems": 1
-    },
-    "agent_types": {
-      "type": "array",
-      "items": {
-        "$ref": "../common.schema.json#/$defs/agent_type"
-      },
-      "maxItems": 256
     },
     "session_limit": {
       "type": "integer",
       "minimum": 0,
-      "maximum": 100000
+      "maximum": 100000,
+      "description": "Sessions the host accepts now, at most its certificate's session limit."
     },
     "sessions_active": {
       "$ref": "../common.schema.json#/$defs/count"
@@ -117,9 +96,6 @@
   "required": [
     "runtime",
     "certificate",
-    "roles",
-    "teams",
-    "agent_types",
     "session_limit",
     "sessions_active",
     "protocol",

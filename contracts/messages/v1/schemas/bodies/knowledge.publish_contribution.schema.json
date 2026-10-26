@@ -14,7 +14,8 @@
       "maxLength": 240
     },
     "seen_version": {
-      "$ref": "../common.schema.json#/$defs/record_version"
+      "$ref": "../common.schema.json#/$defs/record_version",
+      "description": "Optional decimal page revision. Absent uses the proposal base revision; a new page under a free name creates at revision zero."
     },
     "edited": {
       "type": "boolean"
@@ -29,25 +30,30 @@
       "minLength": 0,
       "maxLength": 4000
     },
-    "body": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 32768
-    },
     "tags": {
       "type": "array",
       "items": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 64
+        "maxLength": 80
       },
       "maxItems": 100
+    },
+    "content": {
+      "$ref": "../common.schema.json#/$defs/text_content"
+    },
+    "page": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "note": {
+      "$ref": "../common.schema.json#/$defs/text_content"
     }
   },
   "required": [
     "request_id",
     "contribution_id",
-    "seen_version",
     "edited"
   ],
   "additionalProperties": false

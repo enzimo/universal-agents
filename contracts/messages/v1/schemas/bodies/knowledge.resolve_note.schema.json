@@ -20,9 +20,6 @@
       "minLength": 1,
       "maxLength": 240
     },
-    "seen_version": {
-      "$ref": "../common.schema.json#/$defs/record_version"
-    },
     "note_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
     },
@@ -33,9 +30,6 @@
   },
   "required": [
     "request_id",
-    "space",
-    "page",
-    "seen_version",
     "note_id",
     "merged"
   ],

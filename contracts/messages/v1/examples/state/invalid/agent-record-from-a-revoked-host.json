@@ -1,0 +1,15 @@
+{
+  "description": "The lead host's certificate was revoked; its agent records are refused whenever they were written.",
+  "refusal": "revoked",
+  "at": "/writer/key_id",
+  "base": "agent/lead-busy.json",
+  "changes": [],
+  "context": {
+    "trust": {
+      "add": [
+        "extra/lead-host-revoked-after-issue.json"
+      ]
+    }
+  },
+  "document_text": "{\"record\": \"agent\", \"protocol\": \"1.0-pre\", \"key\": \"team_example.lead\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"lead-host-1\", \"membership_epoch\": 3, \"key_id\": \"test-lead-key-1\"}, \"sequence\": 12, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"body\": {\"team\": \"team_example\", \"agent\": \"lead\", \"agent_type\": \"TeamArchitect\", \"session\": \"session_7\", \"state\": \"busy\", \"accepting_work\": true, \"since\": \"2026-10-22T04:29:00.000Z\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"VV93gFoPmHei-4IBdjEAth19XWv_vIcmQyYp0Zi1zyg\", \"signature\": \"ii-8Tlhgm6eh2LkovclnDtfsuUEBHjElcaQyEVi88KkltsDUgIjphnNH1mDHB4q_wVyspf_H5K5dQnfJ2xQOBg\"}"
+}

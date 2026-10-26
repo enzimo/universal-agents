@@ -33,6 +33,7 @@ from nats.js.api import AckPolicy, ConsumerConfig, RetentionPolicy, StorageType,
 
 from custom_messages.wire.kinds import KINDS
 from tests import message_contract_support as fixtures
+from tests.live_nats_support import flush_fully
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 CONTRACT = Path(__file__).resolve().parents[1] / "contracts/messages/v1"
@@ -49,7 +50,11 @@ HOSTS = {
     "scheduler": {"role": "scheduler", "runtime": "scheduler-1", "agents": [], "pools": [], "edges": []},
     "gateway": {"role": "gateway", "runtime": "gateway-1", "agents": [], "pools": [], "edges": ["web"]},
     "edge": {"role": "edge_adapter", "runtime": "edge-adapter-1", "agents": [], "pools": [], "edges": ["a2a_partner"]},
+    # A host that has not joined yet: the bootstrap bundle's pre-join permissions only.
+    "joining": {"role": "joining_host", "runtime": "new-host-1", "agents": [], "pools": [], "edges": []},
 }
+# What a new host's bootstrap bundle carries besides the authority keys (README, "Installation traffic").
+BOOTSTRAP_RECORDS = {"certificates/authority-1.json", "revocations/install_example.json"}
 
 
 def expand(template: str, bindings: dict[str, list[str]]) -> list[str]:
@@ -222,19 +227,10 @@ class Client:
 
 
 async def subscribe_ready(client: Client, subject: str, cb) -> None:
-    """Subscribe and wait until the server holds the subscription.
-
-    nats-py 2.16.0 queues SUB in its outgoing buffer for a writer task, but
-    flush() writes its PING straight to the socket. One PONG therefore does not
-    prove the server has the subscription, and a request sent from another
-    connection right after can get "no responders" (about 3% of runs under
-    load). While the first flush waits, the writer task sends the queued SUB, so
-    the second PING follows it on the wire.
-    """
+    """Subscribe and wait until the server holds the subscription."""
 
     await client.nc.subscribe(subject, cb=cb)
-    await client.nc.flush()
-    await client.nc.flush()
+    await flush_fully(client.nc)
 
 
 async def connect(stack: AsyncExitStack, broker, user: str) -> Client:
@@ -439,6 +435,32 @@ async def test_installation_requests_reach_the_authority_and_dead_letters_keep_r
 
 
 @pytest.mark.asyncio
+async def test_a_new_host_joins_with_only_its_pre_join_permissions_and_bootstrap_records(isolated_broker) -> None:
+    async with AsyncExitStack() as stack:
+        authority = await connect(stack, isolated_broker, "authority")
+        joining = await connect(stack, isolated_broker, "joining")
+        request = fixtures.example_frame("host.join", "full")
+
+        async def answer(message):
+            verified = fixtures.verify(message.data, request, arrived(request, message))
+            reply = fixtures.example_frame("host.join.reply", "ok")
+            reply.update(subject=message.reply, causation_id=verified.frame.message_id)
+            await authority.nc.publish(message.reply, fixtures.resign(reply), headers=headers(reply))
+
+        await subscribe_ready(authority, "ua.v1._install.*.svc.host.join", answer)
+        response = await joining.nc.request(request["subject"], json.dumps(request).encode(), timeout=2, headers=headers(request))
+        reply = json.loads(response.data)
+        bootstrap = fixtures.trust_store(remove=[name for name in fixtures.default_records() if name not in BOOTSTRAP_RECORDS])
+        verified = fixtures.verify(response.data, reply, arrived(reply, response), trust=bootstrap)
+        assert verified.body.outcome == "ok" and verified.body.certificate.body.runtime == "new-host-1"
+        await joining.publish_refused("ua.v1._install.new-host-1.svc.host.renew")
+        await joining.publish_refused("ua.v1._install.worker-host-1.svc.host.join")
+        await joining.publish_refused("ua.v1.team_example.new-host-1.work.team")
+        await joining.subscribe_refused("_INBOX.worker-host-1.>")
+        assert joining.errors.empty() and authority.errors.empty()
+
+
+@pytest.mark.asyncio
 async def test_a_result_and_its_team_services_copy_both_arrive_and_retries_of_each_are_dropped(isolated_broker) -> None:
     """The stream drops repeats of one Nats-Msg-Id across all subjects, so a copy carries its own key.
 
@@ -508,6 +530,65 @@ async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_per
         assert answer.body.delivery_ref == task.body.work.delivery_ref
         await delivered.ack_sync(timeout=2)
         assert scheduler.errors.empty() and worker.errors.empty() and gateway.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_the_scheduler_signs_a_run_token_for_a_worker_that_asks(isolated_broker) -> None:
+    """Only a scheduler signs a run's token, so it answers run_context.sign (README, "On behalf of a person").
+
+    The scheduler serves that one team-services address; the team services may not
+    listen there, and the token in the answer is the scheduler's.
+    """
+
+    async with AsyncExitStack() as stack:
+        worker = await connect(stack, isolated_broker, "worker")
+        scheduler = await connect(stack, isolated_broker, "scheduler")
+        services = await connect(stack, isolated_broker, "services")
+        request = fixtures.example_frame("run_context.sign", "full")
+
+        async def respond(message):
+            verified = fixtures.verify(message.data, request, arrived(request, message))
+            reply = fixtures.example_frame("run_context.sign.reply", "ok")
+            reply.update(subject=message.reply, causation_id=verified.frame.message_id)
+            await scheduler.nc.publish(message.reply, fixtures.resign(reply), headers=headers(reply))
+
+        await services.subscribe_refused(request["subject"])
+        await subscribe_ready(scheduler, request["subject"], respond)
+        response = await worker.nc.request(request["subject"], json.dumps(request).encode(), timeout=2, headers=headers(request))
+        answer = json.loads(response.data)
+        verified = fixtures.verify(response.data, answer, arrived(answer, response))
+        token = verified.body.authority
+        assert verified.certificate.roles == frozenset({"scheduler"}) and token.issuer.runtime == "scheduler-1"
+        assert token.schedule_id == request["body"]["scheduled_job_id"] and verified.body.system_work is False
+        assert worker.errors.empty() and scheduler.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_the_team_services_pass_a_queue_request_on_to_the_agent_that_holds_the_queue(isolated_broker) -> None:
+    """The gateway asks the team services, which relay the command, token unchanged, to the holder (plan 13A.4)."""
+
+    async with AsyncExitStack() as stack:
+        gateway = await connect(stack, isolated_broker, "gateway")
+        services = await connect(stack, isolated_broker, "services")
+        worker = await connect(stack, isolated_broker, "worker")
+        relay = fixtures.example_frame("tasks.list", "relayed-to-the-holder")
+        assert relay["authority"] == fixtures.example_frame("tasks.list", "full")["authority"]
+        await gateway.publish_refused(f"ua.v1.{TEAM}.gateway-1.ctl.agent.researcher-2.tasks.list")
+
+        async def respond(message):
+            verified = fixtures.verify(message.data, relay, arrived(relay, message))
+            assert verified.authority is not None and verified.authority.certificate.runtime == "gateway-1"
+            reply = fixtures.example_frame("tasks.list.reply", "from-the-holder")
+            reply.update(subject=message.reply)
+            await worker.nc.publish(message.reply, fixtures.resign(reply), headers=headers(reply))
+
+        await subscribe_ready(worker, relay["subject"], respond)
+        response = await services.nc.request(relay["subject"], json.dumps(relay).encode(), timeout=2, headers=headers(relay))
+        answer = json.loads(response.data)
+        verified = fixtures.verify(response.data, answer, arrived(answer, response))
+        assert verified.frame.causation_id == relay["message_id"] and verified.frame.issuer.agent == "researcher-2"
+        assert verified.body.outcome == "ok"
+        assert services.errors.empty() and worker.errors.empty()
 
 
 @pytest.mark.asyncio

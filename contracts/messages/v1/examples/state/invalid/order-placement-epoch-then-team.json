@@ -1,0 +1,29 @@
+{
+  "description": "A placement below the reader's minimum epoch, for a team its writer does not serve.",
+  "refusal": "epoch_too_old",
+  "also": [
+    "wrong_team"
+  ],
+  "at": "/writer/membership_epoch",
+  "base": "placement/lead.json",
+  "changes": [
+    {
+      "set": "/body/team",
+      "to": "team_other"
+    },
+    {
+      "set": "/key",
+      "to": "team_other.lead"
+    }
+  ],
+  "context": {
+    "minimum_epochs": [
+      {
+        "installation": "install_example",
+        "runtime": "team-services-1",
+        "membership": 9
+      }
+    ]
+  },
+  "document_text": "{\"record\": \"placement\", \"protocol\": \"1.0-pre\", \"key\": \"team_other.lead\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"key_id\": \"test-services-key-1\"}, \"sequence\": 1, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"body\": {\"team\": \"team_other\", \"agent\": \"lead\", \"agent_type\": \"TeamArchitect\", \"host\": \"lead-host-1\", \"host_epoch\": 3, \"definition_sha256\": \"CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws\", \"required_labels\": [\"sandbox:container\"], \"placed_at\": \"2026-10-22T04:00:00.000Z\", \"reason\": \"initial\", \"previous_host\": \"lead-host-0\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"Qq3qeg2XfBAHv1tQjBzOjPOsUypNdZ1jLHNUAv-KH8g\", \"signature\": \"wi7LRzCkt2FLmwxSo4aJQS764Jjz-mNCbWPJUmO917ozpEuBysQQe1iMa9h1jUSpVnNO-bX99Gjjv2lEGluWAQ\"}"
+}

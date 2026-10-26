@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/host.renew.reply.schema.json",
   "title": "host.renew.reply body",
-  "description": "A host renews its certificate and connection credential, or rotates its keys.",
+  "description": "The installation authority's answer to a renewal: the renewed certificate and connection credential, or why it was refused.",
   "oneOf": [
     {
       "type": "object",

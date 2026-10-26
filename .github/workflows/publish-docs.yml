@@ -1,10 +1,10 @@
 name: Publish Documentation
 
+# Builds the documentation for a stable release tag and publishes it only when
+# started by hand. Pull requests and branch pushes start no CI
+# (docs/LOCAL_CI.md, "When CI runs").
 on:
-  pull_request:
   push:
-    branches:
-      - main
     # Stable release tags only. Pre-release tags (vX.Y.Z-beta.N, -rc.N,
     # -nightly.YYYYMMDDHHMM) contain "-" and never build or publish docs.
     tags:

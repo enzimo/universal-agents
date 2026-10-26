@@ -1,0 +1,34 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "agent.pause.reply",
+  "message_id": "893b326e-e29b-7919-895e-1b1916383c85",
+  "idempotency_key": "agent.pause.reply:DOZmRcKfrzRlKR5yG5I2F4BYJ-ormJ4NnoynueCXJJI",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.pause_1",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "agent_exiting",
+    "message": "The command was refused. Review the current state before continuing."
+  },
+  "causation_id": "01928f3a-7b2c-7002-8000-000000000002",
+  "body_digest": "MvJ7yp8kme3u3aSaKcKN4_KF9fqgUx0Wi1eHwGclmyY",
+  "signature": "j0eISz0wFZqN5e_xM4JsXGfOMs5NLWt5DkwO3fqIzoGPsIjFoz6v9mO3iQtEccBisf4sOv_8Wv9QEsn39BaxCA"
+}

@@ -1,5 +1,6 @@
 {
   "record": "team_view",
+  "protocol": "1.0-pre",
   "key": "team_example.roster.researcher-2",
   "writer": {
     "type": "host",
@@ -21,5 +22,5 @@
   },
   "algorithm": "ed25519",
   "body_digest": "Dm_GCU3iF06isl4zHgHtKpJb3xJc6E8MqKhuQYukJX8",
-  "signature": "AuokMMHRwny_hFgpnEISIBYn9_4afnQ2XdtdCM4NAx8snUWoccOIWdcXpV3A0SqeuS1wdX7IxiB3lxMsy8REDA"
+  "signature": "75jfBaz5gLlQmjabaeyYK-crzC0NnG6G2QCIAMxSAYASCALDmn5lHRPOuB9F1iwikgx7w67kLsb4sHsl4u2YCg"
 }

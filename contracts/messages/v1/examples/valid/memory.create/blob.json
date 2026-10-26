@@ -1,0 +1,65 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "memory.create",
+  "message_id": "ed7cc918-b982-7e4c-9f3f-44b4ec668247",
+  "idempotency_key": "memory.create:JM-QEqF-PDe-T8-C7GADUr6Efp_I9Kdzm0m23uYTFoI",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "agent": "lead",
+    "session": "s-lead-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team.memory.create",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "4e33ebc0-ee64-757c-8782-5ece4b8a9ac2",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-22T04:34:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "AGohvauC04ckXJ4b06_-SEUUWSGvZN1XSiQAbuaijyOB1Id5DGFmgcXqhNjnUAT3KtbYtK3C7wKiTsbQyFkhCA"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "cmd_memory_create_blob",
+    "bank": "coremem",
+    "fact_text": {
+      "type": "blob",
+      "ref": {
+        "sha256": "68z63E__ScIzx_1N-jf8qn7EUMm-Ru6xXtX-iu3WDDk",
+        "size": 41000,
+        "media_type": "text/plain"
+      }
+    },
+    "valid_from": "2026-10-22T04:30:00.000Z",
+    "expires": "2026-10-23T04:30:00.000Z",
+    "metadata_json": "{\"resume_section\":\"deployment\"}"
+  },
+  "body_digest": "tuyTJQxNVbHY1bgycsl7Nb2Jh91-VO0w9-GuwZGq9PQ",
+  "signature": "yvAIPwtXdX7bQTxZLFg8EJzH51u6CIATcbz4Sb3GBNSXtAufcbzNZ06BbMreyWdoM5SO04CfAKYcSFloBAAdBg"
+}

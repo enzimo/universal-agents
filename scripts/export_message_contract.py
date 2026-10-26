@@ -91,20 +91,39 @@ ID_CHARACTER = re.compile(r"[A-Za-z0-9_-]")
 # its team; a receiver reads only its own, so subscriptions and consumer grants keep
 # them as placeholders for membership code to fill per assigned id.
 RECEIVER_PLACEHOLDERS = ("agent", "pool", "edge")
-# Other address placeholders: a dead-letter copy id (one subject token the sender
-# chooses), and the sender of an installation address (_install.{sender}.svc.<op>).
+# Other address placeholders: a dead-letter copy id (the body's copy_id), and the
+# sender of an installation address (<installation scope>.{sender}.svc.<op>).
 COPY_PLACEHOLDER, SENDER_PLACEHOLDER = "copy", "sender"
-INSTALLATION_ADDRESS = "_install.{sender}."
 # Hosts that send frames for agents; a kind no agent sends is not a topology check.
 AGENT_HOSTS = {"lead_host", "worker_host"}
-# Audience targets that get durable copies: the team services record custody facts.
-COPY_TARGETS = {"team_services"}
+# Audience targets that get durable copies, and the roles that read them there: the
+# team services record custody facts. Another role serving the same target (the
+# scheduler answers run_context.sign at svc.team) never reads copies.
+COPY_READERS = {"team_services": ["team_services"]}
+# The token type bound to one command; its binding always names the command id (`at`).
+COMMAND_BINDING = "command"
+# The permission set of a host that has not joined yet (it holds no role): it only sends
+# its own join request and reads its own reply inbox (README, "Installation traffic").
+JOINING = "joining_host"
 # A kind (with ".reply") within 84 characters keeps its idempotency key, the kind,
 # a colon and 43 digest characters, within the 128 that common.schema.json allows.
 MAX_KIND_LENGTH = 84
 # The frame's and the state record's bodies are the open objects: the schema their
 # kind or record names checks them.
 OPEN_OBJECTS = {("frame.schema.json", "/properties/body"), ("state.schema.json", "/properties/body")}
+# Who sends the version a covered change was based on (README, "Covered changes"), and
+# whether the body's seen_version is then required, optional or absent.
+SEEN_VERSION_FIELD = {"required": "required", "required_for_request_writers": "optional", "optional": "optional",
+                      "none": "absent"}
+# Shared refusals that only the store-safety checks of covered records give: another
+# request's change, an escalated record, a file or sign-in another request writes.
+# changed_since_read and request_closed also answer the lead's operations on its own
+# request (intent.set, requests.pause), which change no covered record.
+COVERED_ONLY_REFUSALS = {"change_conflict", "needs_person_decision", "record_busy"}
+# Frame fields that differ on every frame. A retry is a new frame, so a key made from
+# one of them would never repeat and could not find the stored outcome.
+PER_FRAME_PARTS = {"/message_id", "/idempotency_key", "/issued_at", "/not_before", "/expires_at", "/body_digest",
+                   "/signature"}
 STATE_FIELDS = {"description", "bucket", "key", "signer", "signer_roles", "writers", "body", "ttl_seconds", "write_rule"}
 REQUIRED_STATE_FIELDS = {"description", "bucket", "key", "signer", "writers", "body", "write_rule"}
 SIGNERS = {"authority", "host"}
@@ -119,6 +138,15 @@ def load_yaml(name: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ContractError(f"{name} must hold a mapping")
     return data
+
+
+# Names transport.yaml defines once: the scope installation-wide traffic names instead
+# of a team, and the subject root before the team token (ua.v1.). Every installation
+# address and subject this script builds follows them.
+_NAMES = load_yaml("transport.yaml")
+INSTALLATION_SCOPE = str(_NAMES["installation_scope"])
+INSTALLATION_ADDRESS = INSTALLATION_SCOPE + ".{" + SENDER_PLACEHOLDER + "}."
+SUBJECT_ROOT = str(_NAMES["subject_prefix"]).split("{team}", 1)[0]
 
 
 def load_schemas() -> dict[str, dict[str, Any]]:
@@ -281,6 +309,12 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
                    schemas: dict[str, dict[str, Any]]) -> None:
     check_state_records(registry, transport, schemas)
     check_shared_lists(registry, transport, topologies, schemas)
+    if not 0 < registry["command_token_max_seconds"] <= registry["authority_token_max_seconds"]:
+        raise ContractError("registry.yaml: command_token_max_seconds is positive and within authority_token_max_seconds")
+    overlap = registry["certificate_overlap_seconds"]
+    if not isinstance(overlap, int) or not 0 < overlap <= 3600:
+        raise ContractError("registry.yaml: certificate_overlap_seconds is a short positive deadline, at most an hour")
+    check_name_lists(registry)
     edges = set(EDGES) - {"none"}
     if set(topologies["edges"]) != edges:
         raise ContractError(f"team-topologies.yaml: edges describes exactly {sorted(edges)}")
@@ -292,9 +326,12 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         where = f"registry.yaml kinds.{name}"
         check_entry_fields(where, name, entry, registry, transport, schemas)
         check_entry_addresses(where, name, entry, transport)
+        check_agent_addressed_edges(where, entry)
         check_idempotency(where, name, entry, schemas, registry["frame_schema"])
         check_body_rules(where, entry, schemas)
         check_wake_alternatives(where, entry, schemas)
+        check_reply_errors(where, entry, schemas)
+        check_covered_change(where, entry, registry, schemas)
     names: dict[str, str] = {}
     for name in registry["kinds"]:
         # Generated model and adapter names come from the kind name; two kinds
@@ -339,8 +376,10 @@ def check_entry_fields(where: str, name: str, entry: dict[str, Any], registry: d
     check_authority_binding(where, entry, schemas)
     if entry.get("verification", "standard") not in VERIFICATION:
         raise ContractError(f"{where}: verification must be one of {sorted(VERIFICATION)}")
-    if entry.get("verification") == "proof_of_possession" and entry["class"] != "request_reply":
-        raise ContractError(f"{where}: only an installation request proves possession of its own key")
+    if entry.get("verification") == "proof_of_possession" and (
+            entry["class"] != "request_reply" or entry["authority"] != "none"
+            or not all(address.startswith(INSTALLATION_ADDRESS) for address in own_addresses(entry))):
+        raise ContractError(f"{where}: only an installation request without an authority token proves possession of its own key")
 
 
 def check_routing_rules(where: str, entry: dict[str, Any]) -> None:
@@ -356,28 +395,91 @@ def check_routing_rules(where: str, entry: dict[str, Any]) -> None:
         raise ContractError(f"{where}: admission states execution_slot, accepted_while_paused and priority")
 
 
-def check_authority_binding(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
-    """A kind that takes a token says what the token is bound to; with ``at``, the body field holding that id."""
+def check_agent_addressed_edges(where: str, entry: dict[str, Any]) -> None:
+    """A kind an agent sends to another agent, a worker pool or an edge route names the edges it may take.
+
+    ``none`` means "not a topology check" (README, "Who may talk to whom"): the
+    kind goes to the team services or only hosts send it. When a lead or worker
+    host may send it to a receiver's own address, the receiver checks the edge,
+    so ``none`` would let any agent role send it anywhere. A refusal answered to
+    the refused frame's sender (routing ``sender``) goes back wherever that frame
+    came from, so it is no topology check either.
+    """
+
+    if topology_edges(entry) != ["none"] or entry["routing"] == "sender":
+        return
+    for address in own_addresses(entry):
+        if audience_target(address) in RECEIVER_PLACEHOLDERS and set(address_senders(entry, address)) & AGENT_HOSTS:
+            raise ContractError(f"{where}: agent hosts send it to {address}, so it is a topology check: "
+                                "name the edges it may take instead of none")
+
+
+
+def token_bindings(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    """The kind's ``authority_binding`` as a list: one binding, or a list of them, one per token type."""
 
     binding = entry.get("authority_binding")
-    if (binding is None) != (entry["authority"] == "none"):
-        raise ContractError(f"{where}: kinds that take an authority token, and only they, state authority_binding")
     if binding is None:
-        return
+        return []
+    return list(binding) if isinstance(binding, list) else [binding]
+
+
+def check_authority_binding(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """A kind that takes a token lists each token type it takes, where the body names its record, and who presents it.
+
+    A binding is ``{type, at?, senders?}``. A command token always names its
+    command in the body (``at``): the plan binds commands to the command id, and
+    the receiver checks the field that names it. ``senders`` narrows who may
+    present that type; without it every sender of the frame's address may. A kind
+    that requires a token must accept one from each of its senders.
+    """
+
+    bindings = token_bindings(entry)
+    if bool(bindings) != (entry["authority"] != "none"):
+        raise ContractError(f"{where}: kinds that take an authority token, and only they, state authority_binding")
     types = schemas["common.schema.json"]["$defs"]["authority_token"]["properties"]["bound_to"]["properties"]["type"]["enum"]
-    named = binding.get("type") if isinstance(binding, dict) else None
-    named = named if isinstance(named, list) else [named]
-    if not isinstance(binding, dict) or set(binding) - {"type", "at"} or not named or not set(named) <= set(types) \
-            or ("at" in binding and len(named) != 1):
-        raise ContractError(f"{where}: authority_binding is {{type, at}} with type one of {types}; a list of types "
-                            "only when the handler checks the binding")
+    named = [binding.get("type") if isinstance(binding, dict) else None for binding in bindings]
+    if not all(isinstance(binding, dict) and not set(binding) - {"type", "at", "senders"} for binding in bindings) \
+            or not all(isinstance(kind, str) and kind in types for kind in named) or len(set(named)) != len(named):
+        raise ContractError(f"{where}: authority_binding is a binding {{type, at, senders}}, or a list of them, each "
+                            f"with its own type, one of {types}")
+    for binding in bindings:
+        check_binding_parameters(where, entry, schemas, binding)
+    check_binding_presenters(where, entry, bindings)
+
+
+def check_binding_parameters(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]],
+                             binding: dict[str, Any]) -> None:
+    """One binding names a valid record field and narrows the kind's senders."""
+
+    if binding["type"] == COMMAND_BINDING and "at" not in binding:
+        raise ContractError(f"{where}: a command token is bound to the command its body names: give its binding `at`")
     if "at" in binding:
-        steps = binding["at"].split("/")
-        leaves = schema_leaves(ModelWriter(schemas), entry["body"], schemas[entry["body"]], steps[2:]) \
-            if binding["at"].startswith("/body/") else []
-        if not leaves or not all(scalar_schema(ModelWriter(schemas), file, leaf) for file, leaf in leaves) \
-                or not always_supplied(entry, schemas, "frame.schema.json", steps[1:]):
-            raise ContractError(f"{where}: authority_binding at {binding['at']} names no field every body carries")
+        check_binding_field(where, entry, schemas, binding["at"])
+    if "senders" in binding and (not binding["senders"] or not set(binding["senders"]) <= set(entry["senders"])):
+        raise ContractError(f"{where}: an authority_binding's senders are some of the kind's senders")
+
+
+def check_binding_presenters(where: str, entry: dict[str, Any], bindings: list[dict[str, Any]]) -> None:
+    """Every sender of a token-required operation can present one of its accepted token types."""
+
+    if entry["authority"] != "required":
+        return
+    for address in own_addresses(entry):
+        for sender in address_senders(entry, address):
+            if not any(sender in binding.get("senders", [sender]) for binding in bindings):
+                raise ContractError(f"{where}: {sender} sends it to {address} but may present none of its token types")
+
+
+def check_binding_field(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]], at: str) -> None:
+    """A binding's ``at`` names a string or integer body field that every body carries."""
+
+    steps = at.split("/")
+    leaves = schema_leaves(ModelWriter(schemas), entry["body"], schemas[entry["body"]], steps[2:]) \
+        if at.startswith("/body/") else []
+    if not leaves or not all(scalar_schema(ModelWriter(schemas), file, leaf) for file, leaf in leaves) \
+            or not always_supplied(entry, schemas, "frame.schema.json", steps[1:]):
+        raise ContractError(f"{where}: authority_binding at {at} names no field every body carries")
 
 
 def topology_edges(entry: dict[str, Any]) -> list[str]:
@@ -411,6 +513,10 @@ def check_entry_addresses(where: str, name: str, entry: dict[str, Any], transpor
 def check_entry_receivers(where: str, entry: dict[str, Any], transport: dict[str, Any]) -> None:
     """Every address has a reader, every listed receiver serves one of the kind's own addresses, copies go to custody inboxes."""
 
+    if entry.get("copy_to") and entry["class"] != "durable":
+        raise ContractError(f"{where}: only durable kinds are copied to other inboxes")
+    if any(audience_target(address) not in COPY_READERS for address in entry.get("copy_to", [])):
+        raise ContractError(f"{where}: copies go only to {sorted(COPY_READERS)} inboxes")
     for address in entry_addresses(entry):
         target = audience_target(address)
         if not receiving_roles(entry, address, transport):
@@ -418,13 +524,8 @@ def check_entry_receivers(where: str, entry: dict[str, Any], transport: dict[str
     own_targets = {audience_target(address) for address in own_addresses(entry)}
     idle = [role for role in entry["receivers"]
             if not any(role in transport["audience_targets"][target] for target in own_targets)]
-    # Dead-letter readers read the stream with their own grants, not through one address.
-    if idle and entry["class"] != "dead_letter":
+    if idle:
         raise ContractError(f"{where}: receivers {idle} serve none of its addresses")
-    if entry.get("copy_to") and entry["class"] != "durable":
-        raise ContractError(f"{where}: only durable kinds are copied to other inboxes")
-    if any(audience_target(address) not in COPY_TARGETS for address in entry.get("copy_to", [])):
-        raise ContractError(f"{where}: copies go only to {sorted(COPY_TARGETS)} inboxes")
     for address, senders in entry.get("senders_by_address", {}).items():
         if address not in own_addresses(entry) or not senders or not set(senders) <= set(entry["senders"]):
             raise ContractError(f"{where}: senders_by_address narrows the senders of one of its own addresses")
@@ -437,11 +538,14 @@ def own_addresses(entry: dict[str, Any]) -> list[str]:
 
 
 def full_subject(address: str, owner: str) -> str:
-    """The NATS subject of an address: team addresses sit under ua.v1.<team>.<sender>, installation ones under ua.v1._install."""
+    """The NATS subject of an address: team addresses sit under ua.v1.<team>.<sender>, installation ones under ua.v1.
 
-    if address.startswith("_install."):
-        return "ua.v1." + address.replace("{sender}", owner)
-    return f"ua.v1.{{team}}.{owner}." + address
+    An installation address already names its scope and sender (_install.{sender}.svc.<op>).
+    """
+
+    if address.startswith(INSTALLATION_ADDRESS):
+        return SUBJECT_ROOT + address.replace("{" + SENDER_PLACEHOLDER + "}", owner)
+    return f"{SUBJECT_ROOT}{{team}}.{owner}." + address
 
 
 def entry_addresses(entry: dict[str, Any]) -> list[str]:
@@ -455,14 +559,15 @@ def receiving_roles(entry: dict[str, Any], address: str, transport: dict[str, An
 
     At its own addresses, the kind's receivers that serve the address's audience
     target: a role gets permissions only for the addresses it can serve. A copy
-    goes to every role serving the copy's target (README, "Durable copies"), which
-    is not a receiver of the kind itself: the team services record a task's custody
-    from its copy without the kind's slot, wake or rendering rules.
+    goes to the copy target's readers that serve it (README, "Durable copies"),
+    which are not receivers of the kind itself: the team services record a task's
+    custody from its copy without the kind's slot, wake or rendering rules.
     """
 
-    serving = transport["audience_targets"][audience_target(address)]
+    target = audience_target(address)
+    serving = transport["audience_targets"][target]
     if address in entry.get("copy_to", []):
-        return list(serving)
+        return [role for role in COPY_READERS[target] if role in serving]
     return [role for role in entry["receivers"] if role in serving]
 
 
@@ -510,6 +615,94 @@ def check_wake_alternatives(where: str, entry: dict[str, Any], schemas: dict[str
     if alternatives is None or alternatives != set(wakes["values"]):
         raise ContractError(f"{where}: wakes_model by {wakes['by']} must name a body oneOf and give each of its "
                             f"alternatives {sorted(alternatives or [])} a value")
+
+
+def check_reply_errors(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """An operation's ``reply.errors`` are exactly its reply schema's outcomes other than ``ok``.
+
+    Replies tell their alternatives apart by the constant ``outcome``. The error
+    list is what generated code and readers rely on, so a code the schema lacks
+    would be promised but never sendable, and an outcome missing from the list
+    would be sendable but undocumented.
+    """
+
+    if "reply" not in entry:
+        return
+    errors = entry["reply"]["errors"]
+    outcomes = [variant.get("properties", {}).get("outcome", {}).get("const")
+                for _file, variant in reply_alternatives(entry, schemas)]
+    if None in outcomes or "ok" not in outcomes:
+        raise ContractError(f"{where}: its reply's alternatives are told apart by a constant outcome, one of them ok")
+    if len(set(errors)) != len(errors) or set(errors) != set(outcomes) - {"ok"}:
+        raise ContractError(f"{where}: reply errors {sorted(set(errors))} must be the reply schema's outcomes other "
+                            f"than ok, each once: {sorted(set(outcomes) - {'ok'})}")
+
+
+def check_covered_change(where: str, entry: dict[str, Any], registry: dict[str, Any],
+                         schemas: dict[str, dict[str, Any]]) -> None:
+    """A covered change names its record and version rule, and its body, reply and key agree with them.
+
+    README, "Covered changes": ``seen_version`` required means the body requires
+    the field; required_for_request_writers and optional mean the body offers it
+    without requiring it (the receiver refuses an agent's change without it, which
+    a schema cannot say); none means the body has no such field. Whenever the
+    writer may send a version, the reply's ``changed_since_read`` carries the
+    current one. A kind offering a refusal that only covered changes give must be
+    covered, and a covered change's key never uses a part a retry's new frame changes.
+    """
+
+    covered = entry.get("covered_change")
+    errors = set(entry.get("reply", {}).get("errors", []))
+    if covered is None:
+        if errors & COVERED_ONLY_REFUSALS:
+            raise ContractError(f"{where}: its reply offers {sorted(errors & COVERED_ONLY_REFUSALS)}, which only covered "
+                                "changes give: state its covered_change")
+        return
+    if entry["class"] != "request_reply":
+        raise ContractError(f"{where}: only request/reply operations state covered_change")
+    if not isinstance(covered, dict) or set(covered) != {"record_kind", "seen_version"} \
+            or covered["record_kind"] not in registry["covered_record_kinds"] \
+            or covered["seen_version"] not in SEEN_VERSION_FIELD:
+        raise ContractError(f"{where}: covered_change is {{record_kind, seen_version}} with record_kind one of "
+                            f"covered_record_kinds and seen_version one of {sorted(SEEN_VERSION_FIELD)}")
+    rule = covered["seen_version"]
+    field = seen_version_field(entry, schemas)
+    if field != SEEN_VERSION_FIELD[rule]:
+        raise ContractError(f"{where}: seen_version {rule} needs a body whose seen_version is "
+                            f"{SEEN_VERSION_FIELD[rule]}, not {field}")
+    if rule != "none" and not stale_refusal_carries_version(entry, schemas):
+        raise ContractError(f"{where}: a writer may send seen_version, so its reply offers changed_since_read "
+                            "with a required current_version")
+    if rule == "required_for_request_writers" and "invalid_request" not in errors:
+        raise ContractError(f"{where}: an agent's change without seen_version is refused as invalid_request, "
+                            "so its reply offers invalid_request")
+    per_frame = sorted(set(entry["idempotency"]) & PER_FRAME_PARTS)
+    if per_frame:
+        raise ContractError(f"{where}: idempotency part {per_frame[0]} changes with every frame, so a retry of the "
+                            "change would never find its stored outcome")
+
+
+def seen_version_field(entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> str:
+    """Whether every alternative of the body requires ``seen_version``, offers it, or lacks it; else ``mixed``."""
+
+    states = {"required" if "seen_version" in variant.get("required", [])
+              else "optional" if "seen_version" in variant.get("properties", {}) else "absent"
+              for _file, variant in schema_leaves(ModelWriter(schemas), entry["body"], schemas[entry["body"]], [])}
+    return states.pop() if len(states) == 1 else "mixed"
+
+
+def stale_refusal_carries_version(entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> bool:
+    """Whether the reply has a ``changed_since_read`` alternative that requires ``current_version``."""
+
+    return any(variant.get("properties", {}).get("outcome", {}).get("const") == "changed_since_read"
+               and "current_version" in variant.get("required", [])
+               for _file, variant in reply_alternatives(entry, schemas))
+
+
+def reply_alternatives(entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+    """The alternatives of a kind's reply body, references followed."""
+
+    return schema_leaves(ModelWriter(schemas), entry["reply"]["body"], schemas[entry["reply"]["body"]], [])
 
 
 class BodyFields:
@@ -663,11 +856,22 @@ def check_state_records(registry: dict[str, Any], transport: dict[str, Any], sch
             raise ContractError(f"{where}: host-signed records, and only they, name signer_roles from host_roles")
         if not set(entry["writers"]) <= roles or entry["body"] not in schemas:
             raise ContractError(f"{where}: writers must be host roles and the body schema must exist")
+        bucket_ttl = transport["key_value"][entry["bucket"]]["per_key_ttl_seconds"]
+        if entry.get("ttl_seconds", 0) != bucket_ttl:
+            raise ContractError(f"{where}: ttl_seconds is its bucket's per_key_ttl_seconds ({bucket_ttl}), and only then present")
 
 
 def check_shared_lists(registry: dict[str, Any], transport: dict[str, Any], topologies: dict[str, Any],
                        schemas: dict[str, dict[str, Any]]) -> None:
     """Lists the schemas repeat must match the registry and topologies they come from."""
+
+    refusals = {item["code"] for item in registry["verification_refusals"]}
+    for entry in registry["kinds"].values():
+        if entry["class"] == "dead_letter":
+            reasons = set(schemas[entry["body"]]["properties"]["reason"]["enum"])
+            if not refusals <= reasons:
+                raise ContractError(f"{entry['body']}: a notice's reason names every verification refusal; missing "
+                                    f"{sorted(refusals - reasons)}")
 
     common = schemas["common.schema.json"]["$defs"]
     if set(common["host_role"]["enum"]) != set(registry["host_roles"]):
@@ -679,6 +883,21 @@ def check_shared_lists(registry: dict[str, Any], transport: dict[str, Any], topo
         raise ContractError("transport.yaml audience_targets name host roles only")
     if set(common["agent_role"]["enum"]) != set(topologies["agent_roles"]):
         raise ContractError("common.schema.json agent_role must list team-topologies.yaml agent_roles")
+    if not common["scope_id"]["pattern"].startswith(f"^({re.escape(INSTALLATION_SCOPE)}|"):
+        raise ContractError("common.schema.json scope_id must allow transport.yaml installation_scope")
+    for spec in transport["classes"].values():
+        if not all(address.startswith(INSTALLATION_ADDRESS) for address in spec.get("installation_addresses", [])):
+            raise ContractError(f"transport.yaml: installation addresses start with {INSTALLATION_ADDRESS}")
+
+
+def check_name_lists(registry: dict[str, Any]) -> None:
+    """Registry lists of names that kinds and handlers refer to: each a list of distinct names."""
+
+    for key in ("covered_record_kinds", "retry_outcomes"):
+        names = registry.get(key)
+        if not isinstance(names, list) or not names or len(set(names)) != len(names) \
+                or not all(isinstance(name, str) and re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in names):
+            raise ContractError(f"registry.yaml: {key} lists distinct snake_case names")
 
 
 def audience_target(address: str) -> str:
@@ -693,7 +912,7 @@ def audience_target(address: str) -> str:
         return "team_services"
     if address.startswith("dlq."):
         return "team_services"
-    if address.startswith("_install."):
+    if address.startswith(INSTALLATION_ADDRESS):
         return "installation_service"
     raise ContractError(f"address {address!r} names no audience target")
 
@@ -734,6 +953,10 @@ def check_transport(transport: dict[str, Any]) -> None:
     an old message in again.
     """
 
+    if (transport.get("installation_scope"), transport.get("subject_prefix", "").split("{team}", 1)[0]) != (
+            INSTALLATION_SCOPE, SUBJECT_ROOT):
+        # The generator reads both once, when it loads; a transport passed in later must agree.
+        raise ContractError("transport.yaml: installation_scope and the subject root are the ones the generator loaded")
     skew = transport["clock_skew_seconds"]
     if not isinstance(skew, int) or not 0 <= skew <= 300:
         raise ContractError("transport.yaml: clock_skew_seconds is a whole number of seconds from 0 to 300")
@@ -833,13 +1056,21 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
                     continue
                 if entry["class"] == "durable":
                     publish.update(consumer_permissions(address, transport))
-                elif entry["class"] != "dead_letter":  # dead-letter readers get stream grants later
+                elif entry["class"] != "dead_letter":
+                    # Dead letters wait in UA1_DLQ; its read grants come with the services
+                    # that read it (message contract plan 13A.9), not as a subscription.
                     subscribe.add(full_subject(address, "*"))
                 answers_requests = answers_requests or entry["class"] == "request_reply"
         document: dict[str, Any] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
         if answers_requests:
             document["allow_responses"] = {"max": 1, "expires": f"{reply_window}s"}
         result[role] = document
+    if JOINING in result:
+        raise ContractError(f"registry.yaml: {JOINING} is the permission set of hosts that hold no role yet")
+    joins = [address for entry in registry["kinds"].values() if entry.get("verification") == "proof_of_possession"
+             for address in own_addresses(entry)]
+    result[JOINING] = {"role": JOINING, "publish": sorted(full_subject(send_pattern(address), "{self}") for address in joins),
+                       "subscribe": [f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"]}
     return result
 
 
@@ -1074,14 +1305,22 @@ def shape(writer: ModelWriter, file: str, schema: dict[str, Any]) -> Any:
     return None
 
 
-def binding_spec(entry: dict[str, Any]) -> tuple[str, str | None] | None:
-    """(type, pointer) for the verifier; several types (gateway commands and agents' root tasks) join with |."""
+def binding_spec(entry: dict[str, Any]) -> tuple[tuple[str, str | None, tuple[str, ...] | None], ...]:
+    """Each token type the kind takes, as the verifier reads it: (type, body pointer or None, senders or None).
 
-    binding = entry.get("authority_binding")
-    if binding is None:
-        return None
-    named = binding["type"]
-    return ("|".join(named) if isinstance(named, list) else named, binding.get("at"))
+    The generated ``KindSpec.authority_binding`` holds these as ``TokenBinding``
+    values; it is empty for a kind that takes no token.
+    """
+
+    return tuple((binding["type"], binding.get("at"), tuple(binding["senders"]) if "senders" in binding else None)
+                 for binding in token_bindings(entry))
+
+
+def binding_text(entry: dict[str, Any]) -> str:
+    """``binding_spec`` as Python source for kinds.py."""
+
+    items = [f"TokenBinding(type={kind!r}, at={at!r}, senders={senders!r})" for kind, at, senders in binding_spec(entry)]
+    return "(" + ", ".join(items) + ("," if len(items) == 1 else "") + ")"
 
 
 def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], transport: dict[str, Any],
@@ -1145,7 +1384,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
             f"        receivers={tuple(entry['receivers'])!r},\n"
             f"        expiry_seconds={entry['expiry_seconds']!r},\n"
             f"        authority={entry['authority']!r},\n"
-            f"        authority_binding={binding_spec(entry)!r},\n"
+            f"        authority_binding={binding_text(entry)},\n"
             f"        body_rules={tuple(entry.get('body_rules', ()))!r},\n"
             f"        execution_slot={entry['admission']['execution_slot']!r},\n"
             f"        accepted_while_paused={entry['admission']['accepted_while_paused']!r},\n"
@@ -1163,14 +1402,16 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
     state_specs = [
         f"    {name!r}: StateSpec(name={name!r}, bucket={entry['bucket']!r}, key={entry['key']!r}, "
         f"signer={entry['signer']!r}, signer_roles={tuple(entry.get('signer_roles', ()))!r}, "
-        f"writers={tuple(entry['writers'])!r}, body_model=models.{class_name(name)}StateAdapter),"
+        f"writers={tuple(entry['writers'])!r}, ttl_seconds={entry.get('ttl_seconds')!r}, "
+        f"body_model=models.{class_name(name)}StateAdapter, "
+        f"body_shape={shape(writer, entry['body'], schemas[entry['body']])!r}),"
         for name, entry, _body in states
     ]
     between = sorted(name for name, spec in transport["classes"].items() if spec["between_installations"])
     kinds_text = header + (
         "from __future__ import annotations\n\n"
         "from custom_messages.wire import models\n"
-        "from custom_messages.wire.spec import KindSpec, StateSpec\n\n"
+        "from custom_messages.wire.spec import KindSpec, StateSpec, TokenBinding\n\n"
         f"PROTOCOL = {registry['protocol']!r}\n"
         f"SIGNING_DOMAIN = {registry['signing_domain']!r}\n"
         f"STATE_SIGNING_DOMAIN = {registry['state_signing_domain']!r}\n"
@@ -1178,18 +1419,25 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"DECISION_TOKEN_DOMAIN = {registry['decision_token_domain']!r}\n"
         f"RENEW_KEY_PROOF_DOMAIN = {registry['renew_key_proof_domain']!r}\n"
         f"AUTHORITY_TOKEN_MAX_SECONDS = {registry['authority_token_max_seconds']!r}\n"
+        f"COMMAND_TOKEN_MAX_SECONDS = {registry['command_token_max_seconds']!r}\n"
+        f"CERTIFICATE_OVERLAP_SECONDS = {registry['certificate_overlap_seconds']!r}\n"
         f"MAX_FRAME_BYTES = {registry['max_frame_bytes']!r}\n"
         f"MAX_NESTING_DEPTH = {registry['max_nesting_depth']!r}\n"
         f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
         f"SUBJECT_PREFIX = {transport['subject_prefix']!r}\n"
         f"PEER_SENDER_SLOT = {transport['peer_sender_slot']!r}\n"
         f"REPLY_INBOX_PREFIX = {transport['reply_inbox_prefix']!r}\n"
+        f"INSTALLATION_SCOPE = {INSTALLATION_SCOPE!r}\n"
+        f"INSTALLATION_ADDRESS_PREFIX = {INSTALLATION_ADDRESS!r}\n"
         f"BETWEEN_INSTALLATIONS = frozenset({between!r})\n"
         f"VERIFICATION_REFUSALS = {tuple(item['code'] for item in registry['verification_refusals'])!r}\n"
         f"CHANGE_REFUSALS = {tuple(item['code'] for item in registry['change_refusals'])!r}\n"
+        f"COVERED_RECORD_KINDS = {tuple(registry['covered_record_kinds'])!r}\n"
+        f"RETRY_OUTCOMES = frozenset({sorted(registry['retry_outcomes'])!r})\n"
         f"HOST_ROLES = {tuple(registry['host_roles'])!r}\n"
         f"TOPOLOGIES = { {name: {role: tuple(edges) for role, edges in spec['allowed_edges'].items()} for name, spec in topologies['topologies'].items()}!r}\n"
-        f"FRAME_SHAPE = {shape(writer, 'frame.schema.json', schemas['frame.schema.json'])!r}\n\n"
+        f"FRAME_SHAPE = {shape(writer, 'frame.schema.json', schemas['frame.schema.json'])!r}\n"
+        f"STATE_SHAPE = {shape(writer, registry['state_schema'], schemas[registry['state_schema']])!r}\n\n"
         "KINDS: dict[str, KindSpec] = {\n" + "\n".join(specs) + "\n}\n\n"
         "STATE_RECORDS: dict[str, StateSpec] = {\n" + "\n".join(state_specs) + "\n}\n"
     )

@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.install.reply",
+  "message_id": "01928f3a-7b2c-7000-8000-00000000a04c",
+  "idempotency_key": "schedules.install.reply:roUjRR04DScKpTKxHAlHPicgKcAwBsXjOovk1Gv6ToI",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-743d-8000-00000000043d",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "record_busy",
+    "message": "Another request is writing this schedule. Retry at the stated time.",
+    "retry_at": "2026-10-22T04:30:10.000Z"
+  },
+  "causation_id": "01928f3a-7b2c-743d-8000-00000000043d",
+  "body_digest": "lXP-iydLMwCbaNGiEi-QId2Ym8uEDzgwWaumq3-u-sg",
+  "signature": "bn27fJpxp-hiE7SobAIGhMlIkN9wNYRA6wMGXo_jTHtYOjXfIHgInNP0rInvgrcKFFwstllTpuMaHHxbDWJNAg"
+}

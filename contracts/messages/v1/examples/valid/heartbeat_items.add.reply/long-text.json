@@ -1,0 +1,72 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "heartbeat_items.add.reply",
+  "message_id": "bd368ad7-1810-7249-ae6d-5c763e8afe13",
+  "idempotency_key": "heartbeat_items.add.reply:dJ9CJOHnwek5bLuZ_3x0-q0AWUUCAhuUr41e87OQ-uo",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.5071ee3b-d019-7cb0-99d9-b29c2e3132ff",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "item": {
+      "heartbeat_item_id": "heartbeat_dependency_watch",
+      "title": "Track recurring dependency checks",
+      "instruction": {
+        "type": "blob",
+        "ref": {
+          "sha256": "ymCsPhzlak0N3seSh5A03dklltG1dhKYcMkaDoDva78",
+          "size": 4096,
+          "media_type": "text/plain"
+        }
+      },
+      "target_agent_type": "TeamArchitect",
+      "objective_id": "objective_dependency_watch",
+      "enabled": true,
+      "seen_version": "c8635ed6e3b9cab016c0a9b44d6b911babfda020b6f50b40eb819b559554927f",
+      "source_id": "heartbeat_team",
+      "conversation_id": "conversation_dependency_watch",
+      "created_at": "2026-10-21T04:30:00.000Z",
+      "updated_at": "2026-10-22T04:30:00.000Z",
+      "last_run_at": "2026-10-22T04:30:00.000Z",
+      "last_success_at": "2026-10-22T04:30:00.000Z",
+      "last_failure_at": "2026-10-22T04:30:00.000Z"
+    },
+    "heartbeat_runtime": {
+      "source_id": "heartbeat_team",
+      "config_available": true,
+      "heartbeat_enabled": true,
+      "configured_source_id": "heartbeat_team",
+      "configured_schedule_id": "heartbeat_launcher",
+      "launcher_schedule_installed": true,
+      "notes": [
+        {
+          "type": "blob",
+          "ref": {
+            "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "size": 4096,
+            "media_type": "text/plain"
+          }
+        }
+      ]
+    }
+  },
+  "causation_id": "5071ee3b-d019-7cb0-99d9-b29c2e3132ff",
+  "body_digest": "keUy8RbIkK8XFY6ZCYjuJUGI3arWLfuCWZjh7ptKTJ4",
+  "signature": "sMkAqUCAxHTyO_QGXCWru8Kr5Ktdx2RnSHhssjE52HZUSSSxcOMa8tPYADKRlbEgh36UrZ9e4HMAl6ngdkXDCw"
+}
