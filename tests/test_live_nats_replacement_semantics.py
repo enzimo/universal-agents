@@ -38,7 +38,7 @@ from custom_transport.base import (
 )
 from custom_transport.nats_adapter import NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
-from tests.live_nats_support import flush_fully
+from tests.live_nats_support import flush_adapter_fully
 from live_nats_client import nats_transport_config_from_env, resolve_live_transport_settings
 from config_loader import CONFIG_SCHEMA_VERSION
 from id_generation import new_id, new_id_suffix
@@ -266,13 +266,6 @@ async def _wait_no_delivery(
 ) -> None:
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(queue.get(), timeout=timeout)
-
-
-async def _flush(adapter: NatsTransportAdapter) -> None:
-    """Wait until the server holds the subscriptions made on ``adapter`` so far."""
-
-    if adapter._nc is not None:
-        await flush_fully(adapter._nc)
 
 
 async def test_live_redelivery_moves_unacked_pool_work_to_another_worker() -> None:
@@ -505,7 +498,7 @@ async def test_live_broadcast_control_reaches_all_current_subscribers() -> None:
                 )
             )
         for adapter in adapters:
-            await _flush(adapter)
+            await flush_adapter_fully(adapter)
         await _publish(
             adapters[0],
             RoutingType.ALL_AGENTS_ROUTE.value,
@@ -545,7 +538,7 @@ async def test_live_managed_skill_change_reaches_all_operational_subscribers() -
                 )
             )
         for adapter in adapters:
-            await _flush(adapter)
+            await flush_adapter_fully(adapter)
 
         notification = ManagedSkillCatalogChangedV1(
             team_id=team_id,
@@ -620,7 +613,7 @@ async def test_live_worker_pool_single_delivery_and_broadcast_fanout() -> None:
                 )
             )
         for adapter in adapters:
-            await _flush(adapter)
+            await flush_adapter_fully(adapter)
 
         await _publish(
             adapters[0],

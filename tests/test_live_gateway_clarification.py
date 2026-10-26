@@ -23,6 +23,7 @@ from custom_messages.enums import MessageMetaType, RequesterType, TaskQueryReaso
 from custom_transport.base import SubscriptionDelivery
 from id_generation import new_id
 from live_nats_client import LiveNatsClient, resolve_live_transport_settings
+from tests.live_nats_support import flush_adapter_fully
 
 
 @pytest.mark.asyncio
@@ -105,6 +106,8 @@ async def test_late_and_repeated_pause_replies_over_nats(tmp_path):
             logical_route="status",
             delivery=SubscriptionDelivery.CORE,
         )
+        # The gateway asks about the parent task from its own connection.
+        await flush_adapter_fully(manager.adapter)
         await gateway._manager_client.connect()
         try:
             query = TaskQuery(
@@ -269,6 +272,8 @@ async def test_two_questions_in_one_chat_are_answered_in_order_over_nats(tmp_pat
             logical_route="status",
             delivery=SubscriptionDelivery.CORE,
         )
+        # The gateway asks about the parent task from its own connection.
+        await flush_adapter_fully(manager.adapter)
         await gateway._manager_client.connect()
         try:
             for correlation_id, question in asks.values():

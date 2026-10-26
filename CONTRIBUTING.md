@@ -282,6 +282,14 @@ version numbers. The `external` and `full` profiles use short tracebacks and do
 not replay captured provider output. This prevents credential-bearing client
 arguments from appearing in broad test failure reports.
 
+A live test that subscribes on one NATS connection and then expects a message
+sent from another connection must wait first with
+`tests.live_nats_support.flush_fully()`, or `flush_adapter_fully()` for a
+transport adapter. Otherwise the other connection can publish before the server
+has the subscription, and the test fails now and then. One `flush()` is not
+enough in nats-py 2.16.0; the helper's docstring explains why. Durable consumers
+and messages sent on the subscribing connection itself need no wait.
+
 The knowledge base privacy scenarios call the configured model many times, so
 they require `RUN_LIVE_KNOWLEDGE_PRIVACY=1`. The external and full profiles
 collect `tests/test_live_knowledge_privacy_scenarios.py`, but it skips without

@@ -20,6 +20,7 @@ from custom_transport.base import SubscriptionDelivery, TransportPublishOptions
 from custom_transport.nats_adapter import NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
 from tests.live_nats_client import nats_transport_config_from_env
+from tests.live_nats_support import flush_adapter_fully
 from tests.test_turn_action_outbox import _make_agent, _make_task_manager
 
 
@@ -61,6 +62,10 @@ async def test_status_reply_while_approval_resumes_a_long_turn(tmp_path):
                 logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
             )
             agents.append(agent)
+        # The requester's probes reach the worker's subscription from another
+        # connection, and they are neither retried nor stored.
+        for adapter in adapters:
+            await flush_adapter_fully(adapter)
         requester, worker = agents
         task = Task(task_id="delegated_task", task_type=MessageMetaType.REQUEST)
         worker.task_manager.add_task(
