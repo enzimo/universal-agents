@@ -1,15 +1,19 @@
 name: Personal details
 
-# Checks tracked files, and the commits each push or pull request adds, for
+# Checks tracked files, and the commits a release candidate adds to main, for
 # personal details: addresses, phone numbers, home folder paths and commit
-# emails. Runs on every change, including documentation-only edits. A manual
-# run checks the whole history. See CONTRIBUTING.md ("Personal details").
+# emails. The git hooks in .githooks run the same check before every commit
+# and push. A manual run checks the whole history. See CONTRIBUTING.md
+# ("Personal details").
 # Findings are printed without their values so the log does not repeat them.
 
+# CI runs only for published release candidates (vX.Y.Z-rc.N tags) and when
+# started by hand. Pull requests and branch pushes start no CI; run the
+# relevant tests locally before pushing (docs/LOCAL_CI.md, "When CI runs").
 on:
   push:
-    branches: [main]
-  pull_request:
+    tags:
+      - 'v*.*.*-rc.*'
   workflow_dispatch:
 
 permissions:

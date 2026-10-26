@@ -14,12 +14,11 @@ def _workflow() -> dict:
     return yaml.load(WORKFLOW_PATH.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
-def test_docs_workflow_builds_automatically_but_deploys_manually() -> None:
+def test_docs_workflow_builds_for_stable_tags_but_deploys_manually() -> None:
     workflow = _workflow()
 
-    assert "pull_request" in workflow["on"]
-    assert workflow["on"]["push"]["branches"] == ["main"]
-    assert workflow["on"]["push"]["tags"] == ["v*.*.*", "!v*.*.*-*"]
+    assert set(workflow["on"]) == {"push", "workflow_dispatch"}
+    assert workflow["on"]["push"] == {"tags": ["v*.*.*", "!v*.*.*-*"]}
     assert "workflow_dispatch" in workflow["on"]
     assert workflow["permissions"] == {"contents": "read"}
 
