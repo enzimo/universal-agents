@@ -153,6 +153,7 @@
         var copy = node("div", "memory-item-copy");
         var label = finished ? (task.owner_agent_name || task.owner_agent_id || "Agent")
           : task.is_current ? "Current work" : task.queue_position ? "Queue position " + task.queue_position : "Waiting work";
+        if (!finished && task.is_parallel) label += " · Parallel";
         copy.append(node("h4", "", label), taskText(task, "description", task.problem_statement || "No task description.", "memory-fact", DESCRIPTION_PREVIEW_LIMIT, "Description"));
         copy.append(node("p", "task-metadata", task.root_task_id + " · " + task.state.replaceAll("_", " ")));
         if (task.blocker) copy.append(taskText(task, "blocker", "Waiting on: " + task.blocker, "task-metadata", INFO_PREVIEW_LIMIT, "Waiting reason"));

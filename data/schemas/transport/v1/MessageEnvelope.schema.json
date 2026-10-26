@@ -5244,6 +5244,11 @@
           "title": "Is Current",
           "type": "boolean"
         },
+        "is_parallel": {
+          "default": false,
+          "title": "Is Parallel",
+          "type": "boolean"
+        },
         "latest_activity": {
           "anyOf": [
             {

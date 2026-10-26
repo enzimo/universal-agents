@@ -61,6 +61,12 @@ queue positions and waiting reasons. It refreshes every 10 seconds while open an
 20 tasks per agent per page. Other users' tasks remain private. If one agent cannot
 respond, its section reports that problem while the other sections remain usable.
 
+New tasks appear even when the agent is busy or paused. **Parallel** marks your
+unfinished work in different conversations sharing that agent. The agent runs
+one model turn at a time and can work on another task while a task waits for a
+worker, your answer, or an access decision. The label clears when only one
+conversation has unfinished work.
+
 TeamArchitect appears first. Long descriptions, waiting reasons, and activity
 notes have compact previews; expand them to read the full available text.
 **Finished tasks** starts collapsed below active work. Expand it to browse
@@ -294,7 +300,7 @@ appear as their own threads, **Updates** and **Memory review**, once there is
 something in them.
 
 To start an unrelated request while keeping your earlier chat, turn on
-**Separate request** beside the composer and send your message. Chat creates a
+**Launch parallel thread** below Send and send your message. Chat creates a
 new thread for that message and its files, and keeps its replies there. The
 switch turns off after the message moves to the new chat. Leave it off to
 continue the selected thread. Slash commands keep their usual behavior.

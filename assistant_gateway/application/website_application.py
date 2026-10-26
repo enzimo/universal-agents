@@ -435,6 +435,7 @@ class WebTaskV1(WebsiteContractV1):
     state: str
     problem_statement: str
     is_current: bool
+    is_parallel: bool = False
     queue_position: int | None = None
     latest_activity_at: str | None = None
     latest_activity: str | None = None

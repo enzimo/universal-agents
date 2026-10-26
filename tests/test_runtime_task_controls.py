@@ -173,6 +173,28 @@ async def test_waiting_task_shows_the_access_requests_it_waits_on(agent):
 
 
 @pytest.mark.asyncio
+async def test_parallel_labels_follow_owned_conversations_before_paging(agent):
+    add(agent, "first", state=ProgressState.IN_PROGRESS)
+    add(agent, "same-thread")
+    add(agent, "private", owner="someone_else")
+    for task_id in ("first", "same-thread"):
+        agent.task_manager.get_task_info(task_id).meta.conversation_id = "conversation-first"
+    agent.task_manager.get_task_info("private").meta.conversation_id = "private-conversation"
+    # Another person's work and missing conversation ids do not imply parallel work.
+    add(agent, "internal")
+    assert not any(row.is_parallel for row in (await command(agent)).roots)
+
+    add(agent, "second", state=ProgressState.WAITING)
+    agent.task_manager.get_task_info("second").meta.conversation_id = "conversation-second"
+    for offset in range(4):
+        page = await command(agent, task_offset=offset, task_limit=1)
+        row = page.roots[0]
+        assert row.is_parallel == (row.root_task_id != "internal")
+    agent.task_manager.remove_task("second")
+    assert not any(row.is_parallel for row in (await command(agent)).roots)
+
+
+@pytest.mark.asyncio
 async def test_single_removal_is_owner_scoped_and_can_stop_current_work(agent):
     add(agent, "current", state=ProgressState.IN_PROGRESS)
     add(agent, "private", owner="someone_else")

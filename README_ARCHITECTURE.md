@@ -332,6 +332,12 @@ person often has several requests open at once, one lead model turn running
 while the others wait for workers or people, and a model turn for one request
 must not end or wake another request the person is waiting on; people's own
 stops go through the manager without a model turn and stay immediate.
+New request admission also runs without the model execution slot: it saves the
+request in the normal task queue and wakes the existing queue drain. This keeps
+new chat tasks visible and controllable while another turn runs or the agent is
+paused. Task results still require the slot because they can resume reasoning.
+Settings marks a person's unfinished tasks in different conversations on one
+agent as **Parallel**, calculated before paging and after owner filtering.
 Cancellation retains history and stops attached work; resume refuses unresolved
 approvals, questions, delegation and runtime review. Pause notices identify the task and affected
 worker. Settings also pages finished task results across agents, including

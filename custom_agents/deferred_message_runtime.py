@@ -514,6 +514,11 @@ def is_priority_deferred_message(envelope: MessageEnvelope) -> bool:
 
 
 def requires_execution_slot(envelope: MessageEnvelope) -> bool:
+    # Request handling only admits durable queued work and wakes the retained
+    # drain. Requiring the model slot hid new threads in the deferred inbox
+    # until the current turn finished. Results can resume a turn and still wait.
+    if isinstance(envelope.msg_content, Task) and envelope.msg_content.task_type == MessageMetaType.REQUEST:
+        return False
     return not isinstance(
         envelope.msg_content,
         (

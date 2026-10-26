@@ -157,6 +157,10 @@ async def _inventory(
     response.task_total = len(rows)
     response.current_task_count = sum(row["is_current"] for row in rows)
     response.queued_task_count = len(rows) - response.current_task_count
+    # Parallel means independent conversations sharing this agent. Compute it
+    # after owner filtering and before paging, so another person's work cannot
+    # affect the label and a peer on another page still counts.
+    conversations = {root.meta.conversation_id for root in roots if root.meta.conversation_id}
     by_id = {root.task.task_id: root for root in roots}
     response.roots = []
     for row in rows[command.task_offset : command.task_offset + command.task_limit]:
@@ -164,6 +168,7 @@ async def _inventory(
         summary = await summarize_root(agent, root)
         summary.problem_statement = str(root.task.problem_statement or "")[:2000]
         summary.is_current = row["is_current"]
+        summary.is_parallel = bool(root.meta.conversation_id and len(conversations) > 1)
         summary.queue_position = row["queue_position"]
         response.roots.append(summary)
     return [by_id[row["root_task_id"]] for row in rows]

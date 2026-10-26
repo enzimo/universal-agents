@@ -141,7 +141,10 @@ async def _handle_busy_delivery(
         await delivery.ack()
         return True
     content = envelope.msg_content
-    paused_work = agent.paused and not isinstance(
+    # Pausing stops execution, not admission or the person's queue controls.
+    # New requests use the same visible task queue as requests to a busy agent.
+    request = isinstance(content, Task) and content.task_type == MessageMetaType.REQUEST
+    paused_work = agent.paused and not request and not isinstance(
         content,
         (
             AgentStatus,
@@ -155,29 +158,8 @@ async def _handle_busy_delivery(
     )
     if not (paused_work or (agent.is_executing and requires_execution_slot)):
         return False
-    try:
-        await agent.deferred_inbox.admit(envelope)
-    except DeferredInboxFull:
-        if (
-            not isinstance(content, Task)
-            or content.task_type != MessageMetaType.REQUEST
-        ):
-            raise  # Results and control traffic must retain broker custody.
-        known, _, _ = await agent.task_manager.operations_runtime.run(
-            partial(_admission_status, agent.task_manager),
-            content.task_id,
-        )
-        deferred = any(
-            getattr(item.msg_content, "task_id", None) == content.task_id
-            for item in agent.deferred_inbox.messages
-        )
-        if not known and not deferred:
-            await agent._send_task_error_response(
-                content,
-                envelope.msg_header,
-                envelope.msg_meta,
-                "Your message was not queued because the agent's incoming message queue is full. "
-                + QUEUE_RECOVERY_MESSAGE,
-            )
+    # Requests use task admission above. Only deferred results/resumes can
+    # fill this inbox; its outer handler retains broker custody until room frees.
+    await agent.deferred_inbox.admit(envelope)
     await delivery.ack()
     return True
