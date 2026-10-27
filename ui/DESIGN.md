@@ -1152,6 +1152,15 @@ that leads to it (owner's request 2026-10-12).
   the starter profile choices as radio buttons, each with its description, the
   one in use marked **In use**, and **Save**, which applies the choice to the
   signed-in person's own work only and reloads the view.
+- Below it, in the same kind of box, **Cleaning up your chat history**: a line
+  saying what it does (TeamLead deletes the person's old chats and finished
+  tasks when asked, without a review each time; a notice follows; remembered
+  facts are kept and managed under Memories) and the standard slider switch
+  labeled **Let TeamLead clean up my history without asking**. Flipping it
+  saves at once (no Save button) and reloads the view; while saving the switch
+  is disabled, and a refusal puts it back to the stored state with the reason
+  under it. It is shown only while the tool catalog has the tool
+  (owner's decision 2026-10-27).
 - **By Agent Type** shows one card per agent type, with its role as a badge,
   and one card per scheduled job that holds access, titled **Scheduled job
   <name>** (its id when it has no name), after the agent types. Access follows

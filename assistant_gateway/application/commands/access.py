@@ -68,6 +68,8 @@ ACCESS_HELP_TEXT = "\n".join(
         "administrators block people, roles or the team. A folder is "
         "named below team/, agents/ or data/<name>/, such as data/reports/2026 (or folder:team).",
         "Examples: /access grant agent-type:BackgroundOperationsAgent cli:google read --for 7d",
+        "/access grant agent-type:TeamArchitect fn:history_cleanup full - let TeamLead clean up your own chat history "
+        "without asking each time (only you can give it, and it is never handed on; /access revoke ends it).",
         "/access block agent-type:BackgroundOperationsAgent cli:google --reason \"Sending too much mail\"",
     )
 )

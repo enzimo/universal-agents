@@ -594,6 +594,7 @@ class InternalWebsiteInteractiveApp(BaseInteractiveApp):
                         self.access_map.remove_data_folder,
                     ),
                     ("POST", "/api/web-chat/access-map/starter-profile", self.access_map.set_starter_profile),
+                    ("POST", "/api/web-chat/access-map/history-cleanup", self.access_map.set_history_cleanup),
                     ("GET", "/api/web-chat/files/people", self.access_map.team_people),
                     ("POST", "/api/web-chat/files/share", self.access_map.share),
                     ("POST", "/api/web-chat/files/send", self.access_map.send),
