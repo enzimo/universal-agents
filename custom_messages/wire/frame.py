@@ -50,7 +50,15 @@ from custom_messages.wire.kinds import (
 from custom_messages.wire.models import AuthorityToken, Frame
 from custom_messages.wire.refusals import FrameRefused, refused_by
 from custom_messages.wire.spec import KindSpec, newer_minor, prune
-from custom_messages.wire.trust import RESERVED_RUNTIME_PREFIXES, SKEW, AgentSession, HostCertificate, TrustStore, within
+from custom_messages.wire.trust import (
+    RESERVED_RUNTIME_PREFIXES,
+    SKEW,
+    AgentSession,
+    HostCertificate,
+    TrustStore,
+    ed25519_public_key,
+    within,
+)
 from custom_messages.wire.values import parse_timestamp
 
 __all__ = [
@@ -352,9 +360,9 @@ def _presented_key(raw: Mapping[str, Any], frame: Frame, trust: TrustStore) -> E
     if trust.names_authority_key(issuer.installation, issuer.key_id):
         raise FrameRefused("unknown_key", "an authority key id is not a host's key", at="/issuer/key_id")
     try:
-        public_key = Ed25519PublicKey.from_public_bytes(b64url_decode(str(presented.get("public_key", ""))))
+        public_key = ed25519_public_key(str(presented.get("public_key", "")))
     except ValueError as error:
-        raise FrameRefused("unknown_key", "the presented key is not an Ed25519 public key",
+        raise FrameRefused("unknown_key", "the presented key is not an Ed25519 public key a signature can bind",
                            at="/body/application_key/public_key") from error
     for certificate in trust.certificates_with_key(issuer.installation, issuer.key_id):
         if certificate.public_key.public_bytes_raw() != public_key.public_bytes_raw():
@@ -645,7 +653,7 @@ def _verify_renew_key_proof(raw: Mapping[str, Any], certificate: Optional[HostCe
             raise FrameRefused("invalid_body", "a rotation names a key id the installation does not use yet",
                                at=f"/body/{_KEY_ROTATION}/key/key_id")
     try:
-        public_key = Ed25519PublicKey.from_public_bytes(b64url_decode(rotation["key"]["public_key"]))
+        public_key = ed25519_public_key(rotation["key"]["public_key"])
         public_key.verify(b64url_decode(rotation["proof"]), renew_key_proof_bytes(raw))
     except (InvalidSignature, ValueError, KeyError, TypeError) as error:
         raise FrameRefused("invalid_body", "the renewal's new-key proof does not verify",

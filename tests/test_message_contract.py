@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 import rfc8785
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from jsonschema import Draft202012Validator, ValidationError as SchemaError, validators
 from pydantic import ValidationError
@@ -44,7 +45,7 @@ from custom_messages.wire.frame import (
     signing_bytes,
     verify_frame,
 )
-from custom_messages.wire.trust import TrustStore, sign_state, state_signing_bytes
+from custom_messages.wire.trust import TrustStore, ed25519_public_key, sign_state, state_signing_bytes
 from custom_messages.wire.values import parse_timestamp
 from tests import message_contract_support as fixtures
 
@@ -1061,6 +1062,37 @@ def test_lost_join_reply_can_be_recovered_after_the_key_becomes_known() -> None:
     assert refusal(data, document, {"trust": {"add": ["extra/lead-host-revoked-after-issue.json"]}}).code == "revoked"
 
 
+# The identity point as a public key, and a signature that verifies under it for every message:
+# R is the identity and S is zero.
+IDENTITY_KEY = "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+FORGED_SIGNATURE = b64url(b64url_decode(IDENTITY_KEY) + bytes(32))
+
+
+def test_a_join_presenting_a_small_order_key_is_refused_though_its_forged_signature_verifies() -> None:
+    document = join_frame()
+    document["body"]["application_key"]["public_key"] = IDENTITY_KEY
+    document["idempotency_key"] = registry_key(document)
+    signed = sign_frame(document, fixtures.private_key("test-lead-key-1"))
+    signed["signature"] = FORGED_SIGNATURE
+    Ed25519PublicKey.from_public_bytes(b64url_decode(IDENTITY_KEY)).verify(
+        b64url_decode(FORGED_SIGNATURE), signing_bytes(signed))
+    refused = refusal(json.dumps(signed).encode(), signed, trust=without_lead_host())
+    assert (refused.code, refused.at) == ("unknown_key", "/body/application_key/public_key")
+
+
+def test_a_rotation_to_a_small_order_key_is_refused_though_its_forged_proof_verifies() -> None:
+    document = fixtures.example_frame("host.renew", "rotate")
+    rotation = document["body"]["application_key_rotation"]
+    rotation["key"]["public_key"] = IDENTITY_KEY
+    rotation["proof"] = FORGED_SIGNATURE
+    Ed25519PublicKey.from_public_bytes(b64url_decode(IDENTITY_KEY)).verify(
+        b64url_decode(FORGED_SIGNATURE), wire_frame.renew_key_proof_bytes(document))
+    document["idempotency_key"] = registry_key(document)
+    signed = sign_frame(document, fixtures.private_key("test-lead-key-1"))
+    refused = refusal(json.dumps(signed).encode(), signed)
+    assert (refused.code, refused.at) == ("invalid_body", "/body/application_key_rotation/proof")
+
+
 def test_a_join_speaks_only_for_its_host_in_the_installation_scope() -> None:
     document = join_frame()
     document["issuer"]["team"] = "team_example"
@@ -1221,6 +1253,17 @@ def test_a_byte_order_mark_is_refused(document) -> None:
 def test_only_one_spelling_of_each_base64url_value_decodes(case) -> None:
     with pytest.raises(ValueError):
         b64url_decode(case["text"])
+
+
+@pytest.mark.parametrize("case", VECTORS["public_key_refused"], ids=lambda case: case["name"])
+def test_a_public_key_outside_the_prime_order_subgroup_is_refused(case) -> None:
+    with pytest.raises(ValueError):
+        ed25519_public_key(case["text"])
+
+
+def test_generated_public_keys_are_accepted() -> None:
+    for key in fixtures.KEYS.values():
+        assert b64url(ed25519_public_key(key["public_key"]).public_bytes_raw()) == key["public_key"]
 
 
 def test_every_signature_spelling_but_one_is_refused() -> None:
@@ -1598,17 +1641,21 @@ def test_forgetting_keeps_a_replacement_whose_replaced_certificate_arrives_later
 
 @pytest.mark.parametrize(("record", "key"), [("certificate", "/body/application_key/public_key"),
                                              ("agreement", "/body/authority_keys/0/public_key")])
-def test_a_trust_record_with_a_public_key_spelled_another_way_is_refused(record: str, key: str) -> None:
-    """The same bytes with an unused low bit set: the schema's pattern allows the spelling, the decoder does not."""
+@pytest.mark.parametrize("change", ["respelled", "small-order"])
+def test_a_trust_record_with_a_public_key_spelled_another_way_or_of_small_order_is_refused(
+        record: str, key: str, change: str) -> None:
+    """The same bytes with an unused low bit set, which the schema's pattern allows, or the identity point."""
 
     document = trust_example(record)
     holder = document["body"]["application_key"] if record == "certificate" else document["body"]["authority_keys"][0]
     alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-    holder["public_key"] = holder["public_key"][:-1] + alphabet[alphabet.index(holder["public_key"][-1]) ^ 1]
+    holder["public_key"] = (holder["public_key"][:-1] + alphabet[alphabet.index(holder["public_key"][-1]) ^ 1]
+                            if change == "respelled" else IDENTITY_KEY)
     document["sequence"] += 1
     with pytest.raises(FrameRefused) as refused:
         fixtures.trust_store().add(json.dumps(sign_state(document, fixtures.private_key(document["writer"]["key_id"]))).encode(), now=fixtures.NOW)
     assert (refused.value.code, refused.value.at) == ("invalid_body", key)
+
 
 def test_a_revoked_certificate_is_never_forgotten_so_its_key_cannot_join_again() -> None:
     store = fixtures.trust_store(add=["extra/lead-host-revoked-after-issue.json"])

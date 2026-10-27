@@ -1,6 +1,6 @@
 {
   "files": {
-    "contracts/messages/v1/README.md": "a7664ef6cab8e8f3f8f0f818e23055e6251c7f530724857c491dfb4d534acf69",
+    "contracts/messages/v1/README.md": "2a3de0356339b163d4a896c3be091ff9eb96dee2c5a093f295bcf7610f605d2f",
     "contracts/messages/v1/examples/invalid/access-request-token-on-a-command.json": "45c09aa4dad7c72401ffd76b7dfd582b3ba8608b75fdeffb548be7197be4b7f3",
     "contracts/messages/v1/examples/invalid/access-until-without-hours.json": "ff280196b6c0e78cb759f65ca9d41a88d589d3e92431452e6df0c04df9348c9f",
     "contracts/messages/v1/examples/invalid/access-withdraw-without-request-id.json": "913ae59b2c70f2ebee832e56406f80293e0d67c1e251c87f2b3047d12ccdd3c6",
@@ -1724,7 +1724,7 @@
     "contracts/messages/v1/schemas/state/revocations.schema.json": "9c2be7a34111f1f296a117ccf13f3b4ca7c4b647de9c26d6dd9ed3bfd17b4b58",
     "contracts/messages/v1/schemas/state/team_view.schema.json": "352d8b2f045b5f200f243e7df24355c9e6b2ab3c4d2e0847a53c1a251b6bde6d",
     "contracts/messages/v1/signing-vectors/key-rotation.json": "cc57b6c4452dbc5b099cb8a47637a7952f74d7d70bd08bde361c0736bc4eea70",
-    "contracts/messages/v1/signing-vectors/vectors.json": "03adac14018497c85044ce27e426f53baf99d1c7da6075c4ad96c8b123b897eb",
+    "contracts/messages/v1/signing-vectors/vectors.json": "5b79fb7a757d3ed8634ff3973001efa8e8628ccc8ad0df29ae10e9e753fe2826",
     "contracts/messages/v1/team-topologies.yaml": "18778a8aa1bdd30dafa8721cccaa099f92ab500a927f452e8be4944d6458056a",
     "contracts/messages/v1/transport.yaml": "3cec42b1cc235bb63d5c592a01543da71f984ee902e76c3cbfa1b729a5d999d5",
     "custom_messages/wire/kinds.py": "1dd5e808508bf2bd8b2e7de9dfda9907d3d7edbf41c1318cbe887eb80ba1f7d0",

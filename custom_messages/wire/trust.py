@@ -46,6 +46,7 @@ from typing import Any, Iterable, Mapping, NamedTuple, Optional
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from nacl.bindings import crypto_core_ed25519_is_valid_point
 from pydantic import MISSING, ValidationError
 
 from custom_messages.wire.canonical import CanonicalJsonError, parse
@@ -114,13 +115,29 @@ def sign_state(document: Mapping[str, Any], private_key: Ed25519PrivateKey) -> d
     return signed
 
 
+def ed25519_public_key(text: str) -> Ed25519PublicKey:
+    """A public key that someone else chose, which a signature can bind to its holder.
+
+    Key generation always gives the canonical encoding of a point of Ed25519's
+    prime-order subgroup other than the identity. Under a small-order point a forged
+    signature verifies for every message, so any other point is refused with
+    ``ValueError`` (libsodium's ``crypto_core_ed25519_is_valid_point``), as is any
+    spelling but the one base64url spelling of the key's bytes.
+    """
+
+    data = b64url_decode(text)
+    if len(data) != 32 or not crypto_core_ed25519_is_valid_point(data):
+        raise ValueError("not an Ed25519 public key of the prime-order subgroup")
+    return Ed25519PublicKey.from_public_bytes(data)
+
+
 def _public_key(text: str, at: str) -> Ed25519PublicKey:
-    """An Ed25519 public key in its one accepted base64url spelling; any other is ``invalid_body``."""
+    """A trust record's public key (``ed25519_public_key``); any other value is ``invalid_body``."""
 
     try:
-        return Ed25519PublicKey.from_public_bytes(b64url_decode(text))
+        return ed25519_public_key(text)
     except ValueError as error:
-        raise FrameRefused("invalid_body", "not an Ed25519 public key in its canonical spelling", at=at) from error
+        raise FrameRefused("invalid_body", "not a usable Ed25519 public key in its canonical spelling", at=at) from error
 
 
 @dataclass(frozen=True)
