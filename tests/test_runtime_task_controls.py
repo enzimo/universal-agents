@@ -172,25 +172,21 @@ async def test_waiting_task_shows_the_access_requests_it_waits_on(agent):
 
 
 @pytest.mark.asyncio
-async def test_parallel_labels_follow_owned_conversations_before_paging(agent):
-    add(agent, "first", state=ProgressState.IN_PROGRESS)
-    add(agent, "same-thread")
-    add(agent, "private", owner="someone_else")
-    for task_id in ("first", "same-thread"):
-        agent.task_manager.get_task_info(task_id).meta.conversation_id = "conversation-first"
-    agent.task_manager.get_task_info("private").meta.conversation_id = "private-conversation"
-    # Another person's work and missing conversation ids do not imply parallel work.
-    add(agent, "internal")
-    assert not any(row.is_parallel for row in (await command(agent)).roots)
+async def test_parallel_marks_requests_from_parallel_threads_on_the_team_lead(agent):
+    # The team lead runs requests from threads started with Launch parallel
+    # thread in lanes of their own (custom_agents.execution_lanes).
+    agent.task_manager.parallel_lanes_enabled = agent.is_team_lead
+    add(agent, "ordinary", state=ProgressState.IN_PROGRESS)
+    add(agent, "other-chat")
+    agent.task_manager.get_task_info("other-chat").meta.conversation_id = "conversation-other"
+    add(agent, "parallel")
+    context = agent.task_manager.get_task_info("parallel").meta.gateway_context
+    context.parallel_thread, context.delivery_mode = True, "interactive"
 
-    add(agent, "second", state=ProgressState.WAITING)
-    agent.task_manager.get_task_info("second").meta.conversation_id = "conversation-second"
-    for offset in range(4):
-        page = await command(agent, task_offset=offset, task_limit=1)
-        row = page.roots[0]
-        assert row.is_parallel == (row.root_task_id != "internal")
-    agent.task_manager.remove_task("second")
-    assert not any(row.is_parallel for row in (await command(agent)).roots)
+    labels = {row.root_task_id: row.is_parallel for row in (await command(agent)).roots}
+
+    # Another conversation alone is not parallel work; a worker has no parallel lanes.
+    assert labels == {"ordinary": False, "other-chat": False, "parallel": agent.is_team_lead}
 
 
 @pytest.mark.asyncio

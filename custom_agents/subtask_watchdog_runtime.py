@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from custom_agents.execution_lanes_runtime import lane_of
 from custom_agents.strands_parts import turn_strands_agent
 from custom_tools.runtime_context import task_work
 from custom_messages.records.task_results import TaskResultUpdate
@@ -875,7 +876,7 @@ async def _recover_stalled_subtasks(self) -> None:
     timeout_seconds = self.subtask_timeout_seconds
     if timeout_seconds is None or timeout_seconds <= 0:
         return
-    if self.is_executing or self.paused:
+    if self.paused:
         return
 
     now = datetime.now(timezone.utc)
@@ -889,6 +890,11 @@ async def _recover_stalled_subtasks(self) -> None:
             self.task_manager.get_parent_task_id, subtask_info.task.task_id
         )
         if not parent_task_id:
+            continue
+        # The parent's execution lane runs a turn now; a later pass looks
+        # again. Other requests' lanes are not held back by it
+        # (custom_agents.execution_lanes).
+        if self._execution_lanes.lane_busy(await lane_of(self, parent_task_id)):
             continue
         waiting_in_queue, claimed_at = await _queue_tracking(self, holders, subtask_info)
         if waiting_in_queue:

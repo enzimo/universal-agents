@@ -37,7 +37,8 @@ from custom_messages.enums import MessageMetaType
 from custom_tools.runtime_context import task_work
 from tests.task_work_support import TurnHost, register_turn, set_agent_ref, strands_parts
 from custom_tools.tool_stop import TOOL_STOP_STATE_KEY, ToolStop, tracked_tool_call
-from runtime_hosting.agent_execution import AgentExecutionGate
+from custom_agents.task_operation_runtime import TaskOperationRuntime
+from runtime_hosting.agent_execution import MAIN_LANE, AgentExecutionLanes
 from tests.turn_tool_stop_support import (
     agents_folder,
     kill_if_alive,
@@ -55,6 +56,7 @@ class Host(TurnHost):
     """The production execution scope and turn bookkeeping, without NATS or storage."""
 
     is_executing = UniversalAgent.is_executing
+    main_lane_busy = UniversalAgent.main_lane_busy
     _execution_scope = UniversalAgent._execution_scope
     _announce_execution_state = UniversalAgent._announce_execution_state
     process_llm_interaction = UniversalAgent.process_llm_interaction
@@ -63,7 +65,9 @@ class Host(TurnHost):
 def make_host(sdk: Agent) -> Host:
     host = Host(
         id="agent",
-        _execution_gate=AgentExecutionGate(),
+        _execution_lanes=AgentExecutionLanes(),
+        # Every turn here is ordinary work: the main lane.
+        task_manager=SimpleNamespace(operations_runtime=TaskOperationRuntime(), lane_of=lambda _task_id: MAIN_LANE),
         _logger=LOGGER,
         _refresh_self_agent_state=AsyncMock(),
         _publish_presence_status=AsyncMock(),

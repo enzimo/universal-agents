@@ -100,12 +100,14 @@ class WebsiteConversationHandlers:
     ) -> web.Response:
         web_session = self.operations._require_web_chat_session(request)
         owner = self.operations._required_web_chat_owner(web_session)
+        parallel_thread = await self._parallel_thread_requested(request)
         session = self.application.start_new_session(
             channel_name=self.channel_name,
             user_id=owner,
             chat_id="web-chat",
             thread_id=None,
             canonical_user_id=owner,
+            parallel_thread=parallel_thread,
         )
         return web.json_response(
             {
@@ -116,6 +118,7 @@ class WebsiteConversationHandlers:
                     "conversation_id": session.conversation_id,
                     "title": None,
                     "updated_at": session.updated_at,
+                    "parallel_thread": session.parallel_thread,
                 },
                 "event_cursor": self.application.transcripts.snapshot_cursor(),
             },
@@ -891,6 +894,21 @@ class WebsiteConversationHandlers:
                 )
             )
         return client_request_id
+
+    async def _parallel_thread_requested(self, request: web.Request) -> bool:
+        """Whether Web Chat launches the new thread as parallel: optional body ``{"parallel_thread": true}``.
+
+        New Chat sends no body. A parallel thread's requests may run at the
+        same time as the team lead's other work (custom_agents.execution_lanes).
+        """
+
+        if not request.can_read_body:
+            return False
+        payload = await self.operations._json_payload(request)
+        value = payload.get("parallel_thread", False)
+        if not isinstance(value, bool):
+            raise web.HTTPBadRequest(text="parallel_thread must be true or false.")
+        return value
 
     async def _web_chat_payload_and_uploads(
         self,

@@ -68,7 +68,7 @@ async def test_new_thread_is_visible_and_durable_before_the_active_turn_finishes
         ack=AsyncMock(), nak=AsyncMock(),
     )
     try:
-        async with agent._execution_gate.hold():
+        async with agent._execution_lanes.hold():
             await asyncio.wait_for(agent.on_nats_delivery(delivery), 5)
             roots = await _runtime_work_roots(agent, "alice")
             assert [root.task.task_id for root in roots] == [task.task_id]

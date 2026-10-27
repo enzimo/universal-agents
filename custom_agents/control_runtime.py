@@ -522,20 +522,33 @@ async def _interrupt_active_execution(
     ]
     if not works:
         return None
-    for work in works:
-        if work.tool_stop is not None:
-            work.tool_stop.request(reason)
-        else:
-            agent._logger.warning(
-                "The running turn has no ToolStop, so its commands cannot be stopped with it. "
-                "event=active_turn_without_tool_stop agent_id=%s task_id=%s reason=%s",
-                agent.id,
-                work.task_id,
-                reason,
-            )
+    _request_tool_stops(agent, works, reason)
     for work in works:
         assert work.turn_owner is not None
         work.turn_owner.cancel()
+    await _wait_for_stopped_turns(agent, works, root_task_id=root_task_id, reason=reason)
+    return works[0]
+
+
+def _request_tool_stops(agent: Any, works: list[TaskWork], reason: str) -> None:
+    """Ask each stopped turn's commands to stop, before its turn is cancelled."""
+
+    for work in works:
+        if work.tool_stop is not None:
+            work.tool_stop.request(reason)
+            continue
+        agent._logger.warning(
+            "The running turn has no ToolStop, so its commands cannot be stopped with it. "
+            "event=active_turn_without_tool_stop agent_id=%s task_id=%s reason=%s",
+            agent.id,
+            work.task_id,
+            reason,
+        )
+
+
+async def _wait_for_stopped_turns(agent: Any, works: list[TaskWork], *, root_task_id: str, reason: str) -> None:
+    """Wait, bounded, for cancelled turns to end; a stop cancelled at shutdown still ends them."""
+
     owners = [work.turn_owner for work in works if work.turn_owner is not None]
     try:
         await asyncio.wait_for(
@@ -558,7 +571,6 @@ async def _interrupt_active_execution(
             ACTIVE_STOP_GRACE_SECONDS,
             sum(len(work.tool_stop.running()) for work in works if work.tool_stop is not None),
         )
-    return works[0]
 
 
 async def stop_task_execution(

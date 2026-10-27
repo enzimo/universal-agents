@@ -409,6 +409,8 @@ def _agent(
     )
     if is_lead:
         agent.is_team_lead = True
+        # Construction reads the flag to turn on parallel lanes (custom_agents.execution_lanes).
+        agent.task_manager.parallel_lanes_enabled = True
     return agent
 
 

@@ -373,6 +373,7 @@ class _LoopAgent:
         self._local_team_runtime = None
         self.schedule_workers = {}
         self.is_executing = not can_start
+        self.main_lane_busy = not can_start
         self.paused = False
         self.subtask_watchdog_interval_seconds = 1
         self._logger = logging.getLogger("test_scheduler_loop")
@@ -902,6 +903,7 @@ def test_aar_batch_review_schedule_queues_hydrated_manager_task(tmp_path: Path):
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        main_lane_busy=True,
         # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
@@ -1006,6 +1008,7 @@ def test_aar_batch_review_schedule_skips_when_no_pending_reports(tmp_path: Path)
         task_manager=task_manager,
         paused=False,
         is_executing=False,
+        main_lane_busy=False,
         _conversation_store=None,
         _ensure_request_timezone=lambda meta, top_level_request: meta,
         _logger=SimpleNamespace(
@@ -1077,6 +1080,7 @@ def test_fired_scheduled_task_carries_objective_link(tmp_path: Path):
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        main_lane_busy=True,
         # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
@@ -1154,6 +1158,7 @@ def test_gateway_cron_schedule_fire_keeps_stored_conversation_id(tmp_path: Path)
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        main_lane_busy=True,
         # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
@@ -1249,6 +1254,7 @@ def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: 
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        main_lane_busy=True,
         # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
@@ -1351,6 +1357,7 @@ def test_recurring_fired_schedule_keeps_history_without_followup_delivery_obliga
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        main_lane_busy=True,
         # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,

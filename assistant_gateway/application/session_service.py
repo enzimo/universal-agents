@@ -51,6 +51,7 @@ class GatewaySessionService:
         manager_agent_id: str | None,
         owner_canonical_user_id: str | None,
         route: GatewaySessionRoute = GatewaySessionRoute(),
+        parallel_thread: bool = False,
     ) -> SessionRecord:
         return self._repository.create_session(
             session_key=self._id_generator.new_session_key(),
@@ -61,6 +62,7 @@ class GatewaySessionService:
             chat_id=route.chat_id,
             thread_id=route.thread_id,
             owner_canonical_user_id=owner_canonical_user_id,
+            parallel_thread=parallel_thread,
         )
 
     def resolve_session(

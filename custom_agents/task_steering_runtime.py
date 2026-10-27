@@ -21,7 +21,9 @@ from custom_agents.sdk.strands.turn_tool_stop import (
     stop_tool_calls,
 )
 from custom_agents.task_runtime_state import TurnStartNotes
+from custom_agents.execution_lanes import is_parallel_lane
 from custom_tools.runtime_context import TaskWork, bound_task_id, current_task_work, task_work
+from runtime_hosting.agent_execution import current_lane
 from custom_tools.tool_stop import ToolStop
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError, settle_failed_turn
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND
@@ -109,7 +111,7 @@ def ensure_fresh_strands_agent_for_new_turn(
     *,
     task_id: Optional[str],
 ) -> bool:
-    """Give a new turn the main Strands agent, never one an interrupted session holds.
+    """Give a new turn its lane's Strands agent, never one an interrupted session holds.
 
     The turn's work record gets the parts it calls (``runtime_context.TaskWork``).
     A paused turn keeps its Strands agent for its resume, and an agent left
@@ -118,14 +120,22 @@ def ensure_fresh_strands_agent_for_new_turn(
     whether it was.
     """
 
+    work = current_task_work()
+    if work is None or work.task_id != task_id:
+        raise RuntimeError("A turn took its Strands agent outside its task's work record (runtime_context.task_work).")
+    lane = current_lane()
+    if is_parallel_lane(lane):
+        # A parallel request's turn calls its lane's own agent, built afresh
+        # when an interrupt still holds the old one (execution_lanes_runtime.strands_parts_for_lane).
+        from custom_agents.execution_lanes_runtime import strands_parts_for_lane
+
+        work.strands = strands_parts_for_lane(agent, lane)
+        return False
     current = agent._strands_parts
     session_owners = _session_holders(agent, current)
     replaced = bool(current.replace_before_next_turn or session_owners)
     if replaced:
         _rotate_main_strands_agent(agent, task_id=task_id, session_owners=session_owners)
-    work = current_task_work()
-    if work is None or work.task_id != task_id:
-        raise RuntimeError("A turn took its Strands agent outside its task's work record (runtime_context.task_work).")
     work.strands = agent._strands_parts
     return replaced
 

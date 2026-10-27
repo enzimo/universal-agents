@@ -26,7 +26,8 @@ from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState
-from runtime_hosting.agent_execution import AgentExecutionGate
+from custom_agents.execution_lanes_runtime import ParallelLanes
+from runtime_hosting.agent_execution import MAIN_LANE, AgentExecutionLanes
 
 
 async def _false(*_args: Any, **_kwargs: Any) -> bool:
@@ -76,6 +77,7 @@ class FakeTaskManager:
     """The task-manager calls a drain pass and the scheduler enqueue make."""
 
     current_task_id: str | None = None  # no task holds the slot
+    parallel_lanes_enabled = False  # a worker: everything runs in the main lane
 
     def __init__(self) -> None:
         self.operations_runtime = TaskOperationRuntime()
@@ -88,7 +90,7 @@ class FakeTaskManager:
     def can_start_new_task(self) -> bool:
         return True
 
-    def get_next_task_to_process(self) -> str | None:
+    def get_next_task_to_process(self, _lane: str = MAIN_LANE) -> str | None:
         self.hold.wait_if_armed()
         self.queue_checks += 1
         return self.queue[0] if self.queue else None
@@ -151,8 +153,9 @@ class DrainAgent:
         self._pending_work_timers: set[asyncio.TimerHandle] = set()
         self._owned_tasks: set[asyncio.Task] = set()
         self._pending_interrupt_responses: dict[str, Any] = {}
-        self._execution_gate = AgentExecutionGate(on_release=partial(wake_after_slot_release, self))
-        self._active_execution_task_id = None
+        self._execution_lanes = AgentExecutionLanes(on_release=partial(wake_after_slot_release, self))
+        self._parallel_lanes = ParallelLanes()
+        self._running_turns: dict[Any, Any] = {}
         self._lease_loss_wind_down = None
         self._logger = logging.getLogger("tests.pending_work_support")
         self.task_manager = FakeTaskManager()
@@ -163,11 +166,18 @@ class DrainAgent:
             is_execution_cancelled=_false,
             logger=self._logger,
         )
-        self._runtime_coordinator = lambda: SimpleNamespace(drain_all_deferred_events=_false)
+        self._runtime_coordinator = lambda: SimpleNamespace(
+            runtime=SimpleNamespace(list_deferred_runtime_event_root_ids=lambda: [], get_active_runtime_lease=lambda _root: None),
+            drain_deferred_events=_false,
+        )
 
     @property
     def is_executing(self) -> bool:
-        return self._execution_gate.busy
+        return self._execution_lanes.busy
+
+    @property
+    def main_lane_busy(self) -> bool:
+        return self._execution_lanes.main_busy
 
     def _message_targets_other_team(self, _envelope: Any) -> bool:
         return False

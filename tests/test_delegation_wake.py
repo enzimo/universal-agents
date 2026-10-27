@@ -43,7 +43,7 @@ class _ExecutionGate:
         self.waiting = asyncio.Event()
 
     @contextlib.asynccontextmanager
-    async def scope(self):
+    async def scope(self, _lane: str = "main"):
         me = asyncio.current_task()
         if self.owner is me:
             yield

@@ -1985,7 +1985,8 @@ async def _scheduler_pass(
     task_manager = getattr(agent, "task_manager", None)
     can_claim_scheduled_work = (
         not getattr(agent, "paused", False)
-        and not getattr(agent, "is_executing", False)
+        # Scheduled work runs in the main lane; parallel requests do not hold it back.
+        and not getattr(agent, "main_lane_busy", False)
         and (
             task_manager is None
             or not hasattr(task_manager, "can_start_new_task")

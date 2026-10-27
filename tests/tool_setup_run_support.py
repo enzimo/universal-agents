@@ -77,6 +77,7 @@ def lead_agent(
         _should_exit=asyncio.Event(),
         paused=False,
         is_executing=False,
+        main_lane_busy=False,
         _continue_pending_work=AsyncMock(),
         _access_workflow_limits_loaded=True,
         # What the steering runtime needs to record an interrupt.

@@ -213,6 +213,7 @@ def _lead(world, *, roles: tuple[str, ...] = ("owner",), enabled: bool = True, l
         _interrupted_turn_sessions={},
         paused=False,
         is_executing=False,
+        main_lane_busy=False,
         _continue_pending_work=AsyncMock(),
     )
     set_agent_ref(agent)

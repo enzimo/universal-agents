@@ -133,6 +133,7 @@ def worker_agent(tasks: TaskManager, store: ScheduleStore, bus: Bus, agent_id: s
         schedule_workers={},
         paused=False,
         is_executing=True,  # queue the run instead of starting a model turn
+        main_lane_busy=True,  # the main lane (runtime_hosting.agent_execution)
         # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,

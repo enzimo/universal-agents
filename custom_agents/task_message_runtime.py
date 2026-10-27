@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, Optional, Union
 
 
 from custom_tools.runtime_context import task_work
+from runtime_hosting.agent_execution import MAIN_LANE
 from custom_agents.control_runtime import handle_interrupted_turn
 from custom_agents.lease_loss_wind_down import may_start_next_task
 from custom_agents.pending_work_runtime import schedule_pending_work
@@ -1423,19 +1424,24 @@ async def _handle_delivery_receipt(
 
 
 @staticmethod
-async def _check_and_process_next_task(self) -> bool:
+async def _check_and_process_next_task(self, lane: str = MAIN_LANE) -> bool:
+    """Start the next queued task of ``lane`` and run its turn; the caller holds that lane.
+
+    The main lane takes ordinary work while its slot is free; a parallel
+    request's lane takes only that request's tasks (custom_agents.execution_lanes).
     """
-    Checks if a new task can be started from the task manager's queue
-    and initiates its processing if the agent is not currently executing.
-    """
-    if not self.paused:
-        # The caller holds the execution gate, so no turn runs now: a task still
-        # IN_PROGRESS lost its turn and must not block the queue (turn_failure_runtime).
+    if lane == MAIN_LANE and not self.paused:
+        # The caller holds the main lane, so no main turn runs now: a task still
+        # holding the main slot lost its turn and must not block the queue
+        # (turn_failure_runtime).
         await release_orphaned_execution_slot(self)
     if (
         self.paused
-        or not await self.task_manager.operations_runtime.run(
-            self.task_manager.can_start_new_task,
+        or (
+            lane == MAIN_LANE
+            and not await self.task_manager.operations_runtime.run(
+                self.task_manager.can_start_new_task,
+            )
         )
         # A winding-down worker only resumes tasks that already started here.
         or not await may_start_next_task(self)
@@ -1443,7 +1449,7 @@ async def _check_and_process_next_task(self) -> bool:
         return False
 
     next_task_id = await self.task_manager.operations_runtime.run(
-        self.task_manager.get_next_task_to_process,
+        self.task_manager.get_next_task_to_process, lane
     )
     if not next_task_id:
         return False

@@ -1513,19 +1513,29 @@ function fetchSessions(options) {
     return request;
   }
 
-function createServerThread() {
+function createServerThread(options) {
+    // Launch parallel thread asks for a thread whose requests the agent runs
+    // beside its other work; New Chat and /new start ordinary ones.
+    var parallelThread = Boolean(options && options.parallelThread);
     var authGeneration = sharedState.authSessionGeneration;
     if (!sharedState.authSessionActive) { return Promise.resolve(null); }
-    if (shellState.threadCreationRequest && shellState.threadCreationGeneration === authGeneration) {
+    if (shellState.threadCreationRequest && shellState.threadCreationGeneration === authGeneration
+        && shellState.threadCreationParallel === parallelThread) {
       return shellState.threadCreationRequest;
     }
     var previousThread = activeThread();
     shellState.threadCreationGeneration = authGeneration;
-    var request = requestClient.fetch("/api/web-chat/sessions", {
+    shellState.threadCreationParallel = parallelThread;
+    var init = {
       method: "POST",
       credentials: "same-origin",
       signal: AbortSignal.timeout(15000),
-    }).then(function (response) {
+    };
+    if (parallelThread) {
+      init.headers = { "Content-Type": "application/json" };
+      init.body = JSON.stringify({ parallel_thread: true });
+    }
+    var request = requestClient.fetch("/api/web-chat/sessions", init).then(function (response) {
       if (!sharedState.authSessionActive || sharedState.authSessionGeneration !== authGeneration) { return null; }
       return parseApiResponse(response, "Unable to create a chat thread.", function () {
         if (!sharedState.authSessionActive || sharedState.authSessionGeneration !== authGeneration) {

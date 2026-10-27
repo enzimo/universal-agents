@@ -91,6 +91,7 @@ def make_agent(
         _interrupted_turn_sessions={},
         paused=False,
         is_executing=False,
+        main_lane_busy=False,  # the main lane (runtime_hosting.agent_execution)
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
         _continue_pending_work=AsyncMock(),

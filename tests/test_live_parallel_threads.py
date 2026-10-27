@@ -1,4 +1,9 @@
-"""Independent chat tasks share a lead while workers run through real NATS."""
+"""Chat threads share a lead while workers run, through real NATS and a real gateway.
+
+Ordinary threads (New Chat) take turns on the lead's main lane; a thread
+started with Launch parallel thread runs at the same time
+(custom_agents.execution_lanes).
+"""
 
 import asyncio
 from pathlib import Path
@@ -68,7 +73,8 @@ async def test_new_thread_is_listed_while_busy_and_finishes_while_other_thread_w
             ))
             assert inventory.total == 2 and inventory.current_count == 1 and inventory.queued_count == 1
             assert {row.root_task_id for row in inventory.tasks} == {first_id, second_id}
-            assert all(row.is_parallel for row in inventory.tasks)
+            # New Chat threads are ordinary: they share the lead's main lane.
+            assert not any(row.is_parallel for row in inventory.tasks)
             assert next(row for row in inventory.tasks if row.root_task_id == second_id).queue_position == 1
             assert not turns[1].started.is_set()
             assert not team.lead.deferred_inbox.messages
@@ -98,3 +104,43 @@ async def test_new_thread_is_listed_while_busy_and_finishes_while_other_thread_w
                 send.cancel()
             await asyncio.gather(*sends, return_exceptions=True)
             await _stop_agents(workers)
+
+
+async def test_a_parallel_threads_request_finishes_while_an_ordinary_turn_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    use_gateway_key(monkeypatch)
+    release_lead = asyncio.Event()
+    turns = (
+        _Turn("FIRST-REQUEST", _answer("First thread finished."), release=release_lead),
+        _Turn("PARALLEL-REQUEST", _answer("Parallel thread finished.")),
+    )
+    async with _team(tmp_path, *turns) as team:
+        sends = []
+        # A parallel lane builds a Strands agent of its own; here it is the same scripted model.
+        with patch("custom_agents.strands_agent.Agent", return_value=team.lead_model):
+            try:
+                first_session = team.gateway.application.start_new_session().session_key
+                first = team.send("FIRST-REQUEST", session_key=first_session)
+                sends.append(first)
+                await asyncio.wait_for(turns[0].started.wait(), WAIT_SECONDS)
+
+                parallel_session = team.gateway.application.start_new_session(parallel_thread=True).session_key
+                parallel = team.send("PARALLEL-REQUEST", session_key=parallel_session)
+                sends.append(parallel)
+                parallel_result = await asyncio.wait_for(asyncio.shield(parallel), WAIT_SECONDS)
+
+                assert parallel_result.text == "Parallel thread finished."
+                assert not first.done() and not release_lead.is_set(), "the ordinary turn is still held"
+                first_id = team.root_tasks_named("FIRST-REQUEST")[0].task_id
+                assert team.lead.task_manager.get_task_info(first_id).state == ProgressState.IN_PROGRESS
+
+                release_lead.set()
+                first_result = await asyncio.wait_for(asyncio.shield(first), WAIT_SECONDS)
+                assert first_result.text == "First thread finished."
+                assert not team.lead_model.unexpected
+            finally:
+                release_lead.set()
+                for send in sends:
+                    send.cancel()
+                await asyncio.gather(*sends, return_exceptions=True)

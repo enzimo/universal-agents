@@ -70,10 +70,15 @@ def running_turn_task_ids(agent: Any) -> list[str]:
 
 
 def executing_task_ids(agent: Any) -> set[str]:
-    """The tasks executing now: the one holding the execution slot and those whose turns run."""
+    """The tasks executing now: the main slot's, parallel requests whose lanes are held, and running turns."""
+
+    from custom_agents.execution_lanes import root_of_lane
 
     current = agent.task_manager.current_task_id
-    return set(running_turn_task_ids(agent)) | ({current} if current else set())
+    parallel_roots = {
+        root for lane in agent._execution_lanes.held_lanes() if (root := root_of_lane(lane)) is not None
+    }
+    return set(running_turn_task_ids(agent)) | parallel_roots | ({current} if current else set())
 
 
 def pin_turn_strands(agent: Any) -> Any:
@@ -92,7 +97,10 @@ def pin_turn_strands(agent: Any) -> Any:
         return agent._strands_parts
     parts = work.strands
     if parts is None or parts.generation != agent._strands_generation:
-        work.strands = agent._strands_parts
+        from custom_agents.execution_lanes_runtime import strands_parts_for_lane
+        from runtime_hosting.agent_execution import current_lane
+
+        work.strands = strands_parts_for_lane(agent, current_lane())
     return work.strands
 
 

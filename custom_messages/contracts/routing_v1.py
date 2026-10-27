@@ -308,6 +308,14 @@ class GatewayContext(BaseModel):
             "with it; copied unchanged onto delegated tasks and never saved on a schedule."
         ),
     )
+    parallel_thread: bool = Field(
+        default=False,
+        description=(
+            "The request was sent in a thread the person started with Web Chat's Launch "
+            "parallel thread: the team lead may run it at the same time as its other work "
+            "(custom_agents.execution_lanes). Scheduling only; it grants nothing."
+        ),
+    )
 
 
 # Resolve the forward GatewayContext annotation within its owning contract.

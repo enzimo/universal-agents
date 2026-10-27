@@ -61,11 +61,13 @@ queue positions and waiting reasons. It refreshes every 10 seconds while open an
 20 tasks per agent per page. Other users' tasks remain private. If one agent cannot
 respond, its section reports that problem while the other sections remain usable.
 
-New tasks appear even when the agent is busy or paused. **Parallel** marks your
-unfinished work in different conversations sharing that agent. The agent runs
-one model turn at a time and can work on another task while a task waits for a
-worker, your answer, or an access decision. The label clears when only one
-conversation has unfinished work.
+New tasks appear even when the agent is busy or paused. **Parallel** marks a
+request you sent in a thread started with **Launch parallel thread**. The team
+lead works on such a request at the same time as its other work, up to four
+parallel requests at once; a further one shows as queued until one of them
+finishes. Other work, such as ordinary chats, New Chat, schedules and other chat
+apps, still runs one model turn at a time, and the agent can work on another
+task while a task waits for a worker, your answer, or an access decision.
 
 TeamArchitect appears first. Long descriptions, waiting reasons, and activity
 notes have compact previews; expand them to read the full available text.
@@ -302,8 +304,15 @@ something in them.
 To start an unrelated request while keeping your earlier chat, turn on
 **Launch parallel thread** below Send and send your message. Chat creates a
 new thread for that message and its files, and keeps its replies there. The
-switch turns off after the message moves to the new chat. Leave it off to
-continue the selected thread. Slash commands keep their usual behavior.
+team lead starts on it right away, even while it is busy with your other work,
+and every later request you send in that thread runs the same way. Use it only
+for work that does not change the same things as your other running requests:
+the agent does not coordinate them. Changes to the same memory facts,
+schedules, Objectives, heartbeat items, files written with the file tools and
+credentials are still checked, and the later conflicting change is refused;
+commands the agent runs in its shell or Python are not checked. The switch
+turns off after the message moves to the new chat. Leave it off to continue
+the selected thread. Slash commands keep their usual behavior.
 If the new chat cannot be created, your text and files stay in the composer.
 If sending fails, use **Retry** beside the failed message to resend the same
 request without creating another one. You can send other messages first;

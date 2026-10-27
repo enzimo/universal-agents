@@ -17,7 +17,7 @@ from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState
 from custom_tools.runtime_context import task_work
-from runtime_hosting.agent_execution import AgentExecutionGate
+from runtime_hosting.agent_execution import MAIN_LANE, AgentExecutionLanes
 from tests.task_work_support import TurnHost
 
 
@@ -48,6 +48,7 @@ class HeldModel(Model):
 class RuntimeHost(TurnHost):
     # Use the production admission and ownership methods, with local provider I/O.
     is_executing = UniversalAgent.is_executing
+    main_lane_busy = UniversalAgent.main_lane_busy
     _execution_scope = UniversalAgent._execution_scope
     _announce_execution_state = UniversalAgent._announce_execution_state
     process_llm_interaction = UniversalAgent.process_llm_interaction
@@ -98,7 +99,7 @@ def host(tmp_path, monkeypatch):
         task_manager=manager,
         paused=False,
         _should_exit=asyncio.Event(),
-        _execution_gate=AgentExecutionGate(),
+        _execution_lanes=AgentExecutionLanes(),
         test_task_id=None,
         _logger=logging.getLogger(__name__),
         _refresh_self_agent_state=AsyncMock(),
@@ -261,7 +262,7 @@ async def test_cancelled_owner_finishes_sdk_cleanup_before_waiter_starts(host):
 
 @pytest.mark.asyncio
 async def test_inline_nested_scope_retains_owner_and_child_task_waits():
-    gate = AgentExecutionGate()
+    gate = AgentExecutionLanes()
     entered = asyncio.Event()
 
     async def child():
@@ -270,7 +271,7 @@ async def test_inline_nested_scope_retains_owner_and_child_task_waits():
 
     async with gate.hold():
         async with gate.hold():
-            assert gate.owned_by_current_task
+            assert gate.owned_by_current_task(MAIN_LANE)
         assert gate.busy
         contender = asyncio.create_task(child())
         await asyncio.sleep(0)
@@ -398,7 +399,7 @@ async def test_user_stop_cancels_sdk_child_without_cancelling_its_owner(host):
 @pytest.mark.asyncio
 async def test_gate_release_callback_runs_once_per_outer_hold_even_when_cancelled():
     released = []
-    gate = AgentExecutionGate(on_release=released.append)
+    gate = AgentExecutionLanes(on_release=lambda owner, _lane: released.append(owner))
 
     async def holder():
         async with gate.hold():
@@ -428,10 +429,10 @@ async def test_gate_release_callback_runs_once_per_outer_hold_even_when_cancelle
 
 @pytest.mark.asyncio
 async def test_a_failing_release_callback_is_logged_and_keeps_the_holders_outcome(caplog):
-    def broken_callback(_owner):
+    def broken_callback(_owner, _lane):
         raise RuntimeError("callback bug")
 
-    gate = AgentExecutionGate(on_release=broken_callback)
+    gate = AgentExecutionLanes(on_release=broken_callback)
 
     async def holder_that_fails():
         async with gate.hold():

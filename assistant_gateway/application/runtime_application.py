@@ -82,6 +82,7 @@ def gateway_session_view(session: SessionRecord) -> GatewaySession:
         owner_canonical_user_id=session.owner_canonical_user_id,
         latest_request_text=None,
         updated_at=session.updated_at,
+        parallel_thread=session.parallel_thread,
     )
 
 
@@ -262,7 +263,10 @@ class GatewayRuntimeApplication:
         chat_id: str | None = None,
         thread_id: str | None = None,
         canonical_user_id: str | None = None,
+        parallel_thread: bool = False,
     ) -> GatewaySession:
+        """Start a new chat thread; ``parallel_thread`` marks one Web Chat launched as parallel."""
+
         route = GatewayRequestRoute(
             channel_name=channel_name,
             user_id=user_id,
@@ -279,6 +283,7 @@ class GatewayRuntimeApplication:
                 chat_id=chat_id,
                 thread_id=thread_id,
             ),
+            parallel_thread=parallel_thread,
         )
         return gateway_session_view(session)
 

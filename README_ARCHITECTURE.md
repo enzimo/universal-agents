@@ -335,9 +335,36 @@ stops go through the manager without a model turn and stay immediate.
 New request admission also runs without the model execution slot: it saves the
 request in the normal task queue and wakes the existing queue drain. This keeps
 new chat tasks visible and controllable while another turn runs or the agent is
-paused. Task results still require the slot because they can resume reasoning.
-Settings marks a person's unfinished tasks in different conversations on one
-agent as **Parallel**, calculated before paging and after owner filtering.
+paused. A message that may resume reasoning (a worker's result, a question or
+answer, a credential form's or setup page's result) is never handled inside
+the mailbox's delivery callback either: it is saved to the deferred inbox,
+acknowledged, and handled by the execution lane of the task it concerns
+(`deferred_message_runtime.may_resume_a_turn`). The mailbox waits for each
+callback, so a turn there held back every other message.
+
+**Parallel threads.** A thread a person starts with Web Chat's **Launch
+parallel thread** is stored as parallel on its gateway session, and the
+gateway marks every request sent in it (`GatewayContext.parallel_thread`). The
+team lead runs each such request in an execution lane of its own
+(`custom_agents.execution_lanes` decides the lane,
+`custom_agents.execution_lanes_runtime` runs the lanes,
+`runtime_hosting.agent_execution` allows one turn per lane): its
+turns run at the same time as the main lane's and other parallel lanes', up to
+four lanes at once, while one request's turns still run one at a time. All
+other work (ordinary chats, New Chat, `/new`, schedules, heartbeat, other chat
+apps, and every worker) shares the main lane, one turn at a time, as before.
+Why: by launching a parallel thread the person says the request does not
+overlap their other work (owner, 2026-10-27); the stores still refuse the later
+of two conflicting changes to covered records, and shell or Python writes are
+not checked. Each turn is self-contained: its task, person's model, stop
+handle and Strands agent live in the task's work record
+(`custom_tools.runtime_context.TaskWork`), bound by the runner around the
+task's handling, and every tool, hook and post-turn step reads them from
+there, never from an agent-wide current task (`custom_agents.turn_registry`
+records the running turns; `custom_agents.strands_parts` and
+`custom_agents.strands_agent_builder` give each lane its own Strands agent
+and tool state). Settings marks such
+requests **Parallel**.
 Cancellation retains history and stops attached work; resume refuses unresolved
 approvals, questions, delegation and runtime review. Pause notices identify the task and affected
 worker. Settings also pages finished task results across agents, including

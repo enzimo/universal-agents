@@ -520,6 +520,9 @@ class GatewayInteractiveSubmissionService:
                         delivery_mode="interactive",
                         route=thread.route,
                         manager_agent_id=manager_id,
+                        # Every request of a thread launched as parallel may run
+                        # beside the lead's other work (custom_agents.execution_lanes).
+                        parallel_thread=session.parallel_thread,
                     ),
                 ),
                 msg_header=MessageHeader(

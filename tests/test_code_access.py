@@ -96,6 +96,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         _interrupted_turn_sessions={},
         paused=False,
         is_executing=False,
+        main_lane_busy=False,  # the main lane (runtime_hosting.agent_execution)
         _continue_pending_work=AsyncMock(),
     )
     set_agent_ref(agent)

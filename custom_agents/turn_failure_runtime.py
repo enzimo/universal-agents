@@ -1,7 +1,9 @@
 """End a task whose model turn failed, and never leave the execution slot held.
 
-The task manager has one execution slot (``current_in_progress_task_id``).
-A task claims it by moving to IN_PROGRESS just before its model turn runs,
+The task manager has one main execution slot (``current_in_progress_task_id``);
+a request sent in a parallel thread runs in a lane of its own instead
+(``custom_agents.execution_lanes``). A task claims its slot by moving to
+IN_PROGRESS just before its model turn runs,
 and gives it back when the turn's result moves it on (completed, waiting,
 failed). Every path that runs a turn must therefore also handle a failed
 turn; otherwise the task stays IN_PROGRESS with no turn running, and the
@@ -25,6 +27,8 @@ until the person stopped the task by hand.
   (``runtime_recovery.fail_recovered_executing_task``). Other executing states
   are left alone: RETRYING keeps the slot on purpose while the turn-action
   outbox waits to retry an action.
+- ``release_orphaned_parallel_tasks`` does the same for parallel requests: a
+  task IN_PROGRESS in a parallel lane that nobody holds has lost its turn.
 """
 
 from __future__ import annotations
@@ -49,6 +53,8 @@ from custom_agents.runtime_recovery import fail_recovered_executing_task
 from custom_agents.task_wait_limit import TaskWaitLimitReached, tell_person_about_wait_limit
 from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
 from custom_messages.enums import ProgressState
+from custom_agents.execution_lanes import executing_parallel_task_ids, lane_for_task
+from runtime_hosting.agent_execution import MAIN_LANE
 
 MODEL_OUTPUT_LIMIT_MESSAGE = (
     "The model reached its output limit before completing this request. "
@@ -239,14 +245,55 @@ async def release_orphaned_slot_when_idle(agent: Any) -> bool:
     no turn can start in between, and a busy gate means a turn is running.
     """
 
-    gate = getattr(agent, "_execution_gate", None)
-    if gate is None or gate.busy or getattr(agent, "paused", False):
+    lanes = getattr(agent, "_execution_lanes", None)
+    if lanes is None or lanes.main_busy or getattr(agent, "paused", False):
         return False
-    async with gate.hold():
+    async with lanes.hold(MAIN_LANE):
         released = await release_orphaned_execution_slot(agent)
+    released = await release_orphaned_parallel_tasks(agent) or released
     if released:
         # Queued work starts now, not when unrelated traffic next wakes the drain.
         schedule_pending_work(agent)
+    return released
+
+
+async def release_orphaned_parallel_tasks(agent: Any) -> bool:
+    """Fail parallel requests' tasks left IN_PROGRESS in a lane nobody holds (module docstring).
+
+    A lane's holder claims a task and runs its turn while holding the lane, so
+    a free lane means no turn runs for it. The lane is taken for the check;
+    acquiring a free lock does not suspend, so no turn can start in between.
+    """
+
+    lanes = getattr(agent, "_execution_lanes", None)
+    manager = agent.task_manager
+    # Only the team lead opens parallel lanes (custom_agents.execution_lanes).
+    if lanes is None or getattr(agent, "paused", False) or not getattr(manager, "parallel_lanes_enabled", False):
+        return False
+    released = False
+    for task_id in await manager.operations_runtime.run(partial(executing_parallel_task_ids, manager)):
+        lane = await manager.operations_runtime.run(partial(lane_for_task, manager), task_id)
+        if lanes.lane_busy(lane):
+            continue
+        async with lanes.hold(lane):
+            holder = await manager.operations_runtime.run(manager.get_task_info, task_id)
+            if holder is None or holder.state != ProgressState.IN_PROGRESS:
+                continue
+            agent._logger.error(
+                "A parallel request's task was in progress with no turn running; ending it. "
+                "event=execution_slot_orphaned agent_id=%s task_id=%s lane=%s",
+                agent.id,
+                task_id,
+                lane,
+            )
+            await fail_recovered_executing_task(
+                agent,
+                holder,
+                now_ts=datetime.now(timezone.utc).isoformat(),
+                reason=ORPHANED_SLOT_MESSAGE,
+                snapshot_age_seconds=None,
+            )
+            released = True
     return released
 
 
@@ -258,6 +305,7 @@ __all__ = [
     "UnroutableTaskInterruptError",
     "fail_task_after_turn_error",
     "release_orphaned_execution_slot",
+    "release_orphaned_parallel_tasks",
     "release_orphaned_slot_when_idle",
     "settle_failed_turn",
     "task_runtime_error_message",

@@ -178,10 +178,12 @@ class _FakeGateway:
         chat_id=None,
         thread_id=None,
         canonical_user_id=None,
+        parallel_thread=False,
     ):
         return SimpleNamespace(
             session_key=f"{channel_name}:{chat_id}:{user_id}:new",
             conversation_id="conv_new",
+            parallel_thread=parallel_thread,
         )
 
     async def waiting_question_id_for_session(self, session_key: str):

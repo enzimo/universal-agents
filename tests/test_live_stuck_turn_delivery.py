@@ -142,8 +142,13 @@ async def test_new_messages_reach_agent_while_model_stream_is_stuck(tmp_path, mo
         object.__setattr__(agent, name, AsyncMock())
     monkeypatch.setattr(task_message_runtime, "_apply_task_processing_result", complete)
     object.__setattr__(agent, "_drain_due_turn_action_outbox", AsyncMock(return_value=False))
+    # No runtime mailbox events: every lane's drain finds none.
     object.__setattr__(agent, "_runtime_coordinator", lambda: SimpleNamespace(
-        drain_all_deferred_events=AsyncMock(return_value=False)))
+        runtime=SimpleNamespace(
+            list_deferred_runtime_event_root_ids=lambda: [], get_active_runtime_lease=lambda _root: None
+        ),
+        drain_deferred_events=AsyncMock(return_value=False),
+    ))
     agent._nats_transport_adapter = adapter
     reply = f"{team}_gateway_response"
     try:

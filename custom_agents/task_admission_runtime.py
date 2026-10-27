@@ -3,7 +3,8 @@
 from functools import partial
 from typing import Any
 
-from custom_agents.deferred_message_runtime import DeferredInboxFull
+from custom_agents.deferred_message_runtime import DeferredInboxFull, may_resume_a_turn
+from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_messages.contracts.control_v1 import (
     AgentStatus,
     ControlInstruction,
@@ -156,10 +157,15 @@ async def _handle_busy_delivery(
             WorkerTaskHandbackV1,
         ),
     )
-    if not (paused_work or (agent.is_executing and requires_execution_slot)):
+    # A message that may resume a turn always waits here for its task's
+    # execution lane (deferred_message_runtime.may_resume_a_turn); other work
+    # waits only while the main lane is held.
+    waits = requires_execution_slot and (may_resume_a_turn(envelope) or agent.main_lane_busy)
+    if not (paused_work or waits):
         return False
     # Requests use task admission above. Only deferred results/resumes can
     # fill this inbox; its outer handler retains broker custody until room frees.
     await agent.deferred_inbox.admit(envelope)
     await delivery.ack()
+    schedule_pending_work(agent)
     return True

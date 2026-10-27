@@ -19,7 +19,10 @@ export function createChatSubmission({ readDraft, context, createThread, takeDra
     preparing(true);
     try {
       let thread = origin.thread;
-      if (!command && (draft.separate || !thread)) thread = await createThread();
+      // The switch launches a parallel thread: the server runs its requests
+      // beside the agent's other work. Without a thread, a plain one starts.
+      if (!command && draft.separate) thread = await createThread({ parallelThread: true });
+      else if (!command && !thread) thread = await createThread();
       if (!current() || (!thread && !command)) return;
       const attachments = takeDraft();
       send(draft.content, { thread, attachments });

@@ -39,6 +39,8 @@ class GatewaySession:
     owner_canonical_user_id: str | None = None
     latest_request_text: str | None = None
     updated_at: str | None = None
+    # Started with Web Chat's Launch parallel thread (SessionRecord.parallel_thread).
+    parallel_thread: bool = False
 
 
 @dataclass(frozen=True)
