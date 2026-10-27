@@ -12,7 +12,7 @@ Hi, you’ve found Universal Agents (UA). What are they? Well, they are whatever
 
 **But…** under the hood, it’s built different!  When thinking agents, we imagine industrial swarms that are big… massive… potentially planetscale.  Thus, the key motivation is an architecture that scales with the task. For example, when you spin up your personal assistant (from this repo), you get a team that works on your behalf. For bigger tasks you get multiple teams that interact with each other etc.
 
-[![Universal Agents Intro](https://youtu.be/daVFaZ7RB0g?list=PLPO_4fTKUE6I)](https://youtu.be/daVFaZ7RB0g?list=PLPO_4fTKUE6I)
+[![Universal Agents Intro](https://img.youtube.com/vi/daVFaZ7RB0g/hqdefault.jpg)](https://youtu.be/daVFaZ7RB0g?list=PLPO_4fTKUE6I)
 
 
 Some notable features:
@@ -57,9 +57,9 @@ Features:
 
 Onboarding can be done in a few different ways. For best user experience, we recommend using the web UI that walks you through step-by-step configuration. **Note:** At the end of onboarding, you will be given an opportunity to save your configuration files `config.yaml` and `team.env` - please make sure to do so. The full config contains hundreds of parameters (with sensible defaults). Once you are comfortable with your initial team, feel free to dig into the configuration and play around with the knobs.
 
-[![Desktop Install](https://youtu.be/Ia_zs5fkPqM?list=PLPO_4fTKUE6I)](https://youtu.be/Ia_zs5fkPqM?list=PLPO_4fTKUE6I)
+[![Desktop Install](https://img.youtube.com/vi/Ia_zs5fkPqM/hqdefault.jpg)](https://youtu.be/Ia_zs5fkPqM?list=PLPO_4fTKUE6I)
 
-[![Docker Install](https://youtu.be/NXTE0e_QFDM?list=PLPO_4fTKUE6I)](https://youtu.be/NXTE0e_QFDM?list=PLPO_4fTKUE6I)
+[![Docker Install](https://img.youtube.com/vi/NXTE0e_QFDM/hqdefault.jpg)](https://youtu.be/NXTE0e_QFDM?list=PLPO_4fTKUE6I)
 
 If you are an advanced user, you can also run an onboarding script in non-interactive mode. Make sure to change / pre-populate the `config.example.yaml` and a `team.example.env`. FYI - if you are running in a docker environment all values in the `.env` file can be supplied via docker secrets and the `.env` file can be discarded.
 
@@ -67,7 +67,7 @@ If you are an advanced user, you can also run an onboarding script in non-intera
 
 The Web UI is designed to be lightweight so don't expect it to have all the bells and whistles of a full-fledged chat app. However, it is being built out as we see need for more functionality so you will see new things pop up all the time.
 
-[![Webchat Tour]([https://youtube.com](https://youtu.be/qNSWcChZ7XU?list=PLPO_4fTKUE6I))](https://youtu.be/qNSWcChZ7XU?list=PLPO_4fTKUE6I)
+[![Webchat Tour](https://img.youtube.com/vi/qNSWcChZ7XU/hqdefault.jpg)](https://youtu.be/qNSWcChZ7XU?list=PLPO_4fTKUE6I)
 
 ### Custom Website Generation
 
