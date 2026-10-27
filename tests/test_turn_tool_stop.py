@@ -34,7 +34,8 @@ from custom_agents.strands_agent import UniversalAgent
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
-from custom_tools.runtime_context import set_agent_ref
+from custom_tools.runtime_context import task_work
+from tests.task_work_support import TurnHost, register_turn, set_agent_ref, strands_parts
 from custom_tools.tool_stop import TOOL_STOP_STATE_KEY, ToolStop, tracked_tool_call
 from runtime_hosting.agent_execution import AgentExecutionGate
 from tests.turn_tool_stop_support import (
@@ -50,7 +51,7 @@ from tests.turn_tool_stop_support import (
 LOGGER = logging.getLogger("tests.turn_tool_stop")
 
 
-class Host(SimpleNamespace):
+class Host(TurnHost):
     """The production execution scope and turn bookkeeping, without NATS or storage."""
 
     is_executing = UniversalAgent.is_executing
@@ -63,9 +64,6 @@ def make_host(sdk: Agent) -> Host:
     host = Host(
         id="agent",
         _execution_gate=AgentExecutionGate(),
-        _active_execution_task=None,
-        _active_execution_task_id=None,
-        _active_tool_stop=None,
         _logger=LOGGER,
         _refresh_self_agent_state=AsyncMock(),
         _publish_presence_status=AsyncMock(),
@@ -92,6 +90,13 @@ def make_host(sdk: Agent) -> Host:
     return host
 
 
+def running_stop(host: Host):
+    """The ToolStop of the host's one running turn."""
+
+    [work] = host.running_turn_works()
+    return work.tool_stop
+
+
 def task(task_id: str = "task-1") -> Task:
     return Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="run it")
 
@@ -110,8 +115,10 @@ async def start_owner(host: Host, observed: dict) -> asyncio.Task:
     """The code that runs a turn and handles its cancellation (task_message_runtime)."""
 
     async def owner():
+        turn_task = task()
         try:
-            await host.process_llm_interaction(task(), MessageHeader(), MessageMeta())
+            with task_work(turn_task.task_id):
+                await host.process_llm_interaction(turn_task, MessageHeader(), MessageMeta())
         except asyncio.CancelledError:
             # Here the runtime archives the task, replies and frees the slot.
             observed["pids_alive_when_owner_resumed"] = [process_alive(pid) for pid in observed["pids"]]
@@ -128,7 +135,7 @@ async def test_a_stop_returns_only_after_the_running_command_ended(work_dir: Pat
     observed: dict = {"pids": []}
     running = await start_owner(host, observed)
     observed["pids"].append(await wait_for_pid(pid_file))
-    turn_stop = host._active_tool_stop
+    turn_stop = running_stop(host)
 
     started = time.monotonic()
     await _interrupt_active_execution(host, root_task_id="task-1", graph_task_ids={"task-1"}, reason=TASK_STOPPED_REASON)
@@ -142,7 +149,7 @@ async def test_a_stop_returns_only_after_the_running_command_ended(work_dir: Pat
     # The owner learned of the stop only after the command had ended.
     assert observed["pids_alive_when_owner_resumed"] == [False]
     assert not host.is_executing
-    assert host._active_tool_stop is None
+    assert host._running_turns == {}
 
 
 @pytest.mark.asyncio
@@ -152,7 +159,7 @@ async def test_side_by_side_tool_calls_all_stop(work_dir: Path) -> None:
     observed: dict = {"pids": []}
     running = await start_owner(host, observed)
     observed["pids"] = [await wait_for_pid(path) for path in pid_files]
-    assert len(host._active_tool_stop.running()) == 2
+    assert len(running_stop(host).running()) == 2
 
     await _interrupt_active_execution(host, root_task_id="task-1", graph_task_ids={"task-1"}, reason=TASK_STOPPED_REASON)
 
@@ -206,7 +213,8 @@ class HeldModel(Model):
 async def test_a_stop_during_the_model_call_does_not_wait() -> None:
     model = HeldModel()
     host = make_host(Agent(model=model, callback_handler=None))
-    running = asyncio.create_task(host.process_llm_interaction(task(), MessageHeader(), MessageMeta()))
+    with task_work("task-1"):  # the turn's task copies this binding when it is created
+        running = asyncio.create_task(host.process_llm_interaction(task(), MessageHeader(), MessageMeta()))
     await asyncio.wait_for(model.entered.wait(), 5)
 
     started = time.monotonic()
@@ -253,7 +261,8 @@ async def test_a_tool_call_that_outlives_the_grace_period_is_logged(monkeypatch,
             yield {"messageStop": {"stopReason": "tool_use"}}
 
     host = make_host(Agent(model=CallsStubborn(), tools=[stubborn], callback_handler=None))
-    running = asyncio.create_task(host.process_llm_interaction(task(), MessageHeader(), MessageMeta()))
+    with task_work("task-1"):  # the turn's task copies this binding when it is created
+        running = asyncio.create_task(host.process_llm_interaction(task(), MessageHeader(), MessageMeta()))
     await asyncio.to_thread(entered.wait, 5)
 
     await _interrupt_active_execution(host, root_task_id="task-1", graph_task_ids={"task-1"}, reason=TASK_STOPPED_REASON)
@@ -344,13 +353,8 @@ async def test_a_stop_ends_a_command_of_a_turn_run_by_the_production_turn_execut
     assert production_kwargs["cancel_signal"] is stop.event
     assert production_kwargs["invocation_state"][TOOL_STOP_STATE_KEY] is stop
     assert [call.tool_name for call in stop.running()] == ["shell"]
-    host = SimpleNamespace(
-        id="independent",
-        _active_execution_task=running,
-        _active_execution_task_id=turn_task.task_id,
-        _active_tool_stop=stop,
-        _logger=LOGGER,
-    )
+    host = TurnHost(id="independent", _logger=LOGGER)
+    register_turn(host, turn_task.task_id, running, stop)
     await _interrupt_active_execution(
         host, root_task_id=turn_task.task_id, graph_task_ids={turn_task.task_id}, reason=TASK_STOPPED_REASON
     )
@@ -439,13 +443,8 @@ async def test_a_stop_after_the_model_call_still_ends_background_processes(work_
     pid = await wait_for_pid(pid_file)
     [stop] = stops
     assert stop.running() == ()  # the model call is over
-    host = SimpleNamespace(
-        id="independent",
-        _active_execution_task=running,
-        _active_execution_task_id=turn_task.task_id,
-        _active_tool_stop=stop,
-        _logger=LOGGER,
-    )
+    host = TurnHost(id="independent", _logger=LOGGER)
+    register_turn(host, turn_task.task_id, running, stop)
 
     await _interrupt_active_execution(
         host, root_task_id=turn_task.task_id, graph_task_ids={turn_task.task_id}, reason=TASK_STOPPED_REASON
@@ -504,7 +503,7 @@ async def test_a_resumed_turn_stopped_after_its_model_call_ends_background_proce
 
     now = datetime.now(timezone.utc).isoformat()
     session = StrandsInterruptedTurnSession(
-        task.task_id, SimpleNamespace(invoke_async=invoke), {}, lambda **_: None, "prompt", task,
+        task.task_id, strands_parts(SimpleNamespace(invoke_async=invoke)), {}, lambda **_: None, "prompt", task,
         MessageHeader(from_agent_id="gateway"), MessageMeta(), now,
         [TaskSteeringInterruptRecord(interrupt_id="interrupt_1", reason={"access_request_id": "areq_1"})],
     )

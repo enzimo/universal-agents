@@ -4,8 +4,8 @@ A person reported that an agent "sits there" while its model call hangs and
 that new messages seem not to reach it. This test holds a real Strands model
 call open (the provider stream never finishes), then sends, over real NATS:
 
-- a new task on the agent's work route, which must be admitted to the durable
-  deferred inbox and acknowledged, not left waiting behind the running turn;
+- a new task on the agent's work route, which must be admitted to the agent's
+  visible task queue and acknowledged, not left waiting behind the running turn;
 - same-conversation guidance as ``TaskSteering`` on the operational subject,
   which must be accepted and answered while the turn is still running.
 
@@ -116,6 +116,7 @@ async def test_new_messages_reach_agent_while_model_stream_is_stuck(tmp_path, mo
     completed: list[str] = []
 
     async def real_sdk_turn(content, header, meta):
+        # The runner bound the task's work record (runtime_context.task_work).
         agent._set_active_execution_context(content.task_id)
         try:
             sdk.messages.clear()
@@ -169,16 +170,11 @@ async def test_new_messages_reach_agent_while_model_stream_is_stuck(tmp_path, mo
         await asyncio.wait_for(provider.entered.wait(), 5)
         assert agent.is_executing
 
-        # A message in another conversation: durably queued and acknowledged.
+        # A message in another conversation: admitted to the task queue and acknowledged.
         await agent.team_comms.send_message(
             message=_chat_task("second", reply, agent.id), routing_key=agent.id
         )
-        await _wait_until(
-            lambda: any(
-                item.msg_content.task_id == "second" for item in agent.deferred_inbox.messages
-            ),
-            3,
-        )
+        await _wait_until(lambda: manager.get_task_info("second") is not None, 3)
 
         # A message in the same conversation: accepted as guidance while stuck.
         steering = TaskSteering(

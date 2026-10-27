@@ -29,6 +29,7 @@ from types import SimpleNamespace
 import pytest
 
 from access_control.identity import ENV_VERIFY_KEYS
+from tests.task_work_support import bind_task
 from custom_agents.access_runtime import verified_meta_person_id
 from custom_agents.context_engine import ContextAssemblyRequest, ContextEngineAdapters
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
@@ -58,13 +59,14 @@ def _agent(tmp_path: Path, meta: MessageMeta) -> SimpleNamespace:
     from custom_agents.task_manager import TaskManager
 
     tasks = TaskManager(db_path=str(tmp_path / "manager.db"))
+    bind_task(TASK_ID)  # the agent's calls work for this task (tests.task_work_support)
     return SimpleNamespace(
         id="agent-lead",
         team_id=TEAM,
         workspace_dir=str(InstanceLayout.at(tmp_path).workspaces_dir),
         authorization_config={"enabled": True},
         instance_root=None,
-        _active_execution_task_id=TASK_ID,
+        test_task_id=TASK_ID,
         task_manager=SimpleNamespace(
             storage_settings=tasks.storage_settings,
             get_task_info=lambda _task_id: SimpleNamespace(meta=meta),
@@ -158,7 +160,6 @@ async def test_isolated_turns_name_the_tools_folder_without_exposing_gateway_con
         )
     )
     agent = _agent(tmp_path, meta)
-    agent._active_execution_task_id = None
     engine = _engine(workspace_dir=agent.workspace_dir)
     engine.adapters = ContextEngineAdapters(
         build_request_time_context=lambda _meta: "",

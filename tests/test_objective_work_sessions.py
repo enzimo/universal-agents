@@ -55,7 +55,7 @@ from custom_tools.providers.objective_work import (
     propose_objective_work_profile,
 )
 from custom_tools.providers.objectives import objectives
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from custom_tools.tool_stop import ToolStop
 from runtime_settings.instance_layout import InstanceLayout
 from tests.broker_access_support import context_signer
@@ -181,6 +181,7 @@ def _tool_agent(
     monkeypatch: pytest.MonkeyPatch,
 ):
     manager.task_state.current_in_progress_task_id = task_id
+    bind_task(manager.task_state.current_in_progress_task_id)
     schedule_store = ScheduleStore(
         db_path=manager._db_path,
         storage_settings=manager.storage_settings,
@@ -689,6 +690,7 @@ def test_enable_tool_requires_confirmation_and_installs_protected_schedule(
     manager = _manager(tmp_path, policy=True)
     task, objective = _objective(manager)
     manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(manager.task_state.current_in_progress_task_id)
     schedule_store = ScheduleStore(
         db_path=manager._db_path,
         storage_settings=manager.storage_settings,
@@ -1044,6 +1046,7 @@ def test_team_profile_application_rechecks_current_administrator_authority(
     member = Task(task_id="member_acceptance", task_type=MessageMetaType.REQUEST, problem_statement="Apply profile.")
     assert manager.add_task(member, manager.get_task_info(source.task_id).header, meta, owner_person_id="objective-user")
     manager.task_state.current_in_progress_task_id = member.task_id
+    bind_task(manager.task_state.current_in_progress_task_id)
     refused = tool_json(objective_work_profiles(**acceptance))
     assert refused == {"error": "No objective could be resolved from the supplied context."}
     assert manager.get_objective(team.objective_id).model_dump(mode="json") == before

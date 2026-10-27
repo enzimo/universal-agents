@@ -11,6 +11,7 @@ from strands import tool
 
 from access_control.ownership import PRIVATE_READ
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
+from custom_agents.strands_parts import turn_strands_agent
 from custom_agents.token_estimation import count_message_tokens, count_text_tokens
 from custom_messages.contracts.envelope_v1 import CommsMessage
 from custom_messages.enums import (
@@ -28,6 +29,7 @@ from custom_messages.enums import (
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.providers._runtime import _named_task_refusal
 from custom_tools.runtime_context import (
+    bound_task_id,
     get_agent_ref,
 )
 
@@ -413,7 +415,7 @@ def get_recovery_context(detail_level: str = "summary", max_entries: int = 8) ->
                 "manager_only": True,
             }
         )
-    current_task_id = agent.task_manager.current_task_id
+    current_task_id = bound_task_id()
     if not current_task_id:
         return json.dumps({"error": "No task currently in progress"})
     link = agent.task_manager.operations_runtime.run_sync(
@@ -619,7 +621,7 @@ def _task_age_seconds(task_info: Any) -> Optional[int]:
 
 def _token_counter_for_agent(agent: "UniversalAgent"):
     return getattr(agent, "_strands_model", None) or getattr(
-        getattr(agent, "_strands_agent", None), "model", None
+        turn_strands_agent(agent), "model", None
     )
 
 
@@ -693,7 +695,7 @@ def _build_runtime_pressure_material(
         if history_summary:
             parts.append(("task_history_summary", f"Task History:\n{history_summary}"))
 
-    strands_messages = getattr(getattr(agent, "_strands_agent", None), "messages", None)
+    strands_messages = getattr(turn_strands_agent(agent), "messages", None)
     if strands_messages:
         parts.append(
             (
@@ -843,8 +845,10 @@ def _recent_failure_count(task_manager: Any, task_id: str) -> int:
     return count
 
 
-def build_runtime_pressure_snapshot(agent: "UniversalAgent") -> Dict[str, Any]:
-    current_task_id = agent.task_manager.current_task_id
+def build_runtime_pressure_snapshot(agent: "UniversalAgent", task_id: Optional[str] = None) -> Dict[str, Any]:
+    """Context pressure of ``task_id``, by default the task the current call works for."""
+
+    current_task_id = task_id or bound_task_id()
     if not current_task_id:
         raise ValueError("No task currently in progress")
     task_info = agent.task_manager.operations_runtime.run_sync(
@@ -863,9 +867,7 @@ def build_runtime_pressure_snapshot(agent: "UniversalAgent") -> Dict[str, Any]:
         estimate["estimated_tokens"], context_window_tokens
     )
 
-    strands_messages = (
-        getattr(getattr(agent, "_strands_agent", None), "messages", []) or []
-    )
+    strands_messages = getattr(turn_strands_agent(agent), "messages", []) or []
     tool_call_budget_used, tool_result_tokens_observed = _tool_usage_from_value(
         strands_messages, model
     )
@@ -935,7 +937,7 @@ def log_task_history_entry(
     if agent is None:
         return json.dumps({"error": "Agent reference not set"})
 
-    current_task_id = agent.task_manager.current_task_id
+    current_task_id = bound_task_id()
     if not current_task_id:
         return json.dumps({"error": "No task currently in progress"})
 
@@ -977,7 +979,7 @@ def get_execution_digest(task_id: str = "") -> str:
     if agent is None:
         return json.dumps({"error": "Agent reference not set"})
 
-    resolved_task_id = task_id or agent.task_manager.current_task_id
+    resolved_task_id = task_id or bound_task_id()
     if not resolved_task_id:
         return json.dumps(
             {"error": "No task_id provided and no task currently in progress"}
@@ -985,7 +987,7 @@ def get_execution_digest(task_id: str = "") -> str:
     # A task may inspect its own digest without a signed identity. Keep that
     # read-only exception here: using even the current task as a source of
     # new work still requires identity verification in _named_task_refusal.
-    if resolved_task_id != agent.task_manager.current_task_id:
+    if resolved_task_id != bound_task_id():
         refusal = _named_task_refusal(agent, resolved_task_id, action=PRIVATE_READ)
         if refusal is not None:
             return json.dumps({"error": refusal})

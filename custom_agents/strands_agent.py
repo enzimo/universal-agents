@@ -26,7 +26,6 @@ from custom_agents.task_runtime_ports import RuntimeMailboxDispatch
 import asyncio
 import contextlib
 import copy
-import inspect
 import json
 import logging
 import os
@@ -96,9 +95,8 @@ from custom_agents.embedding_service import (
 )
 from custom_agents.model_keys import embedding_endpoint_key
 from custom_agents.person_model_runtime import (
-    PersonModelHook,
-    clear_turn_model,
     select_turn_model,
+    turn_context_window,
     turn_settings_with_person_model,
 )
 from custom_agents.status_findings import agent_status_findings
@@ -135,8 +133,6 @@ from custom_agents.manager_control_runtime import (
     handle_task_progress_status,
 )
 from custom_agents.manager_bootstrap_runtime import run_manager_bootstrap
-from custom_agents.default_tools import builtin_tool_catalog
-from custom_agents.sdk.strands.changes_first import ChangesFirstToolExecutor
 from custom_agents.sdk.strands.skills import (
     is_agent_skills_plugin,
     list_agent_skill_names,
@@ -161,7 +157,6 @@ from custom_agents.request_prompt_context import (
 )
 from custom_agents.otel_runtime import configure_strands_otel, current_trace_context
 from custom_agents.runtime_model_switch import probe_strands_model
-from custom_agents.runtime_guardrails import RuntimeGuardrailsPlugin
 from custom_agents.tool_call_limits import (
     ToolCallLimitExceeded,
     collect_recent_strands_tool_transcript,
@@ -228,7 +223,6 @@ from custom_agents.context_engine.default import context_engine_kwargs_from_conf
 from custom_agents.context_debug_dump import (
     ContextDebugDumpPlugin,
     merge_context_debug_dump_config,
-    register_context_debug_model_observer,
 )
 from custom_agents.filtered_tool_result_context import (
     merge_inner_loop_context_config,
@@ -252,7 +246,6 @@ from custom_agents import turn_action_outbox_runtime
 from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
 from custom_agents.task_wait_limit import MAX_WAITS_PER_TASK
 from custom_agents.task_steering_runtime import (
-    RuntimeSteeringPlugin,
     StrandsInterruptedTurnSession,
     handle_task_steering_message,
     resume_interrupted_task_turn,
@@ -354,6 +347,16 @@ from custom_agents.access_request_runtime import handle_access_request_resolved
 from custom_messages.contracts.worker_handback_v1 import WorkerTaskHandbackV1
 from custom_tools.comms_tools import TeamComms
 from custom_tools.tool_stop import ToolStop
+from custom_tools.runtime_context import TaskWork, current_task_work
+from custom_agents.strands_parts import StrandsParts, turn_strands_agent
+from custom_agents.strands_agent_builder import build_strands_parts
+from custom_agents.turn_registry import (
+    end_turn,
+    executing_task_ids,
+    pin_turn_strands,
+    running_turn_task_ids,
+    start_turn,
+)
 from storage.memory_graph_repository import create_memory_graph_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from storage.knowledge_repository import create_knowledge_repository
@@ -1145,12 +1148,12 @@ class UniversalAgent(BaseModel):
     _strands_model: Optional[Any] = PrivateAttr(default=None)
     # A person's own model for the current turn (custom_agents.person_model_runtime).
     _person_models: Any = PrivateAttr(default=None)
-    _runtime_guardrails_plugin: Optional[RuntimeGuardrailsPlugin] = PrivateAttr(
-        default=None
-    )
-    _tool_result_budget_monitor: Optional[TaskAwareToolResultOffloader] = PrivateAttr(
-        default=None
-    )
+    # The main Strands agent with its tool state (custom_agents.strands_parts);
+    # _strands_agent is its agent. Turns that run beside the main one build
+    # their own. The generation counts model rebuilds: a turn whose parts are
+    # older rebuilds them before its next model call.
+    _strands_parts: Optional[StrandsParts] = PrivateAttr(default=None)
+    _strands_generation: int = PrivateAttr(default=0)
     _conversation_history: List[Dict[str, str]] = PrivateAttr(default_factory=list)
     _deferred_inbox: DeferredMessageInbox | None = PrivateAttr(default=None)
     _agent_result_transformer: Optional[Callable[[Any, Any, Any], Any]] = PrivateAttr(
@@ -1188,7 +1191,9 @@ class UniversalAgent(BaseModel):
     _configured_model_provider: Optional[str] = PrivateAttr(default=None)
     _configured_model_id: Optional[str] = PrivateAttr(default=None)
     _execution_gate: AgentExecutionGate = PrivateAttr(default_factory=AgentExecutionGate)
-    _active_execution_task: Optional[asyncio.Task] = PrivateAttr(default=None)
+    # The model turns running now, by the asyncio task that runs each one; each
+    # value is that task's work record (custom_tools.runtime_context.TaskWork).
+    _running_turns: Dict[asyncio.Task, TaskWork] = PrivateAttr(default_factory=dict)
     _pending_work_task: Optional[asyncio.Task] = PrivateAttr(default=None)
     # A wake-up arrived that the drain has not yet answered with a pass.
     _pending_work_requested: bool = PrivateAttr(default=False)
@@ -1215,9 +1220,6 @@ class UniversalAgent(BaseModel):
     # is logged once, and senders whose clocks run ahead (agent_liveness).
     _liveness_decisions: Dict[Any, Any] = PrivateAttr(default_factory=dict)
     _status_clock_ahead: set[str] = PrivateAttr(default_factory=set)
-    _active_execution_task_id: Optional[str] = PrivateAttr(default=None)
-    # The running turn's stop for its tool commands (custom_tools.tool_stop).
-    _active_tool_stop: Optional[ToolStop] = PrivateAttr(default=None)
     _stop_reasons_by_task_id: Dict[str, str] = PrivateAttr(default_factory=dict)
     # Set once this worker loses its launch lease; see lease_loss_wind_down.
     _lease_loss_wind_down: Any = PrivateAttr(default=None)
@@ -1250,9 +1252,6 @@ class UniversalAgent(BaseModel):
     _task_runtime_coordinator: Optional[TaskRuntimeCoordinator] = PrivateAttr(
         default=None
     )
-    _runtime_steering_plugin: Optional[RuntimeSteeringPlugin] = PrivateAttr(
-        default=None
-    )
     _pending_proactive_task_steering: Dict[str, List[TaskSteering]] = PrivateAttr(
         default_factory=dict
     )
@@ -1282,9 +1281,9 @@ class UniversalAgent(BaseModel):
         if self.is_executing and not nested:
             self._logger.info(
                 "Waiting for the active agent execution to finish. "
-                "event=agent_execution_waiting agent_id=%s active_task_id=%s",
+                "event=agent_execution_waiting agent_id=%s running_task_ids=%s",
                 self.id,
-                self._active_execution_task_id,
+                ",".join(running_turn_task_ids(self)) or "-",
             )
         try:
             async with self._execution_gate.hold():
@@ -1576,6 +1575,7 @@ class UniversalAgent(BaseModel):
             else None,
             system_prompt=self.system_prompt,
             context_window_tokens=self._resolved_context_window_tokens(),
+            turn_context_window=lambda: turn_context_window(self),
             model=self._strands_model,
             **context_engine_kwargs_from_config(context_engine_config),
             plugins=context_plugins,
@@ -2211,9 +2211,8 @@ class UniversalAgent(BaseModel):
     def _collect_recent_strands_tool_transcript(
         self, *, max_blocks: int = 8
     ) -> List[Dict[str, Any]]:
-        strands_agent = getattr(self, "_strands_agent", None)
         return collect_recent_strands_tool_transcript(
-            strands_agent, max_blocks=max_blocks
+            turn_strands_agent(self), max_blocks=max_blocks
         )
 
     async def _record_tool_call_limit_exceeded(
@@ -2280,22 +2279,11 @@ class UniversalAgent(BaseModel):
         )
 
     def _set_active_execution_context(self, task_id: Optional[str]) -> ToolStop:
-        """Mark the current task as the running turn; returns the turn's new ToolStop."""
-
-        self._active_execution_task = asyncio.current_task()
-        self._active_execution_task_id = task_id
-        self._active_tool_stop = ToolStop(agent_id=self.id, task_id=task_id)
-        return self._active_tool_stop
+        """Start the model turn of the bound task's work (custom_agents.turn_registry)."""
+        return start_turn(self, task_id)
 
     def _clear_active_execution_context(self) -> None:
-        current_task = asyncio.current_task()
-        if self._active_execution_task is current_task or self._active_execution_task is None:
-            # The turn's person model goes with it (custom_agents.person_model_runtime).
-            clear_turn_model(self)
-        if self._active_execution_task is current_task:
-            self._active_execution_task = None
-            self._active_execution_task_id = None
-            self._active_tool_stop = None
+        end_turn(self)
 
     def _consume_stop_reason(self, task_id: str) -> Optional[str]:
         return self._stop_reasons_by_task_id.pop(task_id, None)
@@ -3290,113 +3278,21 @@ class UniversalAgent(BaseModel):
         # user_queue_key = f'{self.team_id}_{self.user_name_postfix}'
         # self.named_agent_type_queue_map[user_queue_key] = user_queue_key
 
-    def _create_strands_agent(self):
-        """Creates the internal Strands Agent with configured model and tools."""
+    def _create_strands_agent(self, *, keep_loaded_tools: bool = False):
+        """Create the main Strands agent (``_strands_agent``) with its tool state.
+
+        ``keep_loaded_tools`` carries the groups loaded for the current task
+        over to the new agent, for a model rebuild in the middle of a task.
+        """
         try:
-            model = self._strands_model or self._configure_model()
-            self._strands_model = model
-            self._refresh_skills_plugins(force=True)
-
-            # Prepare the full system prompt with agent status placeholder
-            full_system_prompt = self.system_prompt
-            self._runtime_guardrails_plugin = RuntimeGuardrailsPlugin(
-                structured_output_failure_threshold=self.structured_output_failure_threshold,
-                max_tool_calls=self.max_tool_calls_per_task,
-                logger_=self._logger,
-            )
-            self._runtime_steering_plugin = RuntimeSteeringPlugin(self)
-            from custom_agents.access_runtime import AccessDecisionHook
-
-            # Always installed: it decides every function tool call, and with
-            # authorization off it allows every catalog tool (access_runtime).
-            # It also withdraws access requests of tasks that end first.
-            self._access_decision_hook = AccessDecisionHook(self)
-            from custom_agents.tool_sync import install_tool_sync, startup_tools
-
-            # With authorization on the model sees its role's standard tools at
-            # first; the rest follow the grants valid for each task's person
-            # (access Phase 7). In both modes installed MCP servers load before
-            # model calls, not at startup (custom_agents.tool_sync).
-            model_tools = startup_tools(self, list(self.tools))
-            tool_sync = install_tool_sync(self, model_tools)
-            from custom_agents.access_runtime import runtime_access
-            from custom_agents.tool_loading import OnRequestToolHook, ToolLimitHook, loadable_tools_text
-
-            # The groups that load on request, listed by name and purpose, cost
-            # far less than their definitions in every call (custom_agents.tool_loading).
-            loadable_text = loadable_tools_text(self, runtime_access(self).catalog)
-            if loadable_text:
-                full_system_prompt = f"{full_system_prompt}\n\n{loadable_text}"
-            tool_result_offloader = TaskAwareToolResultOffloader(
-                max_tokens_per_call=self.max_tool_result_tokens_per_call,
-                model=model,
-                artifact_root=agent_layout(self).tool_results_dir,
-                task_manager=self.task_manager,
-                team_id=self.team_id,
-                agent_id=self.id,
-                named_agent_type=self.named_agent_type,
-                logger_=self._logger,
-            )
-            self._tool_result_budget_monitor = tool_result_offloader
-            conversation_manager = (
-                self._context_engine.build_inner_loop_conversation_manager(
-                    tool_result_offloader.storage
-                )
-                if self._context_engine is not None
-                else None
-            )
-            agent_signature = inspect.signature(Agent)
-            retry_strategy_config = self._model_failover_retry_strategy_config()
-            agent_kwargs: Dict[str, Any] = {}
-            if (
-                retry_strategy_config is not None
-                and "retry_strategy" in agent_signature.parameters
-            ):
-                from strands.event_loop._retry import ModelRetryStrategy
-
-                agent_kwargs["retry_strategy"] = ModelRetryStrategy(
-                    **retry_strategy_config
-                )
-
-            agent_hooks = [
-                self._tool_result_budget_monitor,
-                self._runtime_guardrails_plugin,
-                self._runtime_steering_plugin,
-                self._access_decision_hook,
-                tool_sync,
-                PersonModelHook(self),
-                ToolLimitHook(self),
-                OnRequestToolHook(self),
-            ]
-            if "plugins" in agent_signature.parameters:
-                agent_kwargs["plugins"] = list(self.plugins or [])
-            elif self.plugins:
-                agent_hooks.extend(self.plugins)
-
-            # Create Strands Agent. Record changes run first in each model
-            # step, and a failed one skips the step's later calls
-            # (custom_agents.sdk.strands.changes_first).
-            self._strands_agent = Agent(
-                system_prompt=full_system_prompt,
-                tools=model_tools,
-                model=model,
-                conversation_manager=conversation_manager,
-                callback_handler=None,
-                hooks=agent_hooks,
-                tool_executor=ChangesFirstToolExecutor(builtin_tool_catalog().record_kind),
-                **agent_kwargs,
-            )
-            if self._context_debug_dump_plugin is not None:
-                register_context_debug_model_observer(
-                    self._strands_agent,
-                    self._context_debug_dump_plugin,
-                    logger=self._logger,
-                )
-
+            previous = self._strands_parts
+            loaded = previous.loaded if keep_loaded_tools and previous is not None else None
+            parts = build_strands_parts(self, agent_class=Agent, loaded=loaded)
+            self._strands_parts = parts
+            self._strands_agent = parts.agent
             self._logger.info(
                 f"[{self.id}] Strands Agent created with {len(self.tools)} tools and {len(self.plugins)} plugins"
             )
-
         except Exception as e:
             self._logger.error(f"[{self.id}] Failed to create Strands Agent: {e}")
             raise
@@ -3502,7 +3398,10 @@ class UniversalAgent(BaseModel):
             logger=self._logger,
         )
         self._create_context_engine()
-        self._create_strands_agent()
+        # Running turns keep the Strands agent they started with until their
+        # next model call, when they take a new one (custom_agents.turn_registry.pin_turn_strands).
+        self._strands_generation += 1
+        self._create_strands_agent(keep_loaded_tools=True)
 
     def apply_runtime_llm_profile(
         self,
@@ -3773,7 +3672,7 @@ class UniversalAgent(BaseModel):
             team_id=self.team_id,
             named_agent_type=self.named_agent_type,
             summary_generator=self._conversation_summary_generator,
-            strands_messages=list(getattr(self._strands_agent, "messages", []) or []),
+            strands_messages=list(getattr(turn_strands_agent(self), "messages", []) or []),
             task_info=task_info,
             task_status=task_status,
         )
@@ -3793,7 +3692,7 @@ class UniversalAgent(BaseModel):
                     task_info=task_info,
                     task_status=task_status,
                     strands_messages=list(
-                        getattr(self._strands_agent, "messages", []) or []
+                        getattr(turn_strands_agent(self), "messages", []) or []
                     ),
                 ),
             )
@@ -4009,13 +3908,18 @@ class UniversalAgent(BaseModel):
         results and can poison later turns with oversized context. Clear any
         transient provider metadata at the same boundary so a future adapter
         cannot accidentally carry request state into an unrelated task.
+
+        It acts on the bound turn's Strands agent; this is also where a turn
+        takes a new one after a model rebuild (``turn_registry.pin_turn_strands``).
         """
-        if not self._strands_agent:
+        parts = pin_turn_strands(self)
+        strands_agent = parts.agent if parts is not None else self._strands_agent
+        if not strands_agent:
             return
-        messages = getattr(self._strands_agent, "messages", None)
+        messages = getattr(strands_agent, "messages", None)
         if hasattr(messages, "clear"):
             messages.clear()
-        model_state = getattr(self._strands_agent, "_model_state", None)
+        model_state = getattr(strands_agent, "_model_state", None)
         if isinstance(model_state, dict):
             model_state.clear()
 
@@ -4379,7 +4283,7 @@ class UniversalAgent(BaseModel):
             is_known_task=task_info is not None,
             is_current_task=(
                 task_info is not None
-                and task_status.task_id == self.task_manager.current_task_id
+                and task_status.task_id in executing_task_ids(self)
             ),
             task_state=task_info.state if task_info is not None else None,
             last_task_update_at=last_task_update_at,
@@ -5445,7 +5349,9 @@ class UniversalAgent(BaseModel):
             )
 
             if self.task_manager.current_task_id:
-                pressure_snapshot = build_runtime_pressure_snapshot(self)
+                pressure_snapshot = build_runtime_pressure_snapshot(
+                    self, self.task_manager.current_task_id
+                )
                 diagnostic_dict["runtime_pressure"] = pressure_snapshot
         except Exception as exc:
             diagnostic_dict["runtime_pressure_error"] = str(exc)
@@ -6052,7 +5958,7 @@ class UniversalAgent(BaseModel):
         if self._llm_turn_executor is None:
             self._llm_turn_executor = llm_turn_runtime.LLMTurnExecutor(
                 settings=self._turn_runtime_settings,
-                model=lambda: self._strands_agent,
+                model=partial(turn_strands_agent, self),
                 context=lambda: self._context_engine,
                 debug_dump=lambda: self._context_debug_dump_plugin,
                 logger=self._logger,
@@ -6172,13 +6078,22 @@ class UniversalAgent(BaseModel):
     async def process_llm_interaction(
         self, msg_content: ContentType, msg_header: MessageHeader, msg_meta: MessageMeta
     ) -> ContentType:
+        """Run one model turn for ``msg_content`` inside its task's handling.
+
+        The caller binds the task's work record (``runtime_context.task_work``)
+        around the turn and the saving of its result; the turn, its tool calls
+        and the caller's later steps all read their task from it.
+        """
+        task_id = self._history_task_id_for_content(msg_content)
+        work = current_task_work()
+        if work is None or work.task_id != task_id:
+            raise RuntimeError(
+                f"A model turn for task {task_id} was started outside its task's work record "
+                f"(bound: {getattr(work, 'task_id', None)}); wrap its handling in runtime_context.task_work."
+            )
         async with self._execution_scope():
             # A fresh turn must reread guidance whose previous turn ended
             # without a durable decision, including failover in this process.
-            task_id = (
-                msg_content.task_id if isinstance(msg_content, Task)
-                else getattr(msg_content, "parent_task_id", None)
-            )
             getattr(self, "_consumed_task_steering_ids", {}).pop(task_id, None)
             # Stop cancels this child turn, never the transport/runtime owner.
             # Keep the execution gate held until the SDK finishes unwinding.

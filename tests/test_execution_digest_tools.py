@@ -32,7 +32,7 @@ from custom_tools.providers.objectives import (
     update_execution_plan_step,
     update_execution_unknown,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
@@ -95,6 +95,7 @@ def test_execution_digest_tools_update_current_task():
         owner_person_id=None,
     )
     task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     set_agent_ref(_FakeAgent(task_manager))
 
     plan_result = tool_json(
@@ -197,6 +198,7 @@ def test_execution_plan_step_tool_requires_rationale():
         owner_person_id=None,
     )
     task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     set_agent_ref(_FakeAgent(task_manager))
 
     result = tool_json(
@@ -227,6 +229,7 @@ def test_record_plan_action_tool_records_manager_action(tmp_path):
         owner_person_id=None,
     )
     task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     set_agent_ref(
         _FakeAgent(
             task_manager,
@@ -276,6 +279,7 @@ def test_record_plan_action_tool_is_manager_only(tmp_path):
         owner_person_id=None,
     )
     task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     set_agent_ref(_FakeAgent(task_manager, agent_id="specialist_agent", name="Specialist"))
 
     result = tool_json(record_plan_action("checkpoint", "Specialists cannot record manager plan actions."))
@@ -303,6 +307,7 @@ def test_after_action_report_review_tools_list_and_resolve(tmp_path):
         owner_person_id=None,
     )
     task_manager.task_state.current_in_progress_task_id = parent.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     report = AfterActionReport(
         report_id="aar_tool_review",
         source_task_id="task_child_aar",
@@ -714,6 +719,7 @@ def test_activate_plan_execution_tool_hides_runtime_ids(tmp_path):
         owner_person_id=None,
     )
     task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     set_agent_ref(
         _FakeAgent(
             task_manager,
@@ -770,6 +776,7 @@ def test_activate_plan_execution_tool_is_manager_only(tmp_path):
         owner_person_id=None,
     )
     task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     set_agent_ref(_FakeAgent(task_manager, agent_id="specialist_agent", name="Specialist"))
 
     result = tool_json(
@@ -802,6 +809,7 @@ def test_get_runtime_pressure_reports_current_manager_task_pressure(tmp_path):
         owner_person_id=None,
     )
     task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     task_manager.log_agent_note(
         task.task_id,
         note="Verifier timeout after repeated attempts.",
@@ -874,6 +882,7 @@ def test_get_runtime_pressure_is_manager_only(tmp_path):
         owner_person_id=None,
     )
     task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     set_agent_ref(_FakeAgent(task_manager, agent_id="specialist_agent", name="Specialist"))
 
     result = tool_json(get_runtime_pressure())
@@ -929,6 +938,7 @@ def test_start_isolated_recovery_tool_queues_fresh_manager_task(tmp_path):
         },
     )
     task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     schedule_store = ScheduleStore(db_path=str(tmp_path / "schedules.db"))
     set_agent_ref(
         _FakeAgent(
@@ -1031,6 +1041,7 @@ def test_start_isolated_recovery_tool_is_manager_only(tmp_path):
         owner_person_id=None,
     )
     task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     set_agent_ref(_FakeAgent(task_manager, agent_id="specialist_agent", name="Specialist"))
 
     result = tool_json(
@@ -1104,6 +1115,7 @@ def test_get_recovery_context_returns_sanitized_original_context(tmp_path):
     )
     assert recovery_info is not None
     task_manager.task_state.current_in_progress_task_id = "recovery_task_secret"
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     set_agent_ref(
         _FakeAgent(
             task_manager,
@@ -1147,6 +1159,7 @@ def test_get_recovery_context_requires_current_recovery_task(tmp_path):
         owner_person_id=None,
     )
     task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     set_agent_ref(
         _FakeAgent(
             task_manager,
@@ -1177,6 +1190,7 @@ def test_get_recovery_context_is_manager_only(tmp_path):
         owner_person_id=None,
     )
     task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     set_agent_ref(_FakeAgent(task_manager, agent_id="specialist_agent", name="Specialist"))
 
     result = tool_json(get_recovery_context())
@@ -1198,6 +1212,7 @@ def test_get_execution_digest_reports_inactive_for_plan_only_task():
         owner_person_id=None,
     )
     task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
     set_agent_ref(_FakeAgent(task_manager))
 
     digest_result = tool_json(get_execution_digest())
@@ -1265,6 +1280,7 @@ def _people_tasks(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
 def _digest_as(manager: TaskManager, acting: Task, task: Task) -> dict:
     manager.task_state.current_in_progress_task_id = acting.task_id
+    bind_task(manager.task_state.current_in_progress_task_id)
     return tool_json(get_execution_digest(task_id=task.task_id))
 
 

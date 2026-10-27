@@ -8,7 +8,8 @@ import pytest
 from strands.models.litellm import LiteLLMModel
 
 from custom_tools.local_media_context_tool import load_local_media_for_model_context
-from custom_tools.runtime_context import _agent_ctx, set_agent_ref
+from custom_tools.runtime_context import _agent_ctx
+from tests.task_work_support import set_agent_ref
 from runtime_settings.instance_layout import InstanceLayout
 
 

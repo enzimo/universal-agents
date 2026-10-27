@@ -29,6 +29,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.task_work_support import bind_task
 from access_control.identity import ENV_VERIFY_KEYS, ISSUER_SCHEDULER, ContextSigner
 from custom_agents import access_runtime
 from custom_agents.access_runtime import verified_meta_person_id, verified_person_id
@@ -350,7 +351,7 @@ def test_the_tools_verified_person_logs_the_same_mismatch(tmp_path, caplog) -> N
     signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
     meta = _meta(GatewayContext(canonical_user_id=BOB, task_context=signed))
     agent = _agent(tmp_path)
-    agent._active_execution_task_id = "task_now"
+    bind_task("task_now")
     agent.task_manager = SimpleNamespace(
         storage_settings=agent.task_manager.storage_settings,
         get_task_info=lambda _task_id: SimpleNamespace(meta=meta),

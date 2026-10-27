@@ -16,7 +16,7 @@ from custom_tools.providers.solution_variations import (
     select_solution_candidate,
     start_solution_variation,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from storage.config import resolve_storage_settings
 
 
@@ -70,6 +70,7 @@ def _manager(tmp_path: Path, *, named_agent_type: str = "TeamArchitect") -> Task
         owner_person_id="user-1",
     )
     manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(manager.task_state.current_in_progress_task_id)
     return manager
 
 
@@ -298,6 +299,7 @@ def test_solution_variation_closed_task_scope_remains_inspectable_after_plan(
         is not None
     )
     manager.task_state.current_in_progress_task_id = continuation.task_id
+    bind_task(manager.task_state.current_in_progress_task_id)
     inspected = json.loads(inspect_solution_variation(include_closed=True))
 
     assert inspected["run"]["run_id"] == started["run"]["run_id"]

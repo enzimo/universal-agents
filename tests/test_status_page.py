@@ -214,7 +214,8 @@ def test_agents_report_mcp_servers_that_do_not_load_and_degraded_memory_search()
         named_agent_type="TeamArchitect", team_id="team_status", is_team_lead=True,
         _memory_graph_degraded_reason="embedding backend is unavailable",
         _skill_catalog_runtime_state=SimpleNamespace(last_error=""),
-        _mcp_server_tools=SimpleNamespace(failures=lambda: {"mcp:weather": failure}),
+        # The MCP loader of the agent's main Strands agent (custom_agents.strands_parts).
+        _strands_parts=SimpleNamespace(sync=SimpleNamespace(servers=SimpleNamespace(failures=lambda: {"mcp:weather": failure}))),
     )
 
     findings = {finding.finding_id: finding for finding in agent_status_findings(agent)}

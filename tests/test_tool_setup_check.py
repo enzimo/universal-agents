@@ -42,7 +42,7 @@ from custom_messages.enums import MessageMetaType
 from access_control.identity import IdentityRejected
 from access_control.people import is_administrator
 from custom_tools.tool_setup_check import check_tools
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from secure_tool_broker import executors, google_workspace, x_sign_in
 from secure_tool_broker.access_gate import BrokerAccessGate
 from secure_tool_broker.auth_models import AuthStatus
@@ -209,7 +209,7 @@ def _lead(world, *, roles: tuple[str, ...] = ("owner",), enabled: bool = True, l
         authorization_config={"enabled": enabled, "cedar_binary_path": str(BINARY)},
         task_manager=manager,
         instance_root=None,
-        _active_execution_task_id="task-lead",
+        test_task_id="task-lead",
         _interrupted_turn_sessions={},
         paused=False,
         is_executing=False,

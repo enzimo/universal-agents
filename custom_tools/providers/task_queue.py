@@ -30,7 +30,7 @@ from custom_agents.runtime_task_controls import QUEUE_PAUSE_EVENT
 from custom_messages.enums import ProgressState
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.providers._user_scope import _private_user_scope
-from custom_tools.runtime_context import get_agent_ref
+from custom_tools.runtime_context import bound_task_id, get_agent_ref
 from id_generation import new_id
 
 logger = logging.getLogger(__name__)
@@ -92,8 +92,8 @@ def _prepare_control(agent, task_id, owner, request_id, action, reason):
     if manager.is_terminal_state(info.state):
         raise ValueError("This task has already finished.")
     if (
-        any(item.task.task_id == manager.current_task_id for item in graph)
-        or task_id == manager.current_task_id
+        any(item.task.task_id == bound_task_id() for item in graph)
+        or task_id == bound_task_id()
     ):
         raise ValueError(
             "A queue tool cannot change its own executing task. Return a task response or ask the user to stop it."

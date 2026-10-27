@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from custom_tools import workspace_scope
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from runtime_settings.instance_layout import InstanceLayout
 
 

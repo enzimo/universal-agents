@@ -19,7 +19,8 @@ from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage, ScheduleTaskMemory
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
-from custom_tools.runtime_context import _agent_ctx, get_agent_ref, set_agent_ref
+from custom_tools.runtime_context import _agent_ctx, get_agent_ref
+from tests.task_work_support import set_agent_ref
 from custom_tools.providers.communication import notify_user
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer

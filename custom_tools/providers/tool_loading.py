@@ -81,8 +81,11 @@ def _best_matches(candidates: list[tuple[Any, list[str]]], words: list[str]) -> 
 
 
 def _registry(agent: Any) -> Any | None:
-    inner = getattr(agent, "_strands_agent", None)
-    return getattr(inner, "tool_registry", None)
+    """The tool registry of the Strands agent the current turn calls (custom_agents.strands_parts)."""
+
+    from custom_agents.strands_parts import turn_strands_agent
+
+    return getattr(turn_strands_agent(agent), "tool_registry", None)
 
 
 def _shown_functions(agent: Any, catalog: Any, tool_id: str) -> list[str]:

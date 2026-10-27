@@ -47,6 +47,7 @@ from assistant_gateway.application.request_context import (
     GatewayRequestContextService,
     GatewayRequestContextSettings,
 )
+from tests.task_work_support import acting_as
 from custom_agents.access_runtime import decide_call
 from custom_agents.internal_improvement_runtime import (
     INTERNAL_IMPROVEMENT_DELIVERY_MODE,
@@ -83,6 +84,13 @@ FIRST_USER = "user_123"  # the maintenance schedule's owner (_Manager's bootstra
 MAINTENANCE_ID = internal_improvement_schedule_id(TEAM)
 MEMORY_REVIEW_ID = "mem_rev_core_test"
 ESCALATION_TASK = "escalation_task"
+
+def decide_for(agent, function, arguments):
+    """The access hook's decision for ``agent`` in the task it works on (tests.task_work_support)."""
+
+    with acting_as(agent):
+        return decide_call(agent, function, arguments)
+
 
 pytestmark = pytest.mark.skipif(not BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
 
@@ -272,7 +280,7 @@ def _escalation_for(world, *, task_id: str = ESCALATION_TASK) -> tuple[Any, Any]
         authorization_config={"enabled": True, "cedar_binary_path": str(BINARY)},
         task_manager=tasks,
         instance_root=None,
-        _active_execution_task_id=task_id,
+        test_task_id=task_id,
         _schedule_store=world.manager._schedule_store,
     )
     admitted = sign_system_escalation(lead, meta, task_id=task_id)
@@ -301,7 +309,7 @@ def test_an_existing_maintenance_schedule_gets_the_first_users_session_at_gatewa
     context = _verified(admitted.gateway_context.task_context)
     assert (context.issuer, context.person_id, context.person_roles) == ("scheduler", FIRST_USER, ("admin", "owner"))
     assert admitted.gateway_context.session_key == "session_owner"
-    assert decide_call(lead, "notify_user", {}).allowed
+    assert decide_for(lead, "notify_user", {}).allowed
 
 
 def test_a_schedule_created_after_the_gateways_last_refresh_works_for_its_owner(world, caplog) -> None:
@@ -316,7 +324,7 @@ def test_a_schedule_created_after_the_gateways_last_refresh_works_for_its_owner(
 
     context = _verified(admitted.gateway_context.task_context)
     assert (context.person_id, context.person_roles) == (FIRST_USER, ("admin", "owner"))
-    assert decide_call(lead, "notify_user", {}).allowed
+    assert decide_for(lead, "notify_user", {}).allowed
 
 
 def test_a_role_change_applies_at_the_next_escalation_without_a_refresh(world) -> None:
@@ -332,7 +340,7 @@ def test_a_role_change_applies_at_the_next_escalation_without_a_refresh(world) -
 
     assert _verified(first.gateway_context.task_context).person_roles == ("member",)
     assert _verified(second.gateway_context.task_context).person_roles == ("admin",)
-    assert decide_call(lead, "notify_user", {}).allowed
+    assert decide_for(lead, "notify_user", {}).allowed
 
 
 def _pause_or_disable(manager: _Manager, how: str) -> None:

@@ -24,7 +24,7 @@ from custom_tools.path_policy import (
     contains_protected_runtime_control_reference,
     ensure_allowed_path,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from custom_tools.workspace_scope import current_workspace_scope
 from runtime_settings.instance_layout import InstanceLayout, person_folder_name
 from storage.config import resolve_storage_settings

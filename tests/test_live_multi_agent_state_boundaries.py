@@ -33,6 +33,7 @@ from config_loader import load_config
 from runtime_settings.instance_layout import InstanceLayout
 from runtime_settings.projection import _project_transport
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
+from custom_agents.sdk.strands import turn as llm_turn_module
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.delegated_work_runtime import delegated_tasks, record_publication
 from custom_agents.runtime_guardrails import RuntimeGuardrailsPlugin
@@ -75,7 +76,7 @@ from custom_tools.providers.objectives import (
     start_isolated_recovery,
     update_execution_plan_step,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from storage import resolve_storage_settings
 from custom_transport.base import TransportPublishOptions
 from custom_transport.nats_adapter import NatsTransportAdapter
@@ -589,6 +590,12 @@ async def test_live_manager_nats_request_uses_context_engine_accounting() -> Non
         workspace_dir.mkdir()
 
         manager_llm = FakeStrandsAgent(_task_response("context engine live ok"))
+        assemblies: list = []
+        remember_assembly = llm_turn_module._remember_context_assembly
+
+        def record_assembly(assembly):
+            assemblies.append(assembly)
+            remember_assembly(assembly)
 
         with (
             patch("custom_agents.strands_agent.Agent", return_value=manager_llm),
@@ -596,6 +603,7 @@ async def test_live_manager_nats_request_uses_context_engine_accounting() -> Non
                 "custom_agents.strands_agent.UniversalAgent._configure_model",
                 return_value=MagicMock(),
             ),
+            patch.object(llm_turn_module, "_remember_context_assembly", record_assembly),
         ):
             manager = _agent(
                 agent_id=manager_id,
@@ -647,9 +655,10 @@ async def test_live_manager_nats_request_uses_context_engine_accounting() -> Non
                 assert isinstance(final_envelope.msg_content, Task)
                 assert final_envelope.msg_content.answer == "context engine live ok"
                 assert manager_llm.invocations
-                assert manager.turn_executor.last_context_assembly is not None
+                # The turn's latest assembly lives in its work record (turn._remember_context_assembly).
+                assert assemblies
 
-                assembly = manager.turn_executor.last_context_assembly
+                assembly = assemblies[-1]
                 section_names = [section.name for section in assembly.sections]
                 assert "request_time_context" in section_names
                 assert "request_conversation_context" in section_names
@@ -741,7 +750,8 @@ async def test_live_manager_wires_runtime_guardrails_and_context_debug_dump_plug
                 for hook in agent_call_kwargs["hooks"]
                 if isinstance(hook, RuntimeGuardrailsPlugin)
             ]
-            assert guardrails_plugins == [manager._runtime_guardrails_plugin]
+            # Each Strands agent has its own guardrails hook (custom_agents.strands_parts).
+            assert len(guardrails_plugins) == 1
             assert guardrails_plugins[0].max_tool_calls == 2
 
             agent_tasks: list[tuple[UniversalAgent, asyncio.Task]] = []

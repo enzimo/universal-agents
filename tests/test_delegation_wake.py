@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.task_work_support import TurnHost
 from custom_agents import delegation_wake, subtask_watchdog_runtime
 from custom_agents.task_resume_runtime import resume_task_with_directive as real_resume_task_with_directive
 from custom_agents.delegated_work_runtime import delegated_tasks, record_publication
@@ -71,7 +72,7 @@ def _lead(tmp_path, monkeypatch, *, children: int, interactive: bool = True):
         owner_person_id="jordan",
     )
     manager.update_main_task_state("root", ProgressState.IN_PROGRESS, _iso())
-    agent = SimpleNamespace(
+    agent = TurnHost(
         id="lead",
         name="lead",
         team_id="team",

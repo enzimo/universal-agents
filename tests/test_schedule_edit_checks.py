@@ -67,7 +67,7 @@ from custom_tools.providers.schedules import (
     resume_scheduled_job,
     update_scheduled_job,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts

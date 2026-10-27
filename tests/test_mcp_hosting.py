@@ -50,7 +50,7 @@ from custom_messages.contracts.mcp_v1 import (
     MCPInvocationRequestV1,
 )
 from custom_tools.providers.capabilities import hosted_mcp_servers
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from mcp_control.hosting import (
     HostedMCPLifecycle,
     MCPHostedServerDefinitionV1,

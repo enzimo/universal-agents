@@ -135,7 +135,7 @@ from custom_tools.providers.knowledge import (
 )
 from custom_tools.providers.knowledge_curation import PROVIDER as CURATION_TOOLS
 from custom_tools.tool_results import result_text
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from knowledge_base.vocabulary import ContributionKind, ContributionStatus
 from model_providers.endpoints import (
     EndpointKind,

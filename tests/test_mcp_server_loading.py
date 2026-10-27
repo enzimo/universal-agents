@@ -46,7 +46,7 @@ from custom_agents.mcp_server_tools import (
     unavailable_notice_id,
 )
 from custom_agents.sdk.strands import mcp as strands_mcp
-from custom_agents.tool_sync import MCPServerSync, install_tool_sync
+from custom_agents.tool_sync import MCPServerSync
 from custom_messages.contracts.access_v2 import (
     AccessNoticeKind,
     AccountLinkV1,
@@ -57,7 +57,7 @@ from custom_messages.contracts.access_v2 import (
     SubjectRefV1,
 )
 from custom_tools.providers.capabilities import mcp_connections
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import install_test_tool_sync, set_agent_ref
 from mcp_control.registry import (
     MCPConnectionLifecycle,
     MCPConnectionRecordV1,
@@ -156,7 +156,7 @@ class Agent:
         # With an instance root the tool catalog reloads when a record changes, as in production.
         self.agent.instance_root = str(tmp_path)
         self.registry = ToolRegistry()
-        self.hook = install_tool_sync(self.agent, [])
+        self.hook = install_test_tool_sync(self.agent, [])
         assert isinstance(self.hook, MCPServerSync)
         self.hook.servers.clock = clock
 
@@ -360,7 +360,7 @@ async def test_with_authorization_off_a_server_down_at_start_loads_when_it_answe
     agent = world.worker  # a WebResearchAgent, a type the installed record names
     clock = Clock()
     registry = ToolRegistry()
-    hook = install_tool_sync(agent, [])
+    hook = install_test_tool_sync(agent, [])
     hook.servers.clock = clock
     set_agent_ref(agent)
     event = SimpleNamespace(agent=SimpleNamespace(tool_registry=registry))

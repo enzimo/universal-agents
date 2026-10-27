@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.task_work_support import TurnHost
 from custom_agents.manager_control_runtime import handle_manager_runtime_work_command
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
@@ -26,7 +27,7 @@ def agent(tmp_path, request):
         db_path=str(tmp_path / "tasks.db"), max_queued_top_level_tasks=50
     )
     manager.set_owner_identity("lead", "Lead", "team", "TeamArchitect")
-    return SimpleNamespace(
+    return TurnHost(
         id="lead",
         name="Lead",
         team_id="team",
@@ -35,8 +36,6 @@ def agent(tmp_path, request):
         team_comms=_CaptureComms(),
         _logger=logging.getLogger(__name__),
         _stop_reasons_by_task_id={},
-        _active_execution_task=None,
-        _active_execution_task_id=None,
         _strands_agent=SimpleNamespace(),
         _finalize_conversation_turn=AsyncMock(),
         named_agent_type_queue_map={},

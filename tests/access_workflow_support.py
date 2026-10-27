@@ -32,7 +32,7 @@ from custom_messages.contracts.access_v2 import ChangeProposalV1, contract_diges
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer, context_verify_keys
 
@@ -75,6 +75,8 @@ def make_agent(
     meta = MessageMeta(conversation_id="conv-1")
     meta.gateway_context = SimpleNamespace(task_context=signed or signed_context(), session_key="s-owner")
     manager.add_task(Task(task_id=task_id, task_type=MessageMetaType.REQUEST), MessageHeader(), meta, owner_person_id=None)
+    # The test's direct calls work for this task (tests.task_work_support).
+    bind_task(task_id)
     return SimpleNamespace(
         id=f"agent-{agent_type}",
         name=agent_type,
@@ -85,7 +87,7 @@ def make_agent(
         authorization_config={"enabled": enabled, "cedar_binary_path": str(BINARY)},
         task_manager=manager,
         instance_root=None,
-        _active_execution_task_id=task_id,
+        test_task_id=task_id,
         _interrupted_turn_sessions={},
         paused=False,
         is_executing=False,

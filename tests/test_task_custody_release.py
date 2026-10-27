@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from custom_tools.runtime_context import TaskWork
 from custom_agents.control_runtime import consume_handback_interrupt, handle_interrupted_turn
 from custom_agents.custody_loss import custody_moved, install_custody_listeners
 from custom_agents.sdk.strands.turn_tool_stop import CUSTODY_LOST_REASON
@@ -33,7 +34,8 @@ def _agent(running_task_id: str | None, held: set[str]) -> SimpleNamespace:
         _logger=logging.getLogger("custody-release-test"),
         task_manager=manager,
         deferred_inbox=SimpleNamespace(on_custody_lost=None),
-        _active_execution_task_id=running_task_id,
+        # The turn running now (custom_agents.turn_registry), by its asyncio task.
+        _running_turns={object(): TaskWork(task_id=running_task_id)},
         listener=listener,
     )
 

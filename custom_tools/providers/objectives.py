@@ -83,6 +83,7 @@ from custom_tools.providers.objective_work import (
     propose_objective_work_profile,
 )
 from custom_tools.runtime_context import (
+    bound_task_id,
     get_agent_ref,
 )
 from id_generation import (
@@ -340,7 +341,7 @@ def create_objective(
     if manager_error:
         return failed({"error": manager_error, "manager_only": True})
 
-    resolved_task_id = task_id or agent.task_manager.current_task_id
+    resolved_task_id = task_id or bound_task_id()
     if not resolved_task_id:
         return failed(
             {"error": "No task_id provided and no task currently in progress"}
@@ -520,7 +521,7 @@ def _update_progress(
             progress_summary=progress_summary if progress_summary else None,
             current_focus=current_focus if current_focus else None,
             criterion_updates=criterion_updates,
-            task_id=task_id or agent.task_manager.current_task_id,
+            task_id=task_id or bound_task_id(),
             plan_id=plan_id or None,
             user_visible=_coerce_tool_bool(user_visible),
             expected_version=expected_version,
@@ -567,7 +568,7 @@ def _update_status(
     task_refusal = _named_task_refusal(agent, task_id)
     if task_refusal:
         return failed({"error": task_refusal})
-    current_task_id = agent.task_manager.current_task_id
+    current_task_id = bound_task_id()
     resolved_task_id = task_id or current_task_id
     resolved_objective_id = _resolve_objective_id_for_tool(
         agent, objective_id, resolved_task_id or "", plan_id, action=PRIVATE_UPDATE
@@ -771,7 +772,7 @@ def start_objective_task(
     if not work_brief or not work_brief.strip():
         return failed({"error": "work_brief is required"})
 
-    resolved_source_task_id = source_task_id or agent.task_manager.current_task_id
+    resolved_source_task_id = source_task_id or bound_task_id()
     if not resolved_source_task_id:
         return failed({"error": "No source task is currently in progress"})
     # The new task works for the source task's person.
@@ -853,7 +854,7 @@ def update_execution_plan_status(
     task_refusal = _named_task_refusal(agent, task_id)
     if task_refusal:
         return json.dumps({"error": task_refusal})
-    current_task_id = agent.task_manager.current_task_id
+    current_task_id = bound_task_id()
     resolved_task_id = task_id or current_task_id
     resolved_plan_id = _resolve_plan_id_for_tool(
         agent,
@@ -906,7 +907,7 @@ def set_execution_plan(
     if agent is None:
         return json.dumps({"error": "Agent reference not set"})
 
-    current_task_id = agent.task_manager.current_task_id
+    current_task_id = bound_task_id()
     if not current_task_id:
         return json.dumps({"error": "No task currently in progress"})
 
@@ -955,7 +956,7 @@ def update_execution_plan_step(
     if agent is None:
         return json.dumps({"error": "Agent reference not set"})
 
-    current_task_id = agent.task_manager.current_task_id
+    current_task_id = bound_task_id()
     if not current_task_id:
         return json.dumps({"error": "No task currently in progress"})
 
@@ -1010,7 +1011,7 @@ def update_execution_unknown(
     if agent is None:
         return json.dumps({"error": "Agent reference not set"})
 
-    current_task_id = agent.task_manager.current_task_id
+    current_task_id = bound_task_id()
     if not current_task_id:
         return json.dumps({"error": "No task currently in progress"})
 
@@ -1075,7 +1076,7 @@ def record_plan_action(
             }
         )
 
-    current_task_id = agent.task_manager.current_task_id
+    current_task_id = bound_task_id()
     if not current_task_id:
         return json.dumps({"error": "No task currently in progress"})
 

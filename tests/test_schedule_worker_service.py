@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from config_loader import Config
+from tests.task_work_support import bind_task
 from custom_agents.agent_instantiation_service import (
     AgentInstantiationService,
     current_worker_limits,
@@ -132,6 +133,7 @@ def lead(tmp_path, monkeypatch):
     manager.update_main_task_state(
         "request", ProgressState.IN_PROGRESS, utc_now().isoformat()
     )
+    bind_task("request")  # the lead's direct calls work for this task (tests.task_work_support)
     definitions = {
         name: worker_definition(name) for name in ("Worker", "Replacement")
     }
@@ -269,7 +271,7 @@ async def test_inspection_repairs_custom_eligibility_through_real_settings_and_b
     info.meta.gateway_context.task_context = context_signer().issue(
         team_id=lead.team_id, person_id="owner", person_roles=("owner",)
     )
-    lead._active_execution_task_id = "request"
+    bind_task("request")
     settings = RuntimeSettingsService(lead)
     plan = settings.stage([change])
     agreement = ChangeApproval(ChangeApprovalMode.AGREEMENT, "agreement", datetime.now(timezone.utc))

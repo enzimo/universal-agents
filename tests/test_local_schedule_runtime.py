@@ -66,7 +66,7 @@ def test_a_new_per_person_kind_runs_on_its_own_on_demand_worker(lead, tmp_path, 
     from custom_agents.manager_control_runtime import _schedule_worker_assignment
     from custom_agents.system_schedule_changes import SystemScheduleChangeService
     from custom_tools.providers.schedule_workers import configure_scheduled_worker
-    from custom_tools.runtime_context import set_agent_ref
+    from tests.task_work_support import set_agent_ref
     from tests.change_approval_support import agreement
 
     use_kind(monkeypatch, PERSON_KIND)
@@ -151,7 +151,7 @@ def test_memory_review_worker_change_is_staged_then_applied_with_agreement(lead,
 
     from custom_agents.system_schedule_changes import SystemScheduleChangeService
     from custom_tools.providers.schedule_workers import configure_scheduled_worker
-    from custom_tools.runtime_context import set_agent_ref
+    from tests.task_work_support import set_agent_ref
     from tests.change_approval_support import agreement
 
     lead.instance_root = str(tmp_path)

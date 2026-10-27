@@ -4650,7 +4650,7 @@ def test_secure_cli_tool_schema_stays_compact_and_routes_full_guidance_to_skill(
 def test_secure_cli_reports_missing_runtime_owner_as_identity_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from custom_tools.runtime_context import set_agent_ref
+    from tests.task_work_support import set_agent_ref
 
     monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", "http://127.0.0.1:8766")
     set_agent_ref(None)
@@ -4719,7 +4719,7 @@ def test_secure_cli_preserves_structured_gate_refusal_from_http_error(
 def test_secure_cli_sends_the_signed_task_context_from_the_active_task() -> None:
     from custom_messages.contracts.access_v2 import SignedTaskContextV1
     from custom_tools.secure_cli_tool import _trusted_runtime_context
-    from custom_tools.runtime_context import set_agent_ref
+    from tests.task_work_support import set_agent_ref
     from tests.broker_access_support import signed_task_context
 
     signed = SignedTaskContextV1.model_validate(signed_task_context("user_bound"))

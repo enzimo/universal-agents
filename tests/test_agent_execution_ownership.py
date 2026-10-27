@@ -16,7 +16,9 @@ from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState
+from custom_tools.runtime_context import task_work
 from runtime_hosting.agent_execution import AgentExecutionGate
+from tests.task_work_support import TurnHost
 
 
 class HeldModel(Model):
@@ -43,7 +45,7 @@ class HeldModel(Model):
         yield {"messageStop": {"stopReason": "end_turn"}}
 
 
-class RuntimeHost(SimpleNamespace):
+class RuntimeHost(TurnHost):
     # Use the production admission and ownership methods, with local provider I/O.
     is_executing = UniversalAgent.is_executing
     _execution_scope = UniversalAgent._execution_scope
@@ -52,6 +54,11 @@ class RuntimeHost(SimpleNamespace):
     _resume_parent_task_if_ready = UniversalAgent._resume_parent_task_if_ready
     _check_and_process_next_task = UniversalAgent._check_and_process_next_task
     _can_continue_pending_work = UniversalAgent._can_continue_pending_work
+
+    async def run_turn(self, content, header, meta):
+        """A runner's turn: the task's handling binds its work record (runtime_context.task_work)."""
+        with task_work(self._history_task_id_for_content(content)):
+            return await self.process_llm_interaction(content, header, meta)
 
 
 @pytest.fixture
@@ -92,7 +99,7 @@ def host(tmp_path, monkeypatch):
         paused=False,
         _should_exit=asyncio.Event(),
         _execution_gate=AgentExecutionGate(),
-        _active_execution_task_id=None,
+        test_task_id=None,
         _logger=logging.getLogger(__name__),
         _refresh_self_agent_state=AsyncMock(),
         _publish_presence_status=AsyncMock(),
@@ -137,7 +144,7 @@ async def test_parent_and_aar_wait_for_actual_model_turn_without_failing(host):
     host.task_manager.task_state.task_queue.clear()
     add_task(host, "aar")
     active = asyncio.create_task(
-        host.process_llm_interaction(original, MessageHeader(), MessageMeta())
+        host.run_turn(original, MessageHeader(), MessageMeta())
     )
     await asyncio.wait_for(host.provider.entered.wait(), 2)
     parent = asyncio.create_task(host._resume_parent_task_if_ready("parent"))
@@ -200,11 +207,11 @@ async def test_cancelled_waiter_cannot_release_or_reset_active_turn(host):
         problem_statement="original",
     )
     active = asyncio.create_task(
-        host.process_llm_interaction(task, MessageHeader(), MessageMeta())
+        host.run_turn(task, MessageHeader(), MessageMeta())
     )
     await asyncio.wait_for(host.provider.entered.wait(), 2)
     waiter = asyncio.create_task(
-        host.process_llm_interaction(
+        host.run_turn(
             task.model_copy(update={"task_id": "waiting"}),
             MessageHeader(),
             MessageMeta(),
@@ -232,11 +239,11 @@ async def test_cancelled_owner_finishes_sdk_cleanup_before_waiter_starts(host):
         problem_statement="original",
     )
     active = asyncio.create_task(
-        host.process_llm_interaction(original, MessageHeader(), MessageMeta())
+        host.run_turn(original, MessageHeader(), MessageMeta())
     )
     await asyncio.wait_for(host.provider.entered.wait(), 2)
     waiting = asyncio.create_task(
-        host.process_llm_interaction(
+        host.run_turn(
             original.model_copy(update={"task_id": "waiting"}),
             MessageHeader(),
             MessageMeta(),
@@ -303,7 +310,7 @@ async def test_a_turn_broadcasts_busy_when_it_starts_and_idle_when_it_ends(host,
         add_task(host, original.task_id)
         assert await asyncio.wait_for(host._check_and_process_next_task(), 3)
     else:
-        await asyncio.wait_for(host.process_llm_interaction(original, MessageHeader(), MessageMeta()), 3)
+        await asyncio.wait_for(host.run_turn(original, MessageHeader(), MessageMeta()), 3)
     assert seen == [(True, False), (False, False)]
 
 
@@ -313,7 +320,7 @@ async def test_a_failed_presence_broadcast_never_affects_the_turn(host, caplog):
     original = Task(task_id="original", task_type=MessageMetaType.REQUEST, problem_statement="original")
     host.provider.release.set()
     with caplog.at_level(logging.WARNING):
-        await asyncio.wait_for(host.process_llm_interaction(original, MessageHeader(), MessageMeta()), 3)
+        await asyncio.wait_for(host.run_turn(original, MessageHeader(), MessageMeta()), 3)
     assert host.preparations == ["original"]
     assert "event=agent_execution_presence_failed" in caplog.text
 
@@ -342,8 +349,8 @@ async def test_a_fresh_turn_reloads_guidance_after_the_prior_turn_fails(host):
         return Task(task_id=content.task_id, task_type=MessageMetaType.RESPONSE)
     host.turn_executor.process_llm_interaction = invoke
     with pytest.raises(RuntimeError, match="before recording a decision"):
-        await host.process_llm_interaction(task, MessageHeader(), MessageMeta())
-    await host.process_llm_interaction(task, MessageHeader(), MessageMeta())
+        await host.run_turn(task, MessageHeader(), MessageMeta())
+    await host.run_turn(task, MessageHeader(), MessageMeta())
     assert len(read) == 2
     assert all("Use the revised budget." in guidance for guidance in read)
 
@@ -353,7 +360,6 @@ async def test_user_stop_cancels_sdk_child_without_cancelling_its_owner(host):
     from custom_agents.control_runtime import _interrupt_active_execution
 
     invoke = host.turn_executor.process_llm_interaction
-    host._active_execution_task = None
 
     async def tracked_invoke(content, header, meta):
         UniversalAgent._set_active_execution_context(host, content.task_id)
@@ -367,21 +373,21 @@ async def test_user_stop_cancels_sdk_child_without_cancelling_its_owner(host):
 
     async def owner():
         with pytest.raises(asyncio.CancelledError):
-            await host.process_llm_interaction(task, MessageHeader(), MessageMeta())
+            await host.run_turn(task, MessageHeader(), MessageMeta())
         assert asyncio.current_task().cancelling() == 0
 
     running = asyncio.create_task(owner())
     try:
         await asyncio.wait_for(host.provider.entered.wait(), 2)
-        assert host._active_execution_task is not running
+        assert all(work.turn_owner is not running for work in host.running_turn_works())
         await _interrupt_active_execution(
             host, root_task_id="stopped", graph_task_ids={"stopped"}, reason="task_stopped"
         )
         await asyncio.wait_for(running, 2)
         assert not host.is_executing
-        assert host._active_execution_task is None
+        assert host.running_turn_works() == []
         host.provider.release.set()
-        result = await host.process_llm_interaction(
+        result = await host.run_turn(
             task.model_copy(update={"task_id": "next"}), MessageHeader(), MessageMeta())
         assert result.task_id == "next"
     finally:

@@ -62,7 +62,8 @@ from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ScheduleManagementClass
 from custom_tools.providers.agent_management import get_available_agent_types
 from custom_tools.providers.schedule_workers import install_scheduled_worker_draft, prepare_scheduled_job_access
-from custom_tools.runtime_context import _agent_ctx, set_agent_ref
+from custom_tools.runtime_context import _agent_ctx
+from tests.task_work_support import set_agent_ref
 from runtime_settings.schedule_workers import SCHEDULE_WORKER_ELIGIBILITY_PATH
 from tests.change_approval_support import (
     agreement,

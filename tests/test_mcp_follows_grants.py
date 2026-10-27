@@ -59,7 +59,7 @@ from access_control.proposals import ACCESS_PROPOSAL_KIND, ProposalApplier
 from access_control.requests import AccessRequests
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_agents import access_request_runtime, access_runtime
-from custom_agents.tool_sync import GrantToolSync, install_tool_sync, startup_tools
+from custom_agents.tool_sync import GrantToolSync, startup_tools
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     AccessRequestStatus,
@@ -81,7 +81,7 @@ from custom_tools.providers import access as access_tools
 from custom_tools.providers import tool_loading
 from custom_tools.providers.capabilities import mcp_connections
 from custom_tools.registry import ALL_PROVIDER_TOOLS
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, install_test_tool_sync, set_agent_ref
 from mcp_control.registry import MCPConnectionLifecycle, MCPConnectionStore, resolve_mcp_connection_paths
 from secure_tool_broker.access_gate import BrokerAccessGate
 from secure_tool_broker.credential_catalog import (
@@ -267,7 +267,7 @@ def model_view(agent: Any) -> tuple[ToolRegistry, Any]:
     tools = startup_tools(agent, list(ALL_PROVIDER_TOOLS))
     registry = ToolRegistry()
     registry.process_tools(tools)
-    hook = install_tool_sync(agent, tools)
+    hook = install_test_tool_sync(agent, tools)
     if agent.authorization_config["enabled"]:
         assert isinstance(hook, GrantToolSync)
     return registry, hook
@@ -292,7 +292,8 @@ def work_for(agent: Any, person: PersonPrincipal, task_id: str) -> None:
         task_context=context_signer().issue(team_id=TEAM, person_id=person.person_id, person_roles=person.roles)
     )
     agent.task_manager.add_task(Task(task_id=task_id, task_type=MessageMetaType.REQUEST), MessageHeader(), meta, owner_person_id=None)
-    agent._active_execution_task_id = task_id
+    agent.test_task_id = task_id
+    bind_task(task_id)
 
 
 async def install(world: World) -> Any:

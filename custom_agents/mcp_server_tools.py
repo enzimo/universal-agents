@@ -63,8 +63,6 @@ RETRY_GAPS = tuple(timedelta(minutes=minutes) for minutes in (1, 2, 4, 8, 16))
 LATER_RETRY_GAP = timedelta(minutes=30)
 MAX_ERROR_TEXT = 300
 UNAVAILABLE_NOTICE_PREFIX = "mcp_server_unavailable"
-# Where custom_agents.tool_sync.install_tool_sync keeps an agent's loader.
-SERVER_TOOLS_ATTRIBUTE = "_mcp_server_tools"
 
 
 def _utc_now() -> datetime:
@@ -378,10 +376,22 @@ class MCPServerTools:
         )
 
 
+def server_loader(agent: Any) -> MCPServerTools | None:
+    """The MCP loader of the Strands agent the current turn calls, else of the agent's main one.
+
+    Each Strands agent's tool-list sync has its own (``custom_agents.strands_parts``).
+    """
+
+    from custom_agents.strands_parts import current_parts
+
+    parts = current_parts(agent)
+    return getattr(getattr(parts, "sync", None), "servers", None)
+
+
 def server_status(agent: Any, tool_id: str) -> str | None:
     """Why an MCP server's tools are not loaded for this agent, in plain words; None when nothing failed."""
 
-    servers = getattr(agent, SERVER_TOOLS_ATTRIBUTE, None)
+    servers = server_loader(agent)
     return servers.status(tool_id) if servers is not None else None
 
 
@@ -411,7 +421,7 @@ __all__ = [
     "LoadFailure",
     "MCPServerTools",
     "RETRY_GAPS",
-    "SERVER_TOOLS_ATTRIBUTE",
+    "server_loader",
     "ServerFailure",
     "error_text",
     "load_retry_window",

@@ -35,6 +35,7 @@ from typing import Any
 
 from strands.types.exceptions import MaxTokensReachedException
 
+from custom_agents.strands_parts import turn_strands_agent
 from custom_agents.custody_loss import custody_moved
 from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 from custom_agents.conversation_runtime import finalize_conversation_turn
@@ -162,7 +163,7 @@ async def fail_task_after_turn_error(agent: Any, task_id: str, task_info: Any, e
         conversation_store=agent._conversation_store,
         conversation_compactor=agent._conversation_compactor,
         conversation_artifact_offloader=agent._conversation_artifact_offloader,
-        strands_messages=list(getattr(agent._strands_agent, "messages", []) or []),
+        strands_messages=list(getattr(turn_strands_agent(agent), "messages", []) or []),
         task_manager=agent.task_manager,
         task_info=task_info,
         task_status=ProgressState.FAILED.value,

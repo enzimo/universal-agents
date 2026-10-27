@@ -34,7 +34,7 @@ from custom_tools.providers.schedules import (
     list_scheduled_jobs,
     remove_scheduled_job,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from storage.config import resolve_storage_settings
 from storage.gateway_state_repository import SqliteGatewayStateRepository
 from tests.broker_access_support import (

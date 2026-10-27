@@ -68,6 +68,19 @@ def isolate_agent_context_between_tests():
 
 
 @pytest.fixture(autouse=True)
+def isolate_task_work_between_tests():
+    """Start every test outside any task's handling (tests.task_work_support.bind_task)."""
+
+    from custom_tools.runtime_context import _task_work
+
+    token = _task_work.set(None)
+    try:
+        yield
+    finally:
+        _task_work.reset(token)
+
+
+@pytest.fixture(autouse=True)
 def isolate_task_context_keys_between_tests():
     """Keep cached identity keys aligned with each test's own environment."""
     from tests.broker_access_support import forget_task_context_keys

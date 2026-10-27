@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.task_work_support import bind_task
 from custom_agents.task_operation_runtime import TaskOperationRuntime
 import json
 from types import SimpleNamespace
@@ -72,6 +73,7 @@ def test_tool_result_offloader_replaces_oversized_single_result_with_preview_and
         agent=agent,
     )
 
+    bind_task("task_budget_test")  # the hook runs in the turn of this task (tests.task_work_support)
     offloader._after_tool_call(event)
 
     assert event.result["status"] == "success"

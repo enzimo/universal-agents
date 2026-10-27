@@ -48,7 +48,7 @@ from custom_messages.contracts.runtime_v1 import RUNTIME_RESTART_REQUEST_SCHEMA_
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState
 from custom_tools.providers.changes import apply_change
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from docker.launch_headless import pop_runtime_restart_request
 from storage.config import StorageSettings
 from tests.broker_access_support import context_signer, context_verify_keys

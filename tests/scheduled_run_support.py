@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.task_work_support import bind_task
 from access_control.identity import ENV_SCHEDULER_SIGNING_KEY, ISSUER_SCHEDULER, ContextSigner, ContextVerifier
 from custom_agents import access_runtime, scheduled_run_contexts
 from custom_agents.schedule_store import ScheduleStore
@@ -254,6 +255,7 @@ def access_agent(world, run) -> SimpleNamespace:
     )
     task_manager.add_task_terminal_callback = task_manager.terminal_callbacks.append
     access_runtime._runtime_access.cache_clear()
+    bind_task(run.task.task_id)  # the test's direct calls work for the run (tests.task_work_support)
     return SimpleNamespace(
         id=WORKER_ID,
         named_agent_type=WORKER_TYPE,

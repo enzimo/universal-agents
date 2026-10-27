@@ -26,6 +26,7 @@ import pytest
 from access_control.entities import PersonPrincipal
 from access_control.inbox import StoredAccessInbox
 from access_control.requests import AccessRequests
+from tests.task_work_support import bind_turn
 from custom_agents import access_request_runtime, access_runtime, task_steering_runtime, tool_setup_runtime
 from custom_agents.task_manager import TaskManager
 from custom_agents.tool_setup_run_runtime import run_repository
@@ -69,7 +70,7 @@ def lead_agent(
         task_manager=manager,
         instance_root=str(instance_root) if instance_root else None,
         instance_config_path=None,
-        _active_execution_task_id=task_id,
+        test_task_id=task_id,
         _interrupted_turn_sessions={},
         _pending_interrupt_responses={},
         _pending_work_task=None,
@@ -109,9 +110,10 @@ async def pause_turn(agent: Any, interrupt: Any, task_id: str = "task-lead") -> 
     """The runtime pauses the turn on the tool's interrupt (and trusted code starts the run)."""
 
     info = agent.task_manager.get_task_info(task_id)
+    bind_turn(info.task.task_id)
     await task_steering_runtime.send_interrupt_request_for_result(
         agent, result=SimpleNamespace(interrupts=[interrupt]), task=info.task, msg_header=info.header,
-        msg_meta=info.meta, strands_agent=object(), invoke_kwargs={}, callback_handler=lambda **_: None, full_prompt="",
+        msg_meta=info.meta, invoke_kwargs={}, callback_handler=lambda **_: None, full_prompt="",
     )
 
 

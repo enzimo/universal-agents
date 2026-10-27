@@ -9,6 +9,8 @@ the next command.
 
 from __future__ import annotations
 
+import contextvars
+
 import json
 import socket
 import threading
@@ -42,7 +44,7 @@ from custom_tools import code_sandbox
 from custom_tools.code_sandbox import landlock_abi
 from custom_tools.non_interactive_shell import _execute_single_command
 from custom_tools.providers import access as access_tools
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from custom_tools.workspace_scope import current_workspace_scope
 from runtime_settings.code_sandbox_contract import ENV_CODE_SANDBOX_MODE
 from runtime_settings.instance_layout import InstanceLayout
@@ -90,7 +92,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         task_manager=manager,
         instance_root=str(layout.root),
         workspace_dir=str(layout.workspaces_dir),
-        _active_execution_task_id="task-1",
+        test_task_id="task-1",
         _interrupted_turn_sessions={},
         paused=False,
         is_executing=False,
@@ -230,11 +232,12 @@ def test_parallel_commands_get_the_same_access_as_sequential_ones(world, listene
 
 
 def test_a_command_list_keeps_the_person_it_started_with(world, monkeypatch) -> None:
-    """A shell call fixes its task when it starts (runtime_context.bind_tool_call_task).
+    """A shell call keeps the task of the turn it belongs to (runtime_context.task_work).
 
     Each further command of a list used to read the agent's current task, so a
     call still running when the agent moved on ran its later commands for the
-    next task's person and folders.
+    next task's person and folders. Another turn now binds its own task in its
+    own context, which the running call never sees.
     """
 
     from custom_tools import non_interactive_shell
@@ -251,7 +254,8 @@ def test_a_command_list_keeps_the_person_it_started_with(world, monkeypatch) -> 
     def recording(cmd_str, plan, grants, **options):
         planned.append(grants)
         result = run_in_sandbox(cmd_str, plan, grants, **options)
-        world.agent._active_execution_task_id = "task-2"  # the agent moves on to its next task
+        # Another turn of the agent starts its next task, in its own context.
+        contextvars.copy_context().run(bind_task, "task-2")
         return result
 
     monkeypatch.setattr(non_interactive_shell, "_run_in_sandbox", recording)

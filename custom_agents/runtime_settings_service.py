@@ -13,6 +13,7 @@ agreement applies it. The service never decides authority itself: ``apply`` rece
 
 from __future__ import annotations
 
+from custom_tools.runtime_context import bound_task_id
 import json
 import logging
 import re
@@ -1692,7 +1693,7 @@ class RuntimeSettingsService:
         receipt: Mapping[str, Any],
     ) -> None:
         task_manager = getattr(self.agent, "task_manager", None)
-        task_id = (task_manager.current_task_id if task_manager is not None else None)
+        task_id = bound_task_id()
         if not task_id or not hasattr(task_manager, "append_history_entry"):
             return
         try:

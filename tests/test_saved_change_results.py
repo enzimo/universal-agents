@@ -17,7 +17,7 @@ import pytest
 from custom_tools.providers.heartbeat import _heartbeat_store, add_heartbeat_item
 from custom_tools.providers.changes import _Applied, apply_change
 from custom_tools.providers.schedules import create_scheduled_job, update_scheduled_job
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from tests.change_approval_support import ToolCall, agreement, use_signed_contexts
 from tests.test_schedule_tools import _FakeAgent
 from tests.tool_result_support import sdk_tool_result, tool_json

@@ -24,7 +24,7 @@ from custom_agents.access_runtime import decide_call
 from custom_agents.execution_changes import ManagedServiceChangeService
 from custom_agents.execution_control_service import ExecutionControlService
 from custom_messages.contracts.access_v2 import AccessLevel, ChangeApprovalMode, GrantLifetime
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from runtime_hosting.controller_service import run_execution_controller
 from runtime_hosting.execution_contracts import (
     AccessHolderV1,

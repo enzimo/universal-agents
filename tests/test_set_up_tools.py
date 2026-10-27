@@ -41,7 +41,7 @@ from custom_messages.contracts.access_v2 import AccessProposalV1, ProposedHttpTo
 from custom_messages.contracts.tool_setup_spec_v1 import ExternalSetupStepV1, ToolSetupSpecV1
 from custom_tools.providers import access_workflows as workflow_tools
 from custom_tools.providers.tool_setup import set_up_tools
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from tests.access_workflow_support import TEAM, ToolCall, needs_cedar, run_tool, use_signed_contexts
 from tests.tool_setup_run_support import (
     MEMBER,

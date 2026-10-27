@@ -60,7 +60,7 @@ from custom_tools.providers.schedules import (
     record_scheduled_run,
     update_scheduled_job,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import acting_as, set_agent_ref
 from custom_tools.workspace_scope import current_workspace_scope
 from runtime_settings.instance_layout import InstanceLayout
 from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
@@ -81,6 +81,20 @@ SYSTEM_TYPES = ("InternalImprovementAgent", "KnowledgeCuratorAgent", "MemReviewA
 MAINTENANCE_TASK = "maintenance_task"
 NOW = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
 REVIEW_TASK = "member_review_task"
+
+def verified_person_for(agent):
+    """Whom ``agent`` verifiably works for in the task it works on (tests.task_work_support)."""
+
+    with acting_as(agent):
+        return verified_person_id(agent)
+
+
+def decide_for(agent, function, arguments):
+    """The access hook's decision for ``agent`` in the task it works on (tests.task_work_support)."""
+
+    with acting_as(agent):
+        return decide_call(agent, function, arguments)
+
 
 pytestmark = pytest.mark.skipif(not BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
 
@@ -154,7 +168,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             task_manager=tasks,
             instance_root=str(layout.root),
             workspace_dir=str(layout.workspaces_dir),
-            _active_execution_task_id=task_id,
+            test_task_id=task_id,
             _schedule_store=schedules,
             _memory_review_store=reviews,
             _conversation_store=None,
@@ -204,12 +218,12 @@ def test_a_maintenance_run_may_do_its_duties_with_no_person(world) -> None:
         ("record_scheduled_run", {}),
         ("request_access", {}),
     ):
-        decision = decide_call(maintenance, function, arguments)
+        decision = decide_for(maintenance, function, arguments)
         assert decision is not None and decision.allowed, (function, decision and decision.reason)
 
     # Changing schedules or publishing is not a system duty.
-    assert not decide_call(maintenance, "update_scheduled_job", {}).allowed
-    assert not decide_call(maintenance, "publish_single_page_site", {}).allowed
+    assert not decide_for(maintenance, "update_scheduled_job", {}).allowed
+    assert not decide_for(maintenance, "publish_single_page_site", {}).allowed
 
 
 def test_its_files_and_code_reach_only_the_shared_folders(world) -> None:
@@ -262,7 +276,7 @@ def test_a_worker_given_work_for_no_person_is_refused(world) -> None:
     worker = world.agent("WebResearchAgent", role="worker")
 
     for function in ("file_write", "shell", "record_scheduled_run", "request_access"):
-        assert not decide_call(worker, function, {}).allowed, function
+        assert not decide_for(worker, function, {}).allowed, function
     set_agent_ref(worker)
     refused = json.loads(list_scheduled_jobs())
     assert refused["error"] == "system_work_own_schedule_only" and "schedules" not in refused
@@ -272,10 +286,10 @@ def test_a_members_memory_review_reads_only_that_members_jobs(world) -> None:
     review = world.agent("MemReviewAgent", task_id=REVIEW_TASK)
 
     # The person side applies: a member's review needs the member to hold the tool.
-    assert decide_call(review, "get_memory_review_job", {}).allowed
-    assert decide_call(review, "list_pending_memory_review_jobs", {}).allowed
+    assert decide_for(review, "get_memory_review_job", {}).allowed
+    assert decide_for(review, "list_pending_memory_review_jobs", {}).allowed
     # Team-wide cleanup is not a member's to authorize.
-    assert not decide_call(review, "maintain_memory_review_jobs", {"operation": "archive"}).allowed
+    assert not decide_for(review, "maintain_memory_review_jobs", {"operation": "archive"}).allowed
 
     def job(person: str, index: int):
         return world.reviews.enqueue_review_job(
@@ -373,8 +387,8 @@ def test_a_maintenance_escalation_works_for_the_schedules_owner(world, caplog) -
     assert "event=system_escalation_signed_for_owner" in caplog.text
     assert world.schedule.schedule_id in caplog.text and FIRST_USER in caplog.text and ESCALATION_TASK in caplog.text
     # TeamArchitect acts for the owner, within the owner's access: it can tell them.
-    assert decide_call(lead, "notify_user", {}).allowed
-    assert verified_person_id(lead) == FIRST_USER
+    assert decide_for(lead, "notify_user", {}).allowed
+    assert verified_person_for(lead) == FIRST_USER
 
 
 def test_a_person_named_in_the_escalation_is_ignored(world) -> None:
@@ -398,7 +412,7 @@ def test_an_escalation_from_a_persons_task_keeps_that_person(world) -> None:
     admitted = _admit(world, lead, meta)
 
     assert admitted is meta
-    assert verified_person_id(lead) == MEMBER
+    assert verified_person_for(lead) == MEMBER
 
 
 def _ownerless_maintenance_schedule() -> ScheduledMessage:
@@ -427,7 +441,7 @@ def test_an_escalation_is_not_signed_for_anyone_without_a_system_schedule_owner(
 
     assert admitted is escalation and _verified(admitted).person_id is None
     assert f"event=system_escalation_refused reason={reason}" in caplog.text
-    assert not decide_call(lead, "notify_user", {}).allowed
+    assert not decide_for(lead, "notify_user", {}).allowed
 
 
 @pytest.mark.parametrize("standing", [None, PersonStanding.DISABLED, PersonStanding.REMOVED])
@@ -443,7 +457,7 @@ def test_the_owner_has_no_roles_unless_the_gateway_recorded_them_as_active(world
 
     assert (_verified(admitted).person_id, _verified(admitted).person_roles) == (FIRST_USER, ())
     assert "event=scheduled_owner_roles_unavailable" in caplog.text
-    assert not decide_call(lead, "notify_user", {}).allowed
+    assert not decide_for(lead, "notify_user", {}).allowed
 
 
 @pytest.mark.asyncio

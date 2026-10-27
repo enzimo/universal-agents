@@ -12,23 +12,28 @@ How a turn uses it, without touching the agent's own model settings:
   settings apply, the reasoning-summary repair and the status views all read
   ``model_provider``, ``model_id`` and the other fields, so writing a
   person's model there would make them act on it as if it were the team's.
-  The person's model lives in a per-agent ``PersonModelState`` instead.
+- **One turn's choice.** The person's model belongs to the turn, in its work
+  record (``custom_tools.runtime_context.TaskWork.person_model``), never to
+  the agent: an agent may run several turns at once for different people
+  (``custom_agents.execution_lanes``), and each must use its own person's
+  model, key and context window. The built models are cached per agent
+  (``PersonModelState``).
 - **Choosing it.** ``select_turn_model`` runs at the start of a turn, once the
   turn's task is known and before the context is assembled, so the prompt
-  budget uses the person's context window. Who the task works for comes only
-  from its verified identity (``access_control.task_identity``), never from
-  message fields.
-- **Using it.** The Strands agent's ``model`` is set to the person's model,
-  and the turn settings (``TurnRuntimeSettings``) show its provider, model,
-  address and image support (``turn_settings_with_person_model``), with no
-  reasoning effort or summary, which the person did not choose.
-- **Safety net.** ``PersonModelHook`` runs before every model call and sets
-  the model for the agent's active task again. A resumed interrupted task, a
+  budget uses the person's context window (``turn_context_window``). Who the
+  task works for comes only from its verified identity
+  (``access_control.task_identity``), never from message fields.
+- **Using it.** ``PersonModelHook`` runs before every model call and sets the
+  model of the Strands agent being called to the turn's choice: the person's
+  model, or the team's for work for nobody. A resumed interrupted task, a
   fresh Strands agent made for a turn, and a rebuild after failover or a live
-  settings change all go through it, and work for nobody always gets the
-  team's model back.
-- **Ending it.** ``clear_turn_model`` runs when the turn's execution context
-  is cleared and puts the team's model back.
+  settings change all go through it. The turn settings
+  (``TurnRuntimeSettings``) show its provider, model, address and image
+  support (``turn_settings_with_person_model``), with no reasoning effort or
+  summary, which the person did not choose.
+- **Ending it.** ``restore_team_model`` runs when the turn's execution
+  context is cleared and puts the team's model back on the turn's Strands
+  agent.
 - **Failover** never acts on a person's model: ``person_model_active`` makes
   ``model_failover_runtime`` skip, so a person's provider running out of
   credit does not switch the team's agents to another model.
@@ -111,9 +116,8 @@ class PersonModelBundle:
 
 @dataclass
 class PersonModelState:
-    """One agent's person models: the turn's choice and the built models."""
+    """One agent's built person models, and whom each recent task works for."""
 
-    active: PersonModelBundle | None = None
     bundles: dict[tuple[str, str], PersonModelBundle] = field(default_factory=dict)
     person_by_task: dict[str, str | None] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -302,11 +306,15 @@ def _build_bundle(agent: Any, person_id: str, profile: PersonModelProfileV1) -> 
 
 
 def select_turn_model(agent: Any, task_id: str | None) -> PersonModelBundle | None:
-    """Choose the model for the turn of ``task_id`` (module docstring) and put it in place."""
+    """Choose the model for the turn of ``task_id`` (module docstring) and record it in the turn's work."""
 
+    from custom_tools.runtime_context import current_task_work
+
+    work = current_task_work()
+    if work is None or work.task_id != task_id:
+        raise RuntimeError("A turn chose its model outside its task's work record (runtime_context.task_work).")
     bundle = bundle_for_person(agent, person_for_task(agent, task_id))
-    _state(agent).active = bundle
-    apply_model(agent)
+    work.person_model = bundle
     if bundle is not None:
         logger.info(
             "This turn uses the person's own model. event=person_model_selected agent_id=%s task_id=%s "
@@ -319,45 +327,51 @@ def select_turn_model(agent: Any, task_id: str | None) -> PersonModelBundle | No
     return bundle
 
 
-def clear_turn_model(agent: Any) -> None:
-    """Put the team's model back when the turn ends."""
+def restore_team_model(agent: Any, work: Any) -> None:
+    """Put the team's model back on the turn's Strands agent when the turn ends (module docstring)."""
 
-    state = _state(agent)
-    if state.active is None:
-        return
-    state.active = None
-    apply_model(agent)
+    work.person_model = None
+    strands = getattr(getattr(work, "strands", None), "agent", None)
+    team_model = getattr(agent, "_strands_model", None)
+    if strands is not None and team_model is not None and getattr(strands, "model", None) is not team_model:
+        strands.model = team_model
 
 
-def apply_model(agent: Any, strands_agent: Any = _UNSET) -> None:
-    """Set the Strands agent's model and the context window for the active choice."""
+def apply_model(agent: Any, strands_agent: Any) -> None:
+    """Set ``strands_agent``'s model to the bound turn's choice: the person's, or the team's."""
 
-    bundle = _state(agent).active
-    target = strands_agent if strands_agent is not _UNSET else getattr(agent, "_strands_agent", None)
+    bundle = active_bundle(agent)
     model = bundle.model if bundle is not None else getattr(agent, "_strands_model", None)
-    if target is not None and model is not None and getattr(target, "model", None) is not model:
-        target.model = model
-    engine = getattr(agent, "_context_engine", None)
-    if engine is not None and hasattr(engine, "context_window_tokens"):
-        engine.context_window_tokens = (
-            bundle.context_window_tokens if bundle is not None else agent._resolved_context_window_tokens()
-        )
+    if strands_agent is not None and model is not None and getattr(strands_agent, "model", None) is not model:
+        strands_agent.model = model
 
 
 def active_bundle(agent: Any) -> PersonModelBundle | None:
-    return _state(agent).active
+    """The person's model the turn bound in this context uses, or None for the team's."""
+
+    from custom_tools.runtime_context import current_task_work
+
+    work = current_task_work()
+    return getattr(work, "person_model", None) if work is not None else None
 
 
 def person_model_active(agent: Any) -> bool:
-    """Whether the agent's current turn runs on a person's own model (failover then stays out)."""
+    """Whether the turn bound in this context runs on a person's own model (failover then stays out)."""
 
-    return _state(agent).active is not None
+    return active_bundle(agent) is not None
+
+
+def turn_context_window(agent: Any) -> int | None:
+    """The context window of the person's model the bound turn uses, or None for the team's."""
+
+    bundle = active_bundle(agent)
+    return bundle.context_window_tokens if bundle is not None else None
 
 
 def turn_settings_with_person_model(agent: Any, settings: _Settings) -> _Settings:
     """The turn settings, showing the person's model while it is active (module docstring)."""
 
-    bundle = _state(agent).active
+    bundle = active_bundle(agent)
     if bundle is None:
         return settings
     profile = bundle.profile
@@ -376,7 +390,7 @@ def turn_settings_with_person_model(agent: Any, settings: _Settings) -> _Setting
 def model_supports(agent: Any, capability: str) -> bool | None:
     """Whether the model in use takes ``image``, ``audio`` or ``file`` input (the person's model while active)."""
 
-    bundle = _state(agent).active
+    bundle = active_bundle(agent)
     if bundle is None:
         return getattr(agent, f"supports_{capability}_input", None)
     return {"image": bundle.profile.supports_images, "file": bundle.profile.supports_files}.get(capability, False)
@@ -385,7 +399,7 @@ def model_supports(agent: Any, capability: str) -> bool | None:
 def summary_model_for(agent: Any, meta: Any) -> Any | None:
     """The person's model for summarizing a conversation of theirs (``meta`` is the task's); None keeps the team's."""
 
-    active = _state(agent).active
+    active = active_bundle(agent)
     person = person_for_meta(agent, meta)
     if active is not None and active.person_id == person:
         return active.model
@@ -424,7 +438,7 @@ def current_summary_model() -> Any | None:
     from custom_tools.runtime_context import get_agent_ref
 
     agent = get_agent_ref()
-    bundle = _state(agent).active if agent is not None and getattr(agent, "_person_models", None) else None
+    bundle = active_bundle(agent) if agent is not None else None
     return bundle.model if bundle is not None else None
 
 
@@ -454,7 +468,7 @@ class SummaryAgents:
 
 
 class PersonModelHook(HookProvider):
-    """Before every model call, the model of the agent's active task (module docstring)."""
+    """Before every model call, the model of the turn bound in this context (module docstring)."""
 
     def __init__(self, agent: Any) -> None:
         self._agent = agent
@@ -463,13 +477,15 @@ class PersonModelHook(HookProvider):
         registry.add_callback(BeforeModelCallEvent, self._before_model_call, order=PERSON_MODEL_HOOK_ORDER)
 
     def _before_model_call(self, event: BeforeModelCallEvent) -> None:
-        from custom_tools.runtime_context import active_task_context
+        from custom_tools.runtime_context import current_task_work
 
-        state = _state(self._agent)
-        task_id, _meta = active_task_context(self._agent)
-        person = person_for_task(self._agent, task_id)
-        if state.active is None or state.active.person_id != person:
-            state.active = bundle_for_person(self._agent, person)
+        work = current_task_work()
+        if work is not None:
+            # A resumed interrupted turn did not run select_turn_model again.
+            person = person_for_task(self._agent, work.task_id)
+            current = work.person_model
+            if current is None or current.person_id != person:
+                work.person_model = bundle_for_person(self._agent, person)
         apply_model(self._agent, event.agent)
 
 
@@ -485,7 +501,6 @@ __all__ = [
     "active_bundle",
     "apply_model",
     "bundle_for_person",
-    "clear_turn_model",
     "factory_provider",
     "forget_cached_profiles",
     "model_supports",
@@ -493,7 +508,9 @@ __all__ = [
     "person_for_meta",
     "person_for_task",
     "person_model_active",
+    "restore_team_model",
     "select_turn_model",
     "summary_model_for",
+    "turn_context_window",
     "turn_settings_with_person_model",
 ]

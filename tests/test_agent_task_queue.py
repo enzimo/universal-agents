@@ -11,7 +11,7 @@ import pytest
 
 from custom_messages.enums import ProgressState
 from custom_tools.providers.task_queue import control_task_queue, list_task_queue
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from test_runtime_task_controls import agent as runtime_agent_fixture, add, command
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts

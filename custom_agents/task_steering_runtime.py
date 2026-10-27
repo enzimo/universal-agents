@@ -21,6 +21,7 @@ from custom_agents.sdk.strands.turn_tool_stop import (
     stop_tool_calls,
 )
 from custom_agents.task_runtime_state import TurnStartNotes
+from custom_tools.runtime_context import TaskWork, bound_task_id, current_task_work, task_work
 from custom_tools.tool_stop import ToolStop
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError, settle_failed_turn
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND
@@ -61,10 +62,15 @@ GUIDANCE_APPLIED_EVENT = "task_steering_proactive_guidance_applied"
 
 @dataclass
 class StrandsInterruptedTurnSession:
-    """In-memory state needed to resume a live Strands interrupt."""
+    """In-memory state needed to resume a live Strands interrupt.
+
+    ``strands`` is the paused turn's Strands agent with its tool state
+    (``custom_agents.strands_parts.StrandsParts``); the resumed turn calls it
+    again, and no other turn may use it until then.
+    """
 
     task_id: str
-    strands_agent: Any
+    strands: Any
     invoke_kwargs: Dict[str, Any]
     # The paused turn's callback handler: its tool-call limit and activity
     # reports carry on in the resumed call (sdk.strands.turn_tool_stop).
@@ -81,28 +87,51 @@ class StrandsInterruptedTurnSession:
     # the notes are still saved and the task's fresh turn reads them again.
     start_notes: Optional[TurnStartNotes] = None
 
+    @property
+    def strands_agent(self) -> Any:
+        return self.strands.agent
+
+
+def _session_holders(agent: Any, parts: Any) -> list[str]:
+    """The tasks whose interrupted sessions hold ``parts`` until they resume."""
+
+    return sorted(
+        session_task_id
+        for session_task_id, session in dict(
+            getattr(agent, "_interrupted_turn_sessions", {}) or {}
+        ).items()
+        if session.strands is parts
+    )
+
 
 def ensure_fresh_strands_agent_for_new_turn(
     agent: Any,
     *,
     task_id: Optional[str],
 ) -> bool:
-    """Keep a live SDK interrupt session isolated from unrelated model turns."""
+    """Give a new turn the main Strands agent, never one an interrupted session holds.
 
+    The turn's work record gets the parts it calls (``runtime_context.TaskWork``).
+    A paused turn keeps its Strands agent for its resume, and an agent left
+    with interrupt state no session will resume (``replace_before_next_turn``)
+    is not reused; either way the main agent is rebuilt first. Returns
+    whether it was.
+    """
+
+    current = agent._strands_parts
+    session_owners = _session_holders(agent, current)
+    replaced = bool(current.replace_before_next_turn or session_owners)
+    if replaced:
+        _rotate_main_strands_agent(agent, task_id=task_id, session_owners=session_owners)
+    work = current_task_work()
+    if work is None or work.task_id != task_id:
+        raise RuntimeError("A turn took its Strands agent outside its task's work record (runtime_context.task_work).")
+    work.strands = agent._strands_parts
+    return replaced
+
+
+def _rotate_main_strands_agent(agent: Any, *, task_id: Optional[str], session_owners: list[str]) -> None:
     current = getattr(agent, "_strands_agent", None)
-    session_owners = sorted(
-        session_task_id
-        for session_task_id, session in dict(
-            getattr(agent, "_interrupted_turn_sessions", {}) or {}
-        ).items()
-        if session.strands_agent is current
-    )
-    replacement_required = bool(
-        getattr(agent, "_strands_agent_replacement_required", False) or session_owners
-    )
-    if not replacement_required:
-        return False
-
     previous_id = id(current) if current is not None else None
     agent._create_strands_agent()
     replacement = getattr(agent, "_strands_agent", None)
@@ -110,7 +139,6 @@ def ensure_fresh_strands_agent_for_new_turn(
         raise RuntimeError(
             "Could not isolate a live Strands interrupt from a new task turn."
         )
-    agent._strands_agent_replacement_required = False
     agent._logger.warning(
         "[%s] Rotated the default Strands agent before a new turn because the "
         "prior instance belongs to an interrupted session. "
@@ -123,7 +151,6 @@ def ensure_fresh_strands_agent_for_new_turn(
         previous_id,
         id(replacement),
     )
-    return True
 
 
 async def discard_task_steering_state(
@@ -156,10 +183,9 @@ def _discard_task_steering_memory(
         task_id, None
     )
     getattr(agent, "_consumed_task_steering_ids", {}).pop(task_id, None)
-    if session is not None and session.strands_agent is getattr(
-        agent, "_strands_agent", None
-    ):
-        agent._strands_agent_replacement_required = True
+    if session is not None:
+        # Its agent still holds the interrupt; no later turn may reuse it.
+        session.strands.replace_before_next_turn = True
     discarded = bool(session is not None or pending_response is not None or proactive)
     if discarded:
         agent._logger.info(
@@ -177,19 +203,12 @@ def _discard_task_steering_memory(
     return discarded
 
 
-def _mark_default_strands_agent_resumable(
-    agent: Any,
-    *,
-    resumed_strands_agent: Any,
-) -> None:
-    if agent._strands_agent is not resumed_strands_agent:
+def _mark_strands_resumable(agent: Any, *, resumed: Any) -> None:
+    """A resumed turn finished its interrupt: its Strands agent may serve later turns again."""
+
+    if _session_holders(agent, resumed):
         return
-    if any(
-        candidate.strands_agent is resumed_strands_agent
-        for candidate in agent._interrupted_turn_sessions.values()
-    ):
-        return
-    agent._strands_agent_replacement_required = False
+    resumed.replace_before_next_turn = False
 
 
 def _register_terminal_task_steering_cleanup(agent: Any) -> None:
@@ -820,8 +839,17 @@ def _answered_access_ids(
 
 
 async def resume_interrupted_task_turn(agent: Any, task_id: str) -> Optional[Any]:
-    """Resume an in-memory Strands interrupt and apply the resulting task output."""
+    """Resume an in-memory Strands interrupt and apply the resulting task output.
 
+    The resumed turn is this task's handling: it binds the task's work record
+    and calls the paused turn's own Strands agent (``StrandsInterruptedTurnSession.strands``).
+    """
+
+    with task_work(task_id) as work:
+        return await _resume_interrupted_task_turn(agent, task_id, work)
+
+
+async def _resume_interrupted_task_turn(agent: Any, task_id: str, work: TaskWork) -> Optional[Any]:
     session = agent._interrupted_turn_sessions.get(task_id)
     steering = agent._pending_interrupt_responses.pop(task_id, None)
     if session is None or steering is None:
@@ -852,7 +880,7 @@ async def resume_interrupted_task_turn(agent: Any, task_id: str) -> Optional[Any
         )
         return None
 
-    agent._strands_agent = session.strands_agent
+    work.strands = session.strands
     # Clear the old durable wait before output projection or another interrupt.
     # The access-request handler already checked the stored decision; every
     # tool call is still decided again when the SDK resumes.
@@ -934,7 +962,6 @@ async def _run_resumed_turn(
             task=session.msg_content,
             msg_header=session.msg_header,
             msg_meta=session.msg_meta,
-            strands_agent=session.strands_agent,
             invoke_kwargs=session.invoke_kwargs,
             callback_handler=session.callback_handler,
             full_prompt=session.full_prompt,
@@ -963,10 +990,7 @@ async def _run_resumed_turn(
     )
     await agent._apply_task_processing_result(task_id, task_info, content)
     agent._interrupted_turn_sessions.pop(task_id, None)
-    _mark_default_strands_agent_resumable(
-        agent,
-        resumed_strands_agent=session.strands_agent,
-    )
+    _mark_strands_resumable(agent, resumed=session.strands)
     await agent.task_manager.operations_runtime.run(
         partial(_record_interrupted_turn_resumed, agent.task_manager),
         task_id=task_id,
@@ -999,12 +1023,21 @@ async def send_interrupt_request_for_result(
     task: Task,
     msg_header: MessageHeader,
     msg_meta: MessageMeta,
-    strands_agent: Any,
     invoke_kwargs: Dict[str, Any],
     callback_handler: Callable[..., None],
     full_prompt: str,
     start_notes: Optional[TurnStartNotes] = None,
 ) -> TaskSteering:
+    """Keep the paused turn's Strands agent for its resume and ask for what it waits on.
+
+    The paused turn is the one bound in this context; its Strands agent and
+    tool state (its work record's ``strands``) go to the session.
+    """
+
+    work = current_task_work()
+    if work is None or work.strands is None or work.task_id != task.task_id:
+        raise RuntimeError("A turn paused outside its task's work record (runtime_context.task_work).")
+    strands = work.strands
     config = mid_turn_steering_config(agent)
     expires_at = _ttl_timestamp(
         config.get("interrupt_response_timeout_seconds", 86400.0)
@@ -1040,7 +1073,7 @@ async def send_interrupt_request_for_result(
         # same agent is acknowledged and discarded by the control receiver, not a
         # human review. Reject before persisting a blocker or reserving SDK state.
         if not routing_key or routing_key in {agent.id, RoutingType.SELF_ROUTE.value}:
-            agent._strands_agent_replacement_required = True
+            strands.replace_before_next_turn = True
             raise UnroutableTaskInterruptError(
                 "This task needs input but has no external requester reply route. "
                 "No input request was delivered to Inbox. Start the repair from an "
@@ -1059,7 +1092,7 @@ async def send_interrupt_request_for_result(
     )
     agent._interrupted_turn_sessions[task.task_id] = StrandsInterruptedTurnSession(
         task_id=task.task_id,
-        strands_agent=strands_agent,
+        strands=strands,
         invoke_kwargs=dict(invoke_kwargs),
         callback_handler=callback_handler,
         full_prompt=full_prompt,
@@ -1089,7 +1122,7 @@ async def send_interrupt_request_for_result(
                 "conversation_id": getattr(msg_meta, "conversation_id", None),
             },
         )
-    agent._strands_agent_replacement_required = True
+    strands.replace_before_next_turn = True
     await agent.task_manager.operations_runtime.run(
         agent.task_manager.append_history_entry,
         task.task_id,
@@ -1236,7 +1269,8 @@ class RuntimeSteeringPlugin:
         config = mid_turn_steering_config(agent)
         if not bool(config.get("apply_proactive_guidance_before_tools", True)):
             return
-        task_id = getattr(agent, "_active_execution_task_id", None)
+        # The task of the turn this tool call belongs to (runtime_context.task_work).
+        task_id = bound_task_id()
         text = await consume_pending_proactive_guidance_message(agent, task_id)
         if not text:
             return

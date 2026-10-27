@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from custom_messages.contracts.access_v2 import SubjectKind, SubjectRefV1, TargetKind, TargetRefV1
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from runtime_settings.instance_layout import InstanceLayout
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
 from tests.broker_access_support import TEST_TEAM
