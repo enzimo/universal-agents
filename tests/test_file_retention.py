@@ -71,17 +71,19 @@ def _saved(config: GatewayInstanceConfig) -> GatewayInstanceConfig:
     return GatewayInstanceConfig.load_saved(config.config_path)
 
 
-def test_new_instances_keep_uploads_three_months_and_scratch_three_weeks(tmp_path: Path) -> None:
+def test_new_instances_keep_uploads_and_saved_tool_outputs_three_months_and_scratch_three_weeks(
+    tmp_path: Path,
+) -> None:
     service, _, changes = _service(tmp_path, allowed=False)
 
     page = service.page(person_id="usr_member")
 
-    assert page.retention == FileRetention(upload_days=90, scratch_days=21)
+    assert page.retention == FileRetention(upload_days=90, scratch_days=21, output_days=90)
     assert page.can_change is False
     assert changes.asked == [("usr_member", RUNTIME_SETTINGS_CHANGE_KIND)]
 
 
-def test_saving_changes_only_the_two_numbers_keeps_a_backup_and_tells_the_cleanup(
+def test_saving_changes_only_the_three_numbers_keeps_a_backup_and_tells_the_cleanup(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     service, config, _ = _service(tmp_path, allowed=True)
@@ -89,14 +91,16 @@ def test_saving_changes_only_the_two_numbers_keeps_a_backup_and_tells_the_cleanu
     expected = _saved(config)
     expected.interactive_apps.internal_website.attachments.retention_days = 30
     expected.tool_policy.scratch_retention_days = 0
+    expected.tool_policy.output_retention_days = 180
     caplog.set_level(logging.INFO)
 
-    saved = service.save(person_id="usr_admin", upload_days=30, scratch_days=0)
+    saved = service.save(person_id="usr_admin", upload_days=30, scratch_days=0, output_days=180)
 
-    assert saved == FileRetention(upload_days=30, scratch_days=0)
+    assert saved == FileRetention(upload_days=30, scratch_days=0, output_days=180)
     after = _saved(config)
     assert after.interactive_apps.internal_website.attachments.retention_days == 30
     assert after.tool_policy.scratch_retention_days == 0
+    assert after.tool_policy.output_retention_days == 180
     # Loading fills in empty defaults (as every settings writer's save does),
     # so compare with the expected settings after the same save and load.
     expected.save(tmp_path / "expected.yaml")
@@ -105,7 +109,10 @@ def test_saving_changes_only_the_two_numbers_keeps_a_backup_and_tells_the_cleanu
     [backup] = _backups(config)
     assert backup.read_bytes() == previous
     assert service._uploads.retention_days == 30, "the next cleanup uses the new number without a restart"
-    assert "event=file_retention_changed person_id=usr_admin upload_days=90->30 scratch_days=21->0" in caplog.text
+    assert (
+        "event=file_retention_changed person_id=usr_admin upload_days=90->30 scratch_days=21->0 "
+        "output_days=90->180"
+    ) in caplog.text
     assert service.page(person_id="usr_admin").retention == saved
 
 
@@ -114,24 +121,37 @@ def test_someone_who_may_not_change_it_changes_nothing(tmp_path: Path) -> None:
     previous = config.layout.instance_config_path.read_bytes()
 
     with pytest.raises(FileRetentionRefused, match="Only team administrators"):
-        service.save(person_id="usr_member", upload_days=30, scratch_days=7)
+        service.save(person_id="usr_member", upload_days=30, scratch_days=7, output_days=60)
 
     assert config.layout.instance_config_path.read_bytes() == previous
     assert _backups(config) == []
 
 
 @pytest.mark.parametrize(
-    ("upload_days", "scratch_days"),
-    [(-1, 21), (3651, 21), ("30", 21), (30.5, 21), (True, 21), (None, 21), (90, -5)],
+    ("upload_days", "scratch_days", "output_days"),
+    [
+        (-1, 21, 90),
+        (3651, 21, 90),
+        ("30", 21, 90),
+        (30.5, 21, 90),
+        (True, 21, 90),
+        (None, 21, 90),
+        (90, -5, 90),
+        (90, 21, -1),
+        (90, 21, None),
+        (90, 21, "90"),
+    ],
 )
 def test_numbers_the_settings_cannot_hold_are_refused_and_nothing_is_saved(
-    tmp_path: Path, upload_days: object, scratch_days: object
+    tmp_path: Path, upload_days: object, scratch_days: object, output_days: object
 ) -> None:
     service, config, _ = _service(tmp_path, allowed=True)
     previous = config.layout.instance_config_path.read_bytes()
 
     with pytest.raises(FileRetentionInvalid, match="whole number|from 0"):
-        service.save(person_id="usr_admin", upload_days=upload_days, scratch_days=scratch_days)
+        service.save(
+            person_id="usr_admin", upload_days=upload_days, scratch_days=scratch_days, output_days=output_days
+        )
 
     assert config.layout.instance_config_path.read_bytes() == previous
     assert _backups(config) == []
@@ -152,7 +172,7 @@ def test_a_settings_change_made_meanwhile_is_never_overwritten(
     monkeypatch.setattr(GatewayInstanceConfig, "load", classmethod(load_then_someone_else_saves))
 
     with pytest.raises(FileRetentionConflict, match="changed while this was being saved"):
-        service.save(person_id="usr_admin", upload_days=30, scratch_days=7)
+        service.save(person_id="usr_admin", upload_days=30, scratch_days=7, output_days=60)
 
     assert path.read_text(encoding="utf-8").endswith("# changed by another settings writer\n")
     assert _backups(config) == []
@@ -188,7 +208,7 @@ def test_a_writer_racing_the_retention_backup_must_reload_before_it_can_save(tmp
 
     monkeypatch.setattr(config_file_updates, "atomic_write_bytes", pause_at_backup)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(service.save, person_id="usr_admin", upload_days=30, scratch_days=7)
+        first = pool.submit(service.save, person_id="usr_admin", upload_days=30, scratch_days=7, output_days=60)
         try:
             assert at_backup.wait(timeout=10)
             second = pool.submit(save_other)
@@ -196,7 +216,7 @@ def test_a_writer_racing_the_retention_backup_must_reload_before_it_can_save(tmp
             assert not second_done.wait(timeout=0.05), "the other writer must wait for the checked replacement"
         finally:
             continue_save.set()
-        assert first.result(timeout=10) == FileRetention(upload_days=30, scratch_days=7)
+        assert first.result(timeout=10) == FileRetention(upload_days=30, scratch_days=7, output_days=60)
         with pytest.raises(ConfigFileConflict):
             second.result(timeout=10)
     after = _saved(config)
@@ -226,13 +246,13 @@ def test_concurrent_retention_saves_keep_disk_and_live_values_in_the_same_order(
     def save_second():
         second_started.set()
         try:
-            return service.save(person_id="usr_admin", upload_days=60, scratch_days=9)
+            return service.save(person_id="usr_admin", upload_days=60, scratch_days=9, output_days=120)
         finally:
             second_done.set()
 
     monkeypatch.setattr(GatewayInstanceConfig, "save", save_then_pause)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(service.save, person_id="usr_admin", upload_days=30, scratch_days=7)
+        first = pool.submit(service.save, person_id="usr_admin", upload_days=30, scratch_days=7, output_days=60)
         try:
             assert first_written.wait(timeout=10)
             second = pool.submit(save_second)

@@ -1,8 +1,11 @@
 """Manager-owned recurring maintenance for InternalImprovementAgent workers.
 
-Each occurrence first removes old scratch files in trusted manager code
-(``prune_scratch_for_maintenance``), then dispatches the agent's review with
-the counts in its instructions.
+Each occurrence first removes old scratch files and saved tool outputs past
+their retention periods in trusted manager code
+(``prune_scratch_for_maintenance``, ``remove_old_outputs_for_maintenance``),
+then dispatches the agent's review with the counts in its instructions, which
+the run records, so administrators see in the maintenance schedule's runs
+that retention runs and what it deleted.
 
 A maintenance run is system work (access plan 7c): the scheduler signs it for
 no person (``custom_agents.task_context_runtime.sign_system_context``; without
@@ -14,6 +17,7 @@ so the run may use its role's standard tools on the shared ``team/`` and
 any person's: people's folders and schedules are private. So trusted manager
 code does what needs everyone's records before each run and tells the run
 only counts: it prunes scratch folders (``prune_scratch_for_maintenance``),
+deletes saved tool outputs past their period (``remove_old_outputs_for_maintenance``),
 ends the work of disabled and removed people and purges held data past its
 retention time (``custom_agents.person_departure_runtime``), and checks every
 schedule for ones nobody needs (``custom_agents.stale_schedules``, which tells
@@ -31,6 +35,7 @@ import logging
 from typing import Any, Mapping, Optional
 
 from custom_agents.conversation_runtime import start_new_conversation
+from custom_agents.output_retention import remove_old_outputs
 from custom_agents.scratch_retention import prune_scratch_folders
 from python_env_lifecycle import prune_request_environments
 from custom_agents.schedule_permits import sign_system_run
@@ -357,6 +362,7 @@ async def enqueue_internal_improvement_job(
 
     scratch_sentence = await prune_scratch_for_maintenance(agent, schedule_id)
     python_sentence = await prune_python_envs_for_maintenance(agent, schedule_id)
+    outputs_sentence = await remove_old_outputs_for_maintenance(agent, schedule_id)
     schedules_sentence = await check_schedules_for_maintenance(agent, schedule_id)
     task = scheduled_message.payload.model_copy(deep=True)
     occurrence_id = operational_id(INTERNAL_IMPROVEMENT_ID_PREFIX, occurrence_key)
@@ -372,6 +378,7 @@ async def enqueue_internal_improvement_job(
         f"{MEMORY_REVIEW_CLEANUP_INSTRUCTION}\n\n"
         f"{scratch_sentence}\n\n"
         f"{python_sentence}\n\n"
+        f"{outputs_sentence}\n\n"
         f"{schedules_sentence}\n\n"
         f"Canonical schedule_id: {schedule_id}\n"
         "Current compact schedule memory:\n"
@@ -491,6 +498,48 @@ async def prune_python_envs_for_maintenance(agent: Any, schedule_id: str) -> str
         agent._logger.exception("Python environment cleanup failed. event=python_env_prune_failed schedule_id=%s", schedule_id)
         return "Python environment cleanup failed before this review; report event=python_env_prune_failed to TeamArchitect."
     return f"Trusted maintenance removed {removed} request-default Python environments unused for 7 days. Named environments were kept."
+
+
+async def remove_old_outputs_for_maintenance(agent: Any, schedule_id: str) -> str:
+    """Delete saved tool outputs past ``tool_policy.output_retention_days``; returns a sentence for the run's instructions.
+
+    Trusted manager code, for the same reason as scratch cleanup: the outputs
+    are in ``state/``, ``dbs/`` and people's folders, which the review cannot
+    open. See ``custom_agents.output_retention`` for the rules.
+    """
+
+    from custom_tools.workspace_scope import current_instance_layout
+
+    retention_days = int(
+        getattr(agent, "output_retention_days", TOOL_POLICY_DEFAULTS.output_retention_days.value)
+    )
+    layout = current_instance_layout(agent)
+    if layout is None:
+        agent._logger.warning(
+            "[%s] Saved tool output cleanup did not run because this runtime has no instance folder layout. "
+            "event=output_retention_skipped reason=no_instance_layout schedule_id=%s",
+            agent.id,
+            schedule_id,
+        )
+        return "Saved tool output cleanup did not run because this runtime has no instance folder layout; report it."
+    try:
+        result = await asyncio.to_thread(
+            remove_old_outputs,
+            layout,
+            retention_days=retention_days,
+            conversation_records=getattr(agent, "_conversation_store", None),
+        )
+    except Exception:
+        agent._logger.exception(
+            "[%s] Saved tool output cleanup failed. event=output_retention_failed schedule_id=%s",
+            agent.id,
+            schedule_id,
+        )
+        return (
+            "Saved tool output cleanup failed before this review (manager log event=output_retention_failed); "
+            "report it to TeamArchitect."
+        )
+    return result.instruction_sentence()
 
 
 async def check_schedules_for_maintenance(agent: Any, schedule_id: str) -> str:

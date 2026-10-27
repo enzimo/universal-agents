@@ -421,7 +421,11 @@ schedule's record, but not people's folders or schedules. TeamArchitect handles
 their findings for the person the maintenance schedule belongs to (the first
 user) and tells them.
 
-Before each maintenance run, the runtime itself checks every schedule
+Before each maintenance run, the runtime itself deletes old scratch files and
+saved tool outputs past their retention periods
+([Scratch retention](configuration.md#scratch-retention),
+[Saved tool output retention](configuration.md#saved-tool-output-retention))
+and gives the run the counts to record. Then it checks every schedule
 (settings under `agent.schedule_maintenance.stale_schedules`):
 
 - It ends the work of anyone an administrator disabled or removed

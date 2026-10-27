@@ -36,6 +36,11 @@ class ToolPolicySettings(BaseModel):
     scratch_retention_days: int = Field(
         default=TOOL_POLICY_DEFAULTS.scratch_retention_days.value, ge=0
     )
+    # Trusted maintenance deletes saved tool outputs written longer ago than
+    # this (custom_agents.output_retention); 0 turns the cleanup off.
+    output_retention_days: int = Field(
+        default=TOOL_POLICY_DEFAULTS.output_retention_days.value, ge=0
+    )
 
 
 class AuthorizationPresentationSettings(BaseModel):

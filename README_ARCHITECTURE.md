@@ -1421,7 +1421,36 @@ internal-improvement maintenance schedule fires, trusted code in the manager
 deletes files there older than `tool_policy.scratch_retention_days` (21 by
 default, 0 turns it off) from every person's and the agents' `scratch/`,
 walking folders without following links, and gives InternalImprovementAgent
-the counts (`custom_agents/scratch_retention.py`). The maintenance run itself
+the counts (`custom_agents/scratch_retention.py`).
+
+In the same step it deletes saved tool outputs written longer ago than
+`tool_policy.output_retention_days` (90 by default, 0 turns it off;
+`custom_agents/output_retention.py`). One period covers four kinds, all
+copies of what a tool returned that the tool can produce again: oversized tool
+results in `state/tool_results/` (a folder per result, `manifest.json`
+deleted first), long tool output offloaded from conversations (each
+`conversation_artifacts` record with its file in `dbs/conversation_artifacts/`,
+the record first, then any older file no record names), research result
+folders in `research/` of every person's folder and `agents/`, and execution
+run and Rust build folders in `agents/execution/`. An item's age is the UTC
+time its folder name starts with, or its record's `created_at`, or else (no
+date, or an agent-written name dated in the future) its last change; for a
+tool result without a dated name, its manifest's `created_at` comes first.
+Run and build folders are never deleted younger than two days (no run or
+build lasts more than one), and a build folder only while the cleanup holds
+its build lock; a build that waited on that lock finds its lock file gone and
+starts over in a new folder (`runtime_hosting/builds.py`). Each kind runs on
+its own, so one failure is logged (`event=output_retention_failed`) and
+reported while the others still run, and the run's instructions carry the
+items, files and bytes deleted per kind, which the run records. The manager
+does this because the outputs sit in `state/`, `dbs/` and people's folders,
+which the maintenance run cannot open; it is the side that writes all four.
+Conversations (transcripts, task links, turn and context summaries) and
+completed tasks are never deleted by it. The content-addressed execution
+artifacts in `state/execution_artifacts/` are left alone: one stored object can
+serve many owners' execution records, which are kept, and deleting one a
+record still names breaks every later read of it. Deleting them needs a
+retention period for those records and a record of which objects they name. The maintenance run itself
 is system work for no person and cannot open people's folders, which is why
 trusted code does this part. The run may use the shared `team/` and `agents/`
 folders, sandboxed code there, the memory-review cleanup tools and model
@@ -2988,13 +3017,16 @@ it deletes every file in `state/uploads` older than the cutoff, which also
 removes files left without a record, and the folders left empty. It shares the
 link-safe folder walk with the scratch cleanup (`old_file_cleanup.py`). The
 gateway is the only writer of `state/uploads`; agents work on their own copies.
-Administrators change both retention numbers in Settings → Team → File
-Retention (`assistant_gateway/file_retention.py`). That is a `runtime_settings`
+Administrators change the three retention numbers (chat uploads, scratch
+files, saved tool outputs) in Settings → Team → File Retention
+(`assistant_gateway/file_retention.py`). That is a `runtime_settings`
 change in the gateway's own controls, so `PersonChangeCheck` decides who may.
-The save changes only those two fields of `instance_config.yaml`, keeps a
+The save changes only those three fields of `instance_config.yaml`, keeps a
 backup as the configuration editor does, and is refused when the file changed
-meanwhile. Upload retention applies from the next cleanup; scratch retention
-applies after a restart, because the manager reads its settings when it starts.
+meanwhile. Upload retention applies from the next cleanup; scratch and saved
+output retention apply after a restart, because the manager reads its
+settings when it starts. The team transfer's settings section is version 7
+for `tool_policy.output_retention_days`.
 
 A person can answer one earlier chat message with the channel's reply feature.
 That message often belongs to another conversation than the one the chat

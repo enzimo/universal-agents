@@ -451,6 +451,11 @@ class ConversationStore:
             extension=extension,
         )
 
+    def delete_artifacts_created_before(self, cutoff: str, *, limit: int) -> tuple[str, ...]:
+        """Delete the oldest artifact records created before ``cutoff``; their files' paths (``custom_agents.output_retention``)."""
+
+        return self._repository.delete_artifacts_created_before(cutoff, limit=limit)
+
     def create_context_epoch(self, **kwargs: Any) -> dict[str, Any]:
         return self._repository.create_context_epoch(**kwargs)
 

@@ -731,6 +731,15 @@ class UniversalAgent(BaseModel):
             "when the internal-improvement maintenance schedule fires (custom_agents.scratch_retention); 0 keeps them."
         ),
     )
+    output_retention_days: int = Field(
+        default=TOOL_POLICY_DEFAULTS.output_retention_days.value,
+        ge=0,
+        description=(
+            "``tool_policy.output_retention_days``: the manager deletes saved tool outputs written longer ago "
+            "when the internal-improvement maintenance schedule fires, and the tools that read them say an "
+            "output was deleted under this period (custom_agents.output_retention); 0 keeps them."
+        ),
+    )
     llm_override_path: Optional[str] = Field(
         default=None,
         description="Optional explicit path to the persistent LLM override YAML file.",

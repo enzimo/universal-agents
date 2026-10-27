@@ -28,10 +28,11 @@ class FileRetentionConflict(Exception):
 
 @dataclass(frozen=True)
 class FileRetention:
-    """Days chat uploads and scratch files are kept; 0 keeps them forever."""
+    """Days chat uploads, scratch files and saved tool outputs are kept; 0 keeps them forever."""
 
     upload_days: int
     scratch_days: int
+    output_days: int
 
 
 @dataclass(frozen=True)

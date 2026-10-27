@@ -1,7 +1,8 @@
 """The HTTP routes of Settings > Team > File Retention.
 
-GET shows every signed-in member the saved numbers of days chat uploads and
-scratch files are kept, and whether they may change them. PUT saves both;
+GET shows every signed-in member the saved numbers of days chat uploads,
+scratch files and saved tool outputs are kept, and whether they may change
+them. PUT saves all three;
 who may is decided by ``PersonChangeCheck`` in
 ``assistant_gateway.file_retention`` (administrators with authorization on),
 from the person's current roles, never from the browser.
@@ -38,6 +39,7 @@ def retention_payload(retention: FileRetention) -> dict[str, Any]:
     return {
         "upload_days": retention.upload_days,
         "scratch_days": retention.scratch_days,
+        "output_days": retention.output_days,
         "max_days": MAX_RETENTION_DAYS,
     }
 
@@ -63,6 +65,7 @@ class WebsiteFileRetentionHandlers(SignedInAccessHandlers):
                 person_id=person_id,
                 upload_days=payload.get("upload_days"),
                 scratch_days=payload.get("scratch_days"),
+                output_days=payload.get("output_days"),
             )
         except FileRetentionRefused as exc:
             LOGGER.warning(

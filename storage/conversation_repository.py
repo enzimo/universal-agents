@@ -309,6 +309,8 @@ class ConversationRepository(Protocol):
         extension: str = "txt",
     ) -> dict[str, Any]: ...
 
+    def delete_artifacts_created_before(self, cutoff: str, *, limit: int) -> tuple[str, ...]: ...
+
     def create_context_epoch(
         self,
         *,
@@ -540,6 +542,12 @@ class _RelationalConversationRepository:
                     created_at TEXT
                 )
                 """
+            )
+            # The saved-output cleanup deletes the oldest records first
+            # (delete_artifacts_created_before).
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conversation_artifacts_created_at "
+                "ON conversation_artifacts(created_at)"
             )
             conn.execute(
                 """
@@ -1867,6 +1875,36 @@ class _RelationalConversationRepository:
             "summary_text": summary_text,
             "created_at": now_ts,
         }
+
+    def delete_artifacts_created_before(self, cutoff: str, *, limit: int) -> tuple[str, ...]:
+        """Delete up to ``limit`` artifact records created before ``cutoff``, oldest first.
+
+        ``cutoff`` is an ISO 8601 UTC time in the same form as ``created_at``
+        (``utc_now_iso``), so the text comparison orders them by time.
+        Returns the files the records named, for the caller to delete
+        (``custom_agents.output_retention``): the record goes first, so a file
+        that cannot be removed is left without a record, which the cleanup
+        removes by its age later, never a record without its file. The turns
+        that mention an artifact keep its summary.
+        """
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                DELETE FROM conversation_artifacts
+                WHERE artifact_id IN (
+                    SELECT artifact_id FROM conversation_artifacts
+                    WHERE created_at < {bind}
+                    ORDER BY created_at
+                    LIMIT {bind}
+                )
+                RETURNING storage_path
+                """,
+                (cutoff, int(limit)),
+            ).fetchall()
+            conn.commit()
+        return tuple(str(row[0] or "") for row in rows)
 
     def create_context_epoch(
         self,

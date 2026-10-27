@@ -97,7 +97,7 @@ def prune_scratch_folders(
         logger.info("Scratch cleanup is turned off. event=scratch_prune_disabled retention_days=%s", retention_days)
         return result
     cutoff = retention_cutoff(retention_days, now)
-    for parts in _scratch_folders(workspaces_dir, result):
+    for parts in person_area_folders(workspaces_dir, SCRATCH_DIRNAME, result):
         shown = workspaces_dir.joinpath(*parts)
         try:
             folder = safe_open.open_directory(workspaces_dir, parts)
@@ -123,26 +123,32 @@ def prune_scratch_folders(
     return result
 
 
-def _scratch_folders(workspaces_dir: Path, result: ScratchPruneResult) -> list[tuple[str, ...]]:
-    """``agents/scratch`` and ``users/<folder>/scratch`` for every real person folder."""
+def person_area_folders(workspaces_dir: Path, leaf: str, counts: OldFilesRemoved) -> list[tuple[str, ...]]:
+    """``agents/<leaf>`` and ``users/<folder>/<leaf>`` for every real person folder, relative to ``workspaces/``.
 
-    folders: list[tuple[str, ...]] = [(AGENTS_DIRNAME, SCRATCH_DIRNAME)]
+    Shared with the saved output cleanup (``custom_agents.output_retention``,
+    research folders). An entry of ``users/`` that is not a folder (a link,
+    for example) is not a person folder; it is logged and left alone.
+    """
+
+    folders: list[tuple[str, ...]] = [(AGENTS_DIRNAME, leaf)]
     try:
         entries = safe_open.list_directory(workspaces_dir, (USERS_DIRNAME,))
     except UnsafePath as exc:
         if exc.reason != safe_open.REASON_NOT_FOUND:
-            note_skipped(result, workspaces_dir / USERS_DIRNAME, exc.reason)
+            note_skipped(counts, workspaces_dir / USERS_DIRNAME, exc.reason)
         return folders
     for name, info in sorted(entries):
         if stat.S_ISDIR(info.st_mode):
-            folders.append((USERS_DIRNAME, name, SCRATCH_DIRNAME))
+            folders.append((USERS_DIRNAME, name, leaf))
         else:
-            note_skipped(result, workspaces_dir / USERS_DIRNAME / name, SKIPPED_NOT_FILE_OR_FOLDER)
+            note_skipped(counts, workspaces_dir / USERS_DIRNAME / name, SKIPPED_NOT_FILE_OR_FOLDER)
     return folders
 
 
 __all__ = [
     "SECONDS_PER_DAY",
     "ScratchPruneResult",
+    "person_area_folders",
     "prune_scratch_folders",
 ]

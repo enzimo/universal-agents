@@ -1432,6 +1432,15 @@ class ToolPolicyDefaultValues:
         "Days a file stays in a scratch/ folder (people's and agents') before maintenance deletes it; 0 keeps them.",
         onboarding_overridable=False,
     )
+    # One period for the four kinds of saved tool output (owner's decision
+    # 2026-10-27): about three months, like chat uploads.
+    output_retention_days: DefaultValue[int] = default_value(
+        90,
+        "Days saved tool outputs are kept (oversized tool results, long tool output offloaded from "
+        "conversations, research results and execution run folders) before maintenance deletes them; "
+        "0 keeps them.",
+        onboarding_overridable=False,
+    )
 
 
 @dataclass(frozen=True)

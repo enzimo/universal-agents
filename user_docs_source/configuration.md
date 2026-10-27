@@ -236,7 +236,8 @@ Python needs to process it. Files agents attach to messages for people are
 copied into `scratch/sent/` of the person's folder before they are sent, and
 pages agents publish for a person are written into `sites/` of that folder
 ([Generated Sites](generated-sites.md)). Old files in every `scratch/` folder
-are deleted automatically ([Scratch retention](#scratch-retention)).
+are deleted automatically ([Scratch retention](#scratch-retention)), and so
+are old saved tool outputs ([Saved tool output retention](#saved-tool-output-retention)).
 
 ### Scratch retention
 
@@ -258,6 +259,41 @@ report includes how many files it removed. Web Chat shows an attachment whose
 copy was removed as no longer available. Administrators can also change the
 number in **Settings → Team → File Retention**; the manager reads it when it
 starts, so a change there applies after the next restart.
+
+### Saved tool output retention
+
+Agents' tools save what they produce while they work, so a large result does
+not have to stay in the conversation. Each time the internal-improvement
+maintenance schedule runs (every six hours by default), the manager deletes
+those saved outputs written more than `tool_policy.output_retention_days` days
+ago (90 by default, about three months):
+
+- **Tool results** too large for one answer, in `state/tool_results/`.
+- **Long tool output saved from conversations**, in `dbs/conversation_artifacts/`,
+  with its record in the task database.
+- **Research results**, in `research/` of each person's folder and of `agents/`.
+  Only the result folders the research tools wrote go; other files there stay.
+- **Execution run folders** in `agents/execution/`: folders that an
+  interrupted run left behind, and Rust build folders not used for the period.
+  A run or build folder is never deleted while it may still be in use, and
+  never when it is less than two days old.
+
+```yaml
+tool_policy:
+  output_retention_days: 90   # 0 keeps saved tool outputs
+```
+
+Each output's age is counted from when it was written: the date in its folder
+name or record, or else when its files last changed. Conversations, their
+summaries, task links and completed tasks are kept whatever this number is.
+After a saved output is deleted, an old conversation still shows what the
+output was about, and an agent that tries to open it is told that it was
+deleted under the retention policy; the agent can run the tool again. Links
+are never followed. The maintenance run's record lists, for each kind, how
+many items, files and bytes were deleted, so administrators can see that the
+cleanup runs. Administrators can also change the number in **Settings → Team
+→ File Retention**; like scratch retention it applies after the next restart.
+Nothing is deleted while the maintenance schedule is turned off.
 
 ### Upload retention
 
@@ -391,7 +427,9 @@ It owns durable non-secret settings such as:
 - Manager and gateway storage backend choices.
 - The instance root, from which every folder is derived.
 - Tool settings that are not access, such as
-  `tool_policy.scratch_retention_days`.
+  `tool_policy.scratch_retention_days` and
+  `tool_policy.output_retention_days` (see
+  [Saved tool output retention](#saved-tool-output-retention)).
 - How long chat uploads are kept (`attachments.retention_days` of the internal
   website; see [Upload retention](#upload-retention)).
 - LLM and embedding defaults.

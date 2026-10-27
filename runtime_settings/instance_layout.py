@@ -18,6 +18,8 @@ Docker). The root is split by who may touch each area:
     file), model failover state, diagnostics, execution artifacts, and the
     folders of people removed from the team, held until they are restored or
     purged (``held_people/``, ``access_control.held_person_folders``).
+    Trusted maintenance deletes old offloaded tool results here, and old
+    conversation artifacts in ``dbs/`` (``custom_agents.output_retention``).
 ``workspaces/``
     The only area agents work in:
 
@@ -26,10 +28,13 @@ Docker). The root is split by who may touch each area:
       files, Python environments, uploads copied in for processing, published
       pages (``sites/``) and temporary files (``scratch/``, including the
       gateway's copies of files sent to the person in ``scratch/sent/``).
-      Trusted maintenance deletes old files from ``scratch/``.
+      Trusted maintenance deletes old files from ``scratch/`` and old result
+      folders from ``research/``.
     - ``team/`` is shared by everyone on the team, people and agents.
     - ``agents/`` is shared by the team's agents and is the working folder of
-      tasks that run for no person (system maintenance).
+      tasks that run for no person (system maintenance). Execution control's
+      run and build folders are in ``agents/execution``; trusted maintenance
+      deletes old ones.
 
 Operator files (``instance_config.yaml``, ``team.env``), broker credentials,
 ``auth/`` and ``runtime/`` stay directly under the root, outside every area an
@@ -144,6 +149,10 @@ SCRATCH_DIRNAME = "scratch"
 SCRATCH_SENT_DIRNAME = "sent"
 # Pages published for a person (publish_single_page_site), one folder per site.
 PERSON_SITES_DIRNAME = "sites"
+# Run and build folders of execution control, in agents/ (execution_runs_dir).
+EXECUTION_DIRNAME = "execution"
+# Content-addressed Rust build folders inside the execution folder.
+EXECUTION_RUST_BUILDS_DIRNAME = "rust-builds"
 
 # The one legacy location: every file used to sit in <root>/workspace.
 LEGACY_WORKSPACE_DIRNAME = "workspace"
@@ -506,7 +515,13 @@ class InstanceLayout:
         """Run and build folders. OpenShell sandboxes mount workspaces/, so these
         must sit inside it; they hold materialized copies of verified artifacts."""
 
-        return self.agents_dir / "execution"
+        return self.agents_dir / EXECUTION_DIRNAME
+
+    @property
+    def execution_rust_builds_dir(self) -> Path:
+        """Content-addressed Rust build folders (``runtime_hosting.builds``)."""
+
+        return self.execution_runs_dir / EXECUTION_RUST_BUILDS_DIRNAME
 
     @property
     def uploads_dir(self) -> Path:

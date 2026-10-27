@@ -122,8 +122,9 @@ def purge_held_artifact_files(layout: InstanceLayout, person_id: str, paths: Ite
 
     ``paths`` are the files the held artifact records name
     (``PersonDepartureRepository.held_artifact_paths``). A path outside that
-    folder or through a link is left alone and logged; a file already gone is
-    not counted.
+    folder or through a link is left alone and logged; a file already gone
+    (the saved-output retention deletes old ones while they are held,
+    ``custom_agents.output_retention``) is not counted.
     """
 
     counts = OldFilesRemoved()
