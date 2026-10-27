@@ -21,6 +21,7 @@ from custom_messages.contracts.runtime_v1 import (
     MEM_REVIEW_AGENT_TYPE,
 )
 from default_values import (
+    MAX_STORAGE_WARNING_STEP_GB,
     ACTIVITY_COLLECTOR_DEFAULTS,
     AGENT_DEFAULTS,
     DELIVERY_DEFAULTS,
@@ -423,7 +424,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "gateway.users.web_user_tokens_enabled": "Enable browser user tokens for authenticated Web Chat sessions.",
     "gateway.users.web_user_token_ttl_days": "Browser user-token lifetime in days. 0 disables automatic expiration.",
     "gateway.users.removed_data_retention_days": "Days a removed person's folder, personal memory, own knowledge pages and conversations are held for /user restore before a maintenance run deletes them. 0 deletes them at the next maintenance run.",
-    "gateway.storage_warnings": "When people hear that the data the team stores for them has grown, and when administrators hear that storage is filling up.",
+    "gateway.storage_warnings": "When people hear that the data the team stores for them has grown, and when administrators hear that storage is filling up. Administrators can also change these in Settings > Team.",
     "gateway.storage_warnings.person_step_gb": "Each person gets one Inbox notice when their stored data (chats, completed tasks, their files and folder) passes each multiple of this many GB (1 GB = 1,000,000,000 bytes); the gateway measures it daily. 0 turns these notices off.",
     "gateway.storage_warnings.nearing_limit_percent": "The Status page warns, and administrators get one Inbox notice, when a disk the instance uses or the message server's storage reaches this percent of its limit.",
     "gateway.storage_warnings.nearly_full_percent": "At this percent of its limit the Status page reports a problem and administrators get another notice. Must be above nearing_limit_percent.",
@@ -1669,10 +1670,6 @@ class GatewayUsersSettings(BaseModel):
                 "gateway.users.web_user_invite_ttl_seconds must be <= 86400."
             )
         return parsed
-
-
-# Ten terabytes; a larger step is almost certainly a typing mistake.
-MAX_STORAGE_WARNING_STEP_GB = 10_000
 
 
 def _whole_number(value: Any, *, name: str) -> int:

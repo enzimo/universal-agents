@@ -4018,12 +4018,19 @@ body.is-theme-customizing {
 
 .file-retention-form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: end;
   gap: 12px;
 }
 
+.file-retention-group-title {
+  grid-column: 1 / -1;
+  margin: 8px 0 0;
+  font-weight: 700;
+}
+
 .file-retention-actions {
+  grid-column: 1 / -1;
   margin: 0;
 }
 

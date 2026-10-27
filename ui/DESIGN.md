@@ -856,18 +856,22 @@ that leads to it (owner's request 2026-10-12).
   **Team lead may pass it on**, **Built-in code** (**Matches the runtime** or
   **Does not match the runtime**), **Added**, and **Definition ID**.
 - Team ends with **File Retention**: how many days chat uploads, scratch
-  files and saved tool outputs are kept, where 0 keeps them forever. When the
-  gateway says the person may change them (`can_change`), show one row with
-  **Days to keep chat uploads**, **Days to keep scratch files**, **Days to
-  keep saved tool outputs** and **Save** (primary; **Saving…** while busy).
-  Everyone else sees the three values as a short list ("90 days", "Kept
-  forever") and "Only administrators change how long files are kept." After
-  saving, say that chat uploads follow the new number at the next cleanup,
-  within six hours, and scratch files and saved tool outputs after the next
-  restart. The saved tool outputs field's help says that lowering the number
-  deletes the older outputs at the next maintenance run, and that nothing is
-  deleted for 7 days when it is first turned on. A failure keeps the typed
-  numbers.
+  files and saved tool outputs are kept, where 0 keeps them forever, and the
+  **Storage warnings**. When the gateway says the person may change them
+  (`can_change`), show a row with **Days to keep chat uploads**, **Days to
+  keep scratch files** and **Days to keep saved tool outputs**, a **Storage
+  warnings** label, a row with **Notice to each person every (GB)** (0 turns
+  it off), **Warn administrators at (% full)** and **Report a problem at (%
+  full)**, and **Save** (primary; **Saving…** while busy) below them.
+  Everyone else sees the six values as a short list ("90 days", "Kept
+  forever", "Every 5 GB", "Off", "At 80% full") and "Only administrators
+  change how long files are kept." Refuse a warning level at or above the
+  problem level in place, before sending. After saving, say that chat uploads
+  follow the new number at the next cleanup, within six hours, scratch files
+  and saved tool outputs after the next restart, and storage warnings from
+  their next check. The saved tool outputs field's help says that lowering the
+  number deletes the older outputs at the next maintenance run, and that nothing
+  is deleted for 7 days when it is first turned on. A failure keeps the typed numbers.
 - Browser alerts are opt-in from Settings. Ask for browser permission only on a click;
   explain HTTPS/browser requirements or a denied permission in place. Store the
   preference by signed-in user and browser. Use generic alert text without message

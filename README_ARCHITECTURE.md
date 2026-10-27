@@ -3057,15 +3057,21 @@ removes files left without a record, and the folders left empty. It shares the
 link-safe folder walk with the scratch cleanup (`old_file_cleanup.py`). The
 gateway is the only writer of `state/uploads`; agents work on their own copies.
 Administrators change the three retention numbers (chat uploads, scratch
-files, saved tool outputs) in Settings → Team → File Retention
-(`assistant_gateway/file_retention.py`). That is a `runtime_settings`
-change in the gateway's own controls, so `PersonChangeCheck` decides who may.
-The save changes only those three fields of `instance_config.yaml`, keeps a
-backup as the configuration editor does, and is refused when the file changed
-meanwhile. Upload retention applies from the next cleanup; scratch and saved
-output retention apply after a restart, because the manager reads its
-settings when it starts. The team transfer's settings section is version 7
-for `tool_policy.output_retention_days`.
+files, saved tool outputs), and the storage warnings
+(`gateway.storage_warnings`, below and in the Status page section), in
+Settings → Team → File Retention (`assistant_gateway/file_retention.py`). That
+is a `runtime_settings` change in the gateway's own controls, so
+`PersonChangeCheck` decides who may. The save changes only those fields of
+`instance_config.yaml`, keeps a backup as the configuration editor does, and
+is refused when the file changed meanwhile. Upload retention and the storage
+warnings apply from the next cleanup or check, because the gateway hands the
+new numbers to its running loops; scratch and saved output retention apply
+after a restart, because the manager reads its settings when it starts. The
+team transfer's settings section is version 7 for
+`tool_policy.output_retention_days`. The storage warnings share the page
+because both decide how the team's stored data stays in bounds: retention
+deletes what may go, and the warnings tell people and administrators about
+what stays.
 
 Chat transcripts and completed tasks are kept indefinitely (owner's decision
 of 2026-10-27), so each person's stored data only grows, and each person hears

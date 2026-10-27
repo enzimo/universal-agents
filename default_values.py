@@ -40,6 +40,9 @@ from secure_tool_broker.defaults import (
 T = TypeVar("T")
 
 BUILTIN_OBJECTIVE_EXECUTION_POLICY_URI = "builtin://objective-execution/default"
+# The largest step for people's storage notices (gateway.storage_warnings.person_step_gb):
+# ten terabytes; a larger step is almost certainly a typing mistake.
+MAX_STORAGE_WARNING_STEP_GB = 10_000
 
 
 @dataclass(frozen=True)

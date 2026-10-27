@@ -368,6 +368,10 @@ gateway:
     person_step_gb: 5   # 0 turns these notices off
 ```
 
+Administrators can also change the step, and the levels below, in
+**Settings → Team → File Retention**; the next check uses them, without a
+restart.
+
 Each crossing is announced once, also across restarts. Someone whose data is
 first measured at 16 GB gets one notice, for 15 GB. When stored data falls
 below a step, for example after files were deleted from the person's folder,

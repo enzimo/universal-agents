@@ -493,9 +493,9 @@ def _stored_data(
     Uploads older than their retention are deleted at start and every few hours
     (``upload_retention``). People hear as their stored data grows
     (``storage_usage``, a daily check) and administrators before storage fills
-    (``storage_capacity``, on the Status page). Administrators change the days
-    and scratch retention in Settings (``file_retention``), and the running
-    upload cleanup follows at once.
+    (``storage_capacity``, on the Status page). Administrators change the days,
+    scratch retention and the storage warnings in Settings (``file_retention``),
+    and the running cleanup and checks follow at once.
     """
 
     uploads = UploadRetention(
@@ -514,7 +514,13 @@ def _stored_data(
         uploads=uploads,
         usage=usage,
         capacity=capacity,
-        settings=GatewayFileRetention(config_path=config.config_path, person_changes=person_changes, uploads=uploads),
+        settings=GatewayFileRetention(
+            config_path=config.config_path,
+            person_changes=person_changes,
+            uploads=uploads,
+            storage_usage=usage,
+            storage_capacity=capacity,
+        ),
     )
 
 
