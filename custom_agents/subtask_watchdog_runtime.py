@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from custom_agents.execution_lanes_runtime import lane_of
-from custom_agents.strands_parts import turn_strands_agent
+from custom_agents.strands_parts import task_strands_messages
 from custom_tools.runtime_context import task_work
 from custom_messages.records.task_results import TaskResultUpdate
 
@@ -157,9 +157,7 @@ async def _resume_parent_task_when_ready(self: Any, parent_task_id: str) -> None
                     conversation_store=self._conversation_store,
                     conversation_compactor=self._conversation_compactor,
                     conversation_artifact_offloader=self._conversation_artifact_offloader,
-                    strands_messages=list(
-                        getattr(turn_strands_agent(self), "messages", []) or []
-                    ),
+                    strands_messages=task_strands_messages(parent_task_info.task.task_id),
                     task_manager=self.task_manager,
                     task_info=parent_task_info,
                     task_status=ProgressState.COMPLETED.value,
@@ -333,7 +331,7 @@ async def _fail_subtask_and_reconcile_parent(
         conversation_store=self._conversation_store,
         conversation_compactor=self._conversation_compactor,
         conversation_artifact_offloader=self._conversation_artifact_offloader,
-        strands_messages=list(getattr(turn_strands_agent(self), "messages", []) or []),
+        strands_messages=task_strands_messages(parent_task_info.task.task_id),
         task_manager=self.task_manager,
         task_info=parent_task_info,
         task_status=ProgressState.FAILED.value,
@@ -399,7 +397,7 @@ async def _prepare_local_task_finalization_before_dispatch(
         conversation_store=self._conversation_store,
         conversation_compactor=self._conversation_compactor,
         conversation_artifact_offloader=self._conversation_artifact_offloader,
-        strands_messages=list(getattr(turn_strands_agent(self), "messages", []) or []),
+        strands_messages=task_strands_messages(task_info.task.task_id),
         task_manager=self.task_manager,
         task_info=task_info,
         task_status=ProgressState.COMPLETED.value,
@@ -1111,7 +1109,7 @@ async def _recover_stalled_subtasks(self) -> None:
             conversation_store=self._conversation_store,
             conversation_compactor=self._conversation_compactor,
             conversation_artifact_offloader=self._conversation_artifact_offloader,
-            strands_messages=list(getattr(turn_strands_agent(self), "messages", []) or []),
+            strands_messages=task_strands_messages(task_info.task.task_id),
             task_manager=self.task_manager,
             task_info=task_info,
             task_status=ProgressState.FAILED.value,

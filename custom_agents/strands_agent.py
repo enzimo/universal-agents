@@ -350,7 +350,7 @@ from custom_messages.contracts.worker_handback_v1 import WorkerTaskHandbackV1
 from custom_tools.comms_tools import TeamComms
 from custom_tools.tool_stop import ToolStop
 from custom_tools.runtime_context import TaskWork, current_task_work
-from custom_agents.strands_parts import StrandsParts, turn_strands_agent
+from custom_agents.strands_parts import StrandsParts, task_strands_messages, turn_strands_agent
 from custom_agents.strands_agent_builder import build_strands_parts
 from custom_agents.turn_registry import (
     end_turn,
@@ -3690,7 +3690,7 @@ class UniversalAgent(BaseModel):
             team_id=self.team_id,
             named_agent_type=self.named_agent_type,
             summary_generator=self._conversation_summary_generator,
-            strands_messages=list(getattr(turn_strands_agent(self), "messages", []) or []),
+            strands_messages=task_strands_messages(task_info.task.task_id),
             task_info=task_info,
             task_status=task_status,
         )
@@ -3709,9 +3709,7 @@ class UniversalAgent(BaseModel):
                 TurnFinalizationRequest(
                     task_info=task_info,
                     task_status=task_status,
-                    strands_messages=list(
-                        getattr(turn_strands_agent(self), "messages", []) or []
-                    ),
+                    strands_messages=task_strands_messages(task_info.task.task_id),
                 ),
             )
         except Exception as exc:

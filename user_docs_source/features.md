@@ -305,8 +305,10 @@ To start an unrelated request while keeping your earlier chat, turn on
 **Launch parallel thread** below Send and send your message. Chat creates a
 new thread for that message and its files, and keeps its replies there. The
 team lead starts on it right away, even while it is busy with your other work,
-and every later request you send in that thread runs the same way. Use it only
-for work that does not change the same things as your other running requests:
+and every later request you send in that thread runs the same way.
+Each thread keeps its own conversation history and summaries. Saved team facts
+and your preferences remain available across your threads. Use it only for work
+that does not change the same things as your other running requests:
 the agent does not coordinate them. Changes to the same memory facts,
 schedules, Objectives, heartbeat items, files written with the file tools and
 credentials are still checked, and the later conflicting change is refused;

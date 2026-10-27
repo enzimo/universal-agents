@@ -58,7 +58,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Iterator, TypeVar
+from typing import TYPE_CHECKING, Any, Iterator, TypeVar
 
 from strands.hooks import BeforeModelCallEvent, HookProvider, HookRegistry
 
@@ -69,6 +69,9 @@ from custom_messages.contracts.person_settings_v1 import PersonModelProfileV1
 from model_providers.endpoints import EndpointKind, display_host
 from storage.access_repository import AccessRepository
 from storage.config import StorageSettings
+
+if TYPE_CHECKING:
+    from strands import Agent
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +87,7 @@ _FACTORY_PROVIDERS = {
     EndpointKind.GEMINI: "gemini",
     EndpointKind.XAI: "xai",
 }
-_UNSET = object()
 _Settings = TypeVar("_Settings")
-_SummaryAgent = TypeVar("_SummaryAgent")
 
 
 class PersonModelUnavailable(ModelKeyError):
@@ -442,29 +443,26 @@ def current_summary_model() -> Any | None:
     return bundle.model if bundle is not None else None
 
 
-class SummaryAgents:
-    """A summarizer's Strands agent for the model in use: its own, or a person's (one per model, never shared)."""
+def new_summary_agent(default_model: Any, *, system_prompt: str) -> Agent:
+    """Reuse the selected model, but give each summary its own SDK conversation.
 
-    def __init__(self, system_prompt: str) -> None:
-        self._system_prompt = system_prompt
-        self._by_model: dict[int, Any] = {}
-        self._lock = threading.Lock()
+    A summary's complete source is in its prompt. Reusing a Strands agent
+    would send an earlier conversation's messages with the next summary and
+    would reject overlapping calls. Model objects carry provider setup; the
+    fresh agent owns this operation's messages and invocation state.
+    """
 
-    def agent_for(self, default_agent: _SummaryAgent) -> _SummaryAgent:
-        model = current_summary_model()
-        if model is None:
-            return default_agent
-        with self._lock:
-            agent = self._by_model.get(id(model))
-            if agent is None:
-                from strands import Agent
-                from strands.agent.conversation_manager.null_conversation_manager import NullConversationManager
+    from strands import Agent
+    from strands.agent.conversation_manager.null_conversation_manager import NullConversationManager
 
-                agent = Agent(
-                    model=model, tools=[], system_prompt=self._system_prompt, conversation_manager=NullConversationManager()
-                )
-                self._by_model = {id(model): agent}  # keep only the latest person's agent
-            return agent  # type: ignore[return-value]  # the same Strands agent type as the default
+    model = current_summary_model()
+    return Agent(
+        model=model if model is not None else default_model,
+        tools=[],
+        system_prompt=system_prompt,
+        conversation_manager=NullConversationManager(),
+        callback_handler=None,
+    )
 
 
 class PersonModelHook(HookProvider):
@@ -495,7 +493,7 @@ __all__ = [
     "PersonModelHook",
     "PersonModelState",
     "PersonModelUnavailable",
-    "SummaryAgents",
+    "new_summary_agent",
     "current_summary_model",
     "summaries_with_person_model",
     "active_bundle",

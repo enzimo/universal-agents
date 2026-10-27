@@ -52,6 +52,9 @@ class TaskWork:
       (``custom_agents.person_model_runtime``).
     - ``context_assembly``: the turn's latest prompt assembly, for
       ``get_context_status``.
+    - ``handling_finished``: the runner left its scope. Inherited timer
+      callbacks may keep the record, but its SDK agent can have been reused
+      by another task, so its transcript is no longer safe to archive.
     """
 
     task_id: str | None
@@ -60,6 +63,7 @@ class TaskWork:
     strands: StrandsParts | None = None
     person_model: Any = None
     context_assembly: Any = None
+    handling_finished: bool = False
 
 
 _task_work: ContextVar[TaskWork | None] = ContextVar("task_work", default=None)
@@ -88,6 +92,7 @@ def task_work(task_id: str | None) -> Iterator[TaskWork]:
     try:
         yield work
     finally:
+        work.handling_finished = True
         _task_work.reset(token)
 
 

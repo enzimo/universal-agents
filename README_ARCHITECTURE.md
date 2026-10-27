@@ -363,8 +363,12 @@ task's handling, and every tool, hook and post-turn step reads them from
 there, never from an agent-wide current task (`custom_agents.turn_registry`
 records the running turns; `custom_agents.strands_parts` and
 `custom_agents.strands_agent_builder` give each lane its own Strands agent
-and tool state). Settings marks such
-requests **Parallel**.
+and tool state). Conversation history and summaries stay with their thread;
+team facts and the person's saved preferences remain shared across their
+threads. Background completion archives model messages only from that task's
+own work record. Optional model-generated summaries and compaction use fresh
+SDK history for every operation, while reusing the selected provider model.
+Settings marks such requests **Parallel**.
 Cancellation retains history and stops attached work; resume refuses unresolved
 approvals, questions, delegation and runtime review. Pause notices identify the task and affected
 worker. Settings also pages finished task results across agents, including

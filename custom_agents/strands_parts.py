@@ -30,6 +30,7 @@ agent's model rebuilds them before its next model call
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -69,4 +70,22 @@ def turn_strands_agent(agent: Any) -> Any:
     return getattr(agent, "_strands_agent", None)
 
 
-__all__ = ["StrandsParts", "current_parts", "turn_strands_agent"]
+def task_strands_messages(task_id: str) -> list[dict[str, Any]]:
+    """Snapshot only the transcript this handling produced for ``task_id``.
+
+    Background credential results, stops and watchdogs can finish a task
+    without running its model. They have no fresh transcript to archive.
+    Reading the main agent in that case would file another task's tool
+    results in this task's conversation. A background callback may also
+    inherit another task's work record, so both the id and parts must match.
+    An expired record cannot supply messages: a timer may retain it after
+    its SDK agent has been reused for the next main-lane task.
+    """
+
+    work = current_task_work()
+    if work is None or work.handling_finished or work.task_id != task_id or work.strands is None:
+        return []
+    return deepcopy(list(getattr(work.strands.agent, "messages", []) or []))
+
+
+__all__ = ["StrandsParts", "current_parts", "task_strands_messages", "turn_strands_agent"]
