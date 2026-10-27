@@ -13,6 +13,7 @@ from custom_agents.after_action_report_knowledge import (
     lesson_problem,
     save_review_lesson,
 )
+from custom_agents.output_retention import with_deleted_outputs_marked
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.enums import AfterActionReportReviewStatus
 from custom_tools.provider_contract import ToolProvider
@@ -198,7 +199,8 @@ def _conversation_turn_summary_payload(turn: dict[str, Any]) -> dict[str, Any]:
         )[:1600],
         "summary_generator": turn.get("summary_generator") or "",
         "summary_generated_at": turn.get("summary_generated_at"),
-        "artifact_summary": artifact_summary[:10]
+        # A saved output deleted under the retention policy says so instead of naming its file.
+        "artifact_summary": with_deleted_outputs_marked(artifact_summary[:10])
         if isinstance(artifact_summary, list)
         else [],
         "has_full_user_text": bool(user_text),

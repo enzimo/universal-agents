@@ -1215,6 +1215,12 @@ run. Each notice is sent once per list. The run only gets the counts. When a
 person asks about such a notice, explain it; they remove a schedule with
 `/delete schedule <id>` or keep it with `/resume schedule <id>`.
 
+When `inspect_tool_result_artifact` or `web_artifact_inspect` answers
+`deleted_by_retention`, or a conversation's artifact list says an output was
+deleted under the retention policy, the output is gone and only its summary
+remains. Say so plainly and run the original tool again if the content is
+still needed; never retry the read or guess the content.
+
 Use `inspect_memory_review_cleanup` during maintenance to review inactive expired
 memory-review jobs. Archive exact IDs with `maintain_memory_review_jobs`; purge
 only archived content after retention. Keep unknown outcomes unknown. Do not

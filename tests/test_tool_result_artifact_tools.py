@@ -248,3 +248,79 @@ def test_a_result_the_context_manager_saved_opens_with_the_inspect_tool(tmp_path
     head = _payload(inspect_tool_result_artifact(stub["artifact_manifest_path"], action="grep", query="change_id"))
     assert head["status"] == "success"
     assert "settings_change_01KSTAGED" in json.dumps(head["matches"])
+
+
+# -- a result deleted under the retention policy (custom_agents.output_retention) --------
+
+
+def _saved_result_folder(tmp_path: Path, days_ago: float) -> Path:
+    """A result folder named like tool_result_offloader names it, written ``days_ago`` days ago."""
+
+    from datetime import datetime, timedelta, timezone
+
+    written = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    return _tool_results_dir(tmp_path) / "task-1" / f"{written:%Y%m%dT%H%M%SZ}_tooluse_1_large_tool_0123456789abcdef"
+
+
+@pytest.mark.parametrize("given", ["manifest", "folder"])
+def test_a_result_deleted_under_the_retention_policy_says_so_plainly(tmp_path, own_agent, given):
+    from custom_tools.tool_result_artifact_tools import inspect_tool_result_artifact
+
+    own_agent.output_retention_days = 90
+    folder = _saved_result_folder(tmp_path, 91)  # deleted by the cleanup: neither it nor its manifest exists
+    path = folder / "manifest.json" if given == "manifest" else folder
+
+    payload = _payload(inspect_tool_result_artifact._tool_func(str(path), action="head"))
+
+    assert payload["failure_reason"] == "deleted_by_retention"
+    assert payload["retryable"] is False
+    assert "deleted under the team's retention policy" in payload["message"]
+    assert "kept 90 days after they were written" in payload["message"]
+    assert "Run the tool again" in payload["message"]
+
+
+@pytest.mark.parametrize(("days_ago", "retention_days"), [(89, 90), (400, 0)])
+def test_a_missing_result_inside_the_period_or_kept_forever_is_only_not_found(
+    tmp_path, own_agent, days_ago, retention_days
+):
+    from custom_tools.tool_result_artifact_tools import inspect_tool_result_artifact
+
+    own_agent.output_retention_days = retention_days
+    manifest = _saved_result_folder(tmp_path, days_ago) / "manifest.json"
+
+    payload = _payload(inspect_tool_result_artifact._tool_func(str(manifest), action="head"))
+
+    assert payload["failure_reason"] == "file_not_found"
+    assert "retention" not in payload["message"]
+
+
+def test_a_result_deleted_while_it_was_read_says_it_was_deleted(tmp_path, own_agent, monkeypatch):
+    """The cleanup deletes the manifest first; a read that already loaded it finds its block gone too."""
+
+    from custom_tools import tool_result_artifact_tools as tools
+
+    own_agent.output_retention_days = 90
+    folder = _saved_result_folder(tmp_path, 91)
+    folder.mkdir(parents=True)
+    block = folder / "block_0.txt"
+    block.write_text("text\n", encoding="utf-8")
+    manifest = folder / "manifest.json"
+    manifest.write_text(
+        json.dumps({"task_id": "task-1", "agent_id": "agent-1", "team_id": "team-1",
+                    "blocks": [{"index": 0, "content_type": "text/plain", "path": str(block)}]}),
+        encoding="utf-8",
+    )
+    real_load = tools._load_manifest
+
+    def load_then_cleanup_runs(path):
+        data = real_load(path)
+        manifest.unlink()
+        block.unlink()
+        return data
+
+    monkeypatch.setattr(tools, "_load_manifest", load_then_cleanup_runs)
+
+    payload = _payload(tools.inspect_tool_result_artifact._tool_func(str(manifest), action="head"))
+
+    assert payload["failure_reason"] == "deleted_by_retention"
+    assert payload["retryable"] is False

@@ -4,6 +4,8 @@ Real folders of a temporary instance and a real SQLite task database. Each
 kind is deleted a moment after its retention period and kept a moment before
 it; 0 keeps everything; links are removed as links or left alone, never
 followed; conversations, task links and completed tasks are never touched.
+Every reader of an offloaded conversation output says plainly when it was
+deleted and keeps its summary (the tool readers are tested with their tools).
 """
 
 from __future__ import annotations
@@ -481,3 +483,74 @@ async def test_maintenance_outside_an_instance_layout_reports_that_it_did_not_ru
     sentence = await remove_old_outputs_for_maintenance(manager, "internal_improvement_1")
 
     assert "did not run" in sentence
+
+
+# -- readers of a deleted conversation artifact ---------------------------------------------
+
+
+def _turn_with_artifacts(kept_path: Path, deleted_path: Path) -> dict:
+    """A turn whose offloaded outputs were saved; one was deleted under the retention policy since."""
+
+    manifest = [
+        {"artifact_type": "tool_output", "storage_path": str(kept_path), "summary_text": "kept output summary"},
+        {"artifact_type": "tool_output", "storage_path": str(deleted_path), "summary_text": "deleted output summary"},
+    ]
+    return {
+        "turn_index": 1,
+        "task_id": "task_1",
+        "problem_text": "Look this up.",
+        "final_answer_text": "Here it is.",
+        "tool_artifact_manifest": manifest,
+        "artifact_summary": manifest,
+    }
+
+
+@pytest.fixture
+def artifact_paths(layout: InstanceLayout) -> tuple[Path, Path]:
+    kept = _file(layout.conversation_artifacts_dir / "conv_1" / "task_1_artifact_kept.txt", "kept")
+    deleted = layout.conversation_artifacts_dir / "conv_1" / "task_1_artifact_deleted.txt"
+    return kept, deleted
+
+
+def test_a_deleted_output_is_marked_and_its_summary_kept(artifact_paths) -> None:
+    from custom_agents.output_retention import DELETED_OUTPUT_FLAG, with_deleted_outputs_marked
+
+    kept, deleted = artifact_paths
+    turn = _turn_with_artifacts(kept, deleted)
+
+    marked = with_deleted_outputs_marked([*turn["tool_artifact_manifest"], "not an entry"])
+
+    assert marked[0] == turn["tool_artifact_manifest"][0]
+    assert marked[1]["summary_text"] == "deleted output summary"
+    assert marked[1][DELETED_OUTPUT_FLAG] is True
+    assert "deleted under the team's retention policy" in marked[1]["storage_path"]
+    assert len(marked) == 2
+    assert turn["tool_artifact_manifest"][1]["storage_path"] == str(deleted), "the stored turn is not changed"
+    assert with_deleted_outputs_marked(None) == []
+
+
+def test_prompts_and_summaries_say_a_deleted_output_was_deleted(artifact_paths) -> None:
+    from custom_agents.context_engine.thread_renderer import BudgetedThreadContextRenderer
+    from custom_agents.conversation_compaction.base import ConversationCompactionConfig
+    from custom_agents.conversation_compaction.heuristic_compactor import HeuristicSlidingWindowCompactor
+    from custom_agents.conversation_compaction.llm_compactor import LLMSummarizingConversationCompactor
+    from custom_agents.conversation_compaction.noop_compactor import NoOpConversationCompactor
+    from custom_tools.providers.context_memory import _conversation_turn_summary_payload
+
+    kept, deleted = artifact_paths
+    turn = _turn_with_artifacts(kept, deleted)
+    heuristic = HeuristicSlidingWindowCompactor(ConversationCompactionConfig())
+    rendered = {
+        "thread renderer": BudgetedThreadContextRenderer()._render_artifacts(turn["artifact_summary"]),
+        "heuristic turn": heuristic._render_raw_turn(turn),
+        "heuristic synopsis": json.dumps(heuristic._merge_synopsis({}, [turn])),
+        "noop turn": NoOpConversationCompactor._render_raw_turn(turn),
+        "llm input": json.dumps(LLMSummarizingConversationCompactor._turn_payload(heuristic, turn)),
+        "conversation tool": json.dumps(_conversation_turn_summary_payload(turn)),
+    }
+
+    for reader, text in rendered.items():
+        assert "deleted under the team's retention policy" in text, reader
+        assert str(deleted) not in text, reader
+        assert str(kept) in text, reader
+        assert "deleted output summary" in text, reader  # what the output was about stays

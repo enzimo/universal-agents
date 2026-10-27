@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from custom_agents.conversation_compaction.base import ConversationCompactionConfig
 from custom_agents.conversation_compaction.heuristic_compactor import HeuristicSlidingWindowCompactor
 from custom_agents.conversation_summary import strip_redundant_answer_from_context_summary
+from custom_agents.output_retention import with_deleted_outputs_marked
 from custom_agents.person_model_runtime import new_summary_agent
 from custom_agents.strands_model_factory import StrandsModelFactoryConfig, build_strands_model
 
@@ -103,7 +104,8 @@ class LLMSummarizingConversationCompactor(HeuristicSlidingWindowCompactor):
                     "summary_text": artifact.get("summary_text"),
                     "storage_path": artifact.get("storage_path"),
                 }
-                for artifact in (turn.get("tool_artifact_manifest") or [])
+                # A saved output deleted under the retention policy says so instead of naming its file.
+                for artifact in with_deleted_outputs_marked(turn.get("tool_artifact_manifest"))
             ],
         }
 

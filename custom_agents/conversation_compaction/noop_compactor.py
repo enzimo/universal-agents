@@ -7,6 +7,7 @@ from custom_agents.conversation_compaction.base import (
     ConversationCompactor,
 )
 from custom_agents.conversation_store import ConversationStore
+from custom_agents.output_retention import with_deleted_outputs_marked
 
 
 class NoOpConversationCompactor(ConversationCompactor):
@@ -34,7 +35,8 @@ class NoOpConversationCompactor(ConversationCompactor):
             lines.append(f"\nExecution History:\n{turn['execution_history_text']}")
         if turn.get("turn_summary_text") and not turn.get("final_answer_text"):
             lines.append(f"\nTurn Summary:\n{turn['turn_summary_text']}")
-        artifact_manifest = turn.get("tool_artifact_manifest") or []
+        # A saved output deleted under the retention policy says so instead of naming its file.
+        artifact_manifest = with_deleted_outputs_marked(turn.get("tool_artifact_manifest"))
         if artifact_manifest:
             artifact_lines = []
             for artifact in artifact_manifest:

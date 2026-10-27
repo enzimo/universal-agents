@@ -10,6 +10,7 @@ from custom_agents.conversation_compaction.base import (
     ConversationCompactor,
 )
 from custom_agents.conversation_store import ConversationStore
+from custom_agents.output_retention import with_deleted_outputs_marked
 from custom_agents.conversation_summary import strip_redundant_answer_from_context_summary
 
 
@@ -138,7 +139,8 @@ class HeuristicSlidingWindowCompactor(ConversationCompactor):
             if next_step_lines:
                 next_step_intent = self._truncate_text(" ".join(next_step_lines), 280)
 
-            for artifact in turn.get("tool_artifact_manifest") or []:
+            # A saved output deleted under the retention policy says so instead of naming its file.
+            for artifact in with_deleted_outputs_marked(turn.get("tool_artifact_manifest")):
                 artifact_summary = (artifact or {}).get("summary_text")
                 storage_path = (artifact or {}).get("storage_path")
                 artifact_type = (artifact or {}).get("artifact_type")
@@ -239,7 +241,7 @@ class HeuristicSlidingWindowCompactor(ConversationCompactor):
             lines.append(f"\nExecution History:\n{turn['execution_history_text']}")
         if turn.get("turn_summary_text") and not turn.get("final_answer_text"):
             lines.append(f"\nTurn Summary:\n{turn['turn_summary_text']}")
-        artifact_manifest = turn.get("tool_artifact_manifest") or []
+        artifact_manifest = with_deleted_outputs_marked(turn.get("tool_artifact_manifest"))
         if artifact_manifest:
             artifact_lines = []
             for artifact in artifact_manifest:

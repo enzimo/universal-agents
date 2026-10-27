@@ -50,7 +50,13 @@ those records first and a record of which objects they name.
 
 Kept for good, whatever the period: conversations (transcripts, task links,
 turn summaries and context summaries) and completed tasks. An old
-conversation keeps its summary of an offloaded output.
+conversation keeps its summary of an offloaded output, and every reader says
+plainly when the output itself was deleted (``deleted_output_note``): the
+tools that open saved outputs (``inspect_tool_result_artifact``,
+``web_artifact_inspect``) answer with that note and ``retryable: false``
+instead of "not found", and the context renderers, compactors and the
+conversation tools show it in place of the file's path
+(``with_deleted_outputs_marked``). None of them retries or makes up content.
 
 Trusted manager code does this rather than the maintenance agent because the
 agent works for no person and cannot open people's folders or ``state/``.
@@ -71,11 +77,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, ClassVar, Iterator
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Iterator, Mapping
 
 from access_control import safe_open
 from access_control.safe_open import UnsafePath
 from custom_agents.scratch_retention import person_area_folders
+from default_values import TOOL_POLICY_DEFAULTS
 from old_file_cleanup import (
     FOLDER_FLAGS,
     SECONDS_PER_DAY,
@@ -564,12 +571,76 @@ def _remove_file(folder: int, name: str, info: os.stat_result, shown: Path, coun
     counts.bytes_removed += info.st_size
 
 
+# -- what readers say about a deleted output ---------------------------------------------
+
+DELETED_OUTPUT_FLAG = "deleted_under_retention"
+DELETED_OUTPUT_REASON = "deleted_by_retention"
+
+
+def retention_days_of(agent: Any) -> int:
+    """The agent's saved output retention period in days (0 keeps outputs)."""
+
+    try:
+        return max(0, int(getattr(agent, "output_retention_days", TOOL_POLICY_DEFAULTS.output_retention_days.value)))
+    except (TypeError, ValueError):
+        return int(TOOL_POLICY_DEFAULTS.output_retention_days.value)
+
+
+def deleted_by_retention(written_at: float | None, retention_days: int, *, now: float | None = None) -> bool:
+    """Whether an output written at ``written_at`` is past the period, so a missing one was deleted under it."""
+
+    if written_at is None or retention_days <= 0:
+        return False
+    return written_at < retention_cutoff(retention_days, now)
+
+
+def deleted_output_note(retention_days: int | None = None) -> str:
+    """What a reader says in place of a saved output the cleanup deleted; plain, and never a retry hint."""
+
+    kept = f"are kept {retention_days} days after they were written" if retention_days else "are kept for a limited time"
+    return (
+        f"The saved output was deleted under the team's retention policy: saved tool outputs {kept}. "
+        "Only its summary remains. Run the tool again if you need the content."
+    )
+
+
+def with_deleted_outputs_marked(artifacts: Any) -> list[dict[str, Any]]:
+    """Copies of a turn's artifact entries; one whose saved file is gone says so instead of naming it.
+
+    Its ``storage_path`` becomes ``deleted_output_note()`` and
+    ``deleted_under_retention`` is set, so prompts and tool results never
+    point at a file that no longer exists; its summary stays. While a
+    conversation exists only this cleanup deletes these files (a removed
+    person's purge deletes the conversation too), so a missing file is one
+    the retention deleted.
+    """
+
+    marked: list[dict[str, Any]] = []
+    for artifact in artifacts if isinstance(artifacts, list) else []:
+        if not isinstance(artifact, Mapping):
+            continue
+        entry = dict(artifact)
+        path = entry.get("storage_path") or entry.get("path")
+        if path and not os.path.lexists(str(path)):
+            entry["storage_path"] = deleted_output_note()
+            entry.pop("path", None)
+            entry[DELETED_OUTPUT_FLAG] = True
+        marked.append(entry)
+    return marked
+
+
 __all__ = [
+    "DELETED_OUTPUT_FLAG",
+    "DELETED_OUTPUT_REASON",
     "EXECUTION_MINIMUM_AGE_DAYS",
     "RETENTION_SETTING",
     "OutputKind",
     "OutputRetentionResult",
     "OutputsRemoved",
+    "deleted_by_retention",
+    "deleted_output_note",
     "remove_old_outputs",
+    "retention_days_of",
+    "with_deleted_outputs_marked",
     "written_at_from_name",
 ]

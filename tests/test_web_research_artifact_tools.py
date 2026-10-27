@@ -405,3 +405,28 @@ def test_a_long_task_id_puts_research_files_in_its_own_folder(tmp_path):
 
     assert identity.task_folder == tmp_path / "research" / task_folder_name(task_id)
     assert identity.manifest_fields()["task_id"] == task_id, "manifests keep the full task id"
+
+
+@pytest.mark.parametrize(("days_ago", "retention_days", "deleted"), [(91, 90, True), (89, 90, False), (400, 0, False)])
+def test_a_research_result_deleted_under_the_retention_policy_says_so(layout, days_ago, retention_days, deleted):
+    """Result folders are deleted after the period (custom_agents.output_retention); their names carry the date."""
+
+    from datetime import datetime, timedelta, timezone
+
+    from custom_tools.web_research_artifact_tools import web_artifact_inspect
+
+    agent = _FakeAgent(layout)
+    agent.output_retention_days = retention_days
+    set_agent_ref(agent)
+    _task_research_dir(layout).mkdir(parents=True)
+    written = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    gone = _task_research_dir(layout) / f"{written:%Y%m%dT%H%M%S%fZ}_exa_search_query_0123456789ab" / "page.md"
+
+    payload = _payload(web_artifact_inspect(str(gone), action="head"))
+
+    if deleted:
+        assert payload["failure_reason"] == "deleted_by_retention"
+        assert payload["retryable"] is False
+        assert "deleted under the team's retention policy" in payload["message"]
+    else:
+        assert payload["failure_reason"] == "file_not_found"

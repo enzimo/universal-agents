@@ -3213,6 +3213,16 @@ and the inner-loop context manager,
 folder with `manifest.json` naming its agent, team and task, because
 `state/tool_results` is outside every agent folder and
 `inspect_tool_result_artifact` is the only way an agent reads it back.
+Saved results, research results and offloaded conversation outputs are
+deleted after `tool_policy.output_retention_days`
+(`custom_agents/output_retention.py`). Their readers never retry or make up a
+deleted one: the two inspection tools answer `deleted_by_retention` with
+`retryable: false` and a plain note when the result folder's name dates it
+before the period, and the thread renderer, the compactors and the
+conversation tools show that note in place of a deleted file's path while
+keeping its summary (`with_deleted_outputs_marked`). Only the cleanup
+deletes these files while their conversation exists, so a missing one is one
+it deleted.
 Projected context pressure shrinks only results the model has already read; a
 result it has not read yet (a staged change id, for example) is shrunk only
 after the provider actually rejects the request, and then after older ones.

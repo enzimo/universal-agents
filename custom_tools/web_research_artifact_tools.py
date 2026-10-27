@@ -6,6 +6,12 @@ task's research folder, while tool returns contain compact manifests, bounded
 excerpts, and actionable failure details. Every artifact is written and read
 through the agent file library (``custom_tools.file_access``), which never
 follows a link.
+
+Result folders are deleted after the team's retention period
+(``tool_policy.output_retention_days``, ``custom_agents.output_retention``).
+Their names start with the UTC time they were written, so inspecting a missing
+file of a result written before the period answers that it was deleted under
+the retention policy, with ``retryable: false``.
 """
 
 import json
@@ -21,6 +27,13 @@ from urllib.parse import urljoin
 
 from strands import tool
 
+from custom_agents.output_retention import (
+    DELETED_OUTPUT_REASON,
+    deleted_by_retention,
+    deleted_output_note,
+    retention_days_of,
+    written_at_from_name,
+)
 from custom_tools import file_access
 from custom_tools.broker_web_requests import (
     REASON_ACCESS_DENIED,
@@ -30,6 +43,7 @@ from custom_tools.broker_web_requests import (
 )
 from custom_tools.path_policy import PathPolicyError
 from custom_tools.research_identity import ResearchIdentity, research_identity, result_folder_name
+from custom_tools.runtime_context import get_agent_ref
 
 # Requests go through the secure tool broker, which adds the Brave key of the
 # account linked to http:brave-search (custom_tools.broker_web_requests).
@@ -774,6 +788,9 @@ def _inspection_target(path: str) -> tuple[Path, Dict[str, Any], str] | Dict[str
     except PathPolicyError as exc:
         return _inspection_failure("input_validation", "path_outside_artifacts", str(exc), retryable=False)
     if entry is None:
+        if _deleted_under_retention(location.path):
+            days = retention_days_of(get_agent_ref())
+            return _inspection_failure("artifact_read", DELETED_OUTPUT_REASON, deleted_output_note(days), retryable=False)
         return _inspection_failure("input_validation", "file_not_found", f"File not found: {location.path}", retryable=True)
     stat = {
         "path": str(location.path),
@@ -789,6 +806,24 @@ def _inspection_target(path: str) -> tuple[Path, Dict[str, Any], str] | Dict[str
             return _inspection_failure("read", getattr(exc, "reason_code", "read_failed"), str(exc), retryable=False)
         stat["line_count"] = _line_count(text)
     return location.path, stat, text
+
+
+def _deleted_under_retention(path: Path) -> bool:
+    """Whether a missing path is inside a result folder written before the retention period.
+
+    ``research/<task folder>/<result folder>/...``: the result folder's name
+    starts with the time it was written (``result_folder_name``).
+    """
+
+    identity = research_identity()
+    research_root = Path(os.path.realpath(identity.research_root.parent)) / identity.research_root.name
+    try:
+        parts = path.relative_to(research_root).parts
+    except ValueError:
+        return False
+    if len(parts) < 2:
+        return False
+    return deleted_by_retention(written_at_from_name(parts[1]), retention_days_of(get_agent_ref()))
 
 
 def _line_count(text: str) -> int:
@@ -1186,6 +1221,10 @@ def web_artifact_inspect(
     Actions include bounded text reads plus structured extraction modes:
     `preview`, `extract_markdown`, `extract_links`, `extract_urls`,
     `extract_sitemap_urls`, `extract_text`, and `extract_content_candidates`.
+    Saved results are deleted after the team's retention period; for one
+    deleted that way the answer says so (failure_reason
+    "deleted_by_retention", not retryable): run the research tool again if
+    you still need it.
     """
     target = _inspection_target(path)
     if isinstance(target, dict):

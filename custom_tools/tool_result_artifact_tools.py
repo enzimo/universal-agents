@@ -1,4 +1,12 @@
-"""Bounded inspection tools for offloaded tool-result artifacts."""
+"""Bounded inspection tools for offloaded tool-result artifacts.
+
+Saved tool results are deleted after the team's retention period
+(``tool_policy.output_retention_days``, ``custom_agents.output_retention``).
+A result folder's name starts with the UTC time it was written, so a request
+for a missing result written before the period gets a plain answer that it was
+deleted under the retention policy, with ``retryable: false``, rather than
+"not found".
+"""
 
 from __future__ import annotations
 
@@ -15,6 +23,13 @@ from typing import Any, Dict, Optional
 
 from strands import tool
 
+from custom_agents.output_retention import (
+    DELETED_OUTPUT_REASON,
+    deleted_by_retention,
+    deleted_output_note,
+    retention_days_of,
+    written_at_from_name,
+)
 from custom_tools.runtime_context import get_agent_ref
 from custom_tools.workspace_scope import runtime_layout
 
@@ -64,6 +79,39 @@ def _json_result(status: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": status, "content": [{"text": json.dumps(payload, indent=2, sort_keys=True)}]}
 
 
+def _deleted_under_retention(result_folder: Path) -> Optional[Dict[str, Any]]:
+    """The answer for a missing saved result written before the retention period, else None."""
+
+    days = retention_days_of(get_agent_ref())
+    if not deleted_by_retention(written_at_from_name(result_folder.name), days):
+        return None
+    return _json_result(
+        "error",
+        {
+            "status": "failed",
+            "failure_stage": "artifact_read",
+            "failure_reason": DELETED_OUTPUT_REASON,
+            "message": deleted_output_note(days),
+            "retryable": False,
+        },
+    )
+
+
+def _missing_manifest(manifest: Path) -> Dict[str, Any]:
+    deleted = _deleted_under_retention(manifest.parent)
+    if deleted is not None:
+        return deleted
+    return _json_result("error", {"status": "failed", "failure_stage": "input_validation", "failure_reason": "file_not_found", "message": f"Manifest not found: {manifest}", "retryable": True})
+
+
+def _block_path_failure(manifest: Path, error: str) -> Dict[str, Any]:
+    # The cleanup deletes the manifest first: a block lost with it was being deleted just now.
+    deleted = None if manifest.exists() else _deleted_under_retention(manifest.parent)
+    if deleted is not None:
+        return deleted
+    return _json_result("error", {"status": "failed", "failure_stage": "input_validation", "failure_reason": "block_path_invalid", "message": error, "retryable": True})
+
+
 def _safe_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     try:
         parsed = int(value)
@@ -81,7 +129,8 @@ def _artifact_root() -> Path:
 def _resolve_manifest(path: str) -> tuple[Optional[Path], Optional[str]]:
     raw = Path(path).expanduser()
     resolved = raw.resolve()
-    if resolved.is_dir():
+    # A folder, or a result folder that no longer exists (deleted under retention).
+    if resolved.is_dir() or (not resolved.exists() and resolved.name != "manifest.json"):
         resolved = (resolved / "manifest.json").resolve()
     root = _artifact_root()
     try:
@@ -246,14 +295,17 @@ def inspect_tool_result_artifact(
 
     Use this for manifests produced by oversized tool-result offloading. This
     tool never returns binary block content and enforces hard line/character
-    limits for text blocks.
+    limits for text blocks. Saved results are deleted after the team's
+    retention period; for one deleted that way the answer says so
+    (failure_reason "deleted_by_retention", not retryable): run the original
+    tool again if you still need the content.
     """
     manifest, error = _resolve_manifest(manifest_path)
     if error:
         return _json_result("error", {"status": "failed", "failure_stage": "input_validation", "failure_reason": "path_outside_artifacts", "message": error, "retryable": False})
     assert manifest is not None
     if not manifest.exists():
-        return _json_result("error", {"status": "failed", "failure_stage": "input_validation", "failure_reason": "file_not_found", "message": f"Manifest not found: {manifest}", "retryable": True})
+        return _missing_manifest(manifest)
 
     action = (action or "manifest").strip().lower()
     max_lines = _safe_int(max_lines, default=DEFAULT_MAX_LINES, minimum=1, maximum=HARD_MAX_LINES)
@@ -278,7 +330,7 @@ def inspect_tool_result_artifact(
     assert block is not None
     block_path, error = _resolve_block_path(block)
     if error:
-        return _json_result("error", {"status": "failed", "failure_stage": "input_validation", "failure_reason": "block_path_invalid", "message": error, "retryable": True})
+        return _block_path_failure(manifest, error)
     assert block_path is not None
     if not block_path.is_relative_to(manifest.parent):
         return _json_result("error", {"status": "failed", "failure_reason": "block_path_invalid", "message": "Artifact blocks must remain in their manifest directory.", "retryable": False})
