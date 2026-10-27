@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import MISSING, AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
+from pydantic import MISSING, AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, TypeAdapter
 
-from custom_messages.wire.values import validate_timestamp
+from custom_messages.wire.values import exact_type, validate_timestamp
 
 
 class WireModel(BaseModel):
-    """Strict, immutable and closed to unknown fields."""
+    """Strict, immutable and closed to unknown fields; fields are read only under their wire names."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
 TokenId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')]
@@ -1690,7 +1690,7 @@ class HeartbeatItemsRemoveBody(WireModel):
 class HeartbeatItemsRemoveReplyOk(WireModel):
     outcome: Literal['ok']
     heartbeat_item_id: RecordId
-    removed: Literal[True]
+    removed: Annotated[Literal[True], BeforeValidator(exact_type(bool))]
 
 
 class HeartbeatItemsRemoveReplyNotFound(WireModel):
@@ -3471,7 +3471,7 @@ class MemoryReplaceBody(WireModel):
     valid_from: Union[Timestamp, MISSING] = Field(default=MISSING)
     expires: Union[Timestamp, MISSING] = Field(default=MISSING)
     metadata_json: Union[Annotated[str, StringConstraints(min_length=2, max_length=16384)], MISSING] = Field(default=MISSING)
-    clear_expiry: Union[Literal[True], MISSING] = Field(default=MISSING)
+    clear_expiry: Union[Annotated[Literal[True], BeforeValidator(exact_type(bool))], MISSING] = Field(default=MISSING)
 
 
 class MemoryReplaceReplyOkFact(WireModel):
@@ -4686,7 +4686,7 @@ class ObjectiveProfileProposalProfile(WireModel):
 
 
 class ObjectiveProfileProposal(WireModel):
-    schema_version: Literal[1]
+    schema_version: Annotated[Literal[1], BeforeValidator(exact_type(int))]
     proposal_id: RecordId
     owner_agent_id: DurableOwnerId
     owner_person: PersonRef
@@ -4800,7 +4800,7 @@ class ObjectiveInstalledProfileProfile(WireModel):
 
 
 class ObjectiveInstalledProfile(WireModel):
-    schema_version: Literal[1]
+    schema_version: Annotated[Literal[1], BeforeValidator(exact_type(int))]
     installed_profile_id: RecordId
     owner_agent_id: DurableOwnerId
     owner_person: PersonRef
@@ -4959,7 +4959,7 @@ class ProfileCatalogProfilesItemInstalledProfile(WireModel):
 
 
 class ProfileCatalogProfilesItemInstalled(WireModel):
-    schema_version: Literal[1]
+    schema_version: Annotated[Literal[1], BeforeValidator(exact_type(int))]
     installed_profile_id: RecordId
     owner_agent_id: DurableOwnerId
     owner_person: PersonRef
@@ -5083,7 +5083,7 @@ class PendingProfileProposalProfile(WireModel):
 
 
 class PendingProfileProposal(WireModel):
-    schema_version: Literal[1]
+    schema_version: Annotated[Literal[1], BeforeValidator(exact_type(int))]
     proposal_id: RecordId
     owner_agent_id: DurableOwnerId
     owner_person: PersonRef
@@ -5169,7 +5169,7 @@ class RemovedInstalledProfileProfile(WireModel):
 
 
 class RemovedInstalledProfile(WireModel):
-    schema_version: Literal[1]
+    schema_version: Annotated[Literal[1], BeforeValidator(exact_type(int))]
     installed_profile_id: RecordId
     owner_agent_id: DurableOwnerId
     owner_person: PersonRef

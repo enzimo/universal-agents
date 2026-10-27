@@ -124,7 +124,8 @@ COVERED_ONLY_REFUSALS = {"change_conflict", "needs_person_decision", "record_bus
 # one of them would never repeat and could not find the stored outcome.
 PER_FRAME_PARTS = {"/message_id", "/idempotency_key", "/issued_at", "/not_before", "/expires_at", "/body_digest",
                    "/signature"}
-STATE_FIELDS = {"description", "bucket", "key", "signer", "signer_roles", "writers", "body", "ttl_seconds", "write_rule"}
+STATE_FIELDS = {"description", "bucket", "key", "signer", "signer_roles", "writers", "body", "ttl_seconds", "max_lifetime_seconds",
+                "write_rule"}
 REQUIRED_STATE_FIELDS = {"description", "bucket", "key", "signer", "writers", "body", "write_rule"}
 SIGNERS = {"authority", "host"}
 
@@ -286,6 +287,17 @@ def check_subset(name: str, node: Any, pointer: str) -> None:
         check_subset(name, variant, f"{pointer}/oneOf/{index}")
 
 
+def literal(values: list[Any]) -> str:
+    """A ``Literal`` of ``values``. Pydantic lets ``1`` match ``True`` and ``True`` match ``1``
+    in a ``Literal``, even in strict mode, so numbers and booleans also check their type."""
+
+    text = "Literal[" + ", ".join(repr(value) for value in values) + "]"
+    if not any(isinstance(value, int) for value in values):
+        return text
+    types = ", ".join(sorted({type(value).__name__ for value in values}))
+    return f"Annotated[{text}, BeforeValidator(exact_type({types}))]"
+
+
 def discriminator(name: str, pointer: str, node: dict[str, Any]) -> str:
     """The property whose ``const`` tells the alternatives of a ``oneOf`` apart."""
 
@@ -300,6 +312,8 @@ def discriminator(name: str, pointer: str, node: dict[str, Any]) -> str:
     if not all(key in variant.get("required", []) for variant in variants):
         raise ContractError(f"{name}{pointer}: every oneOf alternative requires its {key!r} property")
     values = [variant["properties"][key]["const"] for variant in variants]
+    if not all(isinstance(value, str) for value in values):
+        raise ContractError(f"{name}{pointer}: oneOf alternatives are told apart by strings")
     if len(set(values)) != len(values):
         raise ContractError(f"{name}{pointer}: oneOf const values must differ")
     return key
@@ -859,6 +873,9 @@ def check_state_records(registry: dict[str, Any], transport: dict[str, Any], sch
         bucket_ttl = transport["key_value"][entry["bucket"]]["per_key_ttl_seconds"]
         if entry.get("ttl_seconds", 0) != bucket_ttl:
             raise ContractError(f"{where}: ttl_seconds is its bucket's per_key_ttl_seconds ({bucket_ttl}), and only then present")
+        lifetime = entry.get("max_lifetime_seconds", 1)
+        if type(lifetime) is not int or lifetime < 1 or ("max_lifetime_seconds" in entry and bucket_ttl):
+            raise ContractError(f"{where}: max_lifetime_seconds is a positive whole number, for records whose bucket keeps them")
 
 
 def check_shared_lists(registry: dict[str, Any], transport: dict[str, Any], topologies: dict[str, Any],
@@ -1221,9 +1238,9 @@ class ModelWriter:
             target_file, fragment = self.resolve(file, schema["$ref"])
             return self.named(target_file, fragment)
         if "const" in schema:
-            return f"Literal[{schema['const']!r}]"
+            return literal([schema["const"]])
         if "enum" in schema:
-            return "Literal[" + ", ".join(repr(value) for value in schema["enum"]) + "]"
+            return literal(schema["enum"])
         if "oneOf" in schema:
             return self.union(file, schema, hint)
         kind = schema.get("type")
@@ -1345,11 +1362,11 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
     models = header + (
         "from __future__ import annotations\n\n"
         "from typing import Annotated, Any, Literal, Union\n\n"
-        "from pydantic import MISSING, AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter\n\n"
-        "from custom_messages.wire.values import validate_timestamp\n\n\n"
+        "from pydantic import MISSING, AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, TypeAdapter\n\n"
+        "from custom_messages.wire.values import exact_type, validate_timestamp\n\n\n"
         "class WireModel(BaseModel):\n"
-        "    \"\"\"Strict, immutable and closed to unknown fields.\"\"\"\n\n"
-        "    model_config = ConfigDict(extra=\"forbid\", frozen=True, strict=True, populate_by_name=True)\n\n\n"
+        "    \"\"\"Strict, immutable and closed to unknown fields; fields are read only under their wire names.\"\"\"\n\n"
+        "    model_config = ConfigDict(extra=\"forbid\", frozen=True, strict=True)\n\n\n"
     )
     models += "\n\n".join(writer.blocks)
     adapters = []
@@ -1403,6 +1420,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"    {name!r}: StateSpec(name={name!r}, bucket={entry['bucket']!r}, key={entry['key']!r}, "
         f"signer={entry['signer']!r}, signer_roles={tuple(entry.get('signer_roles', ()))!r}, "
         f"writers={tuple(entry['writers'])!r}, ttl_seconds={entry.get('ttl_seconds')!r}, "
+        f"max_lifetime_seconds={entry.get('max_lifetime_seconds')!r}, "
         f"body_model=models.{class_name(name)}StateAdapter, "
         f"body_shape={shape(writer, entry['body'], schemas[entry['body']])!r}),"
         for name, entry, _body in states
@@ -1424,6 +1442,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"MAX_FRAME_BYTES = {registry['max_frame_bytes']!r}\n"
         f"MAX_NESTING_DEPTH = {registry['max_nesting_depth']!r}\n"
         f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
+        f"REPLAY_LEDGER_RETENTION_SECONDS = {transport['replay_ledger_retention_seconds']!r}\n"
         f"SUBJECT_PREFIX = {transport['subject_prefix']!r}\n"
         f"PEER_SENDER_SLOT = {transport['peer_sender_slot']!r}\n"
         f"REPLY_INBOX_PREFIX = {transport['reply_inbox_prefix']!r}\n"

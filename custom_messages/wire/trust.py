@@ -29,17 +29,24 @@ than the one it ``replaces``, so both stay in the store and queued frames still 
 the certificate valid when they were issued. The replaced certificate signs new
 frames only until ``CERTIFICATE_OVERLAP_SECONDS`` after its replacement was issued
 (authorization plan 12.5).
+
+``TrustStore.forget`` drops the certificates, sessions and agreements nothing can
+still need, so a long-running receiver's store does not grow without a bound; each
+record type ends within its ``max_lifetime_seconds`` of being written, which bounds
+when that is. ``TrustStore.held`` counts what the store holds, for health checks.
 """
 
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Mapping, NamedTuple, Optional
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from nacl.bindings import crypto_core_ed25519_is_valid_point
 from pydantic import MISSING, ValidationError
 
 from custom_messages.wire.canonical import CanonicalJsonError, parse
@@ -53,6 +60,7 @@ from custom_messages.wire.kinds import (
     MAX_FRAME_BYTES,
     PEER_SENDER_SLOT,
     PROTOCOL,
+    REPLAY_LEDGER_RETENTION_SECONDS,
     STATE_RECORDS,
     STATE_SHAPE,
     STATE_SIGNING_DOMAIN,
@@ -64,6 +72,12 @@ from custom_messages.wire.values import parse_timestamp
 
 SKEW = timedelta(seconds=CLOCK_SKEW_SECONDS)
 OVERLAP = timedelta(seconds=CERTIFICATE_OVERLAP_SECONDS)
+# Longer than any frame lasts (transport.yaml replay_ledger_retention_seconds): once a
+# trust record has ended this long ago, every frame it vouched for has expired.
+RETENTION = timedelta(seconds=REPLAY_LEDGER_RETENTION_SECONDS)
+# A session a certificate signed may be written as late as the certificate's end and
+# vouch for frames this much longer, so certificates are forgotten this much later.
+SESSION_REACH = timedelta(seconds=STATE_RECORDS["agent_session"].max_lifetime_seconds or 0) + SKEW
 # Runtime ids that would read as another installation's sender slot (x-<installation>)
 # or a system id such as the installation scope (_install); transport.yaml defines both.
 RESERVED_RUNTIME_PREFIXES = (PEER_SENDER_SLOT.split("{", 1)[0], INSTALLATION_SCOPE[:1])
@@ -99,6 +113,31 @@ def sign_state(document: Mapping[str, Any], private_key: Ed25519PrivateKey) -> d
     signed["body_digest"] = body_digest(signed["body"])
     signed["signature"] = b64url(private_key.sign(state_signing_bytes(signed)))
     return signed
+
+
+def ed25519_public_key(text: str) -> Ed25519PublicKey:
+    """A public key that someone else chose, which a signature can bind to its holder.
+
+    Key generation always gives the canonical encoding of a point of Ed25519's
+    prime-order subgroup other than the identity. Under a small-order point a forged
+    signature verifies for every message, so any other point is refused with
+    ``ValueError`` (libsodium's ``crypto_core_ed25519_is_valid_point``), as is any
+    spelling but the one base64url spelling of the key's bytes.
+    """
+
+    data = b64url_decode(text)
+    if len(data) != 32 or not crypto_core_ed25519_is_valid_point(data):
+        raise ValueError("not an Ed25519 public key of the prime-order subgroup")
+    return Ed25519PublicKey.from_public_bytes(data)
+
+
+def _public_key(text: str, at: str) -> Ed25519PublicKey:
+    """A trust record's public key (``ed25519_public_key``); any other value is ``invalid_body``."""
+
+    try:
+        return ed25519_public_key(text)
+    except ValueError as error:
+        raise FrameRefused("invalid_body", "not a usable Ed25519 public key in its canonical spelling", at=at) from error
 
 
 @dataclass(frozen=True)
@@ -184,6 +223,17 @@ class _Revocations:
     certificate_ids: frozenset[str]
 
 
+class _Held(NamedTuple):
+    """The newest version the store holds of one trust record (its type and key)."""
+
+    sequence: int
+    digest: str
+    # When the latest version held was written, which decides when the record is forgotten.
+    issued_at: datetime
+    # The record's key in its lookup: certificates, revocations, sessions or agreements.
+    entry: Any
+
+
 class TrustStore:
     """One receiver's view of who may sign what. Not shared between installations."""
 
@@ -194,7 +244,7 @@ class TrustStore:
             if key.installation != installation:
                 raise ValueError("another installation's authority keys come only from an agreement")
             self._anchors[key.key_id] = key.public_key
-        self._sequences: dict[tuple[str, str], tuple[int, str]] = {}
+        self._sequences: dict[tuple[str, str], _Held] = {}
         self._certificates: dict[tuple[str, str, int], HostCertificate] = {}
         self._revocations: dict[str, _Revocations] = {}
         self._sessions: dict[tuple[str, str, str], AgentSession] = {}
@@ -202,6 +252,8 @@ class TrustStore:
         self._minimums: dict[tuple[str, Optional[str]], tuple[int, int]] = {}
         # (installation, runtime, replaced certificate id) -> when the earliest replacement was issued.
         self._replacements: dict[tuple[str, str, str], datetime] = {}
+        # The latest time ``forget`` was given: records it would forget are not added again.
+        self._forgotten_at: Optional[datetime] = None
 
     # -- lookups ---------------------------------------------------------------------------------
 
@@ -296,11 +348,13 @@ class TrustStore:
         return self._certificate(record.document, record.body)
 
     def _checked(self, raw: Mapping[str, Any],
-                 reading: Optional[tuple[str, datetime, Optional[tuple[int, str]]]] = None) -> VerifiedRecord:
+                 reading: Optional[tuple[str, datetime, Optional[tuple[int, str]]]] = None, *,
+                 now: Optional[datetime] = None) -> VerifiedRecord:
         """Check a parsed record in the registry's refusal order (README, "State records").
 
         ``reading`` is the record type the reader reads, its clock and its held record for
-        a state report (``verify``), or None for a trust record (``add``). A record of
+        a state report (``verify``), or None for a trust record (``add``, which gives its
+        clock as ``now``, or a join or renewal reply's certificate, which has none). A record of
         another type than the one read is refused as ``malformed``: whoever can write to
         a bucket chooses what it holds. A record from a newer minor loses the
         unknown optional fields this version does not know before strict validation; its
@@ -338,6 +392,9 @@ class TrustStore:
             assert signer is not None and reading is not None
             self._check_report_scope(raw, document, signer)
             self._check_report_time(document, digest, *reading[1:])
+        elif now is not None and issued_at - now > SKEW:
+            # The longest lifetime counts from when a record was written, so that time has come.
+            raise FrameRefused("not_yet_valid", "a trust record is not dated ahead of the receiver's clock", at="/issued_at")
         try:
             body = spec.body_model.validate_python(prune(raw["body"], spec.body_shape) if newer else raw["body"])
         except ValidationError as error:
@@ -404,23 +461,92 @@ class TrustStore:
         end = BODY_END.get(document.record)
         if end is not None and document.expires_at is not MISSING and document.expires_at != getattr(body, end):
             raise FrameRefused("invalid_body", f"the record expires when its body's {end} says", at="/expires_at")
+        lifetime = spec.max_lifetime_seconds
+        if end is not None and lifetime is not None and parse_timestamp(getattr(body, end)) - issued_at > timedelta(seconds=lifetime):
+            raise FrameRefused("invalid_body", f"a {document.record} record ends within {lifetime} seconds of being written",
+                               at=f"/body/{end}")
 
-    def add(self, data: bytes | bytearray | memoryview) -> bool:
-        """Verify one trust record and keep it; return False when a newer one is already held."""
+    def add(self, data: bytes | bytearray | memoryview, *, now: datetime) -> bool:
+        """Verify one trust record and keep it; return False when a newer one is already held.
 
-        record = self._checked(self._parsed(data))
+        ``now`` is the receiver's clock: a record dated ahead of it by more than the clock
+        tolerance is refused (``not_yet_valid``). ``add`` also returns False, keeping
+        nothing, for a record ``forget`` would forget when the store holds none for its
+        key: a forgotten record, or an older version of it, cannot come back.
+        """
+
+        if now.tzinfo is None:
+            raise ValueError("now must name its time zone")
+        record = self._checked(self._parsed(data), now=now)
         document = record.document
         slot = (document.record, document.key)
-        held_sequence, held_digest = self._sequences.get(slot, (0, ""))
+        issued_at = parse_timestamp(document.issued_at)
+        held = self._sequences.get(slot)
+        held_sequence, held_digest = (held.sequence, held.digest) if held else (0, "")
         if held_sequence == document.sequence and held_digest != record.digest:
             raise FrameRefused("replayed", "the writer used this sequence for other content", at="/sequence")
-        if held_sequence >= document.sequence:
+        revoked = document.record == CERTIFICATE and self.revoked(record.body.installation, record.body.certificate_id)
+        if held_sequence >= document.sequence or (held is None and not revoked and self._forgettable(document.record, issued_at)):
             return False
         keeper = {CERTIFICATE: self._keep_certificate, REVOCATIONS: self._keep_revocations,
                   AGENT_SESSION: self._keep_session, AGREEMENT: self._keep_agreement}[document.record]
-        keeper(document, record.body, record.signer)
-        self._sequences[slot] = (document.sequence, record.digest)
+        entry = keeper(document, record.body, record.signer)
+        latest = issued_at if held is None else max(issued_at, held.issued_at)
+        self._sequences[slot] = _Held(document.sequence, record.digest, latest, entry)
         return True
+
+    # -- forgetting -------------------------------------------------------------------------------
+
+    def forget(self, now: datetime) -> int:
+        """Forget the trust records nothing can still need; return how many (README, "Trust over time").
+
+        A certificate, agent session or agreement is forgotten once its newest version
+        was written longer ago than its record's ``max_lifetime_seconds`` plus the replay
+        retention and the clock tolerance: every version of it has ended, and every
+        frame it vouched for has expired. A certificate is kept an agent session's
+        lifetime longer, for sessions it signed. ``add`` then ignores records this would
+        forget. Revoked certificates and the revocations record are kept, so a revoked
+        key stays refused; the contract bounds both. A receiver calls this at least
+        daily. A clock that jumped ahead forgets records still in use until the receiver
+        restarts, with a correct clock and a new store.
+        """
+
+        if now.tzinfo is None:
+            raise ValueError("now must name its time zone")
+        self._forgotten_at = now if self._forgotten_at is None else max(self._forgotten_at, now)
+        forgotten = [slot for slot, held in self._sequences.items()
+                     if self._forgettable(slot[0], held.issued_at) and not self._revoked_certificate(slot[0], held.entry)]
+        lookups: dict[str, dict[Any, Any]] = {CERTIFICATE: self._certificates, AGENT_SESSION: self._sessions,
+                                              AGREEMENT: self._agreements}
+        for slot in forgotten:
+            del lookups[slot[0]][self._sequences.pop(slot).entry]
+        # A replacement still shortens the replaced certificate's overlap while either is held.
+        needed = {(certificate.installation, certificate.runtime, certificate.certificate_id)
+                  for certificate in self._certificates.values()}
+        needed |= {(certificate.installation, certificate.runtime, certificate.replaces)
+                   for certificate in self._certificates.values() if certificate.replaces is not None}
+        self._replacements = {slot: issued_at for slot, issued_at in self._replacements.items() if slot in needed}
+        return len(forgotten)
+
+    def held(self) -> dict[str, int]:
+        """How many trust records the store holds, by record type: for health checks that warn before memory runs short."""
+
+        return dict(Counter(record for record, _key in self._sequences))
+
+    def _forgettable(self, record: str, issued_at: datetime) -> bool:
+        """Whether ``forget`` forgets a record whose newest version was written at ``issued_at``, unless revoked."""
+
+        lifetime = STATE_RECORDS[record].max_lifetime_seconds
+        if lifetime is None or self._forgotten_at is None:
+            return False
+        kept = timedelta(seconds=lifetime) + RETENTION + SKEW + (SESSION_REACH if record == CERTIFICATE else timedelta())
+        return self._forgotten_at - issued_at >= kept
+
+    def _revoked_certificate(self, record: str, entry: Any) -> bool:
+        if record != CERTIFICATE:
+            return False
+        certificate = self._certificates[entry]
+        return self.revoked(certificate.installation, certificate.certificate_id)
 
     def _signer(self, document: State, spec: StateSpec, issued_at: datetime) -> tuple[Ed25519PublicKey, Optional[HostCertificate]]:
         """The key that must have signed the record, from an authority key or the writer's certificate."""
@@ -487,7 +613,7 @@ class TrustStore:
         held = self._sequences.get((CERTIFICATE, f"host.{signer.installation}.{signer.runtime}.{signer.membership_epoch}"))
         named = body.certificate
         for field_name, expected in (("certificate_id", signer.certificate_id), ("membership_epoch", signer.membership_epoch),
-                                     ("sha256", held[1] if held else None)):
+                                     ("sha256", held.digest if held else None)):
             if getattr(named, field_name) != expected:
                 raise FrameRefused("invalid_body", "a host record names the certificate it is signed with",
                                    at=f"/body/certificate/{field_name}")
@@ -506,17 +632,18 @@ class TrustStore:
         issued_at, expires_at = parse_timestamp(body.issued_at), parse_timestamp(body.expires_at)
         if expires_at <= issued_at:
             raise FrameRefused("invalid_body", "a certificate must end after it starts", at="/body/expires_at")
+        public_key = _public_key(body.application_key.public_key, "/body/application_key/public_key")
         return HostCertificate(
             certificate_id=body.certificate_id, installation=body.installation, runtime=body.runtime,
             teams=frozenset(body.teams), roles=frozenset(body.roles), agent_types=frozenset(body.agent_types),
             membership_epoch=body.membership_epoch, revocation_epoch=body.revocation_epoch,
             key_id=body.application_key.key_id,
-            public_key=Ed25519PublicKey.from_public_bytes(b64url_decode(body.application_key.public_key)),
+            public_key=public_key,
             nats_public_key=body.nats_public_key, session_limit=body.session_limit, issued_at=issued_at, expires_at=expires_at,
             replaces=None if body.replaces is MISSING else body.replaces,
         )
 
-    def _keep_certificate(self, document: State, body: Any, _signer: Optional[HostCertificate]) -> None:
+    def _keep_certificate(self, document: State, body: Any, _signer: Optional[HostCertificate]) -> tuple[str, str, int]:
         certificate = self._certificate(document, body)
         held = [other for other in self._certificates.values()
                 if (other.installation, other.runtime) == (certificate.installation, certificate.runtime)]
@@ -532,9 +659,11 @@ class TrustStore:
             slot = (certificate.installation, certificate.runtime, certificate.replaces)
             earlier = self._replacements.get(slot)
             self._replacements[slot] = certificate.issued_at if earlier is None else min(earlier, certificate.issued_at)
-        self._certificates[(certificate.installation, certificate.runtime, certificate.membership_epoch)] = certificate
+        entry = (certificate.installation, certificate.runtime, certificate.membership_epoch)
+        self._certificates[entry] = certificate
+        return entry
 
-    def _keep_revocations(self, document: State, body: Any, _signer: Optional[HostCertificate]) -> None:
+    def _keep_revocations(self, document: State, body: Any, _signer: Optional[HostCertificate]) -> str:
         self._same_installation(document, body.installation)
         self._expect_key(document, f"revocations.{body.installation}")
         held = self._revocations.get(body.installation)
@@ -543,8 +672,9 @@ class TrustStore:
             raise FrameRefused("invalid_body", "the revocation epoch only grows and revoked certificates stay listed",
                                at="/body/revocation_epoch")
         self._revocations[body.installation] = _Revocations(body.revocation_epoch, listed)
+        return body.installation
 
-    def _keep_session(self, document: State, body: Any, signer: Optional[HostCertificate]) -> None:
+    def _keep_session(self, document: State, body: Any, signer: Optional[HostCertificate]) -> tuple[str, str, str]:
         assert signer is not None  # sessions are host-signed (registry signer: host)
         self._same_installation(document, body.installation)
         if body.team not in signer.teams:
@@ -554,13 +684,15 @@ class TrustStore:
         started_at, ends_at = parse_timestamp(body.started_at), parse_timestamp(body.ends_at)
         if ends_at <= started_at:
             raise FrameRefused("invalid_body", "a session must end after it starts", at="/body/ends_at")
-        self._sessions[(body.installation, body.team, body.session)] = AgentSession(
+        entry = (body.installation, body.team, body.session)
+        self._sessions[entry] = AgentSession(
             session=body.session, installation=body.installation, team=body.team, agent=body.agent,
             agent_type=body.agent_type, agent_role=body.agent_role, runtime=body.runtime,
             placement_revision=body.placement_revision, started_at=started_at, ends_at=ends_at, signer=signer,
         )
+        return entry
 
-    def _keep_agreement(self, document: State, body: Any, _signer: Optional[HostCertificate]) -> None:
+    def _keep_agreement(self, document: State, body: Any, _signer: Optional[HostCertificate]) -> str:
         if body.installation != self.installation or body.peer == self.installation:
             raise FrameRefused("wrong_issuer", "an agreement names this installation and another one", at="/body/peer")
         self._expect_key(document, f"agreement.{body.peer}")
@@ -573,7 +705,8 @@ class TrustStore:
             raise FrameRefused("invalid_body", "an agreement must end after it starts", at="/body/expires_at")
         self._agreements[body.peer] = Agreement(
             agreement_id=body.agreement_id, peer=body.peer,
-            authority_keys={key.key_id: Ed25519PublicKey.from_public_bytes(b64url_decode(key.public_key))
-                            for key in body.authority_keys},
+            authority_keys={key.key_id: _public_key(key.public_key, f"/body/authority_keys/{index}/public_key")
+                            for index, key in enumerate(body.authority_keys)},
             teams=frozenset(body.teams), kinds=frozenset(body.kinds), issued_at=issued_at, expires_at=expires_at,
         )
+        return body.peer

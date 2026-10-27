@@ -5666,11 +5666,12 @@
       "bucket": "UA1_CERTS",
       "description": "An agent session certificate, issued by the team services that place the agent.",
       "key": "session.<installation>.<team>.<session>",
+      "max_lifetime_seconds": 86400,
       "signer": "host",
       "signer_roles": [
         "team_services"
       ],
-      "write_rule": "rewritten with a higher sequence to renew it or to record its actual end; kept until its end plus the longest kind lifetime",
+      "write_rule": "rewritten with a higher sequence to renew it or to record its actual end; deleted once receivers forget it (README, \"Trust over time\"), which is after its end plus the longest kind lifetime",
       "writers": [
         "team_services",
         "edge_adapter"
@@ -5681,8 +5682,9 @@
       "bucket": "UA1_CERTS",
       "description": "A federation agreement with another installation.",
       "key": "agreement.<peer>",
+      "max_lifetime_seconds": 31622400,
       "signer": "authority",
-      "write_rule": "rewritten with a higher sequence to change or end it; only the receiver's own authority signs it",
+      "write_rule": "rewritten with a higher sequence to change, renew or end it; only the receiver's own authority signs it; deleted once receivers forget it (README, \"Trust over time\")",
       "writers": [
         "installation_authority"
       ]
@@ -5692,8 +5694,9 @@
       "bucket": "UA1_CERTS",
       "description": "A host's membership certificate.",
       "key": "host.<installation>.<runtime>.<membership_epoch>",
+      "max_lifetime_seconds": 7776000,
       "signer": "authority",
-      "write_rule": "written once; kept until its expiry plus the longest kind lifetime, so queued frames can still be checked",
+      "write_rule": "written once; deleted once receivers forget it (README, \"Trust over time\"), which is after its expiry plus the longest kind lifetime, so queued frames can still be checked; kept while the revocations record lists it",
       "writers": [
         "installation_authority",
         "edge_adapter"

@@ -1,0 +1,14 @@
+{
+  "description": "A constant 1 is the JSON number 1, not true.",
+  "refusal": "invalid_body",
+  "at": "/body/proposal/value/schema_version",
+  "base": "objectives.work_profiles.propose.reply/ok.json",
+  "changes": [
+    {
+      "set": "/body/proposal/value/schema_version",
+      "to": true
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"objectives.work_profiles.propose.reply\", \"message_id\": \"01928f3a-7b2c-7e50-8000-000000000011\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"lead\", \"runtime\": \"lead-host-1\"}, \"subject\": \"_INBOX.lead-host-1.01928f3a-7b2c-7e50-8000-000000000001\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"outcome\": \"ok\", \"proposal\": {\"type\": \"inline\", \"value\": {\"schema_version\": true, \"proposal_id\": \"proposal_dependency_watch\", \"owner_agent_id\": \"manager_scope:team_example:TeamArchitect\", \"owner_person\": \"person_7c1\", \"source_task_id\": \"task_root_7f\", \"scope\": \"objective\", \"objective_id\": \"objective_dependency_watch\", \"profile_name\": \"dependency-watch\", \"profile\": {\"cadence_cron\": \"0 9 * * *\", \"cadence_timezone\": \"owner\", \"budget\": {\"active_seconds\": 1200, \"checkpoint_reserve_seconds\": 120, \"checkpoint_reserve_turns\": 2, \"checkpoint_reserve_tokens\": 10000, \"checkpoint_reserve_tool_calls\": 1, \"turns\": 20, \"total_tokens\": 50000, \"tool_calls\": 30}}, \"rationale\": {\"type\": \"inline\", \"text\": \"Run bounded checks while the report remains active.\"}, \"replace_existing\": false, \"proposal_digest\": \"08a18f1ed4ac3855a5168dbbbcc45b7825cfe6209a63ab0a3e752c2b74967fcf\", \"status\": \"pending\", \"created_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\"}}}, \"causation_id\": \"01928f3a-7b2c-7e50-8000-000000000001\", \"idempotency_key\": \"objectives.work_profiles.propose.reply:7D2pDDx2keKVbax8c9gIwb66ztT0glPRfDaGaa7zgvQ\", \"body_digest\": \"kXTsum0ul_6tEdrWFKu2k2fQB-OAeC1-S_K_D_HL3t0\", \"signature\": \"5f_KUyANSJ5AUIshsf-kHF69-j0iLkA9sEYtg0pz2RkC3KJWnr7FPnTl-pTzBygZHfhJBilU2Dsd6LP2hzIqCA\"}"
+}

@@ -52,15 +52,16 @@ def default_records() -> list[str]:
                   if path.name != "anchors.json" and path.parent.name != "extra")
 
 
-def trust_store(add: Iterable[str] = (), remove: Iterable[str] = (), extra_documents: Iterable[bytes] = ()) -> TrustStore:
-    """The examples' trust store; ``add`` and ``remove`` name records under examples/trust."""
+def trust_store(add: Iterable[str] = (), remove: Iterable[str] = (), extra_documents: Iterable[bytes] = (),
+                now: datetime = NOW) -> TrustStore:
+    """The examples' trust store, loaded at ``now``; ``add`` and ``remove`` name records under examples/trust."""
 
     names = [name for name in default_records() if name not in set(remove)] + list(add)
     documents = [(TRUST / name).read_bytes() for name in names] + list(extra_documents)
     documents.sort(key=lambda data: RECORD_ORDER.index(json.loads(data)["record"]))
     store = TrustStore(anchors()[0].installation, anchors())
     for data in documents:
-        store.add(data)
+        store.add(data, now=now)
     return store
 
 
@@ -119,7 +120,8 @@ def verify(data: bytes, frame: Mapping[str, Any], context: Optional[Mapping[str,
 
     context = context or {}
     if trust is None:
-        trust = trust_store(**{key: value for key, value in context.get("trust", {}).items() if key in {"add", "remove"}})
+        trust = trust_store(**{key: value for key, value in context.get("trust", {}).items() if key in {"add", "remove"}},
+                            now=parse_timestamp(context["now"]) if "now" in context else NOW)
     for minimum in context.get("minimum_epochs", []):
         trust.require_epochs(minimum["installation"], minimum.get("runtime"),
                              membership=minimum.get("membership", 0), revocation=minimum.get("revocation", 0))
@@ -149,7 +151,8 @@ def verify_state(data: bytes, context: Optional[Mapping[str, Any]] = None, *, tr
 
     context = context or {}
     if trust is None:
-        trust = trust_store(**{key: value for key, value in context.get("trust", {}).items() if key in {"add", "remove"}})
+        trust = trust_store(**{key: value for key, value in context.get("trust", {}).items() if key in {"add", "remove"}},
+                            now=parse_timestamp(context["now"]) if "now" in context else NOW)
     for minimum in context.get("minimum_epochs", []):
         trust.require_epochs(minimum["installation"], minimum.get("runtime"),
                              membership=minimum.get("membership", 0), revocation=minimum.get("revocation", 0))

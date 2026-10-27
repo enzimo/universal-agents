@@ -1,5 +1,5 @@
 {
-  "description": "Ed25519 signatures over a domain prefix and the RFC 8785 canonical document without its signature: frames, authority tokens and state records each have their own prefix. Each implementation re-signs from the seed and must produce the same bytes, decodes keys, digests and signatures as unpadded base64url, and refuses every other spelling in base64url_refused.",
+  "description": "Ed25519 signatures over a domain prefix and the RFC 8785 canonical document without its signature: frames, authority tokens and state records each have their own prefix. Each implementation re-signs from the seed and must produce the same bytes, decodes keys, digests and signatures as unpadded base64url, refuses every other spelling in base64url_refused, and refuses the public keys in public_key_refused (README, \"Canonical form and signatures\").",
   "frames": [
     {
       "name": "ascii",
@@ -290,6 +290,73 @@
       "name": "impossible-length",
       "text": "AAAAA",
       "why": "five characters cannot spell whole bytes"
+    }
+  ],
+  "public_key_refused": [
+    {
+      "name": "identity",
+      "text": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "why": "the identity point, of order 1: a forged signature verifies for every message"
+    },
+    {
+      "name": "order-2",
+      "text": "7P_______________________________________38",
+      "why": "a point of order 2"
+    },
+    {
+      "name": "order-4",
+      "text": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "why": "a point of order 4"
+    },
+    {
+      "name": "order-4-negated",
+      "text": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIA",
+      "why": "the other point of order 4"
+    },
+    {
+      "name": "order-8",
+      "text": "JuiVj8KyJ7BFw_SJ8u-Y8NXfrAXTxjM5sTgCiG1T_AU",
+      "why": "a point of order 8"
+    },
+    {
+      "name": "order-8-negated",
+      "text": "JuiVj8KyJ7BFw_SJ8u-Y8NXfrAXTxjM5sTgCiG1T_IU",
+      "why": "a point of order 8"
+    },
+    {
+      "name": "order-8-other",
+      "text": "xxdqcD1N2E-6PAt2DRBnDyogU_osOczGTsf9d5KsA3o",
+      "why": "a point of order 8"
+    },
+    {
+      "name": "order-8-other-negated",
+      "text": "xxdqcD1N2E-6PAt2DRBnDyogU_osOczGTsf9d5KsA_o",
+      "why": "a point of order 8"
+    },
+    {
+      "name": "identity-non-canonical",
+      "text": "7v_______________________________________38",
+      "why": "the identity with y spelled as p + 1"
+    },
+    {
+      "name": "identity-negative-zero",
+      "text": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIA",
+      "why": "the identity with the sign bit of x = 0 set"
+    },
+    {
+      "name": "mixed-order",
+      "text": "2pnii6Upzd41ol-6kFnnjsruI5-ZdVubGqT2XfAIA-I",
+      "why": "the base point plus a point of order 8: outside the prime-order subgroup"
+    },
+    {
+      "name": "not-on-the-curve",
+      "text": "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "why": "no point has y = 2"
+    },
+    {
+      "name": "short",
+      "text": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "why": "31 bytes"
     }
   ],
   "domain_prefixes": {
