@@ -1156,18 +1156,27 @@ disappears once it is fixed:
 
 - **Problem**: something does not work now, for example a model provider
   rejected a key, an endpoint in the configuration has no key, an MCP server
-  is not answering, the secure tool broker does not answer, or TeamLead
-  stopped reporting.
+  is not answering, the secure tool broker does not answer, TeamLead
+  stopped reporting, or a disk the instance uses is nearly full (95% by
+  default).
 - **Warning**: something works, but not as configured, for example a
   variable in `team.env` or the container environment that overrides a saved
   setting or a key saved with `/auth model`, memory search that stopped
-  working, schedules an administrator needs to check, or people who may not
-  use the team's model keys and have no model of their own yet.
+  working, schedules an administrator needs to check, people who may not
+  use the team's model keys and have no model of their own yet, or a disk
+  the instance uses, or the message server's storage, nearing its limit (80%
+  by default).
 - **Note**: a deliberate choice worth knowing, such as access checks turned
-  off, or people whose work goes to their own model provider.
+  off, people whose work goes to their own model provider, or a message
+  server that sets no limit for stored messages.
 
 When new problems appear, administrators also get one Inbox notice that
-links to the page. The notice stays in the Inbox after the problems are
+links to the page. Storage nearing its limit is told the same way, although
+it is only a warning, so there is time to make room: once when it reaches
+80%, and once more at 95%, not again on each check as the percentage changes.
+If space is freed and the disk fills up again later, administrators hear
+again. A disk finding's **Technical Details** list the databases and their
+sizes. The notice stays in the Inbox after the problems are
 fixed; the page always shows the current state. The page only reads; it
 never changes anything.
 

@@ -14,6 +14,7 @@ from assistant_gateway.account_sharing import GatewayAccountSharing
 from assistant_gateway.status_page import StatusPage
 from assistant_gateway.file_retention import GatewayFileRetention
 from assistant_gateway.inbound_attachments import resolve_inbound_attachment_cache_dir
+from assistant_gateway.storage_capacity import StorageCapacity, build_storage_capacity
 from assistant_gateway.storage_usage import StorageUsageNotices, build_storage_usage_notices
 from assistant_gateway.upload_retention import UploadRetention
 from assistant_gateway.application.knowledge_pages import GatewayKnowledgePages
@@ -472,10 +473,11 @@ def _access_maintenance_tasks(
 
 @dataclass(frozen=True)
 class _StoredData:
-    """The gateway's work on stored data: cleanup, people's storage notices and the Settings page."""
+    """The gateway's work on stored data: cleanup, warnings and their Settings page."""
 
     uploads: UploadRetention
     usage: StorageUsageNotices
+    capacity: StorageCapacity
     settings: GatewayFileRetention
 
 
@@ -486,13 +488,14 @@ def _stored_data(
     access_inbox: GatewayAccessInbox,
     person_changes: PersonChangeCheck,
 ) -> _StoredData:
-    """The chat upload cleanup, people's storage notices and the Settings > Team > File Retention service.
+    """The chat upload cleanup, the storage warnings and the Settings > Team > File Retention service.
 
     Uploads older than their retention are deleted at start and every few hours
     (``upload_retention``). People hear as their stored data grows
-    (``storage_usage``, a daily check). Administrators change the days and
-    scratch retention in Settings (``file_retention``), and the running upload
-    cleanup follows at once.
+    (``storage_usage``, a daily check) and administrators before storage fills
+    (``storage_capacity``, on the Status page). Administrators change the days
+    and scratch retention in Settings (``file_retention``), and the running
+    upload cleanup follows at once.
     """
 
     uploads = UploadRetention(
@@ -506,9 +509,11 @@ def _stored_data(
         access_store=access_inbox.access_store,
         send_notice_once=access_inbox.send_notice_once,
     )
+    capacity = build_storage_capacity(config)
     return _StoredData(
         uploads=uploads,
         usage=usage,
+        capacity=capacity,
         settings=GatewayFileRetention(config_path=config.config_path, person_changes=person_changes, uploads=uploads),
     )
 
@@ -958,8 +963,8 @@ class UserGateway:
             event_output=self._event_output,
             logger=logger,
         )
-        # Upload cleanup, people's storage notices and their Settings page
-        # (_stored_data).
+        # Upload cleanup, people's storage notices, storage on the Status page
+        # and their Settings page (_stored_data).
         self.stored_data = _stored_data(
             config, state_store=self.state_store, access_inbox=self.access_inbox, person_changes=person_changes
         )
@@ -1296,6 +1301,8 @@ class UserGateway:
                 agent_statuses=self.team_presence.current_statuses,
                 send_notice_once=self.access_inbox.send_notice_once,
                 stopped_receivers=resolved_manager_runtime.stopped_receivers,
+                storage=self.stored_data.capacity,
+                jetstream_usage=resolved_manager_runtime.jetstream_usage,
             ),
             # People's Knowledge page; the knowledge base is in the manager's database.
             knowledge=GatewayKnowledgePages(

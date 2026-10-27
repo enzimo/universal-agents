@@ -86,6 +86,9 @@ class _FakeManagerRuntime:
     def stopped_receivers(self) -> tuple:
         return ()
 
+    async def jetstream_usage(self) -> None:
+        return None
+
     async def manager_has_live_consumer(
         self,
         manager_id: str,

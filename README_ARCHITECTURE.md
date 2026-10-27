@@ -3508,7 +3508,8 @@ configured endpoints, every agent's own findings carried in its status
 heartbeat (`AgentStatus.status_findings`, `custom_agents/status_findings.py`:
 MCP servers that do not load, degraded memory search, skill refresh errors,
 schedules for administrators, receive loops that stopped), whether TeamLead
-reports, and its own configuration and receive loops. A source that does not answer is listed and shown as a
+reports, its own configuration and receive loops, and storage filling up
+(`assistant_gateway/storage_capacity.py`). A source that does not answer is listed and shown as a
 problem, because silence must not look like health. Every five minutes the
 gateway sends administrators one Inbox notice per new set of problems
 (`status_problems`), linking to the page. A notice records what
@@ -3521,6 +3522,34 @@ Why: conditions such as an
 environment variable silently overriding a saved setting or key, a rejected
 model key, or an MCP server that stopped answering were only in logs or only
 known to one process.
+
+Storage findings exist because nothing measured disk, database or message
+storage before, so a full disk was first noticed when saving failed, and
+administrators must hear before a limit is reached. On every check the
+gateway reads the free space (`statvfs`, counted as `df` does) of the
+filesystem holding the instance folder and of each SQLite database's folder on
+another filesystem, and the NATS account's JetStream use and limit
+(`js.account_info()`, `NatsTransportAdapter.jetstream_account_usage`). At
+`gateway.storage_warnings.nearing_limit_percent` (80 by default) a place is
+a warning, at `nearly_full_percent` (95) a problem. The nearing level is a
+warning on the page but counts as a problem for the notice, so administrators
+are told before it fills. A finding's id names the place, the level and when
+the level was entered (`storage_nearing_limit:disk:instance:20261027T120000Z`),
+never the percentage, so the notice digest changes only when a level is
+entered, not every five minutes as the percentage moves. When each level was
+entered is kept in `state/storage_levels.json` (`StorageLevels`), so a restart
+neither repeats nor forgets a notice; a level ends only three percentage
+points below its threshold, so use moving around a threshold is not a new
+entry, while a disk that fills up again after space was freed is announced
+again. Database sizes (SQLite files with their write-ahead log,
+`pg_database_size` for PostgreSQL) have no limit of their own and appear in
+the findings' details. The bundled NATS server sets no JetStream limit
+(`docker/nats_service.py` passes no `max_file_store`), so the account reports
+none; the page then shows a note with the stored size instead of inventing a
+limit. Without `max_file_store` the server itself stops storing at three
+quarters of the disk space that was free when it started. An account limit
+must leave room for the streams' own reservations: the server refuses to
+create the dead-letter stream (64 MB) in an account allowed less.
 
 ### Knowledge page
 

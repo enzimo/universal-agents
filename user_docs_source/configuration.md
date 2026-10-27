@@ -379,6 +379,23 @@ approximate: they count the stored text and files, not the space the
 databases and the disk use to hold them. Like other notices, these appear
 only in **Settings → Inbox**, not in a chat.
 
+Administrators hear about the instance's storage on the
+[Status page](features.md#status-page): the disk holding the instance
+folder, the disk of each SQLite database when it is another one, and the
+message server's stored messages when its account has a limit. A place
+nearing its limit is a warning and one Inbox notice; nearly full is a problem
+and another notice:
+
+```yaml
+gateway:
+  storage_warnings:
+    nearing_limit_percent: 80   # warning, and administrators are told
+    nearly_full_percent: 95     # problem; must be above nearing_limit_percent
+```
+
+The bundled NATS server sets no limit for stored messages, so the page notes
+how much they take instead of a percentage; they are on the instance's disk.
+
 ### Upgrading from the single workspace folder
 
 Earlier versions kept everything in `<instance_root>/workspace`. Upgrading the

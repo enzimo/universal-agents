@@ -112,6 +112,9 @@ class GatewayManagerRuntime(GatewayManagerTransport, Protocol):
     def stopped_receivers(self) -> tuple[Any, ...]:
         """Receive loops that ended without being asked to (shown on the Status page)."""
 
+    async def jetstream_usage(self) -> Any:
+        """The messaging account's stored messages and limits, or None when it keeps none (Status page)."""
+
     async def manager_has_live_consumer(
         self,
         manager_id: str,
