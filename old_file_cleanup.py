@@ -1,15 +1,22 @@
-"""Remove files older than a cutoff below an opened folder, never following a link.
+"""Remove old files below an opened folder, never following a link.
 
-The trusted cleanups that keep folders from growing forever share this walk:
-people's and agents' scratch folders (``custom_agents.scratch_retention``) and
-the gateway's chat uploads (``assistant_gateway.upload_retention``).
+The trusted cleanups that keep folders from growing forever share these walks:
+people's and agents' scratch folders (``custom_agents.scratch_retention``),
+the gateway's chat uploads (``assistant_gateway.upload_retention``) and the
+files of a removed person's held conversation artifacts
+(``remove_listed_file``).
 
-Agents' code can write scratch folders and may plant links in them, so the
-walk never follows a link: every folder is opened relative to the one before
-it with ``O_NOFOLLOW``, and files are removed by name inside the folder that
-was opened. Following a planted link could delete files anywhere the process
-can write. Links, devices, sockets and other unusual entries are left alone
-and logged with the caller's event name (``OldFilesRemoved.SKIPPED_EVENT``).
+Agents' code can write scratch folders and may plant links in them, so no
+walk follows a link: every folder is opened relative to the one before it
+with ``O_NOFOLLOW``, and files are removed by name inside the folder that was
+opened. Following a planted link could delete files anywhere the process can
+write. Two walks:
+
+- ``remove_old_files`` decides file by file by when each was last changed.
+  Links, devices, sockets and other unusual entries are left alone and logged
+  with the caller's event name (``OldFilesRemoved.SKIPPED_EVENT``).
+- ``remove_listed_file`` deletes one file a record names, only when it lies
+  inside the given folder.
 """
 
 from __future__ import annotations
@@ -22,6 +29,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
+from access_control import safe_open
+from access_control.safe_open import UnsafePath
+
 logger = logging.getLogger(__name__)
 
 SECONDS_PER_DAY = 24 * 60 * 60
@@ -33,6 +43,7 @@ SKIPPED_NOT_FILE_OR_FOLDER = "not_a_regular_file_or_folder"
 SKIPPED_TOO_DEEP = "too_deep"
 SKIPPED_CANNOT_OPEN = "cannot_open"
 SKIPPED_CANNOT_REMOVE = "cannot_remove"
+SKIPPED_OUTSIDE_FOLDER = "outside_cleaned_folder"
 
 
 @dataclass
@@ -75,6 +86,56 @@ def remove_old_files(
             _remove_subfolder(folder, name, info, shown, cutoff, counts, depth=depth)
         else:
             note_skipped(counts, shown / name, SKIPPED_NOT_FILE_OR_FOLDER)
+
+
+def remove_listed_file(root: Path, path: Path, counts: OldFilesRemoved) -> None:
+    """Delete the regular file a record names, only inside ``root``, then its folder if that is now empty.
+
+    ``root`` is the trusted folder the records' files are kept in (the
+    gateway's uploads, conversation artifacts). A path outside it, or one
+    through a link, is left alone and logged. A file already gone is not
+    counted. ``root`` itself is never removed.
+    """
+
+    root = root.expanduser().resolve()
+    try:
+        parts = Path(os.path.abspath(path)).relative_to(root).parts
+    except ValueError:
+        note_skipped(counts, path, SKIPPED_OUTSIDE_FOLDER)
+        return
+    if not parts:
+        note_skipped(counts, path, SKIPPED_OUTSIDE_FOLDER)
+        return
+    try:
+        info = safe_open.entry_status(root, parts)
+        if info is None:
+            return  # already gone
+        safe_open.remove_file(root, parts)
+    except UnsafePath as exc:
+        if exc.reason != safe_open.REASON_NOT_FOUND:
+            note_skipped(counts, path, exc.reason)
+        return
+    counts.files_removed += 1
+    counts.bytes_removed += info.st_size
+    _remove_emptied_folder(root, parts[:-1], counts)
+
+
+def _remove_emptied_folder(root: Path, parts: tuple[str, ...], counts: OldFilesRemoved) -> None:
+    """Remove the folder a listed file was in when that left it empty; ``root`` stays."""
+
+    if not parts:
+        return
+    try:
+        parent = safe_open.open_directory(root, parts[:-1])
+    except UnsafePath:
+        return
+    try:
+        os.rmdir(parts[-1], dir_fd=parent)  # only an empty folder, never through a link
+    except OSError:
+        return  # not empty, or no longer a folder: leave it
+    finally:
+        os.close(parent)
+    counts.folders_removed += 1
 
 
 def note_skipped(counts: OldFilesRemoved, path: Path, reason: str) -> None:
@@ -142,8 +203,10 @@ __all__ = [
     "SECONDS_PER_DAY",
     "SKIPPED_CANNOT_OPEN",
     "SKIPPED_NOT_FILE_OR_FOLDER",
+    "SKIPPED_OUTSIDE_FOLDER",
     "OldFilesRemoved",
     "note_skipped",
+    "remove_listed_file",
     "remove_old_files",
     "retention_cutoff",
 ]

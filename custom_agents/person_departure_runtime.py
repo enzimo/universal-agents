@@ -62,10 +62,9 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
-from pathlib import Path
 from typing import Any, Iterable
 
-from access_control.held_person_folders import purge_folder
+from access_control.held_person_folders import purge_folder, purge_held_artifact_files
 from access_control.people import PERSON_ROLE_ADMIN, is_administrator, team_work_owner
 from access_control.people_directory import PersonNow
 from custom_agents.access_runtime import send_runtime_notice_once
@@ -636,7 +635,8 @@ def purge_expired_holds(agent: Any, *, now: datetime | None = None) -> int:
             )
             continue
         try:
-            _delete_artifact_files(agent, store.held_artifact_paths(hold.team_id, hold.person_id))
+            # The files first: their records name them, so a failure keeps the records for the next run.
+            purge_held_artifact_files(layout, hold.person_id, store.held_artifact_paths(hold.team_id, hold.person_id))
             purge_folder(layout, hold.person_id)
             rows = store.delete_held_rows(hold.team_id, hold.person_id)
             store.mark_purged(hold.team_id, hold.person_id, at=moment)
@@ -655,20 +655,6 @@ def purge_expired_holds(agent: Any, *, now: datetime | None = None) -> int:
             rows,
         )
     return purged
-
-
-def _delete_artifact_files(agent: Any, paths: list[str]) -> None:
-    """Delete held conversation artifact files, only inside the conversation store's artifact folder."""
-
-    folder = getattr(getattr(agent, "_conversation_store", None), "_artifacts_dir", None)
-    if folder is None or not paths:
-        return
-    base = Path(folder).resolve()
-    for raw in paths:
-        path = Path(raw)
-        if path.is_symlink() or base not in path.resolve().parents or not path.is_file():
-            continue
-        path.unlink(missing_ok=True)
 
 
 async def settle_departed_people_safely(agent: Any, *, when: str) -> str:

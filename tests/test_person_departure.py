@@ -12,6 +12,9 @@ gateway-signed context. Covers:
   and conversations; a link planted in the folder is moved as a link, never
   followed;
 - restore within the window; purge after it; adding back afterwards starts fresh;
+- both purges (the maintenance run's and the gateway's, when it removes
+  someone again after an expired hold) delete the held conversation artifact
+  files with their records;
 - team schedules move to another administrator;
 - after-action report reviews stay with their person: the review schedule is
   deleted, never moved, and removal deletes the report records;
@@ -23,6 +26,7 @@ gateway-signed context. Covers:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sqlite3
@@ -632,6 +636,64 @@ def test_after_the_window_restore_explains_and_a_maintenance_run_purges(world: W
     )
     assert added.startswith("Added Mia (mia) back") and "Restored" not in added
     assert not world.layout.person_dir(MIA).exists() and _usermem(world, MIA) == []
+
+
+def _give_artifact(world: World, person_id: str) -> Path:
+    """A long tool output offloaded from the person's conversation: a record and its file."""
+
+    artifact = world.conversations.offload_large_text(
+        conversation_id=f"conv_{person_id}",
+        task_id=f"task_{person_id}",
+        artifact_type="tool_output",
+        raw_text="long tool output " * 50,
+        summary_text="tool output summary",
+    )
+    path = Path(artifact["storage_path"])
+    assert path.is_file()
+    return path
+
+
+def test_the_maintenance_purge_deletes_held_conversation_artifact_files(world: World) -> None:
+    _give_work(world, MIA)
+    artifact = _give_artifact(world, MIA)
+    world.remove(ADAM, MIA)
+    assert artifact.is_file()  # held with its record
+
+    assert purge_expired_holds(world.agent, now=START + timedelta(days=8)) == 1
+
+    assert not artifact.exists() and not artifact.parent.exists()
+    assert world.layout.conversation_artifacts_dir.is_dir()
+    assert world.departures.held_row_count(TEAM, MIA) == 0
+
+
+def test_the_gateways_purge_of_an_expired_hold_deletes_held_conversation_artifact_files(world: World) -> None:
+    """Removing someone again after an expired hold that no maintenance run purged yet.
+
+    The gateway purges the old hold first; it used to delete the held records
+    and leave their files behind with nothing naming them.
+    """
+
+    _give_work(world, MIA)
+    artifact = _give_artifact(world, MIA)
+    outside = world.tmp / "outside.txt"
+    outside.write_text("not hers", encoding="utf-8")
+    world.remove(ADAM, MIA)
+    with world.departures._connect() as conn:  # a held record naming a file outside the artifacts folder
+        conn.execute(
+            "INSERT INTO person_held_rows (held_row_id, team_id, person_id, position, source_table, row_json, held_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("held_outside", TEAM, MIA, 10_000, "conversation_artifacts", json.dumps({"storage_path": str(outside)}), START.isoformat()),
+        )
+        conn.commit()
+    world.clock.now = START + timedelta(days=8)
+    records = world.lifecycle._records
+
+    records.hold(MIA, until=world.clock.now + timedelta(days=7))
+
+    assert not artifact.exists()
+    assert outside.read_text(encoding="utf-8") == "not hers"
+    assert world.departures.hold_of(TEAM, MIA).purged_at is None  # the new hold
+    assert world.departures.held_row_count(TEAM, MIA) == 0
 
 
 def test_sign_ins_the_broker_could_not_delete_are_reported(world: World) -> None:

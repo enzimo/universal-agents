@@ -2119,9 +2119,13 @@ grants they gave, personal account links with their stored credentials,
 their GitHub, Google and X sign-ins and the broker's credentials folder for
 them, requests, notices and sandbox; their folder, personal memory, own knowledge pages and conversations
 are held out of every agent's reach for `gateway.users.removed_data_retention_days`
-(the folder under `state/held_people/`, the rows in `person_held_rows`) and
-then purged by a maintenance run, unless `/user restore` (or adding them back
-the usual way while held) brings them back. The gateway does its part after the
+(the folder under `state/held_people/`, the rows in `person_held_rows`, and
+the files of their conversations' offloaded long texts in place in
+`dbs/conversation_artifacts/`) and then purged by a maintenance run, or by the
+gateway when it removes them again after an expired hold, unless
+`/user restore` (or adding them back the usual way while held) brings them
+back. Both purges delete those files before the held rows that name them
+(`access_control/held_person_folders.py`, `purge_held_artifact_files`). The gateway does its part after the
 identity change commits (`assistant_gateway/application/person_lifecycle.py`,
 `assistant_gateway/person_departure.py`) and sends the manager a typed
 `PersonStandingCommandV1`, which only a gateway-signed administrator context
