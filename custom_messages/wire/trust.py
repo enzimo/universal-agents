@@ -74,6 +74,9 @@ OVERLAP = timedelta(seconds=CERTIFICATE_OVERLAP_SECONDS)
 # Longer than any frame lasts (transport.yaml replay_ledger_retention_seconds): once a
 # trust record has ended this long ago, every frame it vouched for has expired.
 RETENTION = timedelta(seconds=REPLAY_LEDGER_RETENTION_SECONDS)
+# A session a certificate signed may be written as late as the certificate's end and
+# vouch for frames this much longer, so certificates are forgotten this much later.
+SESSION_REACH = timedelta(seconds=STATE_RECORDS["agent_session"].max_lifetime_seconds or 0) + SKEW
 # Runtime ids that would read as another installation's sender slot (x-<installation>)
 # or a system id such as the installation scope (_install); transport.yaml defines both.
 RESERVED_RUNTIME_PREFIXES = (PEER_SENDER_SLOT.split("{", 1)[0], INSTALLATION_SCOPE[:1])
@@ -328,11 +331,13 @@ class TrustStore:
         return self._certificate(record.document, record.body)
 
     def _checked(self, raw: Mapping[str, Any],
-                 reading: Optional[tuple[str, datetime, Optional[tuple[int, str]]]] = None) -> VerifiedRecord:
+                 reading: Optional[tuple[str, datetime, Optional[tuple[int, str]]]] = None, *,
+                 now: Optional[datetime] = None) -> VerifiedRecord:
         """Check a parsed record in the registry's refusal order (README, "State records").
 
         ``reading`` is the record type the reader reads, its clock and its held record for
-        a state report (``verify``), or None for a trust record (``add``). A record of
+        a state report (``verify``), or None for a trust record (``add``, which gives its
+        clock as ``now``, or a join or renewal reply's certificate, which has none). A record of
         another type than the one read is refused as ``malformed``: whoever can write to
         a bucket chooses what it holds. A record from a newer minor loses the
         unknown optional fields this version does not know before strict validation; its
@@ -370,6 +375,9 @@ class TrustStore:
             assert signer is not None and reading is not None
             self._check_report_scope(raw, document, signer)
             self._check_report_time(document, digest, *reading[1:])
+        elif now is not None and issued_at - now > SKEW:
+            # The longest lifetime counts from when a record was written, so that time has come.
+            raise FrameRefused("not_yet_valid", "a trust record is not dated ahead of the receiver's clock", at="/issued_at")
         try:
             body = spec.body_model.validate_python(prune(raw["body"], spec.body_shape) if newer else raw["body"])
         except ValidationError as error:
@@ -441,15 +449,18 @@ class TrustStore:
             raise FrameRefused("invalid_body", f"a {document.record} record ends within {lifetime} seconds of being written",
                                at=f"/body/{end}")
 
-    def add(self, data: bytes | bytearray | memoryview) -> bool:
+    def add(self, data: bytes | bytearray | memoryview, *, now: datetime) -> bool:
         """Verify one trust record and keep it; return False when a newer one is already held.
 
-        It also returns False, keeping nothing, for a record ``forget`` would forget when
-        the store holds none for its key: a forgotten record, or an older version of it,
-        cannot come back.
+        ``now`` is the receiver's clock: a record dated ahead of it by more than the clock
+        tolerance is refused (``not_yet_valid``). ``add`` also returns False, keeping
+        nothing, for a record ``forget`` would forget when the store holds none for its
+        key: a forgotten record, or an older version of it, cannot come back.
         """
 
-        record = self._checked(self._parsed(data))
+        if now.tzinfo is None:
+            raise ValueError("now must name its time zone")
+        record = self._checked(self._parsed(data), now=now)
         document = record.document
         slot = (document.record, document.key)
         issued_at = parse_timestamp(document.issued_at)
@@ -457,7 +468,8 @@ class TrustStore:
         held_sequence, held_digest = (held.sequence, held.digest) if held else (0, "")
         if held_sequence == document.sequence and held_digest != record.digest:
             raise FrameRefused("replayed", "the writer used this sequence for other content", at="/sequence")
-        if held_sequence >= document.sequence or (held is None and self._forgettable(document.record, issued_at)):
+        revoked = document.record == CERTIFICATE and self.revoked(record.body.installation, record.body.certificate_id)
+        if held_sequence >= document.sequence or (held is None and not revoked and self._forgettable(document.record, issued_at)):
             return False
         keeper = {CERTIFICATE: self._keep_certificate, REVOCATIONS: self._keep_revocations,
                   AGENT_SESSION: self._keep_session, AGREEMENT: self._keep_agreement}[document.record]
@@ -474,16 +486,19 @@ class TrustStore:
         A certificate, agent session or agreement is forgotten once its newest version
         was written longer ago than its record's ``max_lifetime_seconds`` plus the replay
         retention and the clock tolerance: every version of it has ended, and every
-        frame it vouched for has expired. ``add`` then ignores records this would forget.
-        The revocations record is kept; the contract bounds its size. A receiver calls
-        this at least daily. A clock that jumped ahead forgets records still in use until
-        the receiver restarts, with a correct clock and a new store.
+        frame it vouched for has expired. A certificate is kept an agent session's
+        lifetime longer, for sessions it signed. ``add`` then ignores records this would
+        forget. Revoked certificates and the revocations record are kept, so a revoked
+        key stays refused; the contract bounds both. A receiver calls this at least
+        daily. A clock that jumped ahead forgets records still in use until the receiver
+        restarts, with a correct clock and a new store.
         """
 
         if now.tzinfo is None:
             raise ValueError("now must name its time zone")
         self._forgotten_at = now if self._forgotten_at is None else max(self._forgotten_at, now)
-        forgotten = [slot for slot, held in self._sequences.items() if self._forgettable(slot[0], held.issued_at)]
+        forgotten = [slot for slot, held in self._sequences.items()
+                     if self._forgettable(slot[0], held.issued_at) and not self._revoked_certificate(slot[0], held.entry)]
         lookups: dict[str, dict[Any, Any]] = {CERTIFICATE: self._certificates, AGENT_SESSION: self._sessions,
                                               AGREEMENT: self._agreements}
         for slot in forgotten:
@@ -502,11 +517,19 @@ class TrustStore:
         return dict(Counter(record for record, _key in self._sequences))
 
     def _forgettable(self, record: str, issued_at: datetime) -> bool:
-        """Whether ``forget`` forgets a record whose newest version was written at ``issued_at``."""
+        """Whether ``forget`` forgets a record whose newest version was written at ``issued_at``, unless revoked."""
 
         lifetime = STATE_RECORDS[record].max_lifetime_seconds
-        return (lifetime is not None and self._forgotten_at is not None
-                and self._forgotten_at - issued_at >= timedelta(seconds=lifetime) + RETENTION + SKEW)
+        if lifetime is None or self._forgotten_at is None:
+            return False
+        kept = timedelta(seconds=lifetime) + RETENTION + SKEW + (SESSION_REACH if record == CERTIFICATE else timedelta())
+        return self._forgotten_at - issued_at >= kept
+
+    def _revoked_certificate(self, record: str, entry: Any) -> bool:
+        if record != CERTIFICATE:
+            return False
+        certificate = self._certificates[entry]
+        return self.revoked(certificate.installation, certificate.certificate_id)
 
     def _signer(self, document: State, spec: StateSpec, issued_at: datetime) -> tuple[Ed25519PublicKey, Optional[HostCertificate]]:
         """The key that must have signed the record, from an authority key or the writer's certificate."""

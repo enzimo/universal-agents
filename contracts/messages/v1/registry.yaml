@@ -162,7 +162,7 @@ state_records:
     writers: [installation_authority, edge_adapter]
     body: state/certificate.schema.json
     max_lifetime_seconds: 7776000   # 90 days
-    write_rule: written once; deleted once receivers forget it (README, "Trust over time"), which is after its expiry plus the longest kind lifetime, so queued frames can still be checked
+    write_rule: written once; deleted once receivers forget it (README, "Trust over time"), which is after its expiry plus the longest kind lifetime, so queued frames can still be checked; kept while the revocations record lists it
   revocations:
     description: An installation's revoked certificates.
     bucket: UA1_CERTS

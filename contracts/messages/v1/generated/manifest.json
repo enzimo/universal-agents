@@ -1,6 +1,6 @@
 {
   "files": {
-    "contracts/messages/v1/README.md": "6efe34a344699bf4e0a1e2fa86b21352fce8a322052de03ad1d201b2dbd54a06",
+    "contracts/messages/v1/README.md": "a7664ef6cab8e8f3f8f0f818e23055e6251c7f530724857c491dfb4d534acf69",
     "contracts/messages/v1/examples/invalid/access-request-token-on-a-command.json": "45c09aa4dad7c72401ffd76b7dfd582b3ba8608b75fdeffb548be7197be4b7f3",
     "contracts/messages/v1/examples/invalid/access-until-without-hours.json": "ff280196b6c0e78cb759f65ca9d41a88d589d3e92431452e6df0c04df9348c9f",
     "contracts/messages/v1/examples/invalid/access-withdraw-without-request-id.json": "913ae59b2c70f2ebee832e56406f80293e0d67c1e251c87f2b3047d12ccdd3c6",
@@ -1492,10 +1492,10 @@
     "contracts/messages/v1/generated/permissions/scheduler.json": "b55ae5ef107485768c054166a6f835d7eb5b691cee634bb94ae68f9ea5440abb",
     "contracts/messages/v1/generated/permissions/team_services.json": "b645727008c6a1fb6c58bbe40daf23db96ca0f3a7fb1f62b37fb8bedff66433d",
     "contracts/messages/v1/generated/permissions/worker_host.json": "94078a93e0c7b76f46b2aa5a7e5ee018d73cddbb34f5015c009c6a3c2b448aa4",
-    "contracts/messages/v1/generated/registry.json": "05c625cf8eec927ec54e502fa6e2f213e7f7e0b55f7f5e783a99d8f9c87e5731",
+    "contracts/messages/v1/generated/registry.json": "63d421502ac6ff85b8354ceabfea13708b9ff706da637cbb7a5cc6487ea3a9fb",
     "contracts/messages/v1/generated/team-topologies.json": "b729df141b189177c2b8962e73fd5e9cfda1ad9e3593d68e97b286908b86f44f",
     "contracts/messages/v1/generated/transport.json": "dc10f2b4ca822dbd03544af569bbfd581d1c00974c413ce6af7aa917c6351bd0",
-    "contracts/messages/v1/registry.yaml": "aeb6fa46010bcabb12ae29031e5988c375a2d9179283786a3c376127e6417048",
+    "contracts/messages/v1/registry.yaml": "c517639ec94fc5bcffc64a9960c53b9020dd60ded7645fd9b0e1f5c0de92a628",
     "contracts/messages/v1/schemas/bodies/access.decision.schema.json": "40786a91c1b26f623609bb68acaf6677bd1b9ac767cd7b59e19c73b02ba73013",
     "contracts/messages/v1/schemas/bodies/access.request.schema.json": "556fccdd1400a3c6928c74522df8dd44e56a6914de09badbeeb2de944bca4922",
     "contracts/messages/v1/schemas/bodies/access.resolved.schema.json": "91f90b03dc4f611783c759ffd7446a57b869435e705f9bfa73b9c9f3ade4e023",

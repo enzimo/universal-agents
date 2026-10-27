@@ -5696,7 +5696,7 @@
       "key": "host.<installation>.<runtime>.<membership_epoch>",
       "max_lifetime_seconds": 7776000,
       "signer": "authority",
-      "write_rule": "written once; deleted once receivers forget it (README, \"Trust over time\"), which is after its expiry plus the longest kind lifetime, so queued frames can still be checked",
+      "write_rule": "written once; deleted once receivers forget it (README, \"Trust over time\"), which is after its expiry plus the longest kind lifetime, so queued frames can still be checked; kept while the revocations record lists it",
       "writers": [
         "installation_authority",
         "edge_adapter"

@@ -510,8 +510,9 @@ Each file in `examples/invalid/` describes one refusal:
   (a reply's certificate); `after_signing` respells a value with the same bytes;
 - `text_changes` and `pad_to_bytes`: edits to the serialized text;
 - `context`: `receiver` fields, `now`, `arrived_on`, `headers`, `replay` (`digest` held
-  for the frame's key), `trust` (`add` and `remove`, relative to `examples/trust/`),
-  `minimum_epochs` and `answering` (a valid example, or null for none);
+  for the frame's key), `trust` (`add` and `remove`, relative to `examples/trust/`; the
+  receiver keeps its records at `now`), `minimum_epochs` and `answering` (a valid example,
+  or null for none);
 - `frame_text`: the frame exactly as received, written by the script.
 
 `examples/state/invalid/` describes refusals of state reports the same way, from a valid
@@ -568,8 +569,9 @@ A queued message can wait days, for example while a host is cut off.
 - **Epochs.** The receiver's minimum membership and revocation epochs apply to certificate-authenticated request/reply messages and events only. Queued work is never refused for an old epoch. Joining proves key possession without a certificate, so a join's epoch zero is accepted on retries after the key becomes known; revocation still refuses the key.
 - **Renewed certificates.** Every renewal, with or without a new key, gets a certificate at a higher membership epoch that names the old one in `replaces`. The old certificate stays in `UA1_CERTS` for queued work, but signs new frames only until `certificate_overlap_seconds` (5 minutes) after its replacement was issued (authorization plan 12.5). A receiver that wants the old epoch gone for requests and events sooner raises its minimum epoch.
 - **Expiry.** Each delivery class has an expiry in `transport.yaml`. Receivers keep their replay record at least as long as the longest expiry.
-- **Longest lifetime.** A certificate, agent session or agreement ends no later than its record's `max_lifetime_seconds` (registry `state_records`: 90 days, a day and 366 days) after the record is written; a later end is refused (`invalid_body` at the body's end). A record that must last longer is renewed. A rewrite is written no earlier than the version it replaces.
-- **Forgetting.** A receiver forgets a certificate, agent session or agreement once its newest version was written longer ago than its `max_lifetime_seconds` plus `replay_ledger_retention_seconds` and the clock tolerance (`TrustStore.forget(now)`, at least daily). By then every version of it has ended and every frame it vouched for has expired, so its store stays bounded. A forgotten record is not taken back: the store ignores a record it would forget when it holds none under that key, so an older version cannot return either. The revocations record is never forgotten. Its writers delete a record from `UA1_CERTS` once receivers forget it.
+- **Longest lifetime.** A record is written at its document's `issued_at`. A certificate, agent session or agreement ends no later than its record's `max_lifetime_seconds` (registry `state_records`: 90 days, a day and 366 days) after it is written; a later end is refused (`invalid_body` at the body's end). A record that must last longer is renewed. A rewrite is written no earlier than the version it replaces. A receiver keeps a trust record with its clock (`TrustStore.add(data, now=...)`) and refuses one dated ahead of it by more than the clock tolerance (`not_yet_valid` at `/issued_at`), so the lifetime counts from a time that has come.
+- **Forgetting.** A receiver forgets an agent session or agreement once its newest version was written longer ago than its `max_lifetime_seconds` plus `replay_ledger_retention_seconds` and the clock tolerance (`TrustStore.forget(now)`, at least daily). A certificate is kept an agent session's `max_lifetime_seconds` and the clock tolerance longer, since a session it signed may arrive as late as the certificate's end. By then every version of the record has ended and every frame it vouched for has expired, so the store stays bounded. A forgotten record is not taken back: the store ignores a record it would forget when it holds none under that key, so an older version cannot return either.
+- **Revoked certificates are kept.** The revocations record and every certificate it lists are never forgotten, so a join or rotation that names a revoked key stays refused; the record's 2,000 entries bound them. Once a certificate that was not revoked is forgotten, its key id is no longer known, and a join or rotation that names it is judged as a new key. Writers delete a record from `UA1_CERTS` once receivers forget it, and keep revoked certificates there.
 - **State reports outlive certificates.** Agent, placement and team-view records do not expire, but a receiver that forgot the certificate that signed one refuses it as `unknown_key`. Their writers write them again under a current certificate before an old one is forgotten, for example when a renewal's overlap ends.
 
 ## Installation traffic
@@ -654,7 +656,7 @@ A reader refuses a state report with the first failing check, in the registry's 
 5. `expired`, `not_yet_valid`, `replayed`;
 6. `invalid_body`: the body schema, then the record's dates (its expiry, its bucket's lifetime, a trust record's single validity window and its longest lifetime), then its key and body rules.
 
-Trust records (`TrustStore.add`) follow the same order without the reader's checks; their own-installation rules need the body and come with its rules. The two-defect examples under `examples/state/invalid/` (`also`) pin the order.
+Trust records (`TrustStore.add`) follow the same order without the reader's checks, except `not_yet_valid` for a record dated ahead of the receiver's clock ("Trust over time"); their own-installation rules need the body and come with its rules. The two-defect examples under `examples/state/invalid/` (`also`) pin the order.
 
 What each record says, and what `TrustStore.verify` checks about it:
 - **Host liveness.** A host writes only its own record, under its runtime id. The record names the certificate it is signed with: its id, membership epoch and `sha256`, the SHA-256 of the certificate record's signing bytes, which `TrustStore.add` recorded. It allows at most that certificate's sessions. Its roles, teams and agent types are the certificate's, so the record does not repeat them.
