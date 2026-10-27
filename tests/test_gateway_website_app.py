@@ -666,7 +666,7 @@ async def test_website_adapter_rejects_delivery_without_durable_identity(
 
 
 @pytest.mark.asyncio
-async def test_web_chat_transcript_survives_website_replacement_and_second_browser(
+async def test_web_chat_transcript_and_reply_survive_restart_and_second_browser(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -713,8 +713,10 @@ async def test_web_chat_transcript_survives_website_replacement_and_second_brows
         )
         retry_payload = await retry_response.json()
 
+    restarted_store = GatewayStateStore(str(tmp_path / "gateway.db"))
+    restarted_gateway = _StatefulFakeGateway(restarted_store)
     replacement_app = InternalWebsiteInteractiveApp(
-        config, gateway=gateway, bridge=SimpleNamespace()
+        config, gateway=restarted_gateway, bridge=SimpleNamespace()
     )
     async with TestClient(TestServer(replacement_app.build_app())) as second_browser:
         auth_response = await second_browser.post(
@@ -736,6 +738,17 @@ async def test_web_chat_transcript_survives_website_replacement_and_second_brows
             headers={"Cookie": f"ua_web_chat_session={cookie}"},
         )
         events_payload = await events_response.json()
+        continued_response = await second_browser.post(
+            "/api/web-chat/chat",
+            headers={"Cookie": f"ua_web_chat_session={cookie}"},
+            json={
+                "message": "Continue the saved discussion",
+                "session_key": sessions_payload["sessions"][0]["session_key"],
+                "conversation_id": sessions_payload["sessions"][0]["conversation_id"],
+                "client_request_id": "device_b_request_1",
+            },
+        )
+        continued_payload = await continued_response.json()
 
     assert sent_response.status == 200
     assert retry_response.status == 200
@@ -757,6 +770,13 @@ async def test_web_chat_transcript_survives_website_replacement_and_second_brows
         message["message_id"] for message in sent_payload["messages"]
     ]
     assert len(gateway.sent_user_messages) == 1
+    assert continued_response.status == 200
+    assert continued_payload["session_key"] == "website:web-chat:durable"
+    assert continued_payload["conversation_id"] == "conv_durable"
+    assert len(restarted_gateway.sent_user_messages) == 1
+    assert restarted_gateway.sent_user_messages[0]["session_key"] == "website:web-chat:durable"
+    assert restarted_gateway.sent_user_messages[0]["conversation_id"] == "conv_durable"
+    assert len(sessions_payload["sessions"]) == 1
     assert sessions_payload["event_cursor"]
     assert history_payload["event_cursor"]
     assert not sessions_payload["event_cursor"].isdigit()

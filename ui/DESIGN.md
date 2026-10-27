@@ -1787,6 +1787,11 @@ its history. Steps with linked requests cannot use this correction.
   archive; choosing it focuses the composer) and an empty composer (owner's
   request, 2026-10-09). New Chat and the first submitted message explicitly
   create a conversation, which replaces that row.
+  Opening Settings during sign-in waits for the saved-thread lookup before
+  deciding whether a conversation is needed. A failed lookup shows its error
+  without creating a conversation. A late chat-creation response must preserve
+  a conversation the person selected while it was waiting; any submitted
+  request keeps the destination created for it.
 - A thread's name is fixed once given (owner's request, 2026-10-09; it used
   to follow the latest message, renaming the thread on every entry): the
   name the person gave it, else the first ordinary message typed in it (the

@@ -314,6 +314,8 @@ commands the agent runs in its shell or Python are not checked. The switch
 turns off after the message moves to the new chat. Leave it off to continue
 the selected thread. Slash commands keep their usual behavior.
 If the new chat cannot be created, your text and files stay in the composer.
+Selecting an existing conversation while a new chat is being created keeps
+your selection. Any message already submitted keeps its intended conversation.
 If sending fails, use **Retry** beside the failed message to resend the same
 request without creating another one. You can send other messages first;
 each failed message keeps its own Retry. Retry retains the original files and

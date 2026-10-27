@@ -1524,6 +1524,7 @@ function createServerThread(options) {
       return shellState.threadCreationRequest;
     }
     var previousThread = activeThread();
+    var previousSelection = sharedState.activeThreadId;
     shellState.threadCreationGeneration = authGeneration;
     shellState.threadCreationParallel = parallelThread;
     var init = {
@@ -1558,7 +1559,9 @@ function createServerThread(options) {
         persisted: true,
         historyLoaded: true,
       });
-      sharedState.activeThreadId = thread.id;
+      // Creating a destination does not replace a conversation the person
+      // selected while the request was in flight. Its sender keeps `thread`.
+      if (sharedState.activeThreadId === previousSelection) sharedState.activeThreadId = thread.id;
       clearSystemError(previousThread, shellState.SYSTEM_ERROR_SOURCE.CREATE_THREAD);
       clearSystemError(null, shellState.SYSTEM_ERROR_SOURCE.CREATE_THREAD);
       saveThreads();
@@ -2614,36 +2617,37 @@ lifecycle.listen(sharedState.newThreadButton, "click", function () {
     });
   });
 
-lifecycle.listen(sharedState.settingsButton, "click", function () {
-    var thread = activeThread();
-    if (!thread) {
-      createServerThread().then(function (created) {
-        if (created) { sharedState.settingsButton.click(); }
-      }).catch(function (error) {
-        appendSystemError(
-          null,
-          shellState.SYSTEM_ERROR_SOURCE.CREATE_THREAD,
-          error.message || "Unable to create a chat thread."
-        );
-        renderMessages();
-      });
-      return;
-    }
-    sharedState.settingsControls.open(null, thread.sessionKey)
-      .then(function () {
+lifecycle.listen(sharedState.settingsButton, "click", async function () {
+    var generation = sharedState.authSessionGeneration;
+    var current = () => sharedState.authSessionActive && sharedState.authSessionGeneration === generation;
+    try {
+      var thread = activeThread();
+      if (!thread) {
+        // Sign-in shows the shell before its saved conversations arrive.
+        // Absence during that lookup must not create a fresh conversation.
+        var loaded = await fetchSessions();
+        if (!current()) return;
+        if (!loaded) throw new Error("Your conversations could not be loaded. Select Settings to retry.");
+        thread = activeThread() || await createServerThread();
+      }
+      if (!thread || !current()) return;
+      await sharedState.settingsControls.open(null, thread.sessionKey);
+      if (current()) {
         if (clearSystemError(thread, shellState.SYSTEM_ERROR_SOURCE.OPEN_SETTINGS)) {
           renderMessages();
         }
-      })
-      .catch(function (error) {
+      }
+    } catch (error) {
+      if (current()) {
         appendSystemError(
-          thread,
+          thread || activeThread(),
           shellState.SYSTEM_ERROR_SOURCE.OPEN_SETTINGS,
           error.message || "Unable to open Settings."
         );
         saveThreads();
         renderMessages();
-      });
+      }
+    }
   });
 
 lifecycle.listen(sharedState.settingsAppearanceReset, "click", function () {
