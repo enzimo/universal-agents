@@ -1589,6 +1589,20 @@ def test_forgetting_keeps_a_replacement_whose_replaced_certificate_arrives_later
     assert (refused.code, refused.at) == ("unknown_key", "/issued_at")
 
 
+@pytest.mark.parametrize(("record", "key"), [("certificate", "/body/application_key/public_key"),
+                                             ("agreement", "/body/authority_keys/0/public_key")])
+def test_a_trust_record_with_a_public_key_spelled_another_way_is_refused(record: str, key: str) -> None:
+    """The same bytes with an unused low bit set: the schema's pattern allows the spelling, the decoder does not."""
+
+    document = trust_example(record)
+    holder = document["body"]["application_key"] if record == "certificate" else document["body"]["authority_keys"][0]
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    holder["public_key"] = holder["public_key"][:-1] + alphabet[alphabet.index(holder["public_key"][-1]) ^ 1]
+    document["sequence"] += 1
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.trust_store().add(json.dumps(sign_state(document, fixtures.private_key(document["writer"]["key_id"]))).encode())
+    assert (refused.value.code, refused.value.at) == ("invalid_body", key)
+
 def test_forgetting_needs_an_aware_time() -> None:
     with pytest.raises(ValueError, match="time zone"):
         fixtures.trust_store().forget(fixtures.NOW.replace(tzinfo=None))

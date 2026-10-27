@@ -111,6 +111,15 @@ def sign_state(document: Mapping[str, Any], private_key: Ed25519PrivateKey) -> d
     return signed
 
 
+def _public_key(text: str, at: str) -> Ed25519PublicKey:
+    """An Ed25519 public key in its one accepted base64url spelling; any other is ``invalid_body``."""
+
+    try:
+        return Ed25519PublicKey.from_public_bytes(b64url_decode(text))
+    except ValueError as error:
+        raise FrameRefused("invalid_body", "not an Ed25519 public key in its canonical spelling", at=at) from error
+
+
 @dataclass(frozen=True)
 class AuthorityKey:
     """One of an installation's authority keys, given to a receiver as a starting point of trust."""
@@ -583,12 +592,13 @@ class TrustStore:
         issued_at, expires_at = parse_timestamp(body.issued_at), parse_timestamp(body.expires_at)
         if expires_at <= issued_at:
             raise FrameRefused("invalid_body", "a certificate must end after it starts", at="/body/expires_at")
+        public_key = _public_key(body.application_key.public_key, "/body/application_key/public_key")
         return HostCertificate(
             certificate_id=body.certificate_id, installation=body.installation, runtime=body.runtime,
             teams=frozenset(body.teams), roles=frozenset(body.roles), agent_types=frozenset(body.agent_types),
             membership_epoch=body.membership_epoch, revocation_epoch=body.revocation_epoch,
             key_id=body.application_key.key_id,
-            public_key=Ed25519PublicKey.from_public_bytes(b64url_decode(body.application_key.public_key)),
+            public_key=public_key,
             nats_public_key=body.nats_public_key, session_limit=body.session_limit, issued_at=issued_at, expires_at=expires_at,
             replaces=None if body.replaces is MISSING else body.replaces,
         )
@@ -655,8 +665,8 @@ class TrustStore:
             raise FrameRefused("invalid_body", "an agreement must end after it starts", at="/body/expires_at")
         self._agreements[body.peer] = Agreement(
             agreement_id=body.agreement_id, peer=body.peer,
-            authority_keys={key.key_id: Ed25519PublicKey.from_public_bytes(b64url_decode(key.public_key))
-                            for key in body.authority_keys},
+            authority_keys={key.key_id: _public_key(key.public_key, f"/body/authority_keys/{index}/public_key")
+                            for index, key in enumerate(body.authority_keys)},
             teams=frozenset(body.teams), kinds=frozenset(body.kinds), issued_at=issued_at, expires_at=expires_at,
         )
         return body.peer
